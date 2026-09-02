@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-30T21:55:01.9762464Z",
+  "status": "NO_RESULT",
+  "reasonCode": "fixture-not-byte-stable-across-samples",
+  "decision": {
+    "persistentActiveRouteIndexSteadyStateBenefit": "not-proven",
+    "candidateRegression": "not-determined",
+    "realSaveNonRegression": "not-run-after-stop-gate",
+    "surfaceTimingMayBeUsedForAcceptance": false
+  },
+  "binaries": {
+    "baseline": {
+      "artifact": "<baseline-host>",
+      "sha256": "48f097027b90481b37631a2845cb38fcab96ff0db9aedd4b7dbb9e0c9739dc03",
+      "sizeBytes": 13353472,
+      "sourceCommit": "5cc95ca28e8fedbcf3b0f9a58ba5650d1596c3ef",
+      "sourceTree": "622e7b43a29e1dc076fc325c765c7f685cec5582",
+      "sourceState": "detached-clean",
+      "depfileSha256": "50f28eca9eace4b4b2e50ccd32895950dca7829ef3e34d23bb0a13223b42fdd8",
+      "cargoFingerprintSha256": "836cb93c8fe73c350eb0e0b57d202b13821cc6713eb50f80bd6c96d8eb66648a"
+    },
+    "candidate": {
+      "artifact": "<candidate-host>",
+      "sha256": "af5d990292abc878f667b3cb6d0dd88867eeacd180c2fadee186740535189152",
+      "sizeBytes": 13330432,
+      "sourceCommit": "5cc95ca28e8fedbcf3b0f9a58ba5650d1596c3ef",
+      "sourceState": "dirty-working-tree-frozen-binary"
+    },
+    "missingPreviousMilestone": {
+      "sha256": "6cd7d700d1992e46686525ad6e5b0516061bbccaae1ca816ae6d2d87fc21409b",
+      "sizeBytes": 13353472,
+      "searchResult": "not-found-among-91-host-executables-or-available-zips"
+    }
+  },
+  "runner": {
+    "testArtifact": "station-active-route-benchmark.test.ts",
+    "testSha256": "cbc8bb5872540c84aa6d9d30b309a4be474eca0c3a9c569efeb28fc7be2ae434",
+    "vitestConfigArtifact": "vitest.config.mjs",
+    "vitestConfigSha256": "6f01a054b5789833d4664cf94e7c931a91fa806cdb2efe906f8c8f95d36609d4",
+    "unusedNestedOrchestrator": "run-fixed-pcore-ab.mjs",
+    "unusedNestedOrchestratorSha256": "3bb5bbec1603440d911d2b2116a863a1b99ac18ba671bac0bab786de3ce43806",
+    "note": "The six recorded samples were launched directly through PowerShell to cmd.exe START; the nested Node orchestrator was not used."
+  },
+  "configuration": {
+    "executionOrder": ["baseline", "candidate", "candidate", "baseline", "baseline", "candidate"],
+    "processorAffinity": "0xFFFF",
+    "nodePriority": "High",
+    "nativeHostPriority": "Normal",
+    "requestedNativeThreads": 8,
+    "profileEnabled": false,
+    "activeLegacyStations": 128,
+    "dormantLegacyStations": 384,
+    "routesPerStation": 128,
+    "activeRoutes": 16384,
+    "dormantRoutes": 49152,
+    "totalRoutes": 65543,
+    "activeFraction": 0.2499732999710114,
+    "stepSeconds": 60,
+    "measuredStepsPerSample": 5
+  },
+  "validation": {
+    "sampleProcessesPassed": 6,
+    "nodeAffinityVerifiedSamples": 6,
+    "nativeHostAffinityVerifiedSamples": 6,
+    "sparseSchedulerVerifiedSamples": 6,
+    "uniqueFixtureSha256Count": 6,
+    "fixtureSha256Identical": false,
+    "warmCanonicalSha256Identical": false,
+    "perStepCanonicalSha256Identical": false,
+    "finalDomainSha256Identical": true,
+    "timingDecisionValid": false,
+    "failureExplanation": "The fixture was rebuilt independently inside every process. Process-varying persisted fields changed the byte and canonical hashes, so labels did not receive an identical input even though topology counts, scheduler work and final domain proof matched."
+  },
+  "samples": [
+    {
+      "sequence": 1,
+      "label": "baseline",
+      "sampleArtifact": "baseline-round-1-sequence-1.json",
+      "sampleSha256": "142e7012cc565f129c40da68de2873ac05ba31d5878d497af090d7e2d8c1e271",
+      "logArtifact": "baseline-round-1-sequence-1.log",
+      "logSha256": "a0552627ceabf5f14d994fbacbdc8a0af73a1a630bef9afea0c15a69c69914fa",
+      "fixtureSha256": "d7e7d15823a28324121d8a8481962c298826352e8426ef1b3e5aa52a2724addd",
+      "warmCanonicalSha256": "75d339e0be51a12c78b387ea07d7d25501acf4c3d544bc7d33adcbbfc4bd4812",
+      "finalCanonicalSha256": "9bbfb16d0cefe339ad783663da5dd036313c7bf3ac8d112b2891dcfe2ece0e61",
+      "finalDomainSha256": "acfdde8c5df45e308b3d7bef2c71dd8c4471aa58101ddd0aa10ed8a1e0f53b56",
+      "durationsMs": [761.135, 750.9, 768.791, 749.607, 745.181],
+      "medianMs": 750.9
+    },
+    {
+      "sequence": 2,
+      "label": "candidate",
+      "sampleArtifact": "candidate-round-1-sequence-2.json",
+      "sampleSha256": "f99efe8043a04c0a279a8b227340d3b3d1c7f9c7a39407892873ca7bd8f56509",
+      "logArtifact": "candidate-round-1-sequence-2.log",
+      "logSha256": "4d84344b2369077bb590fb838a8f9350dbc91ae993d4838f27e121c53130a3cc",
+      "fixtureSha256": "0c26cf122ef8aab208b7ef91973b607cce9763aa94e33be364524f94137ecd54",
+      "warmCanonicalSha256": "4f81395985d7f8e6e3c9c014da6cca88438d13a2cdb9932d54041697bad2506c",
+      "finalCanonicalSha256": "6de66303bf105f19515c2c1f4bd0ae2ed377ee889e504658d714d754a15eba42",
+      "finalDomainSha256": "acfdde8c5df45e308b3d7bef2c71dd8c4471aa58101ddd0aa10ed8a1e0f53b56",
+      "durationsMs": [752.047, 735.709, 752.082, 736.285, 737.291],
+      "medianMs": 737.291
+    },
+    {
+      "sequence": 3,
+      "label": "candidate",
+      "sampleArtifact": "candidate-round-2-sequence-3.json",
+      "sampleSha256": "b9a8ca2799d1f5ba4fc2a42644ac5577c981ce0557f5aeaa3193f22cb54dc76",
+      "logArtifact": "candidate-round-2-sequence-3.log",
+      "logSha256": "6d281793290b46cabb9a4e562e2cf408e119fab646159086e956942ce5b1deab",
+      "fixtureSha256": "af5a9edb3f29f6239b700233a9af523b1b081756bbb1c05e078d80f913c305b2",
+      "warmCanonicalSha256": "53996ba63be0647311003dc30c2a1c0b5be830ee5e345bd39da348de7c21cd4a",
+      "finalCanonicalSha256": "a8df861a45da3c2d9af9742e08f6414dbcb166255278a9f556e8783cfe26eefe",
+      "finalDomainSha256": "acfdde8c5df45e308b3d7bef2c71dd8c4471aa58101ddd0aa10ed8a1e0f53b56",
+      "durationsMs": [745.817, 739.287, 825.716, 732.388, 733.064],
+      "medianMs": 739.287
+    },
+    {
+      "sequence": 4,
+      "label": "baseline",
+      "sampleArtifact": "baseline-round-2-sequence-4.json",
+      "sampleSha256": "e37b53be90a650273753d16be54fc565d7e32fca6dc6a33c65d04b89acd57543",
+      "logArtifact": "baseline-round-2-sequence-4.log",
+      "logSha256": "4b1363dd2136373784c70b0596ec82c501183ced5c0cde66dc37db902e61987a",
+      "fixtureSha256": "ca8c04fb340512a49682ebaf2a4fc78e47925c95d05ab9af9cc22d03cfa206d2",
+      "warmCanonicalSha256": "5325b710f9832c2be7d30bf04784e4fd9545cb0db5f316bf2305408903afe045",
+      "finalCanonicalSha256": "36584b0074e550a2bef65988ba0465438b966d37ccff1ce6a2381635219bf2b9",
+      "finalDomainSha256": "acfdde8c5df45e308b3d7bef2c71dd8c4471aa58101ddd0aa10ed8a1e0f53b56",
+      "durationsMs": [784.596, 771.127, 748.294, 763.215, 781.002],
+      "medianMs": 771.127
+    },
+    {
+      "sequence": 5,
+      "label": "baseline",
+      "sampleArtifact": "baseline-round-3-sequence-5.json",
+      "sampleSha256": "ec68846b68dfb6eabf8c3003a6f0901eca73d5743364a0dcd19cb02a6d8377f5",
+      "logArtifact": "baseline-round-3-sequence-5.log",
+      "logSha256": "b978387e2e30bede5165fe1cdc398d1c8c1182236c89138b572c92819c27e24f",
+      "fixtureSha256": "0a234776cd56a1e309627fb0ebd47a984155b8c5a4572a4f22d074891c202e43",
+      "warmCanonicalSha256": "1fa8fa77331cd8810d7a7110144f9cc29518554745375cd96e0d89f875bd23e9",
+      "finalCanonicalSha256": "575b3ab56a6443dae93a13a45099ac7324a70a266ab22f729a05e6e41e04cb40",
+      "finalDomainSha256": "acfdde8c5df45e308b3d7bef2c71dd8c4471aa58101ddd0aa10ed8a1e0f53b56",
+      "durationsMs": [785.32, 776.759, 779.571, 765.417, 771.279],
+      "medianMs": 776.759
+    },
+    {
+      "sequence": 6,
+      "label": "candidate",
+      "sampleArtifact": "candidate-round-3-sequence-6.json",
+      "sampleSha256": "e68aa191bdd5e2df57157159ad858908940102cc605ab1c1076471870da63329",
+      "logArtifact": "candidate-round-3-sequence-6.log",
+      "logSha256": "c7fe85ac3aa44548ffcb22f9071d18c5a88fae5717bf9adea1debbEaf5a7f61a",
+      "fixtureSha256": "a0568c3e0cd0b1fcb83ada118edea851320b8cfc4aedf93e28259250f88f6360",
+      "warmCanonicalSha256": "9bccc80b486013fbea1676b1e7fb25332d9d2dbe6e4f090f711f7899724b2d5d",
+      "finalCanonicalSha256": "fa0cf15a15524a44e8c2087e4466ae654da2036a9bb35c76b2e68fc46ce996be",
+      "finalDomainSha256": "acfdde8c5df45e308b3d7bef2c71dd8c4471aa58101ddd0aa10ed8a1e0f53b56",
+      "durationsMs": [740.072, 752.991, 731.06, 734.456, 764.237],
+      "medianMs": 740.072
+    }
+  ],
+  "schedulerDiagnosticRange": {
+    "routeCount": 65543,
+    "groupCount": 517,
+    "activeQueueEnabled": true,
+    "fullScanPasses": 0,
+    "passesPerMeasuredStep": 180,
+    "routeChecks": [2950166, 2950380],
+    "stableRoutesSkipped": [8847360, 8847574],
+    "selectionGroupChecks": [23735, 23940],
+    "carriedActiveGroups": [130, 133],
+    "writeBackWorkers": 1
+  },
+  "invalidSurfaceTimingDiagnostic": {
+    "rounds": [
+      { "round": 1, "baselineMedianMs": 750.9, "candidateMedianMs": 737.291, "candidateReductionPercent": 1.812359 },
+      { "round": 2, "baselineMedianMs": 771.127, "candidateMedianMs": 739.287, "candidateReductionPercent": 4.129022 },
+      { "round": 3, "baselineMedianMs": 776.759, "candidateMedianMs": 740.072, "candidateReductionPercent": 4.723087 }
+    ],
+    "warning": "These percentages are diagnostic only and must not be cited as a proven performance win because every pair used different fixture bytes and canonical state."
+  },
+  "nextMinimumExperiment": "Generate and persist one synthetic v47 envelope once, record its SHA-256, make every child read that exact file, reject before timing unless all fixture/canonical pre-step hashes match, then repeat B-C/C-B/B-C. Run the 91,955-route player save separately only as a non-regression gate."
+}

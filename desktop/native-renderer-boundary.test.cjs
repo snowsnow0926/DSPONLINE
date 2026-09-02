@@ -30,6 +30,286 @@ function performancePolicy() {
   };
 }
 
+test("host startup recovery receipt remains main-only at the renderer boundary", () => {
+  const normalized = normalizeRendererNativeResult("hostHello", {
+    protocolVersion: 1,
+    nativeFormatVersion: 1,
+    hostVersion: "1.2.3",
+    capabilities: ["native-core-player-authority-startup-recovery-v1"],
+    playerAuthorityStartupRecovery: { sessionId: "main-only" },
+  });
+  assert.deepEqual(normalized, {
+    protocolVersion: 1,
+    nativeFormatVersion: 1,
+    hostVersion: "1.2.3",
+    capabilities: ["native-core-player-authority-startup-recovery-v1"],
+  });
+  assert.equal(Object.hasOwn(normalized, "playerAuthorityStartupRecovery"), false);
+});
+
+test("player-authority clock state is exact, bounded and contains no writer identity", () => {
+  const state = {
+    schemaVersion: 1,
+    phase: "active",
+    sessionId: "core-restarted-1",
+    runId: "player-run-1",
+    revision: 11,
+    acknowledgedSequence: 4,
+    nextSequence: 5,
+    nextDeadlineMs: 11_000,
+    inFlight: false,
+    currentOperation: null,
+    queuedCommands: 0,
+    lastErrorCode: null,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", state), state);
+  const batched = {
+    ...state,
+    revision: 12,
+    acknowledgedSequence: 34,
+    nextSequence: 35,
+    nextDeadlineMs: 41_000,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", batched), batched);
+  const hinted = {
+    ...state,
+    macroRecoveryHint: { kind: "finished-pending-disable", revision: 9 },
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", hinted), hinted);
+  for (const invalid of [
+    { ...state, ownerId: "main-player-authority" },
+    { ...state, checkpoint: { generation: 8, rootHash: SHA_A, revision: 11 } },
+    { ...state, nextSequence: 6 },
+    { ...state, sessionId: null },
+    { ...state, queuedCommands: 65 },
+    { ...state, lastErrorCode: "private-path" },
+    { ...state, macroRecoveryHint: { kind: "finished-pending-disable", revision: 12 } },
+    { ...state, macroRecoveryHint: { kind: "other", revision: 9 } },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("playerAuthorityState", invalid),
+      /native player-authority/i,
+    );
+  }
+});
+
+test("player-authority pause lifecycle states expose no durable identity", () => {
+  const base = {
+    schemaVersion: 1,
+    phase: "paused",
+    sessionId: "core-paused-1",
+    runId: "player-run-paused-1",
+    revision: 12,
+    acknowledgedSequence: 5,
+    nextSequence: 6,
+    nextDeadlineMs: 12_000,
+    inFlight: false,
+    currentOperation: null,
+    queuedCommands: 0,
+    lastErrorCode: null,
+  };
+  for (const state of [
+    base,
+    { ...base, phase: "pausing", inFlight: true, currentOperation: "pause" },
+    { ...base, phase: "resuming", inFlight: true, currentOperation: "resume" },
+    { ...base, phase: "pause-uncertain", lastErrorCode: "NATIVE_PLAYER_AUTHORITY_PAUSE_UNCERTAIN" },
+    { ...base, phase: "resume-uncertain", currentOperation: "resume", inFlight: true,
+      lastErrorCode: "NATIVE_PLAYER_AUTHORITY_RESUME_UNCERTAIN" },
+  ]) {
+    assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", state), state);
+    assert.doesNotMatch(JSON.stringify(state), /checkpoint|settledDeadline|commandId|ownerId/);
+  }
+  for (const invalid of [
+    { ...base, inFlight: true },
+    { ...base, currentOperation: "pause" },
+    { ...base, phase: "pausing", currentOperation: "resume" },
+    { ...base, phase: "resume-uncertain", lastErrorCode: null },
+  ]) {
+    assert.throws(() => normalizeRendererNativeResult("playerAuthorityState", invalid),
+      /native player-authority/i);
+  }
+});
+
+test("player-authority macro status is an exact scalar-only discriminated union", () => {
+  const state = {
+    schemaVersion: 2,
+    statusKind: "macro",
+    phase: "macro-active",
+    revision: 13,
+    acknowledgedSequence: 6,
+    nextSequence: 7,
+    nextDeadlineMs: 17_000,
+    inFlight: false,
+    currentOperation: null,
+    simulationBudgetMilliseconds: 60_000,
+    wallBudgetMilliseconds: 4_000,
+    simulationProgressMilliseconds: 60_000,
+    wallProgressMilliseconds: 4_000,
+    pausedReason: "macro-window-active",
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", state), state);
+  assert.doesNotMatch(JSON.stringify(state), /session|runId|operationId|algorithm|error/i);
+
+  const uncertain = {
+    ...state,
+    phase: "macro-uncertain",
+    inFlight: false,
+    simulationProgressMilliseconds: null,
+    wallProgressMilliseconds: null,
+    pausedReason: "macro-advance-uncertain",
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", uncertain), uncertain);
+
+  for (const valid of [
+    {
+      ...state,
+      phase: "macro-committing",
+      inFlight: true,
+      currentOperation: "advance",
+      simulationProgressMilliseconds: 0,
+      wallProgressMilliseconds: 0,
+      pausedReason: "macro-advance-committing",
+    },
+    {
+      ...state,
+      phase: "macro-finishing",
+      inFlight: true,
+      currentOperation: "finish",
+      pausedReason: "macro-finish-committing",
+    },
+    {
+      ...state,
+      phase: "faulted",
+      currentOperation: "advance",
+      pausedReason: "macro-runtime-faulted",
+    },
+    {
+      ...state,
+      phase: "shutdown",
+      currentOperation: "finish",
+      pausedReason: "macro-runtime-shutdown",
+    },
+  ]) {
+    assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", valid), valid);
+  }
+
+  for (const invalid of [
+    { ...state, sessionId: "core-secret" },
+    { ...state, runId: "run-secret" },
+    { ...state, macroSessionId: "macro-secret" },
+    { ...state, operationId: "operation-secret" },
+    { ...state, algorithmVersion: "algorithm-secret" },
+    { ...state, lastErrorCode: "NATIVE_PRIVATE_ERROR" },
+    { ...state, nextSequence: 8 },
+    { ...state, phase: "macro-unknown" },
+    { ...state, currentOperation: "operation-secret" },
+    { ...state, simulationBudgetMilliseconds: null },
+    { ...state, simulationBudgetMilliseconds: 0 },
+    { ...state, wallBudgetMilliseconds: 30 * 24 * 60 * 60 * 1_000 + 1 },
+    { ...state, simulationProgressMilliseconds: 60_001 },
+    { ...state, wallProgressMilliseconds: null },
+    { ...state, phase: "macro-committing", currentOperation: null, pausedReason: "macro-advance-committing" },
+    { ...state, phase: "macro-finishing", currentOperation: "advance", pausedReason: "macro-finish-committing" },
+    { ...uncertain, inFlight: true, currentOperation: null },
+    { ...uncertain, currentOperation: "finish", pausedReason: "macro-advance-uncertain" },
+    { ...state, phase: "shutdown", pausedReason: "macro-runtime-faulted" },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("playerAuthorityState", invalid),
+      /native player-authority/i,
+    );
+  }
+});
+
+test("native command change receipts are stable ordered and duplicate-free", () => {
+  const receipt = {
+    previousRevision: 17,
+    revision: 18,
+    changedEntityIds: ["entity-a", "entity-z"],
+    changedBeltIds: ["belt-a"],
+    topologyDirty: false,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("coreCommand", receipt), receipt);
+  assert.deepEqual(
+    normalizeRendererNativeResult("coreCommand", {
+      ...receipt,
+      changedEntityIds: ["MOD-物品/Ω"],
+    }).changedEntityIds,
+    ["MOD-物品/Ω"],
+  );
+  for (const invalid of [
+    { ...receipt, changedEntityIds: ["entity-z", "entity-a"] },
+    { ...receipt, changedEntityIds: ["entity-a", "entity-a"] },
+    { ...receipt, changedBeltIds: ["belt-a", "belt-a"] },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("coreCommand", invalid),
+      /native changed/i,
+    );
+  }
+});
+
+test("native command reconciliation results are exact, bounded and discriminated", () => {
+  const receipt = {
+    previousRevision: 17,
+    revision: 18,
+    changedEntityIds: ["entity-a", "entity-z"],
+    changedBeltIds: ["belt-a"],
+    topologyDirty: false,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("coreCommandReconcile", {
+    status: "committed",
+    receipt,
+  }), { status: "committed", receipt });
+  const maxSafeReceipt = {
+    ...receipt,
+    previousRevision: Number.MAX_SAFE_INTEGER - 1,
+    revision: Number.MAX_SAFE_INTEGER,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("coreCommandReconcile", {
+    status: "committed",
+    receipt: maxSafeReceipt,
+  }), { status: "committed", receipt: maxSafeReceipt });
+  for (const value of [
+    { status: "pending", baseRevision: 17, currentRevision: 17 },
+    { status: "not-committed", baseRevision: 17, currentRevision: 17 },
+    { status: "conflict", baseRevision: 17, currentRevision: 19 },
+  ]) {
+    assert.deepEqual(normalizeRendererNativeResult("coreCommandReconcile", value), value);
+  }
+  for (const invalid of [
+    { status: "committed", receipt, extra: true },
+    { status: "committed", receipt: { ...receipt, hostPath: SECRET_PATH } },
+    { status: "committed", receipt: { ...receipt, revision: receipt.previousRevision } },
+    { status: "committed", receipt: { ...receipt, revision: receipt.previousRevision + 2 } },
+    {
+      status: "committed",
+      receipt: {
+        ...receipt,
+        previousRevision: Number.MAX_SAFE_INTEGER,
+        revision: Number.MAX_SAFE_INTEGER,
+      },
+    },
+    {
+      status: "committed",
+      receipt: { ...receipt, revision: Number.MAX_SAFE_INTEGER + 1 },
+    },
+    { status: "unknown", baseRevision: 17, currentRevision: 17 },
+    { status: "pending", baseRevision: 17, currentRevision: 17, path: SECRET_PATH },
+    { status: "not-committed", baseRevision: 17, currentRevision: 18 },
+    { status: "conflict", baseRevision: -1, currentRevision: 17 },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("coreCommandReconcile", invalid),
+      /native (?:core )?command/i,
+    );
+  }
+  assert.equal(serializeRendererNativeError(new Error("receipt lookup failed"), {
+    fallbackCode: "NATIVE_CORE_COMMAND_RECONCILE_FAILED",
+    message: "原生权威命令耐久收据对账失败",
+  }).code, "NATIVE_CORE_COMMAND_RECONCILE_FAILED");
+});
+
 function coreSummary(revision = 2) {
   return {
     revision,
@@ -88,6 +368,304 @@ function viewportContext(overrides = {}) {
   };
 }
 
+function viewportV2Context(overrides = {}) {
+  return {
+    sessionId: "session-viewport-v2",
+    expectedRevision: 7,
+    baseFields: ["paused"],
+    planetId: "mod:星球/Ω",
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+    entityCursor: 1,
+    entityLimit: 1,
+    beltCursor: 0,
+    beltLimit: 1,
+    pinnedEntityIds: ["mod:节点/Ω [selected]"],
+    pinnedBeltIds: ["mod:线路/β #pinned"],
+    ...overrides,
+  };
+}
+
+function viewportV2Projection(overrides = {}) {
+  const planetId = "mod:星球/Ω";
+  return {
+    schemaVersion: 2,
+    projectionType: "viewport-v2",
+    revision: 7,
+    planetId,
+    bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 },
+    base: { paused: false },
+    entities: [
+      {
+        id: "mod:节点/Ω [selected]", kind: "vein", planetId,
+        position: { x: 20, y: 20 }, interactionLocked: false,
+        routingCursor: 0, machineCount: 0, minerCount: 1,
+        inputs: {}, outputs: { "mod:物品/铁矿 Ω": 2 },
+        progress: 0, utilization: 1, productionRate: 1,
+      },
+      {
+        id: "mod:节点/可见", kind: "vein", planetId,
+        position: { x: 2, y: 3 }, interactionLocked: false,
+        routingCursor: 0, machineCount: 0, minerCount: 1,
+        inputs: {}, outputs: { "mod:物品/铁矿 Ω": 1 },
+        progress: 0, utilization: 1, productionRate: 1,
+      },
+    ],
+    belts: [
+      {
+        id: "mod:线路/β #pinned", planetId, source: "mod:节点/Ω [selected]",
+        target: "mod:节点/远端", itemId: "mod:物品/铁矿 Ω", lanes: 1,
+        tier: 1, sorterTier: 1, progress: 0, priority: 1,
+      },
+      {
+        id: "mod:线路/可见", planetId, source: "mod:节点/可见",
+        target: "mod:节点/远端", itemId: "mod:物品/铁矿 Ω", lanes: 1,
+        tier: 1, sorterTier: 1, progress: 0, priority: 1,
+      },
+    ],
+    pinnedEntityIds: ["mod:节点/Ω [selected]"],
+    pinnedBeltIds: ["mod:线路/β #pinned"],
+    nextEntityCursor: 2,
+    nextBeltCursor: 1,
+    planetTotals: { entities: 4, belts: 3 },
+    viewportTotals: { entities: 3, belts: 2 },
+    worldBounds: { minX: -5, minY: -5, maxX: 30, maxY: 30 },
+    minimap: {
+      bounds: { minX: -5, minY: -5, maxX: 30, maxY: 30 },
+      entityCount: 4,
+      beltCount: 3,
+      occupiedCellCount: 2,
+      cellSize: 512,
+    },
+    broadQueryFallback: false,
+    ...overrides,
+  };
+}
+
+function factoryReadModelContext(overrides = {}) {
+  return {
+    sessionId: "session-factory-read-model",
+    expectedRevision: 7,
+    selectedEntityIds: ["MOD-建筑", "missing"],
+    selectedBeltIds: ["MOD-线路"],
+    ...overrides,
+  };
+}
+
+function factoryReadModelProjection(overrides = {}) {
+  const rows = (entries, totalCount = entries.length) => ({
+    rows: entries,
+    totalCount,
+    truncated: totalCount > entries.length,
+  });
+  return {
+    schemaVersion: 1,
+    projectionType: "factory-read-model-v1",
+    revision: 7,
+    shell: {
+      schema: "factory-read-model-v1",
+      source: "native-core",
+      stateVersion: 47,
+      mode: "normal",
+      activePlanetId: "MOD-星球",
+      paused: false,
+      elapsedSeconds: 123,
+      simulationSpeed: 4,
+      timeWarp: {
+        controllerEntityId: "MOD-时间扭曲/Ω",
+        enabled: true,
+        requestedMultiplier: 15,
+        effectiveMultiplier: 12,
+        requiredPowerKw: 1e13,
+        allocatedPowerKw: 1e13,
+      },
+      entityCount: 2,
+      beltCount: 1,
+      activePlanetEntityCount: 2,
+      activePlanetBeltCount: 1,
+      constructionQueueCount: 1,
+    },
+    planetNavigation: {
+      schema: "factory-read-model-v1",
+      activePlanetId: "MOD-星球",
+      planets: rows([{
+        planetId: "MOD-星球",
+        systemId: "MOD-恒星系",
+        displayName: "测试家园 Ω",
+        code: "MOD-星球",
+        active: true,
+        discovered: true,
+        colonized: true,
+        role: "industry",
+        entityCount: 2,
+        deviceCount: 7,
+        beltCount: 1,
+        constructionQueueCount: 1,
+        powerFactor: 0.75,
+      }]),
+    },
+    selection: {
+      schema: "factory-read-model-v1",
+      activePlanetId: "MOD-星球",
+      requestedEntityCount: 2,
+      requestedBeltCount: 1,
+      entityRows: rows([{
+        entityId: "MOD-建筑",
+        planetId: "MOD-星球",
+        kind: "storage",
+        position: { x: -5, y: 6 },
+        interactionLocked: false,
+        buildingId: "MOD-仓库",
+        resourceId: null,
+        recipeId: null,
+        storedItemId: "MOD-物品/Ω",
+        fuelItemId: null,
+        machineCount: 1,
+        minerCount: 0,
+        progress: 0,
+        utilization: 0.5,
+        productionRate: 1,
+        powerFactor: null,
+        inputItems: rows([{ itemId: "MOD-物品/Ω", amount: 4 }]),
+        outputItems: rows([]),
+        stationConfiguration: null,
+      }]),
+      beltRows: rows([{
+        beltId: "MOD-线路",
+        planetId: "MOD-星球",
+        sourceEntityId: "MOD-建筑",
+        targetEntityId: "sink",
+        itemId: "MOD-物品/Ω",
+        lanes: 1,
+        tier: 1,
+        sorterTier: 1,
+        stackSize: null,
+        priority: 1,
+        progress: 0,
+        lastFlow: 2,
+        totalTransferred: null,
+        congestion: null,
+      }]),
+    },
+    construction: {
+      schema: "factory-read-model-v1",
+      activePlanetId: "MOD-星球",
+      nativeCenterWorkspace: null,
+      queue: rows([{
+        queueId: "queue-1",
+        blueprintId: "bp-1",
+        blueprintVersionId: null,
+        blueprintRevision: null,
+        blueprintName: "测试蓝图",
+        planetId: "MOD-星球",
+        queuedAt: 2,
+        status: "pending-materials",
+        rotation: 0,
+        mirror: "none",
+        placedEntityCount: 1,
+        reservedConstruction: rows([{ constructionId: "MOD-仓库", amount: 2 }]),
+        reservedFleet: rows([{ itemId: "MOD-物品/Ω", amount: 3 }]),
+      }]),
+      automation: {
+        enabled: true,
+        quantumSourceEnabled: true,
+        totalCrafted: 7,
+        lastCraftedId: "MOD-仓库",
+        targets: rows([{ targetId: "MOD-仓库", amount: 10 }]),
+        jobs: rows([{
+          entityId: "MOD-建筑",
+          constructionId: "MOD-仓库",
+          stepIndex: 1,
+          stepCount: 2,
+          elapsedSeconds: 0.5,
+          inventory: rows([{ itemId: "MOD-物品/Ω", amount: 4 }]),
+        }]),
+        destroyedByproducts: rows([{ itemId: "MOD-副产物", amount: 1 }]),
+      },
+    },
+    ...overrides,
+  };
+}
+
+function factoryInventoryContext(overrides = {}) {
+  return {
+    sessionId: "session-factory-inventory",
+    expectedRevision: 7,
+    cursor: 0,
+    limit: 2,
+    ...overrides,
+  };
+}
+
+function factoryInventoryProjection(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    projectionType: "factory-inventory-v1",
+    source: "native-core",
+    revision: 7,
+    stateVersion: 47,
+    registryFingerprint: "builtin:test",
+    activePlanetId: "MOD-星球",
+    cargo: {
+      itemId: "iron_ore",
+      amount: 40,
+      origin: { kind: "node-output", id: "MOD-建筑" },
+    },
+    pickupTargetAmount: 100,
+    portableFleet: { logistics_drone: 3, logistics_vessel: 4 },
+    productionBufferLimit: 10_000,
+    trayItemLimit: 1_000,
+    trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
+    request: { expectedRevision: 7, cursor: 0, limit: 2 },
+    totalCount: 3,
+    rows: [
+      { itemId: "MOD/item-beta", amount: 1_250, freeCapacity: 0, overLimit: true },
+      { itemId: "iron_ore", amount: 150, freeCapacity: 850, overLimit: false },
+    ],
+    nextCursor: 2,
+    truncated: true,
+    limits: { rows: 256, projectionBytes: 1_048_576 },
+    ...overrides,
+  };
+}
+
+function constructionInventoryContext(overrides = {}) {
+  return {
+    sessionId: "session-construction-inventory",
+    expectedRevision: 7,
+    expectedRegistryFingerprint: "builtin:test",
+    cursor: 0,
+    limit: 2,
+    ...overrides,
+  };
+}
+
+function constructionInventoryProjection(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    projectionType: "construction-inventory-v1",
+    source: "native-core",
+    revision: 7,
+    stateVersion: 47,
+    registryFingerprint: "builtin:test",
+    readOnly: true,
+    request: {
+      expectedRevision: 7,
+      expectedRegistryFingerprint: "builtin:test",
+      cursor: 0,
+      limit: 2,
+    },
+    totalCount: 3,
+    rows: [
+      { buildingId: "MOD/building-beta", amount: 4 },
+      { buildingId: "arc_smelter", amount: 8 },
+    ],
+    nextCursor: 2,
+    truncated: true,
+    limits: { rows: 256, projectionBytes: 1_048_576 },
+    ...overrides,
+  };
+}
+
 function statisticsContext(overrides = {}) {
   return {
     minElapsedSeconds: 0,
@@ -138,6 +716,20 @@ test("renderer native errors preserve only bounded symbolic codes", () => {
   assert.doesNotMatch(safe.stack, /[A-Z]:\\|native-renderer-boundary\.cjs/);
 });
 
+test("renderer publishes the bounded viewport presentation capability error", () => {
+  const raw = Object.assign(new Error("host capability details must remain private"), {
+    code: "NATIVE_CORE_CAPABILITY_MISSING",
+  });
+  const safe = createRendererNativeError(raw, {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生建筑展示能力不可用",
+  });
+
+  assert.equal(safe.code, "NATIVE_CORE_CAPABILITY_MISSING");
+  assert.equal(safe.message, "原生建筑展示能力不可用（NATIVE_CORE_CAPABILITY_MISSING）");
+  assert.doesNotMatch(safe.message, /private/);
+});
+
 test("malformed Host codes cannot smuggle stderr or paths", () => {
   const raw = Object.assign(new Error(SECRET_BODY), {
     code: `NATIVE_HOST_EXITED\n${SECRET_PATH}`,
@@ -178,6 +770,46 @@ test("Electron invoke rejection is reconstructed from only a published suffix", 
     message: "原生操作失败，请重试",
   });
   assert.equal(unknown.code, "NATIVE_OPERATION_FAILED");
+
+  const busy = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED",
+    message: "Windows 原生权威检查点验证失败，请重试",
+  });
+  assert.equal(busy.code, "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY");
+
+  const rebase = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机启动失败，请重试",
+  });
+  assert.equal(rebase.code, "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED");
+
+  const macroBusy = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_MACRO_BUSY）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机恢复失败，请重试",
+  });
+  assert.equal(macroBusy.code, "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY");
+
+  const macroClockInvalid = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_MACRO_CLOCK_INVALID）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机主时钟无效",
+  });
+  assert.equal(macroClockInvalid.code, "NATIVE_PLAYER_AUTHORITY_MACRO_CLOCK_INVALID");
+
+  const macroUncertain = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机推进结果不确定，正在恢复",
+  });
+  assert.equal(macroUncertain.code, "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN");
 });
 
 test("AbortError identity remains public without its private message", () => {
@@ -273,6 +905,88 @@ test("v47 import and export receipts use exact Host key sets", () => {
     ...exported,
     result: { ...exported.result, hostStderr: SECRET_BODY },
   }), /native v47 export proof is invalid/);
+
+  const playerAuthorityExport = {
+    authority: { sessionId: "core-7", runId: "player-run-7", revision: 2 },
+    ...exported,
+  };
+  assert.deepEqual(
+    normalizeRendererNativeResult("playerAuthorityExport", playerAuthorityExport),
+    playerAuthorityExport,
+  );
+  assert.throws(() => normalizeRendererNativeResult("playerAuthorityExport", {
+    ...playerAuthorityExport,
+    authority: { ...playerAuthorityExport.authority, revision: 3 },
+  }), /native player-authority export binding is invalid/);
+  assert.throws(() => normalizeRendererNativeResult("playerAuthorityExport", {
+    ...playerAuthorityExport,
+    authority: { ...playerAuthorityExport.authority, ownerId: "forged-owner" },
+  }), /native player-authority export authority is invalid/);
+});
+
+test("offline candidate export binds source, one-shot advance, and envelope proof", () => {
+  const sourceSummary = coreSummary(2);
+  const candidateSummary = coreSummary(3);
+  const value = {
+    prepared: true,
+    strategy: "macro-v1",
+    sourceSavedAtMs: 1_000,
+    settledAtMs: 601_000,
+    settledSeconds: 600,
+    advance: {
+      supported: true,
+      exactScope: "offline-macro-v1",
+      changed: true,
+      previousRevision: 2,
+      revision: 3,
+      algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1",
+      exactCalibrationSeconds: 30,
+      approximatedSeconds: 570,
+      summary: candidateSummary,
+    },
+    export: {
+      exportId: "offlinecandidate7",
+      mode: "normal",
+      result: {
+        revision: 3,
+        savedAtMs: 601_000,
+        byteLength: 2048,
+        envelopeSha256: SHA_B,
+        stateChecksum: "1234abcd",
+      },
+    },
+    sourceSummary,
+    candidateSummary,
+  };
+  const normalized = normalizeRendererNativeResult("coreOfflineCandidateExport", value);
+  assert.equal(normalized.prepared, true);
+  assert.equal(normalized.export.result.byteLength, 2048);
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...value,
+    sourcePath: SECRET_PATH,
+  }), /native offline candidate export result is invalid/);
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...value,
+    settledAtMs: 600_999,
+  }), /native offline candidate time or source binding is invalid/);
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...value,
+    export: { ...value.export, result: { ...value.export.result, revision: 4 } },
+  }), /native offline candidate prepared binding is invalid/);
+});
+
+test("native offline startup errors publish only stable symbolic identities", () => {
+  assert.deepEqual(serializeRendererNativeError({
+    code: "NATIVE_OFFLINE_STARTUP_TIMEOUT",
+    message: SECRET_BODY,
+  }, {
+    fallbackCode: "NATIVE_OFFLINE_STARTUP_FAILED",
+    message: "Windows 原生离线候选失败",
+  }), {
+    name: "NativeHostError",
+    message: "Windows 原生离线候选失败（NATIVE_OFFLINE_STARTUP_TIMEOUT）",
+    code: "NATIVE_OFFLINE_STARTUP_TIMEOUT",
+  });
 });
 
 test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fields", () => {
@@ -314,9 +1028,57 @@ test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fie
     algorithmVersion: "native-pure-idle-conservative-v4",
     exactCalibrationSeconds: 30,
     approximatedSeconds: 3_570,
+    beltScheduler: {
+      routeCount: 155_746,
+      groupCount: 78_025,
+      activeQueueEnabled: true,
+      initializationGroupChecks: 0,
+      selectionGroupChecks: 12_345,
+      carriedActiveGroups: 4_115,
+      transferPasses: 2,
+      reservationPasses: 1,
+      fullScanPasses: 0,
+      transferRouteChecks: 16_000,
+      reservationRouteChecks: 8_000,
+      reservationAllowanceEntries: 7_900,
+      reservationCreditEntries: 4_000,
+      stableRoutesSkipped: 443_238,
+      wakeCount: 20,
+      sleepCount: 12,
+      changedBeltRecords: 1_024,
+      writeBackPatchRecords: 1_024,
+      writeBackWorkers: 1,
+    },
   });
   assert.equal(advanced.reason, "native-domain-unavailable");
+  assert.equal(advanced.beltScheduler.initializationGroupChecks, 0);
+  assert.equal(advanced.beltScheduler.selectionGroupChecks, 12_345);
+  assert.equal(advanced.beltScheduler.carriedActiveGroups, 4_115);
   assert.doesNotMatch(JSON.stringify(advanced), /Player|private-save|token/);
+
+  const macroAdvanced = normalizeRendererNativeResult("coreAdvance", {
+    supported: true,
+    exactScope: "pure-idle-macro-v10",
+    changed: true,
+    previousRevision: 2,
+    revision: 5,
+    algorithmVersion: "native-pure-idle-macro-v10-three-window-strict-freeze-v1",
+    exactCalibrationSeconds: 30,
+    approximatedSeconds: 30,
+  });
+  assert.equal(macroAdvanced.exactScope, "pure-idle-macro-v10");
+
+  const offlineAdvanced = normalizeRendererNativeResult("coreAdvance", {
+    supported: true,
+    exactScope: "offline-macro-v1",
+    changed: true,
+    previousRevision: 5,
+    revision: 9,
+    algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1",
+    exactCalibrationSeconds: 30,
+    approximatedSeconds: 570,
+  });
+  assert.equal(offlineAdvanced.exactScope, "offline-macro-v1");
 
   const checkpoint = {
     checkpoint: saveCommit(2),
@@ -328,6 +1090,50 @@ test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fie
     "checkpoint", "summary", "encodedRecords", "reusedRecords",
   ]);
   assert.throws(() => normalizeRendererNativeResult("coreCheckpoint", { ...checkpoint, stderr: SECRET_BODY }), /native core checkpoint result is invalid/);
+
+  const playerAuthorityCheckpoint = {
+    authority: { sessionId: "core-7", runId: "player-run-7", revision: 2 },
+    checkpoint: {
+      generation: 9,
+      rootHash: SHA_A,
+      revision: 2,
+    },
+    summary: coreSummary(2),
+    reusedAcknowledgedCheckpoint: true,
+  };
+  assert.deepEqual(
+    normalizeRendererNativeResult("playerAuthorityCheckpoint", playerAuthorityCheckpoint),
+    playerAuthorityCheckpoint,
+  );
+  assert.throws(
+    () => normalizeRendererNativeResult("playerAuthorityCheckpoint", {
+      ...playerAuthorityCheckpoint,
+      ownerId: "renderer-forged-owner",
+    }),
+    /native player-authority checkpoint result is invalid/,
+  );
+  assert.throws(
+    () => normalizeRendererNativeResult("playerAuthorityCheckpoint", {
+      ...playerAuthorityCheckpoint,
+      reusedAcknowledgedCheckpoint: false,
+    }),
+    /native player-authority checkpoint binding is invalid/,
+  );
+  assert.throws(
+    () => normalizeRendererNativeResult("playerAuthorityCheckpoint", {
+      ...playerAuthorityCheckpoint,
+      checkpoint: { ...playerAuthorityCheckpoint.checkpoint, revision: 3 },
+    }),
+    /native player-authority checkpoint binding is invalid/,
+  );
+  assert.throws(
+    () => normalizeRendererNativeResult("playerAuthorityCheckpoint", {
+      ...playerAuthorityCheckpoint,
+      authority: { ...playerAuthorityCheckpoint.authority, runId: "replacement-run" },
+      ownerId: "renderer-forged-owner",
+    }),
+    /native player-authority checkpoint result is invalid/,
+  );
 
   const compared = {
     matches: true,
@@ -350,7 +1156,6 @@ test("projection receipts are request-bound, cloned, and reject nested Host diag
     planetId: "home",
     position: { x: 1, y: 2 },
     interactionLocked: false,
-    stationRoutes: [{ id: "route-1", slotIndex: 0, peerId: "peer-1", itemId: "iron_ore", scope: "local", cargo: 1, vehicleCount: 1, progress: 0, duration: 1, requiresWarp: false }],
     routingCursor: 0,
     machineCount: 1,
     minerCount: 0,
@@ -369,7 +1174,7 @@ test("projection receipts are request-bound, cloned, and reject nested Host diag
   assert.deepEqual(normalized, raw);
   assert.notEqual(normalized.base, raw.base);
   assert.notEqual(normalized.entities[0], raw.entities[0]);
-  assert.notEqual(normalized.entities[0].stationRoutes, raw.entities[0].stationRoutes);
+  assert.equal(Object.hasOwn(normalized.entities[0], "stationRoutes"), false);
   assert.deepEqual(normalized.entities[0].inputs, { state: 1 });
   assert.deepEqual(normalized.entities[0].outputs, { body: 2 });
 
@@ -380,7 +1185,7 @@ test("projection receipts are request-bound, cloned, and reject nested Host diag
   rejectsProtocol({ ...raw, base: { paused: false, elapsedSeconds: 10 } });
   rejectsProtocol({ ...raw, base: { paused: { entities: [], belts: [] } } });
   rejectsProtocol({ ...raw, entities: [{ ...entity, sourcePath: SECRET_PATH }] });
-  rejectsProtocol({ ...raw, entities: [{ ...entity, stationRoutes: [{ ...entity.stationRoutes[0], stderr: SECRET_BODY }] }] });
+  rejectsProtocol({ ...raw, entities: [{ ...entity, stationRoutes: [{ id: "route-1" }] }] });
   rejectsProtocol({ ...raw, entities: [{ ...entity, inputs: { state: { path: SECRET_PATH } } }] });
   rejectsProtocol({ ...raw, belts: [{ ...belt, congestion: { rawBody: SECRET_BODY } }] });
   rejectsProtocol(raw, { baseFields: ["entities"], entityIds: ["entity-1"], beltIds: ["belt-1"] });
@@ -459,6 +1264,667 @@ test("viewport and statistics projections use bounded formal schemas", () => {
   rejectsStatistics({ ...statistics, nextCursor: 9 }, statisticsContext({ cursor: 3 }));
 });
 
+test("viewport v2 binds independent pages and preserves bounded opaque selections", () => {
+  const projection = viewportV2Projection();
+  const context = viewportV2Context();
+  const normalized = normalizeRendererNativeResult("coreViewportProjectionV2", projection, context);
+  assert.deepEqual(normalized, projection);
+  assert.notEqual(normalized, projection);
+  assert.notEqual(normalized.entities[0], projection.entities[0]);
+  assert.notEqual(normalized.entities[0].outputs, projection.entities[0].outputs);
+  assert.equal(normalized.entities[0].outputs["mod:物品/铁矿 Ω"], 2);
+  assert.deepEqual(normalized.pinnedEntityIds, ["mod:节点/Ω [selected]"]);
+  assert.deepEqual(normalized.pinnedBeltIds, ["mod:线路/β #pinned"]);
+  assert.equal(normalized.nextEntityCursor, 2);
+  assert.equal(normalized.nextBeltCursor, 1);
+
+  const rejectsViewportV2 = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult("coreViewportProjectionV2", value, requestContext),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+
+  // Session and revision are mandatory request selectors even though only the
+  // revision is echoed in the bounded projection body.
+  rejectsViewportV2(projection, viewportV2Context({ sessionId: "bad session" }));
+  rejectsViewportV2(projection, viewportV2Context({ expectedRevision: 8 }));
+  rejectsViewportV2(projection, { ...context, unexpected: true });
+  rejectsViewportV2({ ...projection, revision: 8 });
+
+  // Entity and belt pages advance independently and are both derived from
+  // their own cursor plus total, never from the other returned array length.
+  rejectsViewportV2({ ...projection, nextEntityCursor: 1 });
+  rejectsViewportV2({ ...projection, nextBeltCursor: null });
+  rejectsViewportV2({ ...projection, viewportTotals: { entities: 1, belts: 2 } });
+  rejectsViewportV2({ ...projection, viewportTotals: { entities: 3, belts: 4 } });
+  rejectsViewportV2({ ...projection, entities: [] });
+  rejectsViewportV2({ ...projection, belts: [...projection.belts, { ...projection.belts[1], id: "mod:线路/额外" }] });
+
+  // Only a resolved, explicitly requested pinned selection may be outside the
+  // requested viewport, and every returned pin must have a matching record.
+  rejectsViewportV2({ ...projection, pinnedEntityIds: ["mod:节点/未请求"] });
+  rejectsViewportV2({ ...projection, pinnedBeltIds: ["mod:线路/未请求"] });
+  rejectsViewportV2({ ...projection, entities: projection.entities.slice(1) });
+  rejectsViewportV2({ ...projection, belts: projection.belts.slice(1) });
+  rejectsViewportV2({
+    ...projection,
+    entities: projection.entities.map((entity) => entity.id === "mod:节点/可见"
+      ? { ...entity, position: { x: 11, y: 3 } }
+      : entity),
+  });
+  rejectsViewportV2({
+    ...projection,
+    pinnedEntityIds: [],
+    entities: projection.entities,
+  }, viewportV2Context({ pinnedEntityIds: [] }));
+
+  // Totals, world bounds and minimap are a closed read-model description.
+  rejectsViewportV2({ ...projection, planetTotals: { entities: 4, belts: 1 } });
+  rejectsViewportV2({ ...projection, worldBounds: { minX: -5, minY: -5, maxX: 10, maxY: 10 } });
+  rejectsViewportV2({ ...projection, minimap: { ...projection.minimap, entityCount: 5 } });
+  rejectsViewportV2({ ...projection, minimap: { ...projection.minimap, occupiedCellCount: 5 } });
+  rejectsViewportV2({ ...projection, minimap: { ...projection.minimap, cellSize: 256 } });
+  rejectsViewportV2({ ...projection, broadQueryFallback: "false" });
+
+  // Opaque MOD identifiers are UTF-8 byte bounded and may contain Unicode,
+  // spaces and slashes, but never NUL or malformed surrogate halves.
+  rejectsViewportV2({
+    ...projection,
+    entities: [{ ...projection.entities[0], id: "mod:\0bad" }, projection.entities[1]],
+  });
+  rejectsViewportV2(projection, viewportV2Context({ planetId: "界".repeat(342) }));
+  rejectsViewportV2({
+    ...projection,
+    entities: [{ ...projection.entities[0], id: "mod:\ud800" }, projection.entities[1]],
+  });
+  rejectsViewportV2(projection, viewportV2Context({
+    pinnedEntityIds: ["mod:节点/Ω [selected]", "mod:节点/Ω [selected]"],
+  }));
+
+  // The renderer boundary independently retains the core's 1 MiB payload
+  // contract before cloning nested projection data.
+  rejectsViewportV2({
+    ...projection,
+    base: { paused: false, payload: new Array(16_384).fill("x".repeat(64)) },
+  }, viewportV2Context({ baseFields: ["paused", "payload"] }));
+});
+
+test("viewport v2 entity presentation is opt-in, page-aligned, and fail-closed for unknown semantics", () => {
+  const legacy = viewportV2Projection();
+  const context = viewportV2Context({ entityPresentationVersion: 1 });
+  const entityPresentation = [
+    { entityId: legacy.entities[0].id, supported: false },
+    {
+      entityId: legacy.entities[1].id,
+      supported: true,
+      coverage: "complete",
+      status: { code: "running", label: "运行中", tone: "running" },
+      powerFactor: 0.75,
+      resourceReserve: {
+        infinite: false,
+        exhausted: false,
+        remaining: 75,
+        capacity: 100,
+        remainingRatio: 0.75,
+        remainingPercent: 75,
+      },
+      outputCapacity: 1_000,
+      cycleRatePerSecond: 2.5,
+      acceptedInputItemIds: ["mod:物品/铁矿 Ω"],
+      producedOutputItemIds: ["mod:物品/铁板 Ω"],
+      targetDysonOrbitLabel: null,
+    },
+  ];
+  const projection = {
+    ...legacy,
+    entityPresentationVersion: 1,
+    entityPresentation,
+  };
+  const normalized = normalizeRendererNativeResult("coreViewportProjectionV2", projection, context);
+  assert.deepEqual(normalized.entityPresentation, entityPresentation);
+  assert.equal(normalized.entityPresentation[0].supported, false);
+
+  const rejects = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult("coreViewportProjectionV2", value, requestContext),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+  rejects(legacy);
+  rejects(projection, viewportV2Context());
+  rejects({ ...projection, entityPresentation: projection.entityPresentation.slice(1) });
+  rejects({ ...projection, entityPresentation: [...projection.entityPresentation].reverse() });
+  rejects({
+    ...projection,
+    entityPresentation: [{ entityId: legacy.entities[0].id, supported: false, powerFactor: 1 }, entityPresentation[1]],
+  });
+  rejects({
+    ...projection,
+    entityPresentation: [entityPresentation[0], {
+      ...entityPresentation[1],
+      resourceReserve: { ...entityPresentation[1].resourceReserve, remainingRatio: 1.25 },
+    }],
+  });
+});
+
+test("factory read model is strictly bounded and revision-bound before renderer delivery", () => {
+  const projection = factoryReadModelProjection();
+  const context = factoryReadModelContext();
+  const normalized = normalizeRendererNativeResult("coreFactoryReadModelProjection", projection, context);
+  assert.deepEqual(normalized, projection);
+  assert.notEqual(normalized, projection);
+  assert.notEqual(normalized.selection.entityRows.rows[0], projection.selection.entityRows.rows[0]);
+  assert.equal(normalized.shell.source, "native-core");
+  assert.deepEqual(normalized.shell.timeWarp, projection.shell.timeWarp);
+  assert.equal(normalized.selection.entityRows.rows[0].inputItems.rows[0].itemId, "MOD-物品/Ω");
+
+  const workspaceRows = (entries, totalCount = entries.length) => ({
+    rows: entries,
+    totalCount,
+    truncated: totalCount > entries.length,
+  });
+  const currentProjection = structuredClone(projection);
+  Object.assign(currentProjection.selection.entityRows.rows[0], {
+    buildingName: "MOD 仓库 Ω",
+    upgradeTargetId: null,
+    sprayCoaterInstalled: false,
+    quantumMode: "legacy",
+    quantumTransitionActive: false,
+    stationTier: 0,
+    orbitalYieldItemIds: ["deuterium", "hydrogen"],
+  });
+  currentProjection.workspace = {
+    schema: "workspace-actions-v1",
+    activePlanetId: "MOD-星球",
+    regions: workspaceRows([{
+      id: "region-1",
+      name: "主工厂",
+      planetId: "MOD-星球",
+      x: -100,
+      y: 50,
+      width: 400,
+      height: 300,
+      fillColor: "#102030",
+      borderColor: "#abcdef",
+    }]),
+    bookmarks: workspaceRows([{
+      id: "bookmark-1",
+      name: "总线视角",
+      planetId: "MOD-星球",
+      viewport: { x: -20, y: 30, zoom: 1.25 },
+      createdAtSeconds: 120,
+    }]),
+    handcraftQueue: workspaceRows([{
+      entryId: "handcraft-1",
+      recipeId: "iron_ingot",
+      recipeName: "铁块",
+      outputItemId: "iron_ingot",
+      outputItemName: "铁块",
+      planetId: "MOD-星球",
+      batchesTotal: 10,
+      batchesRemaining: 4,
+      progress: 0.5,
+      queuedAt: 100,
+    }]),
+    handcraftRecipes: workspaceRows([{
+      recipeId: "iron_ingot",
+      name: "铁块",
+      buildingId: "arc_smelter",
+      buildingName: "电弧熔炉",
+      duration: 1,
+      unlocked: true,
+      requiredTechId: null,
+      inputs: [{ itemId: "iron_ore", name: "铁矿石", amount: 1 }],
+      outputs: [{ itemId: "iron_ingot", name: "铁块", amount: 1 }],
+    }]),
+  };
+  const normalizedCurrent = normalizeRendererNativeResult(
+    "coreFactoryReadModelProjection",
+    currentProjection,
+    context,
+  );
+  assert.deepEqual(normalizedCurrent.workspace, currentProjection.workspace);
+  assert.deepEqual(
+    normalizedCurrent.selection.entityRows.rows[0].orbitalYieldItemIds,
+    ["deuterium", "hydrogen"],
+  );
+
+  const stationSlots = Array.from({ length: 5 }, (_, slotIndex) => ({
+    slotIndex,
+    itemId: slotIndex === 2 ? "iron_ore" : null,
+    localMode: slotIndex === 2 ? "supply" : "storage",
+    remoteMode: slotIndex === 2 ? "demand" : "storage",
+    minimumLoad: slotIndex === 2 ? 0.25 : 1,
+    minStock: slotIndex === 2 ? 10 : 0,
+    maxStock: slotIndex === 2 ? 100 : 0,
+    priority: slotIndex === 2 ? 2 : 1,
+    routePolicy: "relay-preferred",
+    warperBudget: 2,
+  }));
+  const stationConfiguration = {
+    schema: "station-configuration-v1",
+    registryFingerprint: "7df8cf3a",
+    stationType: "interstellar",
+    itemOptions: {
+      rows: [
+        { itemId: "copper_ore", name: "铜矿", kind: "solid" },
+        { itemId: "iron_ore", name: "铁矿", kind: "solid" },
+      ],
+      totalCount: 2,
+      truncated: false,
+      limit: 128,
+    },
+    stationDrones: 5,
+    stationVessels: 2,
+    stationWarpers: 1,
+    slots: stationSlots,
+    spaceWarpUnlocked: true,
+    stationWarpEnabled: true,
+    stationWarperAutoRefill: false,
+    stationWarperTarget: 25,
+    stationHubEnabled: false,
+    stationHubPriority: 1,
+  };
+  const stationProjection = structuredClone(projection);
+  Object.assign(stationProjection.selection.entityRows.rows[0], {
+    kind: "station",
+    buildingId: "interstellar_logistics_station",
+    stationConfiguration,
+  });
+  const normalizedStation = normalizeRendererNativeResult(
+    "coreFactoryReadModelProjection",
+    stationProjection,
+    context,
+  );
+  assert.equal(normalizedStation.selection.entityRows.rows[0].stationConfiguration.slots.length, 5);
+  assert.equal(normalizedStation.selection.entityRows.rows[0].stationConfiguration.slots[2].itemId, "iron_ore");
+  assert.deepEqual(
+    normalizedStation.selection.entityRows.rows[0].stationConfiguration.itemOptions,
+    stationConfiguration.itemOptions,
+  );
+  assert.equal(Object.hasOwn(normalizedStation.selection.entityRows.rows[0].stationConfiguration, "stationRoutes"), false);
+
+  const bounded = (entries, totalCount = entries.length) => ({
+    rows: entries,
+    totalCount,
+    truncated: totalCount > entries.length,
+  });
+  const quantities = (entries, totalAmount = entries.reduce((sum, row) => sum + row.amount, 0)) => ({
+    ...bounded(entries),
+    totalAmount,
+  });
+  const builtInWorkspace = {
+    schema: "construction-center-workspace-v1",
+    registryFingerprint: "7df8cf3a",
+    readOnly: true,
+    writeAvailable: true,
+    activePlanetId: "MOD-星球",
+    activePlanetName: "测试家园 Ω",
+    paused: false,
+    enabled: true,
+    quantumSourceEnabled: true,
+    quantumNetworkEnabled: true,
+    totalCrafted: 7,
+    lastCraftedId: "wind_turbine",
+    lastCraftedName: "风力涡轮机",
+    stockLimit: 500,
+    cycleSeconds: 2.5,
+    materialSeconds: 0.05,
+    targets: bounded([{
+      targetId: "wind_turbine",
+      name: "风力涡轮机",
+      kind: "building",
+      category: "power",
+      target: 50,
+      currentStock: 41,
+      unlocked: true,
+      requiredTechId: "electromagnetism",
+      requiredTechName: "电磁学",
+      outputAmount: 1,
+      costs: bounded([{ itemId: "iron_ore", name: "铁矿石", amount: 6 }]),
+    }]),
+    centers: bounded([{
+      entityId: "center-a",
+      planetId: "MOD-星球",
+      planetName: "测试家园 Ω",
+      machineCount: 2,
+      status: "working",
+    }]),
+    jobs: bounded([{
+      entityId: "center-a",
+      targetId: "wind_turbine",
+      targetName: "风力涡轮机",
+      stepIndex: 1,
+      stepCount: 2,
+      elapsedSeconds: 0.5,
+      inventory: quantities([{ itemId: "iron_ore", name: "铁矿石", amount: 2 }]),
+    }]),
+    materials: quantities([{ itemId: "iron_ore", name: "铁矿石", amount: 123 }]),
+    quantumBuffer: quantities([{ entityId: "center-a", itemId: "iron_ore", name: "铁矿石", amount: 4 }]),
+    destroyedByproducts: quantities([{ itemId: "iron_ore", name: "铁矿石", amount: 3 }]),
+    limits: {
+      targetRows: 128,
+      centerRows: 64,
+      jobRows: 64,
+      materialRows: 256,
+      quantumBufferRows: 256,
+      destroyedByproductRows: 256,
+      costRowsPerTarget: 32,
+      projectionBytes: 1_048_576,
+    },
+  };
+  const builtInProjection = structuredClone(projection);
+  builtInProjection.construction.nativeCenterWorkspace = builtInWorkspace;
+  const normalizedBuiltIn = normalizeRendererNativeResult(
+    "coreFactoryReadModelProjection",
+    builtInProjection,
+    context,
+  );
+  assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.targets.rows[0].currentStock, 41);
+  assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.writeAvailable, true);
+  assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.quantumBuffer.totalAmount, 4);
+  assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.limits.projectionBytes, 1_048_576);
+
+  const unavailableProjection = structuredClone(builtInProjection);
+  unavailableProjection.construction.nativeCenterWorkspace.writeAvailable = false;
+  const normalizedUnavailable = normalizeRendererNativeResult(
+    "coreFactoryReadModelProjection",
+    unavailableProjection,
+    context,
+  );
+  assert.equal(normalizedUnavailable.construction.nativeCenterWorkspace.writeAvailable, false);
+
+  const rejects = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult("coreFactoryReadModelProjection", value, requestContext),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+  rejects(projection, factoryReadModelContext({ sessionId: "bad session" }));
+  rejects(projection, factoryReadModelContext({ expectedRevision: 8 }));
+  rejects(projection, factoryReadModelContext({ selectedEntityIds: new Array(65).fill("entity") }));
+  rejects({ ...projection, revision: 8 });
+  rejects({ ...projection, shell: { ...projection.shell, source: "web-game-state" } });
+  rejects({ ...projection, shell: { ...projection.shell, timeWarp: { ...projection.shell.timeWarp, effectiveMultiplier: 4.5 } } });
+  rejects({ ...projection, shell: { ...projection.shell, timeWarp: { ...projection.shell.timeWarp, allocatedPowerKw: 1e14 } } });
+  rejects({ ...projection, shell: { ...projection.shell, path: SECRET_PATH } });
+  for (const mutate of [
+    (value) => { value.workspace.activePlanetId = "other"; },
+    (value) => { value.workspace.regions.rows[0].privatePath = SECRET_PATH; },
+    (value) => { value.workspace.bookmarks.rows[0].viewport.zoom = 3; },
+    (value) => { value.workspace.handcraftRecipes.rows[0].inputs = []; },
+    (value) => { value.selection.entityRows.rows[0].quantumMode = "forged"; },
+    (value) => { value.selection.entityRows.rows[0].orbitalYieldItemIds.reverse(); },
+  ]) {
+    const malformed = structuredClone(currentProjection);
+    mutate(malformed);
+    rejects(malformed);
+  }
+  for (const mutate of [
+    (workspace) => { workspace.registryFingerprint = "MOD/forged"; },
+    (workspace) => { delete workspace.writeAvailable; },
+    (workspace) => { workspace.writeAvailable = "yes"; },
+    (workspace) => { workspace.engineStatus = { body: SECRET_BODY }; },
+    (workspace) => { workspace.centers.rows[0].planetId = "other"; },
+    (workspace) => { workspace.quantumBuffer.rows[0].entityId = "unknown-center"; },
+    (workspace) => { workspace.materials.totalAmount = 1; },
+    (workspace) => { workspace.targets.rows[0].currentStock = 1.5; },
+  ]) {
+    const malformed = structuredClone(builtInProjection);
+    mutate(malformed.construction.nativeCenterWorkspace);
+    rejects(malformed);
+  }
+  rejects({
+    ...projection,
+    selection: {
+      ...projection.selection,
+      entityRows: {
+        ...projection.selection.entityRows,
+        rows: [{ ...projection.selection.entityRows.rows[0], entityId: "not-requested" }],
+      },
+    },
+  });
+  rejects({
+    ...projection,
+    selection: {
+      ...projection.selection,
+      entityRows: {
+        ...projection.selection.entityRows,
+        rows: [{
+          ...projection.selection.entityRows.rows[0],
+          inputItems: {
+            rows: [
+              { itemId: "MOD-物品/Ω", amount: 1 },
+              { itemId: "MOD-物品/Ω", amount: 2 },
+            ],
+            totalCount: 2,
+            truncated: false,
+          },
+        }],
+      },
+    },
+  });
+  rejects({
+    ...projection,
+    selection: { ...projection.selection, requestedEntityCount: 1 },
+  });
+  rejects({
+    ...projection,
+    construction: {
+      ...projection.construction,
+      queue: { ...projection.construction.queue, truncated: true },
+    },
+  });
+  rejects({ ...projection, shell: { ...projection.shell, constructionQueueCount: 2 } });
+  const malformedStationProjection = structuredClone(stationProjection);
+  malformedStationProjection.selection.entityRows.rows[0].stationConfiguration.slots.pop();
+  rejects(malformedStationProjection);
+  const unsortedStationOptions = structuredClone(stationProjection);
+  unsortedStationOptions.selection.entityRows.rows[0].stationConfiguration.itemOptions.rows.reverse();
+  rejects(unsortedStationOptions);
+  const oversizedStationOptions = structuredClone(stationProjection);
+  oversizedStationOptions.selection.entityRows.rows[0].stationConfiguration.itemOptions = {
+    rows: Array.from({ length: 129 }, (_, index) => ({
+      itemId: `item_${String(index).padStart(3, "0")}`,
+      name: `item ${index}`,
+      kind: "solid",
+    })),
+    totalCount: 129,
+    truncated: true,
+    limit: 128,
+  };
+  rejects(oversizedStationOptions);
+  const unboundStationItem = structuredClone(stationProjection);
+  unboundStationItem.selection.entityRows.rows[0].stationConfiguration.itemOptions = {
+    rows: [{ itemId: "copper_ore", name: "铜矿", kind: "solid" }],
+    totalCount: 1,
+    truncated: false,
+    limit: 128,
+  };
+  rejects(unboundStationItem);
+  const invalidStationLabel = structuredClone(stationProjection);
+  invalidStationLabel.selection.entityRows.rows[0].stationConfiguration.itemOptions.rows[0].name = "界".repeat(86);
+  rejects(invalidStationLabel);
+  const forgedModStationProjection = structuredClone(stationProjection);
+  forgedModStationProjection.selection.entityRows.rows[0].stationConfiguration.registryFingerprint = "MOD/forged";
+  rejects(forgedModStationProjection);
+  const routedStationProjection = structuredClone(stationProjection);
+  routedStationProjection.selection.entityRows.rows[0].stationConfiguration.stationRoutes = [{ id: "secret" }];
+  rejects(routedStationProjection);
+  rejects({
+    ...projection,
+    selection: {
+      ...projection.selection,
+      entityRows: {
+        ...projection.selection.entityRows,
+        rows: [{
+          ...projection.selection.entityRows.rows[0],
+          inputItems: { rows: [{ itemId: "MOD-物品/Ω", amount: { body: SECRET_BODY } }], totalCount: 1, truncated: false },
+        }],
+      },
+    },
+  });
+  rejects({
+    ...projection,
+    construction: {
+      ...projection.construction,
+      queue: {
+        ...projection.construction.queue,
+        rows: [{ ...projection.construction.queue.rows[0], blueprintName: "x".repeat(1_048_576) }],
+      },
+    },
+  });
+});
+
+test("factory inventory pages are exact, revision-bound, sorted, and conservation-safe", () => {
+  const projection = factoryInventoryProjection();
+  const context = factoryInventoryContext();
+  const normalized = normalizeRendererNativeResult(
+    "coreFactoryInventoryProjection",
+    projection,
+    context,
+  );
+  assert.deepEqual(normalized, projection);
+  assert.notEqual(normalized, projection);
+  assert.notEqual(normalized.rows[0], projection.rows[0]);
+  assert.notEqual(normalized.cargo, projection.cargo);
+
+  const rejects = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult("coreFactoryInventoryProjection", value, requestContext),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+  rejects(projection, factoryInventoryContext({ sessionId: "bad session" }));
+  rejects(projection, factoryInventoryContext({ expectedRevision: 8 }));
+  rejects(projection, factoryInventoryContext({ cursor: -1 }));
+  rejects(projection, factoryInventoryContext({ limit: 257 }));
+  rejects({ ...projection, source: "web-game-state" });
+  rejects({ ...projection, stateVersion: 46 });
+  rejects({ ...projection, revision: 8 });
+  rejects({ ...projection, registryFingerprint: "bad fingerprint" });
+  rejects({ ...projection, activePlanetId: "bad\ud800" });
+  rejects({ ...projection, activePlanetId: "bad\nplanet" });
+  rejects({ ...projection, cargo: { ...projection.cargo, amount: 0 } });
+  rejects({
+    ...projection,
+    cargo: { ...projection.cargo, origin: { kind: "tray" } },
+  });
+  rejects({
+    ...projection,
+    cargo: { ...projection.cargo, origin: { kind: "unknown", id: null } },
+  });
+  rejects({
+    ...projection,
+    portableFleet: { ...projection.portableFleet, logistics_drone: -1 },
+  });
+  rejects({ ...projection, productionBufferLimit: 999 });
+  rejects({ ...projection, productionBufferLimit: 100_000_001 });
+  rejects({
+    ...projection,
+    trayItemLimitBounds: { ...projection.trayItemLimitBounds, minimum: 0 },
+  });
+  rejects({ ...projection, trayItemLimit: 100_000_001 });
+  rejects({ ...projection, request: { ...projection.request, cursor: 1 } });
+  rejects({
+    ...projection,
+    rows: [projection.rows[1], projection.rows[0]],
+  });
+  rejects({
+    ...projection,
+    rows: [{ ...projection.rows[0], itemId: "bad\nitem" }, projection.rows[1]],
+  });
+  rejects({
+    ...projection,
+    rows: projection.rows.map((row, index) => index === 0 ? { ...row, freeCapacity: 1 } : row),
+  });
+  rejects({
+    ...projection,
+    rows: projection.rows.map((row, index) => index === 1 ? { ...row, overLimit: true } : row),
+  });
+  rejects({ ...projection, totalCount: 2 });
+  rejects({ ...projection, nextCursor: null });
+  rejects({ ...projection, truncated: false });
+  rejects({ ...projection, limits: { ...projection.limits, rows: 512 } });
+  rejects({ ...projection, path: SECRET_PATH });
+  rejects({
+    ...projection,
+    rows: [{
+      ...projection.rows[0],
+      itemId: "x".repeat(1_048_576),
+    }, projection.rows[1]],
+  });
+
+  const emptyCargo = factoryInventoryProjection({ cargo: null });
+  assert.equal(normalizeRendererNativeResult(
+    "coreFactoryInventoryProjection",
+    emptyCargo,
+    context,
+  ).cargo, null);
+});
+
+test("construction inventory pages fail closed on identity, shape, order, and unsafe counts", () => {
+  const projection = constructionInventoryProjection();
+  const context = constructionInventoryContext();
+  const normalized = normalizeRendererNativeResult(
+    "coreConstructionInventoryProjection",
+    projection,
+    context,
+  );
+  assert.deepEqual(normalized, projection);
+  assert.notEqual(normalized, projection);
+  assert.notEqual(normalized.rows[0], projection.rows[0]);
+  const opaqueModProjection = constructionInventoryProjection({
+    totalCount: 1,
+    rows: [{ buildingId: "未知/MOD-建筑", amount: 5 }],
+    nextCursor: null,
+    truncated: false,
+  });
+  assert.equal(normalizeRendererNativeResult(
+    "coreConstructionInventoryProjection",
+    opaqueModProjection,
+    context,
+  ).rows[0].buildingId, "未知/MOD-建筑");
+
+  const rejects = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult(
+      "coreConstructionInventoryProjection",
+      value,
+      requestContext,
+    ),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+  rejects(projection, constructionInventoryContext({ sessionId: "bad session" }));
+  rejects(projection, constructionInventoryContext({ expectedRevision: 8 }));
+  rejects(projection, constructionInventoryContext({ expectedRegistryFingerprint: "other" }));
+  rejects(projection, constructionInventoryContext({ cursor: -1 }));
+  rejects(projection, constructionInventoryContext({ limit: 257 }));
+  rejects({ ...projection, source: "web-game-state" });
+  rejects({ ...projection, stateVersion: 46 });
+  rejects({ ...projection, revision: 8 });
+  rejects({ ...projection, registryFingerprint: "other" });
+  rejects({ ...projection, readOnly: false });
+  rejects({
+    ...projection,
+    request: { ...projection.request, expectedRegistryFingerprint: "other" },
+  });
+  rejects({ ...projection, rows: [projection.rows[1], projection.rows[0]] });
+  rejects({
+    ...projection,
+    rows: [{ ...projection.rows[0], buildingId: "bad\nbuilding" }, projection.rows[1]],
+  });
+  rejects({
+    ...projection,
+    rows: [{ ...projection.rows[0], amount: 0 }, projection.rows[1]],
+  });
+  rejects({
+    ...projection,
+    rows: [{ ...projection.rows[0], amount: Number.MAX_SAFE_INTEGER + 1 }, projection.rows[1]],
+  });
+  rejects({ ...projection, totalCount: 2 });
+  rejects({ ...projection, nextCursor: null });
+  rejects({ ...projection, truncated: false });
+  rejects({ ...projection, limits: { ...projection.limits, rows: 512 } });
+  rejects({ ...projection, path: SECRET_PATH });
+  rejects({
+    ...projection,
+    rows: [{ buildingId: "x".repeat(1_048_576), amount: 1 }, projection.rows[1]],
+  });
+});
+
 test("Electron main uses the dedicated native renderer boundary", () => {
   const source = fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8");
   const preload = fs.readFileSync(path.join(__dirname, "preload.cjs"), "utf8");
@@ -469,19 +1935,100 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?\.catch\(\(error\) => postNativeProjectionTransferError\(port, error\)\)/);
   assert.doesNotMatch(source, /desktop:native-core-projection-transfer[\s\S]*?\.catch\(\(error\) => postTransferError\(port, error\)\)/);
   assert.match(source, /function nativeViewportProjectionResultContext[\s\S]*?planetId:\s*request\?\.planetId[\s\S]*?bounds:\s*request\?\.bounds[\s\S]*?entityCursor:[\s\S]*?entityLimit:[\s\S]*?beltLimit:/);
+  assert.match(source, /function nativeViewportProjectionV2ResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?planetId:\s*request\?\.planetId[\s\S]*?entityCursor:[\s\S]*?entityLimit:[\s\S]*?beltCursor:[\s\S]*?beltLimit:[\s\S]*?pinnedEntityIds:[\s\S]*?pinnedBeltIds:/);
+  assert.match(source, /function nativeFactoryReadModelResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?selectedEntityIds:[\s\S]*?selectedBeltIds:/);
+  assert.match(source, /function nativeFactoryInventoryResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?cursor:[\s\S]*?limit:/);
+  assert.match(source, /function nativeConstructionInventoryResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?cursor:[\s\S]*?limit:/);
+  assert.match(source, /function nativeBlueprintWorkspaceResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?section:[\s\S]*?blueprintId:[\s\S]*?cursor:[\s\S]*?limit:/);
+  assert.match(source, /function nativeBlueprintCaptureContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?entityIds:/);
+  assert.match(source, /function nativeBlueprintImportContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?raw:/);
+  assert.match(source, /function nativeBlueprintExportContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?blueprintId:[\s\S]*?blueprintRevision:/);
+  assert.match(source, /function nativeBlueprintEnqueueContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?blueprintId:[\s\S]*?blueprintRevision:/);
+  assert.match(source, /function nativeBlueprintDirectDeployContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?blueprintId:[\s\S]*?blueprintRevision:[\s\S]*?position:/);
   assert.match(source, /function nativeStatisticsProjectionResultContext[\s\S]*?minElapsedSeconds:[\s\S]*?maxElapsedSeconds:[\s\S]*?cursor:[\s\S]*?limit:[\s\S]*?planetId:[\s\S]*?itemId:/);
+  assert.match(source, /function nativeTechnologyProjectionResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision/);
   assert.match(source, /desktop:native-core-projection"[\s\S]*?resultContext:\s*nativeCoreProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-viewport-projection"[\s\S]*?resultContext:\s*nativeViewportProjectionResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-viewport-projection-v2"[\s\S]*?runRendererNativeOperation\("coreViewportProjectionV2"[\s\S]*?resultContext:\s*nativeViewportProjectionV2ResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-factory-read-model"[\s\S]*?runRendererNativeOperation\("coreFactoryReadModelProjection"[\s\S]*?resultContext:\s*nativeFactoryReadModelResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-factory-inventory"[\s\S]*?runRendererNativeOperation\("coreFactoryInventoryProjection"[\s\S]*?resultContext:\s*nativeFactoryInventoryResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-construction-inventory"[\s\S]*?runRendererNativeOperation\("coreConstructionInventoryProjection"[\s\S]*?resultContext:\s*nativeConstructionInventoryResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-blueprint-workspace"[\s\S]*?runRendererNativeOperation\("coreBlueprintWorkspaceProjection"[\s\S]*?resultContext:\s*nativeBlueprintWorkspaceResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-blueprint-capture-context"[\s\S]*?runRendererNativeOperation\("coreBlueprintCaptureContext"[\s\S]*?resultContext:\s*nativeBlueprintCaptureContextResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-blueprint-enqueue-context"[\s\S]*?runRendererNativeOperation\("coreBlueprintEnqueueContext"[\s\S]*?resultContext:\s*nativeBlueprintEnqueueContextResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-blueprint-direct-deploy-context"[\s\S]*?runRendererNativeOperation\("coreBlueprintDirectDeployContext"[\s\S]*?resultContext:\s*nativeBlueprintDirectDeployContextResultContext\(request\)/);
   assert.match(source, /desktop:native-core-statistics-projection"[\s\S]*?resultContext:\s*nativeStatisticsProjectionResultContext\(request\)/);
-  assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)/);
+  assert.match(source, /desktop:native-core-technology-projection"[\s\S]*?resultContext:\s*nativeTechnologyProjectionResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeViewportProjectionV2ResultContext\(normalizedRequest\)[\s\S]*?nativeFactoryReadModelResultContext\(normalizedRequest\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)[\s\S]*?nativeTechnologyProjectionResultContext\(normalizedRequest\)/);
   assert.match(source, /desktop:native-core-status[\s\S]*?runRendererNativeOperation\("coreSummary"/);
+  assert.match(source, /desktop:native-player-authority-state"[\s\S]*?runRendererNativeOperation\("playerAuthorityState"/);
+  assert.match(source, /onTransition:\s*publishNativePlayerAuthorityState/);
+  assert.match(source, /webContents\.send\("desktop:native-player-authority-state-changed", state\)/);
   assert.match(preload, /function invokeNative[\s\S]*?createRendererNativeRejection\(error, options\)/);
   assert.doesNotMatch(preload, /ipcRenderer\.invoke\("desktop:(?:native|set-native)/);
 
   const mainChannels = [...source.matchAll(/ipcMain\.handle\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
+  const preloadChannels = [...preload.matchAll(/invokeNative\(\s*"(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 24);
+  assert.equal(mainChannels.length, 71);
+  assert.ok(mainChannels.includes("desktop:native-core-reconcile-command"));
+  assert.ok(preloadChannels.includes("desktop:native-core-reconcile-command"));
+  assert.ok(mainChannels.includes("desktop:native-player-authority-set-paused"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-set-paused"));
+  assert.ok(mainChannels.includes("desktop:native-player-authority-checkpoint"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-checkpoint"));
+  assert.ok(mainChannels.includes("desktop:native-player-authority-export-v47"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-export-v47"));
+  assert.ok(mainChannels.includes("desktop:native-core-star-map-catalog-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-star-map-catalog-projection"));
+  assert.ok(mainChannels.includes("desktop:native-core-factory-inventory"));
+  assert.ok(preloadChannels.includes("desktop:native-core-factory-inventory"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-inventory"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-inventory"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-workspace"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-workspace"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-capture-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-capture-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-import-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-import-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-export-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-export-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-enqueue-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-enqueue-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-direct-deploy-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-direct-deploy-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-placement-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-placement-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-belt-placement-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-belt-placement-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-belt-lane-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-belt-lane-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-belt-removal-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-belt-removal-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-removal-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-removal-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-stack-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-stack-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-stellar-quantum-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-stellar-quantum-projection"));
+  assert.ok(mainChannels.includes("desktop:native-core-dyson-workspace-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-dyson-workspace-projection"));
+  assert.ok(mainChannels.includes("desktop:native-core-system-space-station-workspace-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-system-space-station-workspace-projection"));
+  assert.ok(mainChannels.includes("desktop:native-player-authority-system-space-station-intent"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-system-space-station-intent"));
+  assert.ok(mainChannels.includes("desktop:native-core-orbital-contract-workspace-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-orbital-contract-workspace-projection"));
+  assert.ok(mainChannels.includes("desktop:native-player-authority-orbital-contract-intent"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-orbital-contract-intent"));
+  assert.ok(mainChannels.includes("desktop:native-core-campaign-workspace-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-campaign-workspace-projection"));
+  assert.ok(mainChannels.includes("desktop:native-core-operations-workspace-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-operations-workspace-projection"));
+  assert.ok(mainChannels.includes("desktop:native-player-authority-operations-setting-intent"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-operations-setting-intent"));
+  assert.ok(mainChannels.includes("desktop:native-core-galaxy-account-workspace-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-galaxy-account-workspace-projection"));
   assert.deepEqual(new Set(preloadChannels), new Set(mainChannels));
 });

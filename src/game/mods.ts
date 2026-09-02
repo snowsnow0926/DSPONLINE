@@ -1,5 +1,5 @@
 import { BUILDINGS, ITEMS, RECIPES, TECHNOLOGIES, validateContentCatalog } from "./content";
-import type { BuildingDefinition, ItemDefinition } from "./types";
+import type { BuildingDefinition, BuildingPortDefinition, ItemDefinition } from "./types";
 
 export const MOD_FORMAT_VERSION = 2;
 
@@ -44,6 +44,16 @@ export interface ModBuildingDefinition {
   requiredTechId?: string;
   costs?: ModRecipeAmount[];
   outputAmount?: number;
+  stackLimit?: number;
+  megastructure?: boolean;
+  unique?: boolean;
+  upgradeTargetId?: string;
+  layoutWidth?: number;
+  layoutHeight?: number;
+  layoutClearance?: number;
+  ports?: BuildingPortDefinition[];
+  capabilities?: string[];
+  scripted?: boolean;
 }
 
 export interface ModBuildingOverride {
@@ -260,7 +270,33 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
       issues.push({ severity: "error", code: "building-number", path: `$.buildings[${index}].${key}`, message: "建筑数值必须是有限的非负数" });
     }
     if (entry.requiredTechId !== undefined && !validId(entry.requiredTechId)) issues.push({ severity: "error", code: "building-tech", path: `$.buildings[${index}].requiredTechId`, message: "建筑解锁科技 ID 无效" });
+    if (entry.upgradeTargetId !== undefined && !validId(entry.upgradeTargetId)) issues.push({ severity: "error", code: "building-upgrade", path: `$.buildings[${index}].upgradeTargetId`, message: "建筑升级目标 ID 无效" });
     if (entry.costs !== undefined && !amountList(entry.costs)) issues.push({ severity: "error", code: "building-costs", path: `$.buildings[${index}].costs`, message: "建筑成本必须是合法物品数量数组" });
+    if (entry.stackLimit !== undefined && (!Number.isInteger(entry.stackLimit) || entry.stackLimit < 1 || entry.stackLimit > 100_000_000)) issues.push({ severity: "error", code: "building-stack-limit", path: `$.buildings[${index}].stackLimit`, message: "建筑堆叠上限必须是 1～100,000,000 的整数" });
+    for (const key of ["layoutWidth", "layoutHeight", "layoutClearance"] as const) {
+      const candidate = entry[key];
+      if (candidate !== undefined && (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate < (key === "layoutClearance" ? 0 : 1) || candidate > 10_000)) {
+        issues.push({ severity: "error", code: "building-layout", path: `$.buildings[${index}].${key}`, message: "建筑布局尺寸必须位于安全范围" });
+      }
+    }
+    const capabilities = entry.capabilities === undefined ? [] : entry.capabilities;
+    if (!Array.isArray(capabilities) || capabilities.length > 64 || !capabilities.every(validId) || new Set(capabilities).size !== capabilities.length) {
+      issues.push({ severity: "error", code: "building-capabilities", path: `$.buildings[${index}].capabilities`, message: "建筑能力必须是最多 64 个不重复的合法 ID" });
+    }
+    const ports = entry.ports === undefined ? [] : entry.ports;
+    if (!Array.isArray(ports) || ports.length > 32 || !ports.every((port) => isRecord(port) &&
+      Number.isInteger(port.index) && port.index >= 0 && port.index < 32 &&
+      ["input", "output", "bidirectional"].includes(port.direction) &&
+      ["solid", "fluid", "matrix", "any"].includes(port.accepts) &&
+      (port.maxConnections === undefined || (Number.isInteger(port.maxConnections) && port.maxConnections >= 1 && port.maxConnections <= 16)) &&
+      (port.special === undefined || validId(port.special)))) {
+      issues.push({ severity: "error", code: "building-ports", path: `$.buildings[${index}].ports`, message: "建筑端口声明无效" });
+    } else if (new Set(ports.map((port) => `${port.index}:${port.direction}`)).size !== ports.length) {
+      issues.push({ severity: "error", code: "building-port-duplicate", path: `$.buildings[${index}].ports`, message: "同方向建筑端口索引不能重复" });
+    }
+    for (const key of ["megastructure", "unique", "scripted"] as const) if (entry[key] !== undefined && typeof entry[key] !== "boolean") {
+      issues.push({ severity: "error", code: "building-flag", path: `$.buildings[${index}].${key}`, message: "建筑能力标记必须是布尔值" });
+    }
     return [{
       id: entry.id,
       name: entry.name.trim().slice(0, 80),
@@ -271,7 +307,17 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
       ...(family === "smelter" || family === "assembler" || family === "chemical" ? { family } : {}),
       ...(typeof entry.description === "string" ? { description: entry.description.trim().slice(0, 240) } : {}),
       ...(typeof entry.requiredTechId === "string" ? { requiredTechId: entry.requiredTechId } : {}),
+      ...(typeof entry.upgradeTargetId === "string" ? { upgradeTargetId: entry.upgradeTargetId } : {}),
       ...(Array.isArray(entry.costs) ? { costs: entry.costs } : {}),
+      ...(typeof entry.stackLimit === "number" ? { stackLimit: Math.floor(entry.stackLimit) } : {}),
+      ...(typeof entry.megastructure === "boolean" ? { megastructure: entry.megastructure } : {}),
+      ...(typeof entry.unique === "boolean" ? { unique: entry.unique } : {}),
+      ...(typeof entry.scripted === "boolean" ? { scripted: entry.scripted } : {}),
+      ...(typeof entry.layoutWidth === "number" ? { layoutWidth: entry.layoutWidth } : {}),
+      ...(typeof entry.layoutHeight === "number" ? { layoutHeight: entry.layoutHeight } : {}),
+      ...(typeof entry.layoutClearance === "number" ? { layoutClearance: entry.layoutClearance } : {}),
+      ...(Array.isArray(ports) ? { ports: ports.map((port) => ({ ...port })) } : {}),
+      ...(Array.isArray(capabilities) ? { capabilities: [...capabilities] } : {}),
     }];
   });
   const validTechnologies = technologies.filter(isRecord).flatMap((entry, index) => {
@@ -370,6 +416,11 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
     if (!allBuildings.has(recipe.buildingId)) issues.push({ severity: "error", code: "recipe-building", path: `$.recipes.${recipe.id}`, message: `配方引用未知建筑 ${recipe.buildingId}` });
     if (recipe.requiredTechId && !allTechnologies.has(recipe.requiredTechId)) issues.push({ severity: "error", code: "recipe-tech", path: `$.recipes.${recipe.id}`, message: `配方引用未知科技 ${recipe.requiredTechId}` });
     for (const entry of [...recipe.inputs, ...recipe.outputs]) if (!allItems.has(entry.itemId)) issues.push({ severity: "error", code: "recipe-item", path: `$.recipes.${recipe.id}`, message: `配方引用未知物品 ${entry.itemId}` });
+  }
+  for (const building of validBuildings) {
+    if (building.upgradeTargetId && (!allBuildings.has(building.upgradeTargetId) || building.upgradeTargetId === building.id)) {
+      issues.push({ severity: "error", code: "building-upgrade", path: `$.buildings.${building.id}`, message: `建筑升级目标 ${building.upgradeTargetId} 不存在或指向自身` });
+    }
   }
   for (const technology of validTechnologies) for (const prerequisite of technology.prerequisites ?? []) if (!allTechnologies.has(prerequisite)) issues.push({ severity: "error", code: "technology-prerequisite", path: `$.technologies.${technology.id}`, message: `科技引用未知前置 ${prerequisite}` });
 

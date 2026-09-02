@@ -39,6 +39,17 @@ pub(crate) struct Plan {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum PlanOutcome {
+    Ready(Plan),
+    RawShortage {
+        item_id: String,
+        current: f64,
+        required: f64,
+    },
+    Blocked,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum TargetKind {
     Building,
     Fleet { recipe_id: String },
@@ -519,12 +530,12 @@ pub(crate) fn target_is_unlocked(base: &Map<String, Value>, target: &Target) -> 
         .is_none_or(|id| completed_tech(base, id))
 }
 
-pub(crate) fn build_plan(
+pub(crate) fn probe_plan(
     state: &CoreState,
     base: &Map<String, Value>,
     target: &Target,
     inventory: BTreeMap<String, f64>,
-) -> Option<Plan> {
+) -> PlanOutcome {
     let initial = Work {
         inventory: inventory
             .into_iter()
@@ -535,17 +546,21 @@ pub(crate) fn build_plan(
     };
     let result = match &target.kind {
         TargetKind::Building => {
-            let definition = state.catalog.constructions.get(&target.id)?;
+            let Some(definition) = state.catalog.constructions.get(&target.id) else {
+                return PlanOutcome::Blocked;
+            };
             plan_requirements(state, base, vec![initial], &definition.costs)
         }
         TargetKind::Fleet { recipe_id } => {
-            let recipe = state.catalog.recipes.get(recipe_id)?;
+            let Some(recipe) = state.catalog.recipes.get(recipe_id) else {
+                return PlanOutcome::Blocked;
+            };
             if recipe
                 .required_tech_id
                 .as_deref()
                 .is_some_and(|id| !completed_tech(base, id))
             {
-                return None;
+                return PlanOutcome::Blocked;
             }
             let mut result = plan_requirements(state, base, vec![initial], &recipe.inputs);
             for work in &mut result.options {
@@ -573,7 +588,18 @@ pub(crate) fn build_plan(
             result
         }
     };
-    let selected = result.options.into_iter().next()?;
+    let Some(selected) = result.options.into_iter().next() else {
+        return match preferred_blocker(&result.blockers) {
+            Some(blocker) if blocker.reason == BlockerReason::RawShortage => {
+                PlanOutcome::RawShortage {
+                    item_id: blocker.item_id,
+                    current: blocker.current,
+                    required: blocker.required,
+                }
+            }
+            _ => PlanOutcome::Blocked,
+        };
+    };
     let mut steps = selected.steps;
     match &target.kind {
         TargetKind::Building => steps.push(PlannedStep::Building {
@@ -584,10 +610,22 @@ pub(crate) fn build_plan(
             amount: target.output_amount,
         }),
     }
-    Some(Plan {
+    PlanOutcome::Ready(Plan {
         steps,
         decisions: public_decisions(state, selected.decisions),
     })
+}
+
+pub(crate) fn build_plan(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    target: &Target,
+    inventory: BTreeMap<String, f64>,
+) -> Option<Plan> {
+    match probe_plan(state, base, target, inventory) {
+        PlanOutcome::Ready(plan) => Some(plan),
+        PlanOutcome::RawShortage { .. } | PlanOutcome::Blocked => None,
+    }
 }
 
 pub(crate) fn inventory_from_sources(

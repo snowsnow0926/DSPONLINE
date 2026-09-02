@@ -10,8 +10,63 @@ import {
   type DesktopNativeCoreProjectionTransferResult,
   type DesktopNativeCoreViewportProjectionRequest,
   type DesktopNativeCoreViewportProjectionResult,
+  type DesktopNativeCoreViewportProjectionV2Request,
+  type DesktopNativeCoreViewportProjectionV2Result,
+  type DesktopNativeCoreFactoryReadModelRequest,
+  type DesktopNativeCoreFactoryReadModelResult,
+  type DesktopNativeCoreFactoryInventoryRequest,
+  type DesktopNativeCoreFactoryInventoryResult,
+  type DesktopNativeCoreConstructionInventoryRequest,
+  type DesktopNativeCoreConstructionInventoryResult,
+  type DesktopNativeCoreBlueprintWorkspaceRequest,
+  type DesktopNativeCoreBlueprintWorkspaceResult,
+  type DesktopNativeCoreBlueprintCaptureContextRequest,
+  type DesktopNativeCoreBlueprintCaptureContextResult,
+  type DesktopNativeCoreBlueprintImportContextRequest,
+  type DesktopNativeCoreBlueprintImportContextResult,
+  type DesktopNativeCoreBlueprintExportContextRequest,
+  type DesktopNativeCoreBlueprintExportContextResult,
+  type DesktopNativeCoreBlueprintEnqueueContextRequest,
+  type DesktopNativeCoreBlueprintEnqueueContextResult,
+  type DesktopNativeCoreBlueprintDirectDeployContextRequest,
+  type DesktopNativeCoreBlueprintDirectDeployContextResult,
+  type DesktopNativeCoreConstructionPlacementContextRequest,
+  type DesktopNativeCoreConstructionPlacementContextResult,
+  type DesktopNativeCoreConstructionBeltPlacementContextRequest,
+  type DesktopNativeCoreConstructionBeltPlacementContextResult,
+  type DesktopNativeCoreConstructionBeltLaneContextRequest,
+  type DesktopNativeCoreConstructionBeltLaneContextResult,
+  type DesktopNativeCoreConstructionBeltRemovalContextRequest,
+  type DesktopNativeCoreConstructionBeltRemovalContextResult,
+  type DesktopNativeCoreConstructionRemovalContextRequest,
+  type DesktopNativeCoreConstructionRemovalContextResult,
+  type DesktopNativeCoreConstructionStackContextRequest,
+  type DesktopNativeCoreConstructionStackContextResult,
   type DesktopNativeCoreStatisticsProjectionRequest,
   type DesktopNativeCoreStatisticsProjectionResult,
+  type DesktopNativeCoreTechnologyProjectionRequest,
+  type DesktopNativeCoreTechnologyProjectionResult,
+  type DesktopNativeCoreRecipeWorkspaceProjectionRequest,
+  type DesktopNativeCoreRecipeWorkspaceProjectionResult,
+  type DesktopNativeCoreStarMapOverviewProjectionRequest,
+  type DesktopNativeCoreStarMapOverviewProjectionResult,
+  type DesktopNativeCoreStarMapCatalogProjectionRequest,
+  type DesktopNativeCoreStarMapCatalogProjectionResult,
+  type DesktopNativeCoreStellarIndustryProjectionRequest,
+  type DesktopNativeCoreStellarIndustryProjectionResult,
+  type DesktopNativeCoreStellarIndustryV2ProjectionRequest,
+  type DesktopNativeCoreStellarIndustryV2ProjectionResult,
+  type DesktopNativeCoreStellarQuantumProjectionRequest,
+  type DesktopNativeCoreStellarQuantumProjectionResult,
+  type DesktopNativeCoreDysonWorkspaceProjectionRequest,
+  type DesktopNativeCoreDysonWorkspaceProjectionResult,
+  type DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest,
+  type DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult,
+  type DesktopNativeCoreOperationsWorkspaceProjectionResult,
+  type DesktopNativeCoreCampaignWorkspaceProjectionRequest,
+  type DesktopNativeCoreCampaignWorkspaceProjectionResult,
+  type DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
+  type DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
   type DesktopNativeSaveCommitResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -21,14 +76,50 @@ import type { SaveMode } from "./types";
 
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 
+export type NativeCoreAdvanceMode = "exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "offline-macro-v1";
+
 type NativeCoreTransferProjection =
   | DesktopNativeCoreViewportProjectionResult
-  | DesktopNativeCoreStatisticsProjectionResult;
+  | DesktopNativeCoreViewportProjectionV2Result
+  | DesktopNativeCoreFactoryReadModelResult
+  | DesktopNativeCoreFactoryInventoryResult
+  | DesktopNativeCoreConstructionInventoryResult
+  | DesktopNativeCoreBlueprintWorkspaceResult
+  | DesktopNativeCoreBlueprintCaptureContextResult
+  | DesktopNativeCoreBlueprintImportContextResult
+  | DesktopNativeCoreBlueprintExportContextResult
+  | DesktopNativeCoreBlueprintEnqueueContextResult
+  | DesktopNativeCoreBlueprintDirectDeployContextResult
+  | DesktopNativeCoreConstructionPlacementContextResult
+  | DesktopNativeCoreConstructionBeltPlacementContextResult
+  | DesktopNativeCoreConstructionBeltLaneContextResult
+  | DesktopNativeCoreConstructionBeltRemovalContextResult
+  | DesktopNativeCoreConstructionRemovalContextResult
+  | DesktopNativeCoreConstructionStackContextResult
+  | DesktopNativeCoreStatisticsProjectionResult
+  | DesktopNativeCoreTechnologyProjectionResult
+  | DesktopNativeCoreRecipeWorkspaceProjectionResult
+  | DesktopNativeCoreStarMapOverviewProjectionResult
+  | DesktopNativeCoreStarMapCatalogProjectionResult
+  | DesktopNativeCoreStellarIndustryProjectionResult
+  | DesktopNativeCoreStellarIndustryV2ProjectionResult
+  | DesktopNativeCoreStellarQuantumProjectionResult
+  | DesktopNativeCoreDysonWorkspaceProjectionResult
+  | DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult
+  | DesktopNativeCoreOperationsWorkspaceProjectionResult;
+
+function projectionBodySchemaVersion(projectionType: NativeCoreTransferProjection["projectionType"]): 1 | 2 {
+  return projectionType === "viewport-v2" || projectionType === "stellar-industry-v2" ? 2 : 1;
+}
 
 function bytesToHex(bytes: Uint8Array): string {
   let result = "";
   for (const byte of bytes) result += byte.toString(16).padStart(2, "0");
   return result;
+}
+
+function isArrayBuffer(value: unknown): value is ArrayBuffer {
+  return value instanceof ArrayBuffer || Object.prototype.toString.call(value) === "[object ArrayBuffer]";
 }
 
 export async function decodeNativeCoreProjectionTransfer<T extends NativeCoreTransferProjection>(
@@ -42,13 +133,14 @@ export async function decodeNativeCoreProjectionTransfer<T extends NativeCoreTra
     !Number.isSafeInteger(header.payloadLength) || header.payloadLength < 1 ||
     header.payloadLength > MAX_NATIVE_PROJECTION_TRANSFER_BYTES ||
     typeof header.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(header.sha256) ||
-    !(bodyBuffer instanceof ArrayBuffer) || bodyBuffer.byteLength !== header.payloadLength) {
+    !isArrayBuffer(bodyBuffer) || bodyBuffer.byteLength !== header.payloadLength) {
     throw new Error("原生投影二进制响应边界无效");
   }
   const digest = bytesToHex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bodyBuffer)));
   if (digest !== header.sha256) throw new Error("原生投影二进制响应校验失败");
   const decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bodyBuffer)) as Partial<T>;
-  if (!decoded || decoded.schemaVersion !== 1 || decoded.projectionType !== expected.projectionType ||
+  if (!decoded || decoded.schemaVersion !== projectionBodySchemaVersion(expected.projectionType) ||
+    decoded.projectionType !== expected.projectionType ||
     decoded.revision !== header.revision) {
     throw new Error("原生投影二进制正文身份无效");
   }
@@ -57,17 +149,44 @@ export async function decodeNativeCoreProjectionTransfer<T extends NativeCoreTra
 
 export interface WindowsNativeCoreShadow {
   readonly sessionId: string;
-  readonly checkpoint: DesktopNativeSaveCommitResult;
+  readonly checkpoint: Pick<DesktopNativeSaveCommitResult, "slot" | "generation" | "rootHash" | "revision">;
   status(): Promise<DesktopNativeCoreSummary>;
   projection(request: { baseFields?: string[]; entityIds?: string[]; beltIds?: string[] }): Promise<DesktopNativeCoreProjectionResult>;
   viewportProjection(request: Omit<DesktopNativeCoreViewportProjectionRequest, "sessionId">): Promise<DesktopNativeCoreViewportProjectionResult>;
+  viewportProjectionV2(request: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId">): Promise<DesktopNativeCoreViewportProjectionV2Result>;
+  factoryReadModel(request: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId">): Promise<DesktopNativeCoreFactoryReadModelResult>;
+  factoryInventoryProjection?(request: Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">): Promise<DesktopNativeCoreFactoryInventoryResult>;
+  constructionInventoryProjection?(request: Omit<DesktopNativeCoreConstructionInventoryRequest, "sessionId">): Promise<DesktopNativeCoreConstructionInventoryResult>;
+  blueprintWorkspaceProjection?(request: Omit<DesktopNativeCoreBlueprintWorkspaceRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintWorkspaceResult>;
+  blueprintCaptureContext?(request: Omit<DesktopNativeCoreBlueprintCaptureContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintCaptureContextResult>;
+  blueprintImportContext?(request: Omit<DesktopNativeCoreBlueprintImportContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintImportContextResult>;
+  blueprintExportContext?(request: Omit<DesktopNativeCoreBlueprintExportContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintExportContextResult>;
+  blueprintEnqueueContext?(request: Omit<DesktopNativeCoreBlueprintEnqueueContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintEnqueueContextResult>;
+  blueprintDirectDeployContext?(request: Omit<DesktopNativeCoreBlueprintDirectDeployContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintDirectDeployContextResult>;
+  constructionPlacementContext?(request: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionPlacementContextResult>;
+  constructionBeltPlacementContext?(request: Omit<DesktopNativeCoreConstructionBeltPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionBeltPlacementContextResult>;
+  constructionBeltLaneContext?(request: Omit<DesktopNativeCoreConstructionBeltLaneContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionBeltLaneContextResult>;
+  constructionBeltRemovalContext?(request: Omit<DesktopNativeCoreConstructionBeltRemovalContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionBeltRemovalContextResult>;
+  constructionRemovalContext?(request: Omit<DesktopNativeCoreConstructionRemovalContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionRemovalContextResult>;
+  constructionStackContext?(request: Omit<DesktopNativeCoreConstructionStackContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionStackContextResult>;
   statisticsProjection(request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStatisticsProjectionResult>;
+  technologyProjection(request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">): Promise<DesktopNativeCoreTechnologyProjectionResult>;
+  recipeWorkspaceProjection(request: Omit<DesktopNativeCoreRecipeWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
+  starMapOverviewProjection(request: Omit<DesktopNativeCoreStarMapOverviewProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStarMapOverviewProjectionResult>;
+  starMapCatalogProjection?(request: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStarMapCatalogProjectionResult>;
+  stellarIndustryProjection(request: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarIndustryProjectionResult>;
+  stellarIndustryV2Projection(request: Omit<DesktopNativeCoreStellarIndustryV2ProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult>;
+  stellarQuantumProjection?(request: Omit<DesktopNativeCoreStellarQuantumProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarQuantumProjectionResult>;
+  dysonWorkspaceProjection?(request: Omit<DesktopNativeCoreDysonWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreDysonWorkspaceProjectionResult>;
+  systemSpaceStationWorkspaceProjection?(request: Omit<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult>;
+  campaignWorkspaceProjection?(request: Omit<DesktopNativeCoreCampaignWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreCampaignWorkspaceProjectionResult>;
+  galaxyAccountWorkspaceProjection?(request: Omit<DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
   advance(request: {
     baseRevision: number;
     simulationSeconds: number;
     wallSeconds: number;
-    advanceMode?: "exact" | "pure-idle-conservative-v2";
+    advanceMode?: NativeCoreAdvanceMode;
   }): Promise<{ supported: boolean; revision: number; reason?: string }>;
   advanceSegmented(request: NativeCoreSegmentedAdvanceRequest): Promise<NativeCoreSegmentedAdvanceResult>;
   commitOperation(request: {
@@ -76,7 +195,7 @@ export interface WindowsNativeCoreShadow {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
-    advanceMode?: "exact" | "pure-idle-conservative-v2";
+    advanceMode?: NativeCoreAdvanceMode;
     includeDiagnostics?: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult>;
   createCheckpoint(savedAtMs?: number): Promise<DesktopNativeCoreCheckpointResult>;
@@ -94,6 +213,7 @@ export interface NativeCoreSegmentedAdvanceRequest {
   baseRevision: number;
   simulationSeconds: number;
   wallSeconds: number;
+  advanceMode?: NativeCoreAdvanceMode;
   maxSegmentSeconds?: number;
   signal?: AbortSignal;
   onProgress?: (progress: {
@@ -118,6 +238,7 @@ export type NativeCoreAdvanceSegmentExecutor = (request: {
   baseRevision: number;
   simulationSeconds: number;
   wallSeconds: number;
+  advanceMode?: NativeCoreAdvanceMode;
 }) => Promise<{ supported: boolean; revision: number; reason?: string }>;
 
 export function partitionNativeAdvanceBudget(
@@ -175,11 +296,16 @@ export async function advanceNativeCoreSegmented(
     request.wallSeconds,
     request.maxSegmentSeconds,
   );
+  if (request.advanceMode === "offline-macro-v1" && segments.length > 1) {
+    throw new Error("原生离线宏观结算必须作为单个耐久事务提交，不能由渲染层分段重校准");
+  }
   for (const segment of segments) {
     if (request.signal?.aborted) {
       return { supported: true, revision, cancelled: true, advancedSimulationSeconds, advancedWallSeconds };
     }
-    const result = await advance({ baseRevision: revision, ...segment });
+    const result = await advance(request.advanceMode === undefined
+      ? { baseRevision: revision, ...segment }
+      : { baseRevision: revision, ...segment, advanceMode: request.advanceMode });
     if (!result.supported) {
       return {
         supported: false,
@@ -212,7 +338,7 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
 
   constructor(
     readonly sessionId: string,
-    readonly checkpoint: DesktopNativeSaveCommitResult,
+    readonly checkpoint: Pick<DesktopNativeSaveCommitResult, "slot" | "generation" | "rootHash" | "revision">,
   ) {}
 
   async status(): Promise<DesktopNativeCoreSummary> {
@@ -254,6 +380,371 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     return desktop.getNativeCoreViewportProjection({ sessionId: this.sessionId, ...request });
   }
 
+  async viewportProjectionV2(
+    request: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId">,
+  ): Promise<DesktopNativeCoreViewportProjectionV2Result> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "viewport-v2",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreViewportProjectionV2Result>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "viewport-v2",
+      });
+    }
+    return desktop.getNativeCoreViewportProjectionV2({ sessionId: this.sessionId, ...request });
+  }
+
+  async factoryReadModel(
+    request: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreFactoryReadModelResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "factory-read-model-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreFactoryReadModelResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "factory-read-model-v1",
+      });
+    }
+    return desktop.getNativeCoreFactoryReadModel({ sessionId: this.sessionId, ...request });
+  }
+
+  async factoryInventoryProjection(
+    request: Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreFactoryInventoryResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "factory-inventory-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreFactoryInventoryResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "factory-inventory-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreFactoryInventory !== "function") {
+      throw new Error("Windows 原生工厂库存投影不可用");
+    }
+    return desktop.getNativeCoreFactoryInventory({ sessionId: this.sessionId, ...request });
+  }
+
+  async constructionInventoryProjection(
+    request: Omit<DesktopNativeCoreConstructionInventoryRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreConstructionInventoryResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "construction-inventory-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreConstructionInventoryResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "construction-inventory-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreConstructionInventory !== "function") {
+      throw new Error("Windows 原生建筑库存投影不可用");
+    }
+    return desktop.getNativeCoreConstructionInventory({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintWorkspaceProjection(
+    request: Omit<DesktopNativeCoreBlueprintWorkspaceRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintWorkspaceResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-workspace-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintWorkspaceResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "blueprint-workspace-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreBlueprintWorkspace !== "function") {
+      throw new Error("Windows 原生蓝图只读模型不可用");
+    }
+    return desktop.getNativeCoreBlueprintWorkspace({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintCaptureContext(
+    request: Omit<DesktopNativeCoreBlueprintCaptureContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintCaptureContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-capture-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintCaptureContextResult>(
+        transfer,
+        { sessionId: this.sessionId, projectionType: "blueprint-capture-context-v1" },
+      );
+    }
+    if (typeof desktop.getNativeCoreBlueprintCaptureContext !== "function") {
+      throw new Error("Windows 原生蓝图捕获上下文不可用");
+    }
+    return desktop.getNativeCoreBlueprintCaptureContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintImportContext(
+    request: Omit<DesktopNativeCoreBlueprintImportContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintImportContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-import-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintImportContextResult>(
+        transfer,
+        { sessionId: this.sessionId, projectionType: "blueprint-import-context-v1" },
+      );
+    }
+    if (typeof desktop.getNativeCoreBlueprintImportContext !== "function") {
+      throw new Error("Windows 原生蓝图导入上下文不可用");
+    }
+    return desktop.getNativeCoreBlueprintImportContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintExportContext(
+    request: Omit<DesktopNativeCoreBlueprintExportContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintExportContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-export-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintExportContextResult>(
+        transfer,
+        { sessionId: this.sessionId, projectionType: "blueprint-export-context-v1" },
+      );
+    }
+    if (typeof desktop.getNativeCoreBlueprintExportContext !== "function") {
+      throw new Error("Windows 原生蓝图导出上下文不可用");
+    }
+    return desktop.getNativeCoreBlueprintExportContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintEnqueueContext(
+    request: Omit<DesktopNativeCoreBlueprintEnqueueContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintEnqueueContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-enqueue-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintEnqueueContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "blueprint-enqueue-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreBlueprintEnqueueContext !== "function") {
+      throw new Error("Windows 原生蓝图入队上下文不可用");
+    }
+    return desktop.getNativeCoreBlueprintEnqueueContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintDirectDeployContext(
+    request: Omit<DesktopNativeCoreBlueprintDirectDeployContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintDirectDeployContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-direct-deploy-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintDirectDeployContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "blueprint-direct-deploy-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreBlueprintDirectDeployContext !== "function") {
+      throw new Error("Windows 原生蓝图直接部署上下文不可用");
+    }
+    return desktop.getNativeCoreBlueprintDirectDeployContext({
+      sessionId: this.sessionId,
+      ...request,
+    });
+  }
+
+  async constructionPlacementContext(
+    request: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreConstructionPlacementContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "construction-placement-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreConstructionPlacementContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "construction-placement-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreConstructionPlacementContext !== "function") {
+      throw new Error("Windows 原生建筑放置上下文不可用");
+    }
+    return desktop.getNativeCoreConstructionPlacementContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async constructionBeltPlacementContext(
+    request: Omit<DesktopNativeCoreConstructionBeltPlacementContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreConstructionBeltPlacementContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "construction-belt-placement-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreConstructionBeltPlacementContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "construction-belt-placement-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreConstructionBeltPlacementContext !== "function") {
+      throw new Error("Windows 原生传送带放置上下文不可用");
+    }
+    return desktop.getNativeCoreConstructionBeltPlacementContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async constructionBeltRemovalContext(
+    request: Omit<DesktopNativeCoreConstructionBeltRemovalContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreConstructionBeltRemovalContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "construction-belt-removal-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreConstructionBeltRemovalContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "construction-belt-removal-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreConstructionBeltRemovalContext !== "function") {
+      throw new Error("Windows 原生传送带回收上下文不可用");
+    }
+    return desktop.getNativeCoreConstructionBeltRemovalContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async constructionBeltLaneContext(
+    request: Omit<DesktopNativeCoreConstructionBeltLaneContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreConstructionBeltLaneContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "construction-belt-lane-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreConstructionBeltLaneContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "construction-belt-lane-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreConstructionBeltLaneContext !== "function") {
+      throw new Error("Windows 原生传送带并联调整上下文不可用");
+    }
+    return desktop.getNativeCoreConstructionBeltLaneContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async constructionRemovalContext(
+    request: Omit<DesktopNativeCoreConstructionRemovalContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreConstructionRemovalContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "construction-removal-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreConstructionRemovalContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "construction-removal-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreConstructionRemovalContext !== "function") {
+      throw new Error("Windows 原生建筑回收上下文不可用");
+    }
+    return desktop.getNativeCoreConstructionRemovalContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async constructionStackContext(
+    request: Omit<DesktopNativeCoreConstructionStackContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreConstructionStackContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "construction-stack-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreConstructionStackContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "construction-stack-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreConstructionStackContext !== "function") {
+      throw new Error("Windows 原生建筑堆叠上下文不可用");
+    }
+    return desktop.getNativeCoreConstructionStackContext({ sessionId: this.sessionId, ...request });
+  }
+
   async statisticsProjection(
     request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">,
   ): Promise<DesktopNativeCoreStatisticsProjectionResult> {
@@ -274,6 +765,234 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     return desktop.getNativeCoreStatisticsProjection({ sessionId: this.sessionId, ...request });
   }
 
+  async technologyProjection(
+    request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreTechnologyProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "technology-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreTechnologyProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "technology-v1",
+      });
+    }
+    return desktop.getNativeCoreTechnologyProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async recipeWorkspaceProjection(
+    request: Omit<DesktopNativeCoreRecipeWorkspaceProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "recipe-workspace-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreRecipeWorkspaceProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "recipe-workspace-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreRecipeWorkspaceProjection !== "function") {
+      throw new Error("Windows 原生生产资料库投影不可用");
+    }
+    return desktop.getNativeCoreRecipeWorkspaceProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async starMapOverviewProjection(
+    request: Omit<DesktopNativeCoreStarMapOverviewProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStarMapOverviewProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "star-map-overview-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStarMapOverviewProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "star-map-overview-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreStarMapOverviewProjection !== "function") {
+      throw new Error("Windows 原生星图总览投影不可用");
+    }
+    return desktop.getNativeCoreStarMapOverviewProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async starMapCatalogProjection(
+    request: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStarMapCatalogProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "star-map-catalog-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStarMapCatalogProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "star-map-catalog-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreStarMapCatalogProjection !== "function") {
+      throw new Error("Windows 原生星图目录投影不可用");
+    }
+    return desktop.getNativeCoreStarMapCatalogProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async stellarIndustryProjection(
+    request: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStellarIndustryProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "stellar-industry-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStellarIndustryProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "stellar-industry-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreStellarIndustryProjection !== "function") {
+      throw new Error("Windows 原生恒星工业投影不可用");
+    }
+    return desktop.getNativeCoreStellarIndustryProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async stellarIndustryV2Projection(
+    request: Omit<DesktopNativeCoreStellarIndustryV2ProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "stellar-industry-v2",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStellarIndustryV2ProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "stellar-industry-v2",
+      });
+    }
+    if (typeof desktop.getNativeCoreStellarIndustryV2Projection !== "function") {
+      throw new Error("Windows 原生恒星工业 v2 投影不可用");
+    }
+    return desktop.getNativeCoreStellarIndustryV2Projection({ sessionId: this.sessionId, ...request });
+  }
+
+  async stellarQuantumProjection(
+    request: Omit<DesktopNativeCoreStellarQuantumProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStellarQuantumProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "stellar-quantum-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStellarQuantumProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "stellar-quantum-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreStellarQuantumProjection !== "function") {
+      throw new Error("Windows 原生量子库存投影不可用");
+    }
+    return desktop.getNativeCoreStellarQuantumProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async dysonWorkspaceProjection(
+    request: Omit<DesktopNativeCoreDysonWorkspaceProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreDysonWorkspaceProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "dyson-workspace-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreDysonWorkspaceProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "dyson-workspace-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreDysonWorkspaceProjection !== "function") {
+      throw new Error("Windows 原生戴森球工作区投影不可用");
+    }
+    return desktop.getNativeCoreDysonWorkspaceProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async systemSpaceStationWorkspaceProjection(
+    request: Omit<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "system-space-station-workspace-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "system-space-station-workspace-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreSystemSpaceStationWorkspaceProjection !== "function") {
+      throw new Error("Windows 原生恒星系空间站工作区投影不可用");
+    }
+    return desktop.getNativeCoreSystemSpaceStationWorkspaceProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async campaignWorkspaceProjection(
+    request: Omit<DesktopNativeCoreCampaignWorkspaceProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreCampaignWorkspaceProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (typeof desktop.getNativeCoreCampaignWorkspaceProjection !== "function") {
+      throw new Error("Windows 原生战役工作区投影不可用");
+    }
+    return desktop.getNativeCoreCampaignWorkspaceProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async galaxyAccountWorkspaceProjection(
+    request: Omit<DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (typeof desktop.getNativeCoreGalaxyAccountWorkspaceProjection !== "function") {
+      throw new Error("Windows 原生银河账户工作区投影不可用");
+    }
+    return desktop.getNativeCoreGalaxyAccountWorkspaceProjection({ sessionId: this.sessionId, ...request });
+  }
+
   async applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }> {
     if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
     const desktop = getDesktopBridge();
@@ -289,7 +1008,7 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     baseRevision: number;
     simulationSeconds: number;
     wallSeconds: number;
-    advanceMode?: "exact" | "pure-idle-conservative-v2";
+    advanceMode?: NativeCoreAdvanceMode;
   }): Promise<{ supported: boolean; revision: number; reason?: string }> {
     if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
     const desktop = getDesktopBridge();
@@ -312,7 +1031,7 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
-    advanceMode?: "exact" | "pure-idle-conservative-v2";
+    advanceMode?: NativeCoreAdvanceMode;
     includeDiagnostics?: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult> {
     if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
@@ -372,6 +1091,18 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     if (!desktop) return;
     await desktop.closeNativeCore({ sessionId: this.sessionId });
   }
+}
+
+/**
+ * Creates only a renderer-side thin-session facade for a host session whose
+ * owner was independently recovered by main. It never calls coreOpen and
+ * cannot claim or transfer native ownership.
+ */
+export function attachWindowsNativeCoreMainOwnedAuthority(
+  sessionId: string,
+  checkpoint: { generation: number; rootHash: string; revision: number },
+): WindowsNativeCoreShadow {
+  return new DesktopNativeCoreShadow(sessionId, { slot: "normal-main", ...checkpoint });
 }
 
 export async function openWindowsNativeCoreShadow(

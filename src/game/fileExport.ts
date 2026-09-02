@@ -25,9 +25,36 @@ export interface BinaryFileExport {
   title?: string;
 }
 
+const MAX_EXPORT_FILE_NAME_LENGTH = 120;
+const WINDOWS_RESERVED_FILE_BASE = /^(?:con|prn|aux|nul|(?:com|lpt)[1-9\u00b9\u00b2\u00b3])$/iu;
+
+function trimWindowsFileSuffix(value: string): string {
+  return value.replace(/[. ]+$/u, "");
+}
+
+function truncateExportFileName(value: string): string {
+  if (value.length <= MAX_EXPORT_FILE_NAME_LENGTH) return value;
+  const extensionIndex = value.indexOf(".");
+  if (extensionIndex > 0) {
+    const extension = value.slice(extensionIndex);
+    const baseLimit = MAX_EXPORT_FILE_NAME_LENGTH - extension.length;
+    if (baseLimit > 0) return `${value.slice(0, baseLimit)}${extension}`;
+  }
+  return value.slice(0, MAX_EXPORT_FILE_NAME_LENGTH);
+}
+
 export function safeExportFileName(value: string): string {
-  const normalized = value.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-").replace(/\s+/g, " ").trim();
-  return (normalized || "dsp-export.json").slice(0, 120);
+  let normalized = trimWindowsFileSuffix(
+    value.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-").replace(/\s+/g, " ").trim(),
+  );
+  if (!normalized) return "dsp-export.json";
+  normalized = trimWindowsFileSuffix(truncateExportFileName(normalized));
+  if (!normalized) return "dsp-export.json";
+  const windowsDeviceBase = normalized.split(".", 1)[0].replace(/[. ]+$/u, "");
+  if (WINDOWS_RESERVED_FILE_BASE.test(windowsDeviceBase)) {
+    normalized = trimWindowsFileSuffix(truncateExportFileName(`_${normalized}`));
+  }
+  return normalized || "dsp-export.json";
 }
 
 export async function exportTextFile({ contents, fileName, mimeType = "application/json", title = "导出 DSP极简网络数据" }: TextFileExport): Promise<"native" | "browser"> {

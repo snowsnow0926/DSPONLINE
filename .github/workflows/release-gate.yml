@@ -26,6 +26,7 @@ jobs:
     env:
       REQUESTED_SHA: ${{ inputs.expected_sha }}
       SOURCE_DATE_EPOCH: "0"
+      CARGO_BUILD_JOBS: "1"
     steps:
       - name: Check out the exact release SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -61,6 +62,10 @@ jobs:
         run: node --test scripts/generate-synthetic-save-fixtures.test.mjs scripts/release-gate.test.mjs
       - name: Typecheck
         run: npm run typecheck
+      - name: Full serial Rust Core and Host suite
+        run: npm run test:native-core:serial
+      - name: Build the release native Host before differential and integration tests
+        run: npm run native:build-host
       - name: Full Vitest suite
         run: npm test -- --maxWorkers=1
       - name: Full server suite with temporary SQLite only

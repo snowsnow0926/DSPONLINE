@@ -1,4 +1,5 @@
 pub mod core_runtime;
+mod disk_budget;
 pub mod exact_realtime_lease;
 pub mod frame;
 pub mod protocol;

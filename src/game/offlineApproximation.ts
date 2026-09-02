@@ -14,6 +14,7 @@ import {
   ACCUMULATOR_ENERGY_MJ,
   advanceConstructionAutomationMacroInPlace,
   advanceDysonRocketMacroInPlace,
+  advanceSimulationBudget,
   advanceSimulationSession,
   completeSimulationAdvanceSession,
   createSimulationAdvanceSession,
@@ -31,6 +32,7 @@ import {
   PORTABLE_FLEET_ITEM_IDS,
   type SimulationPowerAuditSample,
   type SimulationAdvanceSession,
+  type SimulationProfiler,
 } from "./engine";
 import { getDifficultyDefinition } from "./difficulty";
 import type { FactoryEntity, GameState, ItemId, PlanetId, PowerGridId } from "./types";
@@ -1172,6 +1174,26 @@ const PURE_IDLE_TRANSIENT_KEYS = new Set([
   "effectiveMultiplier", "requiredPowerKw", "allocatedPowerKw",
 ]);
 
+// These fields are terminal material sinks or their public mirrors.  A pure
+// idle affine contract may only extrapolate a closed flow ledger; it must not
+// turn a one-second launch/export/absorption observation into repeated free
+// outcomes.  The exact prefix and the dedicated rocket ledger still update
+// these fields, while the unproven macro tail keeps the last certified values.
+// Keep this separate from AFFINE_IGNORED_KEYS so ordinary offline simulation
+// retains its existing affine behaviour; the guard is enabled only by the
+// pure-idle calibration call site.
+const PURE_IDLE_TERMINAL_PATH_KEYS = new Set([
+  // Dyson rocket/sail terminal counters and per-system/per-orbit mirrors.
+  "totalRocketsLaunched", "totalLaunched", "totalExpired", "totalSailsAbsorbed",
+  "structurePoints", "shellSails", "sailsInOrbit", "absorbedSails",
+  // Galactic exports, contracts, orbital delivery and destruction sinks.
+  "totalDelivered", "delivered", "personalDelivered", "globalDelivered", "pendingBatches",
+  "exportedByItem", "totalExported", "orbitalCargoTotalUploaded", "totalDestroyed",
+  // Construction completion is committed through its receipt/queue ledger,
+  // never by copying a sampled cumulative counter.
+  "totalCrafted", "destroyedByproducts",
+]);
+
 function isFastFiniteFloatPath(path: AffinePath): boolean {
   return path.some((part) => typeof part === "string" &&
     (FAST_FINITE_FLOAT_KEYS.has(part) || part.endsWith("Kw")));
@@ -1183,6 +1205,10 @@ function isFastSensitivePath(path: AffinePath): boolean {
 
 function isPureIdleTransientPath(path: AffinePath): boolean {
   return pathHasString(path, PURE_IDLE_TRANSIENT_KEYS);
+}
+
+function isPureIdleTerminalPath(path: AffinePath): boolean {
+  return pathHasString(path, PURE_IDLE_TERMINAL_PATH_KEYS);
 }
 
 function isDynamicMapEntryPath(path: AffinePath): boolean {
@@ -1601,7 +1627,8 @@ function createFastAffineContractFromSnapshots(
     const first = entries[0]!;
     const path = pathFor(key);
     if (!path) continue;
-    if (excludePureIdleTransientPaths && isPureIdleTransientPath(path)) continue;
+    if (excludePureIdleTransientPaths &&
+      (isPureIdleTransientPath(path) || isPureIdleTerminalPath(path))) continue;
     if (first.kind === "number" && entries.every((entry) => entry?.kind === "number")) {
       const numericEntries = entries as Array<Extract<AffineEntry, { kind: "number" }>>;
       const intervalRates = numericEntries.slice(1).map((entry, index) => (entry.value - numericEntries[index].value) / intervalSeconds);
@@ -2404,13 +2431,10 @@ function captureAggregateItemStores(state: GameState): AggregateItemStoreCapture
   const hubWarpers = aggregateItemAmount(state.galacticHubNetwork.warpers);
   if (hubWarpers === null) failure ??= "galacticHubNetwork.warpers 不是非负整数";
   else addAggregateAmount(totals, "space_warper", hubWarpers);
-  for (const batch of Object.values(state.endgame.constructionActivity.pendingBatches)) {
-    if (batch && Number.isSafeInteger(batch.amount) && batch.amount >= 0) {
-      addAggregateAmount(totals, batch.itemId, BigInt(batch.amount));
-    } else if (batch) {
-      failure ??= `constructionActivity.pendingBatches.${batch.id}.amount 不是非负安全整数`;
-    }
-  }
+  // Construction-activity batches are a replay-safe server outbox. Their
+  // amounts mirror already delivered Galactic exports and are not player-owned
+  // stock; counting them here would duplicate material until the ACK arrives
+  // and then manufacture a false inventory loss when the outbox is cleared.
   return { totals, ...(failure ? { failure } : {}) };
 }
 
@@ -2471,6 +2495,12 @@ function captureKnownMaterialConsumption(state: GameState): { totals: Map<string
     if (amount === null) failure ??= `${label} 不是非负安全整数`;
     else addAggregateAmount(totals, itemId, amount);
   };
+  // Dyson launch counters are cumulative physical sinks. Their derived
+  // structure/orbit mirrors are validated separately and must not be counted
+  // again here.
+  addCounter("small_carrier_rocket", state.dysonSphere.totalRocketsLaunched,
+    "dysonSphere.totalRocketsLaunched");
+  addCounter("solar_sail", state.dysonSwarm.totalLaunched, "dysonSwarm.totalLaunched");
   for (const definition of GALACTIC_EXPORT_DEFINITIONS) {
     addCounter(definition.itemId, state.endgame.exportProjects[definition.id]?.totalDelivered,
       `endgame.exportProjects.${definition.id}.totalDelivered`);
@@ -2483,9 +2513,8 @@ function captureKnownMaterialConsumption(state: GameState): { totals: Map<string
       addCounter(itemId, amount, `orbitalStation.construction.${stage.stageId}.delivered.${itemId}`);
     }
   }
-  for (const [itemId, amount] of Object.entries(state.endgame.constructionActivity.personalDelivered)) {
-    addCounter(itemId, amount, `endgame.constructionActivity.personalDelivered.${itemId}`);
-  }
+  // personalDelivered is the activity/leaderboard mirror of the physical
+  // exportProjects.totalDelivered sink above, not a second consumption event.
   for (const [itemId, amount] of Object.entries(state.constructionAutomation.destroyedByproducts)) {
     addCounter(itemId, amount, `constructionAutomation.destroyedByproducts.${itemId}`);
   }
@@ -3014,6 +3043,44 @@ export function validateAggregateConservation(
   );
 }
 
+export interface ExactSimulationConservationDiagnostic {
+  state: GameState;
+  conservationFailure: string | null;
+  /** Exact engine call only; excludes the two baseline/receipt scans. */
+  exactAdvanceDurationMs: number;
+}
+
+/**
+ * Run the ordinary exact simulation and validate its aggregate material flow
+ * with an internally issued construction receipt. This is a diagnostic
+ * comparator, not a settlement commit API: callers can provide only the
+ * source and duration, never an arbitrary candidate or a forged receipt.
+ *
+ * Keeping the receipt inside this module is important. `totalCrafted` remains
+ * a cross-check and cannot certify itself merely because unrelated inventory
+ * happened to fall during the same simulation window.
+ */
+export function advanceExactSimulationForConservationDiagnostic(
+  source: GameState,
+  simulationSeconds: number,
+  wallSeconds: number,
+  profiler?: SimulationProfiler,
+): ExactSimulationConservationDiagnostic {
+  const aggregateBefore = captureAggregateConservationBaseline(source);
+  const constructionBefore = captureConstructionRecipeStageSnapshot(source, "aggregate");
+  const exactAdvanceStartedAt = globalThis.performance.now();
+  const state = advanceSimulationBudget(source, simulationSeconds, wallSeconds, profiler);
+  const exactAdvanceDurationMs = globalThis.performance.now() - exactAdvanceStartedAt;
+  const receipt = createConstructionRecipeReceipt(constructionBefore, state);
+  return {
+    state,
+    exactAdvanceDurationMs,
+    conservationFailure: typeof receipt === "string"
+      ? `精确施工阶段最终物资守恒失败：${receipt}`
+      : validateAggregateConservation(aggregateBefore, state, receipt),
+  };
+}
+
 interface PureIdleFlowSnapshot {
   stores: Map<string, bigint>;
   produced: Map<string, bigint>;
@@ -3508,8 +3575,8 @@ function knownTerminalConsumption(state: GameState, itemId: PureIdleTerminalMate
     total += ledgerCounter(stage.delivered[itemId] ?? "0",
       `orbitalStation.construction.${stage.stageId}.delivered.${itemId}`);
   }
-  total += ledgerCounter(state.endgame.constructionActivity.personalDelivered[itemId] ?? 0,
-    `endgame.constructionActivity.personalDelivered.${itemId}`);
+  // personalDelivered and pendingBatches are activity/transport mirrors of the
+  // physical Galactic project sink above. Neither may consume material twice.
   total += ledgerCounter(state.constructionAutomation.destroyedByproducts[itemId] ?? 0,
     `constructionAutomation.destroyedByproducts.${itemId}`);
   for (const entity of state.entities) {

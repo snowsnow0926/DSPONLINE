@@ -68,7 +68,15 @@ export function App() {
           <StartMenu onEnterGame={(loaded) => setLaunch({ id: Date.now(), loaded })} onOpenReleaseNotes={openReleaseNotes} />
         ) : (
           <Suspense fallback={<FactoryLoading />}>
-            <FactoryRuntime launchId={launch.id} initialLoad={launch.loaded} onReturnToMenu={() => setLaunch(null)} onOpenReleaseNotes={openReleaseNotes} />
+            <FactoryRuntime
+              launchId={launch.id}
+              initialLoad={launch.loaded}
+              onReturnToMenu={() => setLaunch(null)}
+              onOpenReleaseNotes={openReleaseNotes}
+              onReleaseNativeRendererState={(releasedLoad) => setLaunch((current) => current
+                ? { ...current, loaded: releasedLoad }
+                : current)}
+            />
           </Suspense>
         )}
       </DynamicImportBoundary>

@@ -1,0 +1,98 @@
+{
+  "contractVersion": 1,
+  "targetStationId": "station-ils",
+  "peerStationId": "station-empty",
+  "station": {
+    "stationDrones": 7,
+    "stationVessels": 4,
+    "stationProgress": 0.75
+  },
+  "peer": {
+    "stationProgress": 0.5
+  },
+  "portableFleet": {
+    "logistics_drone": 3,
+    "logistics_vessel": 2
+  },
+  "traySentinel": {
+    "logistics_drone": 41,
+    "logistics_vessel": 43
+  },
+  "busyRoutes": [
+    {
+      "id": "station-fleet-busy-local",
+      "slotIndex": 0,
+      "peerId": "station-ils",
+      "itemId": "iron_ore",
+      "scope": "local",
+      "cargo": 2,
+      "vehicleCount": 2,
+      "progress": 0.25,
+      "duration": 10,
+      "requiresWarp": false,
+      "vehicleStationId": "station-ils",
+      "waypointStationIds": []
+    },
+    {
+      "id": "station-fleet-busy-remote",
+      "slotIndex": 0,
+      "peerId": "station-ils",
+      "itemId": "iron_ore",
+      "scope": "remote",
+      "cargo": 1,
+      "vehicleCount": 1,
+      "progress": 0.5,
+      "duration": 20,
+      "requiresWarp": true,
+      "vehicleStationId": "station-ils",
+      "waypointStationIds": []
+    }
+  ],
+  "cases": [
+    {
+      "name": "drone-partial-load",
+      "kind": "drone",
+      "itemId": "logistics_drone",
+      "requested": 12,
+      "expected": {
+        "busy": 2,
+        "final": 10,
+        "loaded": 3,
+        "unloaded": 0,
+        "shortfall": 2,
+        "portableFleetAfter": 0,
+        "reason": "portable-stock"
+      }
+    },
+    {
+      "name": "drone-busy-floor-refund",
+      "kind": "drone",
+      "itemId": "logistics_drone",
+      "requested": 0,
+      "expected": {
+        "busy": 2,
+        "final": 2,
+        "loaded": 0,
+        "unloaded": 5,
+        "shortfall": 0,
+        "portableFleetAfter": 8,
+        "reason": "busy-vehicles"
+      }
+    },
+    {
+      "name": "vessel-busy-floor-refund",
+      "kind": "vessel",
+      "itemId": "logistics_vessel",
+      "requested": 0,
+      "expected": {
+        "busy": 1,
+        "final": 1,
+        "loaded": 0,
+        "unloaded": 3,
+        "shortfall": 0,
+        "portableFleetAfter": 5,
+        "reason": "busy-vehicles"
+      }
+    }
+  ]
+}

@@ -4,6 +4,26 @@ import type { SaveMode } from "./types";
 
 export const WINDOWS_NATIVE_SAVE_FORMAT_VERSION = 1;
 const seededSlots = new Set<"normal-main" | "speedrun-main">();
+const pendingCompactionTimers = new Map<"normal-main" | "speedrun-main", ReturnType<typeof globalThis.setTimeout>>();
+const NATIVE_SAVE_IDLE_COMPACTION_DELAY_MS = 15_000;
+
+function cancelScheduledCompaction(slot: "normal-main" | "speedrun-main"): void {
+  const timer = pendingCompactionTimers.get(slot);
+  if (timer === undefined) return;
+  globalThis.clearTimeout(timer);
+  pendingCompactionTimers.delete(slot);
+}
+
+function scheduleIdleCompaction(slot: "normal-main" | "speedrun-main"): void {
+  cancelScheduledCompaction(slot);
+  const timer = globalThis.setTimeout(() => {
+    if (pendingCompactionTimers.get(slot) !== timer) return;
+    pendingCompactionTimers.delete(slot);
+    const operation = getDesktopBridge()?.compactNativeSave({ slot, retainGenerations: 2 });
+    if (operation) void operation.catch(() => undefined);
+  }, NATIVE_SAVE_IDLE_COMPACTION_DELAY_MS);
+  pendingCompactionTimers.set(slot, timer);
+}
 
 export interface NativeSaveTransaction {
   readonly transactionId: string;
@@ -43,9 +63,7 @@ class DesktopNativeSaveTransaction implements NativeSaveTransaction {
       );
     }
     seededSlots.add(this.request.slot);
-    globalThis.setTimeout(() => {
-      void getDesktopBridge()?.compactNativeSave({ slot: this.request.slot, retainGenerations: 2 }).catch(() => undefined);
-    }, 15_000);
+    scheduleIdleCompaction(this.request.slot);
     return result;
   }
 
@@ -72,6 +90,9 @@ export async function appendWindowsNativeWal(
   const desktop = getDesktopBridge();
   if (!desktop) return "fallback";
   const slot = mode === "speedrun" ? "speedrun-main" : "normal-main";
+  // Any new authoritative activity invalidates the definition of "idle".
+  // The next durable checkpoint will schedule one fresh, coalesced cleanup.
+  cancelScheduledCompaction(slot);
   if (!seededSlots.has(slot)) {
     const recovery = await desktop.recoverNativeSave({ slot }).catch(() => null);
     if (!recovery) return "not-seeded";
@@ -88,6 +109,7 @@ export async function appendWindowsNativeWal(
 export async function beginWindowsNativeSave(
   request: DesktopNativeSaveBeginRequest,
 ): Promise<NativeSaveTransaction | null> {
+  cancelScheduledCompaction(request.slot);
   const desktop = getDesktopBridge();
   if (!desktop) return null;
   const status = await desktop.getNativePerformanceStatus();

@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require("electron");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const nodeOs = require("node:os");
 const path = require("node:path");
@@ -37,6 +37,61 @@ const {
 const {
   NativeCoreExactRealtimeRustLeaseStore,
 } = require("./native-core-exact-realtime-experiment.cjs");
+const { NativePlayerAuthorityRuntime } = require("./native-player-authority-runtime.cjs");
+const {
+  NativePlayerAuthorityHandoffCoordinator,
+  QUIESCENCE_ACK_KIND,
+} = require("./native-player-authority-handoff.cjs");
+const {
+  CANCEL_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_CANCEL_REQUEST_KIND,
+  COMMIT_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMMIT_REQUEST_KIND,
+  COMPLETE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETE_REQUEST_KIND,
+  NativePlayerAuthorityBoundedRetryCoordinator,
+  NativePlayerAuthorityHandoffIpcBridge,
+  PREPARE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_PREPARE_REQUEST_KIND,
+  RELEASE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_RELEASE_REQUEST_KIND,
+  RENDERER_READY_CHANNEL: NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_CHANNEL,
+  RENDERER_READY_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_KIND,
+  RESPONSE_CHANNEL: NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL,
+  STARTUP_RECONCILE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_STARTUP_RECONCILE_REQUEST_KIND,
+  startupReconciliationIsTerminalResolved,
+} = require("./native-player-authority-handoff-ipc.cjs");
+const {
+  NativePlayerAuthorityCommandBroker,
+} = require("./native-player-authority-command-broker.cjs");
+const {
+  NativePlayerAuthoritySystemSpaceStationBroker,
+} = require("./native-player-authority-system-space-station-broker.cjs");
+const {
+  createMonotonicOrbitalContractClock,
+  NativePlayerAuthorityOrbitalContractBroker,
+} = require("./native-player-authority-orbital-contract-broker.cjs");
+const {
+  NativePlayerAuthorityOperationsSettingBroker,
+} = require("./native-player-authority-operations-setting-broker.cjs");
+const {
+  NativePlayerAuthorityMacroBroker,
+} = require("./native-player-authority-macro-broker.cjs");
+const {
+  nativeProjectionHasPlayerAuthorityRun,
+  NativePlayerAuthorityProjectionBroker,
+  NativePlayerAuthorityProjectionBrokerError,
+  routeNativeProjectionRead,
+} = require("./native-player-authority-projection-broker.cjs");
+const {
+  NativePlayerAuthorityPersistenceBroker,
+} = require("./native-player-authority-persistence-broker.cjs");
+const {
+  NativeProjectionSubscription,
+  normalizeSubscriptionRequest,
+  summarizeNativeProjectionSubscriptions,
+} = require("./native-projection-subscription.cjs");
+const {
+  NativeAuthorityCloudTransfer,
+} = require("./native-authority-cloud-transfer.cjs");
+const {
+  NativePlayerAuthorityStateBroker,
+} = require("./native-player-authority-state-broker.cjs");
 const {
   inspectNativeExactRealtimeStartup,
   inspectNativeExactRealtimeStartupWithoutHost,
@@ -56,6 +111,9 @@ const {
   rendererNativeErrorCode,
   serializeRendererNativeError,
 } = require("./native-renderer-boundary.cjs");
+const {
+  streamNativeOfflineStartupCandidate,
+} = require("./native-offline-startup-transfer.cjs");
 const { RuntimeDiagnosticsSampler } = require("./runtime-diagnostics.cjs");
 const { initializeShellRuntimePolicy } = require("./shell-runtime-policy.cjs");
 const packageMetadata = require("../package.json");
@@ -67,11 +125,21 @@ const desktopRuntimeIdentity = initializeDesktopEditionIdentity({
   app,
   fileSystem: fs,
   pathModule: path,
+  smokeIsolation: process.env.DSP_PERFORMANCE_SMOKE_ISOLATION === "1"
+    ? {
+        enabled: true,
+        releaseChannel: packageMetadata.releaseChannel,
+        appDataRoot: process.env.DSP_PERFORMANCE_SMOKE_APP_DATA_ROOT,
+        temporaryRootPath: nodeOs.tmpdir(),
+      }
+    : null,
 });
 // This is deliberately initialized before app readiness. The default path does
 // not mutate Electron; only the exact experimental fallback can disable GPU use.
 const shellRuntimePolicy = initializeShellRuntimePolicy({ app, environment: process.env });
 
+const isDevelopment = Boolean(process.env.DSP_DESKTOP_DEV_URL);
+const sampleNativeOfflineStartupWallClock = createMonotonicOrbitalContractClock();
 const channels = createReleaseChannels({
   updateBaseUrl: process.env.DSP_UPDATE_BASE_URL || packageMetadata.updateBaseUrl,
   stableUrl: process.env.DSP_UPDATE_STABLE_URL,
@@ -93,6 +161,11 @@ const maximumResponseBytes = cloudTransferContract.singleSaveResponseLimitBytes;
 const DESKTOP_BASE_SCALE = 0.8;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const MAX_NATIVE_V47_IMPORT_BYTES = 256 * 1024 * 1024;
+// Main-owned development gate. Domain coverage remains an independent hard
+// gate inside Rust and the coordinator; setting this flag can never bypass it.
+const nativePlayerAuthorityHandoffFeatureEnabled =
+  process.env.DSP_NATIVE_PLAYER_AUTHORITY_HANDOFF === "1";
+const NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS = 15_000;
 
 function sha256File(filePath) {
   return new Promise((resolve, reject) => {
@@ -121,6 +194,25 @@ let accountArchiveQuitDrainComplete = false;
 let nativeHostClient = null;
 let nativeSaveSessions = null;
 let nativeCoreSessions = null;
+let nativePlayerAuthorityRuntime = null;
+let nativePlayerAuthorityRestartScheduled = false;
+let nativePlayerAuthorityCommandBroker = null;
+let nativePlayerAuthoritySystemSpaceStationBroker = null;
+let nativePlayerAuthorityOrbitalContractBroker = null;
+let nativePlayerAuthorityOperationsSettingBroker = null;
+let nativePlayerAuthorityMacroBroker = null;
+let nativePlayerAuthorityProjectionBroker = null;
+let nativePlayerAuthorityPersistenceBroker = null;
+let nativePlayerAuthorityStateBroker = null;
+const nativeProjectionSubscriptions = new Map();
+const nativeProjectionSubscriptionHistory = [];
+let nativePlayerAuthorityHandoffIpcBridge = null;
+let nativePlayerAuthorityHandoffCoordinator = null;
+let nativePlayerAuthorityHandoffAttempt = null;
+let nativePlayerAuthorityDeferredHandoff = null;
+let nativePlayerAuthorityStartupReconcileObservation = Object.freeze({ state: "unknown" });
+let nativePlayerAuthorityStartupReconcileRetry = null;
+let nativePlayerAuthorityHandoffCompletionRetry = null;
 let nativeHostQuitDrainPromise = null;
 let nativeHostQuitDrainComplete = false;
 let nativeExactRealtimeStartupStatus = unavailableStartupStatus(process.env);
@@ -242,8 +334,414 @@ function requireTrustedNativeSender(event) {
   return event.sender.id;
 }
 
+function validatedNativePlayerAuthorityState(rendererOwnerId) {
+  if (!nativePlayerAuthorityRuntime || !nativePlayerAuthorityStateBroker || !nativeCoreSessions) {
+    throw new Error("Windows 原生玩家权威时钟不可用");
+  }
+  const authoritySnapshot = nativePlayerAuthorityRuntime.snapshot();
+  const authoritySessionId = authoritySnapshot?.sessionId;
+  if (authoritySessionId !== null) {
+    if (!validNativeLogicalId(authoritySessionId)) {
+      throw new Error("Windows 原生玩家权威会话无效");
+    }
+    const owned = nativeCoreSessions.inspectSession("main-player-authority", authoritySessionId);
+    if (owned.ownerId !== "main-player-authority" || owned.slot !== "normal-main" ||
+        owned.state !== "owned") {
+      throw new Error("Windows 原生玩家权威会话不一致");
+    }
+  }
+  const state = nativePlayerAuthorityStateBroker.read(rendererOwnerId);
+  return normalizeRendererNativeResult("playerAuthorityState", state);
+}
+
+function publishNativePlayerAuthorityState(_snapshot) {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  try {
+    // Treat the transition only as a wake-up signal. Reading through the
+    // trusted broker is essential for macro states: it validates the internal
+    // authority identity and then redacts every session/run/macro/operation ID
+    // before the payload reaches the renderer.
+    const state = validatedNativePlayerAuthorityState(mainWindow.webContents.id);
+    mainWindow.webContents.send("desktop:native-player-authority-state-changed", state);
+  } catch {
+    // A malformed or stale authority snapshot is never delivered. The pull
+    // endpoint remains available for the renderer to recover a later exact state.
+  }
+}
+
 function validNativeLogicalId(value, maximumLength = 128) {
   return typeof value === "string" && value.length > 0 && value.length <= maximumLength && /^[A-Za-z0-9_.:-]+$/.test(value);
+}
+
+function trustedRendererForNativePlayerAuthority(ownerId) {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() ||
+      mainWindow.webContents.id !== ownerId) return null;
+  return mainWindow.webContents;
+}
+
+function nativePlayerAuthoritySummaryEligible(summary) {
+  return summary?.revision >= 0 && summary?.stateVersion === 47 && summary?.mode === "normal" &&
+    summary?.paused === false && summary?.coverage?.authorityEligible === true;
+}
+
+function recordActiveNativePlayerAuthorityObservation(identity, entryCheckpoint, checkpoint, summary) {
+  nativePlayerAuthorityStartupReconcileObservation = Object.freeze({
+    state: "active",
+    runId: identity.runId,
+    sessionId: identity.sessionId,
+    stateVersion: 47,
+    mode: "normal",
+    entryCheckpoint: Object.freeze({ ...entryCheckpoint }),
+    checkpoint: Object.freeze({ ...checkpoint }),
+    summary,
+  });
+}
+
+const NATIVE_PLAYER_AUTHORITY_RETRYABLE_CODES = new Set([
+  "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+  "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
+  "NATIVE_PLAYER_AUTHORITY_HANDOFF_IPC_BUSY",
+  "NATIVE_PLAYER_AUTHORITY_HANDOFF_IPC_TIMEOUT",
+  "NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_UNAVAILABLE",
+  "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_BUSY",
+  "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_TIMEOUT",
+  "NATIVE_PLAYER_AUTHORITY_COMPLETION_STALE",
+  "NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETION_STALE",
+]);
+
+function retryableNativePlayerAuthorityBoundaryError(error) {
+  return NATIVE_PLAYER_AUTHORITY_RETRYABLE_CODES.has(error?.code);
+}
+
+function nativePlayerAuthorityStartupReconciliationTerminal(rendererOwnerId) {
+  const state = nativePlayerAuthorityStartupReconcileRetry?.snapshot();
+  return state?.phase === "terminal" && state.rendererOwnerId === rendererOwnerId &&
+    Boolean(trustedRendererForNativePlayerAuthority(rendererOwnerId));
+}
+
+function cancelNativePlayerAuthorityRetriesForOwner(rendererOwnerId) {
+  nativePlayerAuthorityStartupReconcileRetry?.cancelOwner(rendererOwnerId);
+  nativePlayerAuthorityHandoffCompletionRetry?.cancelOwner(rendererOwnerId);
+}
+
+function resetNativePlayerAuthorityRetryCoordinators() {
+  nativePlayerAuthorityStartupReconcileRetry?.shutdown();
+  nativePlayerAuthorityHandoffCompletionRetry?.shutdown();
+  nativePlayerAuthorityStartupReconcileRetry = null;
+  nativePlayerAuthorityHandoffCompletionRetry = null;
+}
+
+async function cancelPreparedNativePlayerAuthorityHandoff(rendererOwnerId, identity) {
+  if (!nativePlayerAuthorityHandoffIpcBridge) return;
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+        kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_CANCEL_REQUEST_KIND,
+        handoffId: identity.handoffId,
+        sessionId: identity.sessionId,
+        runId: identity.runId,
+        releaseAuthorized: true,
+        browserFenceAcquired: false,
+      }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError ?? new Error("native player-authority prepare cancellation is uncertain");
+}
+
+async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
+  if (!nativePlayerAuthorityHandoffFeatureEnabled || nativePlayerAuthorityHandoffAttempt ||
+      !nativePlayerAuthorityHandoffIpcBridge || !nativeCoreSessions || !nativePlayerAuthorityRuntime ||
+      !nativePlayerAuthoritySummaryEligible(opened?.summary) ||
+      nativePlayerAuthorityRuntime.snapshot().phase !== "idle") return null;
+  const identity = Object.freeze({
+    handoffId: `handoff-${randomUUID()}`,
+    runId: `player-run-${randomUUID()}`,
+    sessionId: opened.sessionId,
+  });
+  let prepareDispatched = false;
+  let coordinatorStarted = false;
+  const operation = (async () => {
+    try {
+      prepareDispatched = true;
+      const preparedResult = await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+        kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_PREPARE_REQUEST_KIND,
+        ...identity,
+        initialRevision: opened.summary.revision,
+        timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
+      }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+
+      // The renderer has invalidated its legacy async generation and drained
+      // all JS/Worker/save/cloud work. Only now is the final Rust checkpoint
+      // generated, so it cannot race a queued shadow replay.
+      const preCheckpointStatus = normalizeRendererNativeResult(
+        "coreSummary",
+        await nativeCoreSessions.status(rendererOwnerId, identity.sessionId),
+      );
+      if (!nativePlayerAuthoritySummaryEligible(preCheckpointStatus)) {
+        throw Object.assign(new Error("native player-authority coverage is incomplete"), {
+          code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COVERAGE_INCOMPLETE",
+        });
+      }
+      const savedAtMs = Date.now();
+      const checkpointResult = normalizeRendererNativeResult(
+        "coreCheckpoint",
+        await nativeCoreSessions.checkpoint(rendererOwnerId, {
+          sessionId: identity.sessionId,
+          savedAtMs,
+        }),
+      );
+      if (!nativePlayerAuthoritySummaryEligible(checkpointResult.summary)) {
+        throw Object.assign(new Error("native player-authority checkpoint coverage is incomplete"), {
+          code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COVERAGE_INCOMPLETE",
+        });
+      }
+      const expectedCheckpoint = Object.freeze({
+        generation: checkpointResult.checkpoint.generation,
+        rootHash: checkpointResult.checkpoint.rootHash,
+        revision: checkpointResult.checkpoint.revision,
+      });
+      let browserFence = null;
+      const coordinator = new NativePlayerAuthorityHandoffCoordinator({
+        registry: nativeCoreSessions,
+        runtime: nativePlayerAuthorityRuntime,
+        mainOwnerId: "main-player-authority",
+        requestQuiescence: async (request) => {
+          const fenced = await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+            kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMMIT_REQUEST_KIND,
+            handoffId: request.handoffId,
+            sessionId: request.sessionId,
+            runId: request.runId,
+            revision: request.expectedRevision,
+            checkpoint: request.expectedCheckpoint,
+            publicWriterFence: request.publicWriterFence,
+            settledDeadlineMs: request.settledDeadlineMs,
+          }, request.timeoutMs);
+          browserFence = fenced;
+          return Object.freeze({
+            kind: QUIESCENCE_ACK_KIND,
+            handoffId: request.handoffId,
+            sessionId: request.sessionId,
+            runId: request.runId,
+            ownerId: request.rendererOwnerId,
+            revision: request.expectedRevision,
+            checkpoint: request.expectedCheckpoint,
+            publicWriterFence: request.publicWriterFence,
+            settledDeadlineMs: request.settledDeadlineMs,
+            rendererInFlightCoreOperations: fenced.rendererInFlightCoreOperations,
+            workerInFlightCoreOperations: fenced.workerInFlightCoreOperations,
+          });
+        },
+        releaseQuiescence: async (request) => {
+          if (!browserFence || request.releaseAuthorized !== true) {
+            throw Object.assign(new Error("browser-fence release identity is unavailable"), {
+              code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_RELEASE_UNCERTAIN",
+            });
+          }
+          await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+            kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_RELEASE_REQUEST_KIND,
+            handoffId: request.handoffId,
+            sessionId: request.sessionId,
+            runId: request.runId,
+            checkpoint: request.checkpoint,
+            receipt: browserFence.leaseReceipt,
+            releaseAuthorized: true,
+            decision: {
+              action: "release-browser-fence",
+              reason: "rust-lease-absent-release-authorized",
+              runId: request.runId,
+              sessionId: request.sessionId,
+              checkpoint: request.checkpoint,
+            },
+          }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+        },
+      });
+      nativePlayerAuthorityHandoffCoordinator = coordinator;
+      coordinatorStarted = true;
+      const handoff = await coordinator.handoff({
+        ...identity,
+        rendererOwnerId,
+        expectedRevision: expectedCheckpoint.revision,
+        expectedCheckpoint,
+        publicWriterFence: preparedResult.publicWriterFence,
+        settledDeadlineMs: preparedResult.settledDeadlineMs,
+        timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
+      });
+      if (handoff.phase !== "active" || !browserFence || !nativePlayerAuthorityPersistenceBroker) {
+        throw Object.assign(new Error("native player-authority completion boundary is unavailable"), {
+          code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETION_UNAVAILABLE",
+        });
+      }
+      // Rust owns the session from this point onward even if the renderer ACK
+      // is lost or the document reloads. Keep the main-owned startup
+      // observation current so the next renderer can rebind instead of seeing
+      // the pre-handoff "absent" observation.
+      recordActiveNativePlayerAuthorityObservation(
+        identity,
+        expectedCheckpoint,
+        expectedCheckpoint,
+        checkpointResult.summary,
+      );
+      nativePlayerAuthorityPersistenceBroker.clearRendererBinding(rendererOwnerId);
+      // Ownership has already moved to main. From this point forward there is
+      // no legal browser hand-back. Retry only the idempotent completion bind,
+      // and hold one settled persistence boundary across checkpoint capture,
+      // renderer refresh/drain, and the exact completion ACK.
+      const completionRetry = new NativePlayerAuthorityBoundedRetryCoordinator({
+        operation: (ownerId) => nativePlayerAuthorityPersistenceBroker.withHandoffCompletion(
+          ownerId,
+          async (durable) => {
+            if (durable.authority.sessionId !== identity.sessionId ||
+                durable.authority.runId !== identity.runId ||
+                durable.authority.revision !== durable.checkpoint.revision) {
+              throw Object.assign(new Error("native player-authority completion lineage changed"), {
+                code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETION_STALE",
+              });
+            }
+            const completed = await nativePlayerAuthorityHandoffIpcBridge.request(ownerId, {
+              kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETE_REQUEST_KIND,
+              ...identity,
+              revision: durable.checkpoint.revision,
+              checkpoint: durable.checkpoint,
+              nativeWriterFence: browserFence.leaseReceipt.nativeWriterFence,
+              summary: durable.summary,
+            }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+            recordActiveNativePlayerAuthorityObservation(
+              durable.authority,
+              expectedCheckpoint,
+              durable.checkpoint,
+              durable.summary,
+            );
+            nativePlayerAuthorityPersistenceBroker.bindRendererAuthority(ownerId, durable.authority);
+            return completed;
+          },
+        ),
+        isTerminalResult: (result) => result?.kind === "native-player-authority-handoff-completed-v1",
+        isOwnerAvailable: (ownerId) => Boolean(trustedRendererForNativePlayerAuthority(ownerId)),
+        shouldRetryError: retryableNativePlayerAuthorityBoundaryError,
+      });
+      nativePlayerAuthorityHandoffCompletionRetry = completionRetry;
+      try {
+        await completionRetry.start(rendererOwnerId);
+      } finally {
+        if (nativePlayerAuthorityHandoffCompletionRetry === completionRetry &&
+            completionRetry.snapshot().phase === "terminal") {
+          nativePlayerAuthorityHandoffCompletionRetry = null;
+        }
+      }
+      return handoff;
+    } catch (error) {
+      if (prepareDispatched && !coordinatorStarted) {
+        await cancelPreparedNativePlayerAuthorityHandoff(rendererOwnerId, identity).catch(() => undefined);
+      }
+      throw error;
+    }
+  })();
+  nativePlayerAuthorityHandoffAttempt = operation;
+  try {
+    return await operation;
+  } finally {
+    if (nativePlayerAuthorityHandoffAttempt === operation) nativePlayerAuthorityHandoffAttempt = null;
+    if (nativePlayerAuthorityHandoffCoordinator?.snapshot().phase === "blocked") {
+      nativePlayerAuthorityHandoffCoordinator = null;
+    }
+  }
+}
+
+async function reconcileNativePlayerAuthorityStartupWithRenderer(rendererOwnerId) {
+  if (!nativePlayerAuthorityHandoffIpcBridge) return null;
+  let observation = nativePlayerAuthorityStartupReconcileObservation;
+  const recoveredRuntimePhase = nativePlayerAuthorityRuntime?.snapshot().phase ?? null;
+  if (observation.state === "active" &&
+      !["active", "paused", "macro-active"].includes(recoveredRuntimePhase)) {
+    observation = Object.freeze({ state: "unknown" });
+  }
+  const handoffId = `startup-reconcile-${randomUUID()}`;
+  const challenge = (rustLease) => nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+    kind: NATIVE_PLAYER_AUTHORITY_STARTUP_RECONCILE_REQUEST_KIND,
+    handoffId,
+    rustLease,
+    releaseAuthorized: rustLease.state === "absent",
+    timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
+  }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+  if (observation.state === "active" &&
+      ["active", "paused", "macro-active"].includes(recoveredRuntimePhase) &&
+      nativePlayerAuthorityPersistenceBroker) {
+    // Keep the exact clock frozen from checkpoint capture through renderer
+    // drain and ACK. The outer retry coordinator starts a fresh atomic attempt
+    // after BUSY, timeout, or a non-terminal fail-closed response.
+    const entryCheckpoint = observation.entryCheckpoint;
+    return nativePlayerAuthorityPersistenceBroker.withStartupReconciliation(
+      rendererOwnerId,
+      async (durable) => {
+        if (durable.authority.sessionId !== observation.sessionId ||
+            durable.authority.runId !== observation.runId ||
+            durable.authority.revision !== durable.checkpoint.revision) {
+          throw Object.assign(new Error("native player-authority startup lineage changed"), {
+            code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
+          });
+        }
+        const result = await challenge(Object.freeze({
+          ...observation,
+          checkpoint: durable.checkpoint,
+          summary: durable.summary,
+        }));
+        if (result?.action === "resumed-native") {
+          recordActiveNativePlayerAuthorityObservation(
+            durable.authority,
+            entryCheckpoint,
+            durable.checkpoint,
+            durable.summary,
+          );
+          nativePlayerAuthorityPersistenceBroker.bindRendererAuthority(rendererOwnerId, durable.authority);
+        }
+        return result;
+      },
+    );
+  }
+  const result = await challenge(observation);
+  if (result?.action === "resumed-native" && observation.state === "active" &&
+      nativePlayerAuthorityPersistenceBroker) {
+    nativePlayerAuthorityPersistenceBroker.bindRendererAuthority(rendererOwnerId, {
+      sessionId: observation.sessionId,
+      runId: observation.runId,
+      revision: observation.checkpoint.revision,
+    });
+  }
+  return result;
+}
+
+function beginNativePlayerAuthorityStartupReconciliation(rendererOwnerId) {
+  if (!nativePlayerAuthorityStartupReconcileRetry) {
+    nativePlayerAuthorityStartupReconcileRetry = new NativePlayerAuthorityBoundedRetryCoordinator({
+      operation: reconcileNativePlayerAuthorityStartupWithRenderer,
+      isTerminalResult: startupReconciliationIsTerminalResolved,
+      isOwnerAvailable: (ownerId) => Boolean(trustedRendererForNativePlayerAuthority(ownerId)),
+      shouldRetryError: retryableNativePlayerAuthorityBoundaryError,
+    });
+  }
+  const retry = nativePlayerAuthorityStartupReconcileRetry;
+  const completion = retry.start(rendererOwnerId);
+  void completion.then(() => {
+    if (nativePlayerAuthorityStartupReconcileRetry !== retry || retry.snapshot().phase !== "terminal") return;
+    const deferred = nativePlayerAuthorityDeferredHandoff;
+    nativePlayerAuthorityDeferredHandoff = null;
+    if (deferred) scheduleNativePlayerAuthorityHandoff(deferred.rendererOwnerId, deferred.opened);
+  }, () => undefined);
+  return completion;
+}
+
+function scheduleNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
+  if (!nativePlayerAuthorityHandoffFeatureEnabled || !nativePlayerAuthoritySummaryEligible(opened?.summary)) return;
+  if (!nativePlayerAuthorityStartupReconciliationTerminal(rendererOwnerId)) {
+    nativePlayerAuthorityDeferredHandoff = Object.freeze({ rendererOwnerId, opened });
+    return;
+  }
+  setImmediate(() => {
+    void performNativePlayerAuthorityHandoff(rendererOwnerId, opened).catch(() => undefined);
+  });
 }
 
 function initializeNativePerformancePolicy() {
@@ -287,14 +785,153 @@ async function initializeNativeHost() {
       spawnEnvironment: nativePerformancePolicyStore.spawnEnvironment(),
     });
     const hello = normalizeRendererNativeResult("hostHello", await nativeHostClient.start(app.getVersion()));
-    nativeSaveSessions = new NativeSaveSessionRegistry(nativeHostClient);
+    nativeSaveSessions = new NativeSaveSessionRegistry(nativeHostClient, {
+      // The Rust Host creates this fixed root before hello.  The JavaScript
+      // preflight uses a non-existent probe filename only to query the same
+      // filesystem; it never creates or removes the probe.
+      diskBudgetTargetPath: path.join(rootPath, ".native-save-space-probe"),
+    });
     nativeCoreSessions = new NativeCoreSessionRegistry(nativeHostClient);
-    nativeExactRealtimeStartupStatus = await inspectNativeExactRealtimeStartup({
+    nativePlayerAuthorityHandoffIpcBridge = new NativePlayerAuthorityHandoffIpcBridge({
+      getRenderer: trustedRendererForNativePlayerAuthority,
+    });
+    // Main-owned only. There is deliberately no renderer IPC that can call
+    // activate/tick. The internal challenge below can cut over only after the
+    // Rust coverage gate and the public-primary browser fence both succeed.
+    const playerAuthorityOwnerId = "main-player-authority";
+    const samplePlayerAuthorityWallClock = createMonotonicOrbitalContractClock();
+    nativePlayerAuthorityRuntime = new NativePlayerAuthorityRuntime({
+      registry: nativeCoreSessions,
+      ownerId: playerAuthorityOwnerId,
+      now: samplePlayerAuthorityWallClock,
+      onTransition: publishNativePlayerAuthorityState,
+    });
+    nativePlayerAuthorityStateBroker = new NativePlayerAuthorityStateBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      getMacroRecoveryHint: () => nativePlayerAuthorityMacroBroker?.recoveryHint() ?? null,
+      isTrustedRendererOwner: (ownerId) => Boolean(
+        mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+      ),
+    });
+    const playerAuthorityStartupRecovery =
+      nativeCoreSessions.takePlayerAuthorityStartupRecovery(playerAuthorityOwnerId);
+    if (playerAuthorityStartupRecovery) {
+      nativePlayerAuthorityRuntime.resumeFromStartupRecovery(playerAuthorityStartupRecovery);
+    }
+    nativePlayerAuthorityCommandBroker = new NativePlayerAuthorityCommandBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      onCommittedCommand: (receipt) =>
+        nativePlayerAuthorityMacroBroker?.observeCommittedCommand(receipt),
+      isTrustedRendererOwner: (ownerId) => Boolean(
+        mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+      ),
+    });
+    nativePlayerAuthoritySystemSpaceStationBroker =
+      new NativePlayerAuthoritySystemSpaceStationBroker({
+        runtime: nativePlayerAuthorityRuntime,
+        isTrustedRendererOwner: (ownerId) => Boolean(
+          mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+        ),
+      });
+    nativePlayerAuthorityOrbitalContractBroker =
+      new NativePlayerAuthorityOrbitalContractBroker({
+        runtime: nativePlayerAuthorityRuntime,
+        now: samplePlayerAuthorityWallClock,
+        isTrustedRendererOwner: (ownerId) => Boolean(
+          mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+        ),
+      });
+    nativePlayerAuthorityOperationsSettingBroker =
+      new NativePlayerAuthorityOperationsSettingBroker({
+        runtime: nativePlayerAuthorityRuntime,
+        isTrustedRendererOwner: (ownerId) => Boolean(
+          mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+        ),
+      });
+    // Main-process-owned. The renderer supplies only one optimistic start
+    // revision plus its same-revision multiplier observation, followed by
+    // parameter-free continue/finish intents. This broker derives every wall
+    // and simulation budget from the same monotonic main clock used by the
+    // durable exact scheduler; identities and retry state stay in main/Rust.
+    nativePlayerAuthorityMacroBroker = new NativePlayerAuthorityMacroBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      now: samplePlayerAuthorityWallClock,
+      ...(playerAuthorityStartupRecovery?.recoveredMacroOperationId
+        ? { recoveredOperationId: playerAuthorityStartupRecovery.recoveredMacroOperationId }
+        : {}),
+      ...(playerAuthorityStartupRecovery?.macroSessionId
+        ? {
+            recoveredSimulationMilliseconds:
+              playerAuthorityStartupRecovery.macroSimulationMilliseconds,
+            recoveredWallMilliseconds:
+              playerAuthorityStartupRecovery.macroWallMilliseconds,
+          }
+        : {}),
+      ...(playerAuthorityStartupRecovery?.pendingMacroCleanupSessionId
+        ? {
+            pendingMacroCleanupSessionId:
+              playerAuthorityStartupRecovery.pendingMacroCleanupSessionId,
+            pendingMacroCleanupRevision:
+              playerAuthorityStartupRecovery.pendingMacroCleanupRevision,
+          }
+        : {}),
+    });
+    nativePlayerAuthorityProjectionBroker = new NativePlayerAuthorityProjectionBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      registry: nativeCoreSessions,
+      ownerId: playerAuthorityOwnerId,
+      now: samplePlayerAuthorityWallClock,
+      isTrustedRendererOwner: (ownerId) => Boolean(
+        mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+      ),
+    });
+    nativePlayerAuthorityPersistenceBroker = new NativePlayerAuthorityPersistenceBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      registry: nativeCoreSessions,
+      ownerId: playerAuthorityOwnerId,
+      isTrustedRendererOwner: (ownerId) => Boolean(
+        mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+      ),
+    });
+    const inspectedExactRealtimeStartup = await inspectNativeExactRealtimeStartup({
       leaseStore: new NativeCoreExactRealtimeRustLeaseStore({
         leaseRegistry: new NativeExactRealtimeLeaseRegistry(nativeHostClient),
       }),
       environment: process.env,
     });
+    nativeExactRealtimeStartupStatus = playerAuthorityStartupRecovery
+      ? {
+        ...inspectedExactRealtimeStartup,
+        state: "player-authority-recovered",
+        leaseState: "valid",
+        leasePhase: playerAuthorityStartupRecovery.paused ? "paused" : "active",
+        code: null,
+        normalWindowAllowed: true,
+        message: playerAuthorityStartupRecovery.macroSessionId
+          ? "已恢复 Windows 原生纯挂机结算；普通确定性时钟保持暂停"
+          : playerAuthorityStartupRecovery.paused
+            ? "已恢复 Windows 原生玩家权威会话；模拟保持玩家暂停状态"
+          : "已恢复 Windows 原生玩家权威会话并继续确定性时钟",
+      }
+      : inspectedExactRealtimeStartup;
+    nativePlayerAuthorityStartupReconcileObservation = playerAuthorityStartupRecovery?.entryCheckpoint
+      ? Object.freeze({
+        state: "active",
+        runId: playerAuthorityStartupRecovery.runId,
+        sessionId: playerAuthorityStartupRecovery.sessionId,
+        stateVersion: 47,
+        mode: "normal",
+        entryCheckpoint: playerAuthorityStartupRecovery.entryCheckpoint,
+        checkpoint: playerAuthorityStartupRecovery.checkpoint,
+        summary: playerAuthorityStartupRecovery.summary,
+      })
+      : Object.freeze({
+        state: !playerAuthorityStartupRecovery && inspectedExactRealtimeStartup.leaseState === "missing"
+          ? "absent"
+          : "unknown",
+      });
+    resetNativePlayerAuthorityRetryCoordinators();
+    nativePlayerAuthorityDeferredHandoff = null;
     nativeHostState = {
       available: true,
       state: "ready",
@@ -330,6 +967,29 @@ async function initializeNativeHost() {
     nativeHostClient = null;
     nativeSaveSessions = null;
     nativeCoreSessions = null;
+    nativePlayerAuthorityRuntime?.shutdownForProcessExit();
+    nativePlayerAuthorityRuntime = null;
+    nativePlayerAuthorityCommandBroker = null;
+    nativePlayerAuthoritySystemSpaceStationBroker = null;
+    nativePlayerAuthorityOrbitalContractBroker = null;
+    nativePlayerAuthorityOperationsSettingBroker = null;
+    nativePlayerAuthorityMacroBroker = null;
+    nativePlayerAuthorityProjectionBroker = null;
+    nativePlayerAuthorityPersistenceBroker = null;
+    nativePlayerAuthorityStateBroker = null;
+    // Startup reconciliation remains available even when the host failed:
+    // an explicit fixed-root "absent" result is what authorizes an IndexedDB
+    // N+2 hand-back. Unknown/blocked observations still fail closed.
+    nativePlayerAuthorityHandoffIpcBridge = new NativePlayerAuthorityHandoffIpcBridge({
+      getRenderer: trustedRendererForNativePlayerAuthority,
+    });
+    nativePlayerAuthorityHandoffCoordinator = null;
+    nativePlayerAuthorityHandoffAttempt = null;
+    nativePlayerAuthorityDeferredHandoff = null;
+    nativePlayerAuthorityStartupReconcileObservation = Object.freeze({
+      state: nativeExactRealtimeStartupStatus.leaseState === "missing" ? "absent" : "unknown",
+    });
+    resetNativePlayerAuthorityRetryCoordinators();
   }
   return nativeHostState;
 }
@@ -407,6 +1067,14 @@ function postNativeProjectionTransferError(port, error) {
   closeTransferPort(port);
 }
 
+function postNativeOfflineStartupTransferError(port, error) {
+  const safe = serializeRendererNativeError(error, {
+    fallbackCode: "NATIVE_OFFLINE_STARTUP_FAILED",
+    message: "Windows 原生离线结算候选失败，正在回退兼容结算",
+  });
+  try { port.postMessage({ error: safe }); } catch { /* renderer is gone */ }
+}
+
 async function runRendererNativeOperation(kind, options, operation) {
   try {
     const raw = await operation();
@@ -442,6 +1110,173 @@ function nativeViewportProjectionResultContext(request) {
   };
 }
 
+function nativeViewportProjectionV2ResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    baseFields: request?.baseFields ?? [],
+    planetId: request?.planetId,
+    bounds: request?.bounds,
+    entityCursor: request?.entityCursor ?? 0,
+    entityLimit: request?.entityLimit,
+    beltCursor: request?.beltCursor ?? 0,
+    beltLimit: request?.beltLimit,
+    pinnedEntityIds: request?.pinnedEntityIds ?? [],
+    pinnedBeltIds: request?.pinnedBeltIds ?? [],
+    entityPresentationVersion: request?.entityPresentationVersion,
+  };
+}
+
+function nativeFactoryReadModelResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    selectedEntityIds: request?.selectedEntityIds ?? [],
+    selectedBeltIds: request?.selectedBeltIds ?? [],
+  };
+}
+
+function nativeFactoryInventoryResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    cursor: request?.cursor,
+    limit: request?.limit,
+  };
+}
+
+function nativeConstructionInventoryResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    cursor: request?.cursor,
+    limit: request?.limit,
+  };
+}
+
+function nativeBlueprintWorkspaceResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    section: request?.section,
+    blueprintId: request?.blueprintId,
+    queueEntryId: request?.queueEntryId,
+    cursor: request?.cursor,
+    limit: request?.limit,
+  };
+}
+
+function nativeBlueprintCaptureContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    entityIds: request?.entityIds,
+  };
+}
+
+function nativeBlueprintImportContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    raw: request?.raw,
+  };
+}
+
+function nativeBlueprintExportContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    blueprintId: request?.blueprintId,
+    blueprintRevision: request?.blueprintRevision,
+  };
+}
+
+function nativeBlueprintEnqueueContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    blueprintId: request?.blueprintId,
+    blueprintRevision: request?.blueprintRevision,
+  };
+}
+
+function nativeBlueprintDirectDeployContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    blueprintId: request?.blueprintId,
+    blueprintRevision: request?.blueprintRevision,
+    position: request?.position,
+  };
+}
+
+function nativeConstructionPlacementContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    buildingId: request?.buildingId,
+  };
+}
+
+function nativeConstructionBeltPlacementContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    sourceId: request?.sourceId,
+    targetId: request?.targetId,
+    itemId: request?.itemId,
+    tier: request?.tier,
+    lanes: request?.lanes,
+  };
+}
+
+function nativeConstructionBeltRemovalContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    beltId: request?.beltId,
+  };
+}
+
+function nativeConstructionBeltLaneContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    beltId: request?.beltId,
+    targetLanes: request?.targetLanes,
+  };
+}
+
+function nativeConstructionRemovalContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    entityId: request?.entityId,
+  };
+}
+
+function nativeConstructionStackContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    entityId: request?.entityId,
+    targetCount: request?.targetCount,
+  };
+}
+
 function nativeStatisticsProjectionResultContext(request) {
   return {
     minElapsedSeconds: request?.minElapsedSeconds,
@@ -451,6 +1286,208 @@ function nativeStatisticsProjectionResultContext(request) {
     planetId: request?.planetId ?? null,
     itemId: request?.itemId ?? null,
   };
+}
+
+function nativeStatisticsProjectionHasPlayerAuthorityLineage(request) {
+  return request !== null && typeof request === "object" && !Array.isArray(request) &&
+    (Object.hasOwn(request, "runId") || Object.hasOwn(request, "expectedRegistryFingerprint"));
+}
+
+function nativeTechnologyProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+  };
+}
+
+function nativeRecipeWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    itemIds: request?.itemIds ?? [],
+    selectedItemId: request?.selectedItemId,
+    location: request?.location ?? null,
+  };
+}
+
+function nativeStarMapOverviewProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    cursor: request?.cursor,
+    limit: request?.limit,
+  };
+}
+
+function nativeStarMapCatalogProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    systemCursor: request?.systemCursor,
+    systemLimit: request?.systemLimit,
+    planetCursor: request?.planetCursor,
+    planetLimit: request?.planetLimit,
+  };
+}
+
+function nativeStellarIndustryProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    systemId: request?.systemId ?? null,
+    planetId: request?.planetId ?? null,
+    planetCursor: request?.planetCursor,
+    planetLimit: request?.planetLimit,
+    stationCursor: request?.stationCursor,
+    stationLimit: request?.stationLimit,
+  };
+}
+
+function nativeStellarIndustryV2ProjectionResultContext(request) {
+  return {
+    ...nativeStellarIndustryProjectionResultContext(request),
+    routeCursor: request?.routeCursor,
+    routeLimit: request?.routeLimit,
+    routeFilter: request?.routeFilter,
+    query: request?.query,
+  };
+}
+
+function nativeStellarQuantumProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    itemCursor: request?.itemCursor,
+    itemLimit: request?.itemLimit,
+    collectorCursor: request?.collectorCursor,
+    collectorLimit: request?.collectorLimit,
+  };
+}
+
+function nativeDysonWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    selectedSystemId: request?.selectedSystemId,
+    systemCursor: request?.systemCursor,
+    systemLimit: request?.systemLimit,
+    layerCursor: request?.layerCursor,
+    layerLimit: request?.layerLimit,
+    orbitCursor: request?.orbitCursor,
+    orbitLimit: request?.orbitLimit,
+    nodeCursor: request?.nodeCursor,
+    nodeLimit: request?.nodeLimit,
+    frameCursor: request?.frameCursor,
+    frameLimit: request?.frameLimit,
+    shellCursor: request?.shellCursor,
+    shellLimit: request?.shellLimit,
+  };
+}
+
+function nativeSystemSpaceStationWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    systemId: request?.systemId,
+    requirementCursor: request?.requirementCursor,
+    requirementLimit: request?.requirementLimit,
+    inventoryCursor: request?.inventoryCursor,
+    inventoryLimit: request?.inventoryLimit,
+    trayCursor: request?.trayCursor,
+    trayLimit: request?.trayLimit,
+    stationCursor: request?.stationCursor,
+    stationLimit: request?.stationLimit,
+  };
+}
+
+function nativeOrbitalContractWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+  };
+}
+
+function nativeCampaignWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+  };
+}
+
+function nativeOperationsWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+  };
+}
+
+function nativeGalaxyAccountWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+  };
+}
+
+function nativeCommandPaletteEntitySearchResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    query: request?.query,
+    cursor: request?.cursor,
+    limit: request?.limit,
+    buildingIds: request?.buildingIds ?? [],
+    resourceIds: request?.resourceIds ?? [],
+    planetIds: request?.planetIds ?? [],
+  };
+}
+
+const NATIVE_SUBSCRIPTION_PROJECTION_NORMALIZERS = Object.freeze({
+  "viewport-v2": ["coreViewportProjectionV2", nativeViewportProjectionV2ResultContext],
+  "factory-read-model-v1": ["coreFactoryReadModelProjection", nativeFactoryReadModelResultContext],
+  "factory-inventory-v1": ["coreFactoryInventoryProjection", nativeFactoryInventoryResultContext],
+  "construction-inventory-v1": ["coreConstructionInventoryProjection", nativeConstructionInventoryResultContext],
+  "statistics-v1": ["coreStatisticsProjection", nativeStatisticsProjectionResultContext],
+  "technology-v1": ["coreTechnologyProjection", nativeTechnologyProjectionResultContext],
+  "operations-workspace-v1": ["coreOperationsWorkspaceProjection", nativeOperationsWorkspaceProjectionResultContext],
+});
+
+async function readNativeProjectionSubscriptionFrame(rendererOwnerId, request) {
+  const normalizer = NATIVE_SUBSCRIPTION_PROJECTION_NORMALIZERS[request.projectionType];
+  if (!normalizer || !nativePlayerAuthorityProjectionBroker?.ownsSession(request.sessionId)) {
+    throw Object.assign(new Error("native projection subscription is not bound to the active authority session"), {
+      code: "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+    });
+  }
+  const normalizedRequest = Object.freeze({ ...request.payload, sessionId: request.sessionId });
+  const raw = await nativePlayerAuthorityProjectionBroker.read(
+    rendererOwnerId,
+    request.projectionType,
+    normalizedRequest,
+  );
+  return normalizeRendererNativeResult(normalizer[0], raw, normalizer[1](normalizedRequest));
+}
+
+function nativeProjectionSubscriptionDiagnostics() {
+  const active = [...nativeProjectionSubscriptions.values()].map((entry) => entry.snapshot());
+  const retained = nativeProjectionSubscriptionHistory.slice(-64);
+  return summarizeNativeProjectionSubscriptions(active, retained);
 }
 
 async function waitForResponseAck(record, expectedBytes) {
@@ -621,6 +1658,12 @@ function createWindow() {
       if (nativeSaveSessions) void nativeSaveSessions.abortOwner(ownerId);
     },
     closeNativeCoreOwner: (ownerId) => {
+      cancelNativePlayerAuthorityRetriesForOwner(ownerId);
+      nativePlayerAuthorityHandoffIpcBridge?.cancelOwner(ownerId);
+      nativePlayerAuthorityPersistenceBroker?.clearRendererBinding(ownerId);
+      if (nativePlayerAuthorityDeferredHandoff?.rendererOwnerId === ownerId) {
+        nativePlayerAuthorityDeferredHandoff = null;
+      }
       if (nativeCoreSessions) void nativeCoreSessions.closeOwner(ownerId);
     },
     cancelApiRequests: cancelAllApiRequests,
@@ -671,6 +1714,31 @@ function configureAutoUpdater() {
   }
 }
 
+// Response-only channel: a renderer cannot start a handoff through IPC. The
+// bridge accepts a reply only while main holds the matching one-shot challenge
+// for that exact WebContents ID.
+ipcMain.on(NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL, (event, response) => {
+  nativePlayerAuthorityHandoffIpcBridge?.accept(event, response);
+});
+
+// Renderer readiness carries no authority identity. Main creates every
+// startup challenge and binds it to this exact WebContents before accepting a
+// response. A remount can safely retry a timed-out challenge.
+ipcMain.on(NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_CHANNEL, (event, message) => {
+  if (message?.kind !== NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_KIND ||
+      Reflect.ownKeys(message).length !== 1 ||
+      !trustedRendererForNativePlayerAuthority(event?.sender?.id)) return;
+  // A ready event belongs to the newly installed renderer subscription. Drop
+  // any binding left by the previous document even when Electron reuses the
+  // same WebContents ID. Invalidate the old one-shot request/retry generation
+  // before issuing a fresh challenge, so a late ACK from the previous document
+  // cannot bind the new document by owner-ID reuse alone.
+  cancelNativePlayerAuthorityRetriesForOwner(event.sender.id);
+  nativePlayerAuthorityHandoffIpcBridge?.cancelOwner(event.sender.id);
+  nativePlayerAuthorityPersistenceBroker?.clearRendererBinding(event.sender.id);
+  void beginNativePlayerAuthorityStartupReconciliation(event.sender.id).catch(() => undefined);
+});
+
 ipcMain.handle("desktop:release-info", () => ({
   isDesktop: true,
   editionId: desktopRuntimeIdentity.editionId,
@@ -695,9 +1763,83 @@ ipcMain.handle("desktop:native-status", async (event) => runRendererNativeOperat
   return nativeHostState;
 }));
 
+ipcMain.handle("desktop:native-player-authority-state", async (event) =>
+  runRendererNativeOperation("playerAuthorityState", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_STATE_FAILED",
+    message: "无法读取 Windows 原生玩家权威时钟",
+  }, async () => validatedNativePlayerAuthorityState(requireTrustedNativeSender(event))));
+
+ipcMain.handle("desktop:native-player-authority-set-paused", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityState", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_PAUSE_FAILED",
+    message: "Windows 原生暂停状态切换失败",
+  }, async () => {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+        Reflect.ownKeys(request).length !== 1 || !Object.hasOwn(request, "paused") ||
+        typeof request.paused !== "boolean") {
+      throw Object.assign(new TypeError("native player-authority pause intent is invalid"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PAUSE_REQUEST_INVALID",
+      });
+    }
+    if (!nativePlayerAuthorityRuntime ||
+        typeof nativePlayerAuthorityRuntime.setPaused !== "function") {
+      throw Object.assign(new Error("native player-authority pause lifecycle is unavailable"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PAUSE_UNAVAILABLE",
+      });
+    }
+    await nativePlayerAuthorityRuntime.setPaused(request.paused);
+    return validatedNativePlayerAuthorityState(rendererOwnerId);
+  }));
+
+ipcMain.handle("desktop:native-player-authority-macro-start", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityMacroReceipt", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机结算启动失败",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityMacroBroker) throw new Error("native player authority macro broker is unavailable");
+    return nativePlayerAuthorityMacroBroker.start(request);
+  }));
+
+ipcMain.handle("desktop:native-player-authority-macro-advance", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityMacroReceipt", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机结算推进失败",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityMacroBroker) throw new Error("native player authority macro broker is unavailable");
+    return nativePlayerAuthorityMacroBroker.advance(request);
+  }));
+
+ipcMain.handle("desktop:native-player-authority-macro-finish", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityMacroReceipt", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机结算结束失败",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityMacroBroker) throw new Error("native player authority macro broker is unavailable");
+    return nativePlayerAuthorityMacroBroker.finish(request);
+  }));
+
+ipcMain.handle("desktop:native-player-authority-macro-recover", async (event, request) =>
+  runRendererNativeOperation("playerAuthorityMacroReceipt", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机结算恢复失败",
+  }, async () => {
+    requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityMacroBroker) throw new Error("native player authority macro broker is unavailable");
+    return nativePlayerAuthorityMacroBroker.recover(request);
+  }));
+
 ipcMain.handle("desktop:runtime-diagnostics", async (event) => {
   if (!trustedSender(event)) throw new Error("桌面运行诊断调用来源无效");
   return runtimeDiagnosticsSampler.sample();
+});
+
+ipcMain.handle("desktop:native-projection-subscription-diagnostics", async (event) => {
+  if (!trustedSender(event)) throw new Error("原生投影订阅诊断调用来源无效");
+  return nativeProjectionSubscriptionDiagnostics();
 });
 
 ipcMain.handle("desktop:native-performance-policy", async (event) => runRendererNativeOperation("performancePolicy", {
@@ -826,7 +1968,10 @@ ipcMain.handle("desktop:native-core-open", async (event, request) => {
     },
   }, async () => {
     ownerId = requireTrustedNativeSender(event);
-    return nativeCoreSessions.open(ownerId, request);
+    const opened = await nativeCoreSessions.open(ownerId, request);
+    const normalized = normalizeRendererNativeResult("coreOpen", opened);
+    scheduleNativePlayerAuthorityHandoff(ownerId, normalized);
+    return opened;
   });
 });
 
@@ -834,9 +1979,9 @@ ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
   try {
     const ownerId = requireTrustedNativeSender(event);
     const selection = await dialog.showOpenDialog(mainWindow, {
-      title: "导入 DSP极简网络 v47 存档到 Windows 原生核心",
+      title: "导入 DSP极简网络 v46/v47 存档到 Windows 原生核心",
       buttonLabel: "验证并导入",
-      filters: [{ name: "DSP极简网络存档", extensions: ["json"] }],
+      filters: [{ name: "DSP极简网络存档", extensions: ["json", "gz"] }],
       properties: ["openFile", "dontAddToRecent"],
     });
     if (selection.canceled || selection.filePaths.length !== 1) {
@@ -849,8 +1994,11 @@ ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
       });
     }
     const sourcePath = path.resolve(selection.filePaths[0]);
+    const sourceFileName = path.basename(sourcePath).toLowerCase();
+    const supportedSourceName = sourceFileName.endsWith(".json") ||
+      sourceFileName.endsWith(".json.gz");
     const sourceStat = await fs.promises.lstat(sourcePath);
-    if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size < 1 ||
+    if (!supportedSourceName || !sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size < 1 ||
       sourceStat.size > MAX_NATIVE_V47_IMPORT_BYTES) {
       throw Object.assign(new Error("unsupported native v47 import selection"), {
         code: "NATIVE_CORE_V47_IMPORT_FILE_INVALID",
@@ -858,7 +2006,7 @@ ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
     }
     const imported = await runRendererNativeOperation("coreImport", {
       fallbackCode: "NATIVE_CORE_V47_IMPORT_FAILED",
-      message: "原生 v47 存档导入失败；未验证的内容不会进入游戏会话",
+      message: "原生 v46/v47 存档导入失败；未验证的内容不会进入游戏会话",
       onInvalidResult: async (raw) => {
         if (typeof raw?.sessionId === "string") await nativeCoreSessions?.close(ownerId, raw.sessionId);
       },
@@ -872,7 +2020,7 @@ ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
   } catch (error) {
     throw createRendererNativeError(error, {
       fallbackCode: "NATIVE_CORE_V47_IMPORT_FAILED",
-      message: "原生 v47 存档导入失败；未验证的内容不会进入游戏会话",
+      message: "原生 v46/v47 存档导入失败；未验证的内容不会进入游戏会话",
     });
   }
 });
@@ -909,6 +2057,283 @@ ipcMain.handle("desktop:native-core-viewport-projection", async (event, request)
   });
 });
 
+ipcMain.handle("desktop:native-core-viewport-projection-v2", async (event, request) => {
+  return runRendererNativeOperation("coreViewportProjectionV2", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生视口 v2 投影请求失败，请重试",
+    resultContext: nativeViewportProjectionV2ResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "viewport-v2", request);
+    }
+    return await nativeCoreSessions.viewportProjectionV2(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-factory-read-model", async (event, request) => {
+  return runRendererNativeOperation("coreFactoryReadModelProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生工厂只读模型请求失败，请重试",
+    resultContext: nativeFactoryReadModelResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "factory-read-model-v1", request);
+    }
+    return await nativeCoreSessions.factoryReadModelProjection(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-factory-inventory", async (event, request) => {
+  return runRendererNativeOperation("coreFactoryInventoryProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生工厂库存请求失败，请重试",
+    resultContext: nativeFactoryInventoryResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "factory-inventory-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.factoryInventoryProjection(ownerId, request),
+    });
+  });
+});
+
+ipcMain.handle("desktop:native-core-construction-inventory", async (event, request) => {
+  return runRendererNativeOperation("coreConstructionInventoryProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生建筑库存请求失败，请重试",
+    resultContext: nativeConstructionInventoryResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "construction-inventory-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.constructionInventoryProjection(ownerId, request),
+    });
+  });
+});
+
+ipcMain.handle("desktop:native-core-blueprint-workspace", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图只读模型请求失败，请重试",
+    resultContext: nativeBlueprintWorkspaceResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "blueprint-workspace-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.blueprintWorkspaceProjection(ownerId, request),
+    });
+  });
+});
+
+ipcMain.handle("desktop:native-core-blueprint-capture-context", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintCaptureContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图捕获上下文请求失败，请重试",
+    resultContext: nativeBlueprintCaptureContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "blueprint-capture-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.blueprintCaptureContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-blueprint-import-context", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintImportContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图导入上下文请求失败，请重试",
+    resultContext: nativeBlueprintImportContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "blueprint-import-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.blueprintImportContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-blueprint-export-context", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintExportContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图导出上下文请求失败，请重试",
+    resultContext: nativeBlueprintExportContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "blueprint-export-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.blueprintExportContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-blueprint-enqueue-context", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintEnqueueContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图入队上下文请求失败，请重试",
+    resultContext: nativeBlueprintEnqueueContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "blueprint-enqueue-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.blueprintEnqueueContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-blueprint-direct-deploy-context", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintDirectDeployContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图直接部署上下文请求失败，请重试",
+    resultContext: nativeBlueprintDirectDeployContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "blueprint-direct-deploy-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.blueprintDirectDeployContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-construction-placement-context", async (event, request) => {
+  return runRendererNativeOperation("coreConstructionPlacementContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生建筑放置上下文请求失败，请重试",
+    resultContext: nativeConstructionPlacementContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "construction-placement-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.constructionPlacementContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-construction-belt-placement-context", async (event, request) => {
+  return runRendererNativeOperation("coreConstructionBeltPlacementContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生传送带放置上下文请求失败，请重试",
+    resultContext: nativeConstructionBeltPlacementContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "construction-belt-placement-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.constructionBeltPlacementContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-construction-belt-removal-context", async (event, request) => {
+  return runRendererNativeOperation("coreConstructionBeltRemovalContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生传送带回收上下文请求失败，请重试",
+    resultContext: nativeConstructionBeltRemovalContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "construction-belt-removal-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.constructionBeltRemovalContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-construction-belt-lane-context", async (event, request) => {
+  return runRendererNativeOperation("coreConstructionBeltLaneContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生传送带并联调整上下文请求失败，请重试",
+    resultContext: nativeConstructionBeltLaneContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "construction-belt-lane-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.constructionBeltLaneContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-construction-removal-context", async (event, request) => {
+  return runRendererNativeOperation("coreConstructionRemovalContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生建筑回收上下文请求失败，请重试",
+    resultContext: nativeConstructionRemovalContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "construction-removal-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.constructionRemovalContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-construction-stack-context", async (event, request) => {
+  return runRendererNativeOperation("coreConstructionStackContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生建筑堆叠上下文请求失败，请重试",
+    resultContext: nativeConstructionStackContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "construction-stack-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.constructionStackContext(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-statistics-projection", async (event, request) => {
   return runRendererNativeOperation("coreStatisticsProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -916,8 +2341,303 @@ ipcMain.handle("desktop:native-core-statistics-projection", async (event, reques
     resultContext: nativeStatisticsProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
+    const hasPlayerAuthorityLineage = nativeStatisticsProjectionHasPlayerAuthorityLineage(request);
+    if (hasPlayerAuthorityLineage || nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority statistics projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "statistics-v1", request);
+    }
     return await nativeCoreSessions.statisticsProjection(ownerId, request);
   });
+});
+
+ipcMain.handle("desktop:native-core-technology-projection", async (event, request) => {
+  return runRendererNativeOperation("coreTechnologyProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生科研投影请求失败，请重试",
+    resultContext: nativeTechnologyProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativeProjectionHasPlayerAuthorityRun(request) ||
+        nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority technology projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "technology-v1", request);
+    }
+    return await nativeCoreSessions.technologyProjection(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-recipe-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreRecipeWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生生产资料库投影请求失败，请重试",
+    resultContext: nativeRecipeWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativeProjectionHasPlayerAuthorityRun(request) ||
+        nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority recipe projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "recipe-workspace-v1", request);
+    }
+    return await nativeCoreSessions.recipeWorkspaceProjection(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-star-map-overview-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStarMapOverviewProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生星图总览投影请求失败，请重试",
+    resultContext: nativeStarMapOverviewProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "star-map-overview-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.starMapOverviewProjection(ownerId, request),
+    });
+  });
+});
+
+ipcMain.handle("desktop:native-core-star-map-catalog-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStarMapCatalogProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生星图目录投影请求失败，请重试",
+    resultContext: nativeStarMapCatalogProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "star-map-catalog-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.starMapCatalogProjection(ownerId, request),
+    });
+  });
+});
+
+ipcMain.handle("desktop:native-core-stellar-industry-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStellarIndustryProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生恒星工业投影请求失败，请重试",
+    resultContext: nativeStellarIndustryProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "stellar-industry-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.stellarIndustryProjection(ownerId, request),
+    });
+  });
+});
+
+ipcMain.handle("desktop:native-core-stellar-industry-v2-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStellarIndustryProjectionV2", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生恒星工业 v2 投影请求失败，请重试",
+    resultContext: nativeStellarIndustryV2ProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "stellar-industry-v2",
+      request,
+      shadowRead: () => nativeCoreSessions.stellarIndustryProjectionV2(ownerId, request),
+    });
+  });
+});
+
+ipcMain.handle("desktop:native-core-stellar-quantum-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStellarQuantumProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生量子库存投影请求失败，请重试",
+    resultContext: nativeStellarQuantumProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "stellar-quantum-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.stellarQuantumProjection(ownerId, request),
+    });
+  });
+});
+
+ipcMain.handle("desktop:native-core-dyson-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreDysonWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生戴森球工作区投影请求失败，请重试",
+    resultContext: nativeDysonWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativeProjectionHasPlayerAuthorityRun(request) ||
+        nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority Dyson projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "dyson-workspace-v1", request);
+    }
+    return await nativeCoreSessions.dysonWorkspaceProjection(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-system-space-station-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreSystemSpaceStationWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生恒星系空间站工作区投影请求失败，请重试",
+    resultContext: nativeSystemSpaceStationWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "system-space-station-workspace-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.systemSpaceStationWorkspaceProjection(ownerId, request),
+    });
+  });
+});
+
+ipcMain.handle("desktop:native-core-orbital-contract-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreOrbitalContractWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生轨道合同工作区投影请求失败，请重试",
+    resultContext: nativeOrbitalContractWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生轨道合同投影仅对当前玩家权威会话开放");
+    }
+    return await nativePlayerAuthorityProjectionBroker.read(
+      ownerId,
+      "orbital-contract-workspace-v1",
+      request,
+    );
+  });
+});
+
+ipcMain.handle("desktop:native-core-campaign-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreCampaignWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生主线任务工作区投影请求失败，请重试",
+    resultContext: nativeCampaignWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生主线任务投影仅对当前玩家权威会话开放");
+    }
+    return await nativePlayerAuthorityProjectionBroker.read(
+      ownerId,
+      "campaign-workspace-v1",
+      request,
+    );
+  });
+});
+
+ipcMain.handle("desktop:native-core-galaxy-account-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreGalaxyAccountWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生银河账户工作区投影请求失败，请重试",
+    resultContext: nativeGalaxyAccountWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生银河账户投影仅对当前玩家权威会话开放");
+    }
+    return await nativePlayerAuthorityProjectionBroker.read(
+      ownerId,
+      "galaxy-account-workspace-v1",
+      request,
+    );
+  });
+});
+
+ipcMain.handle("desktop:native-core-operations-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreOperationsWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生运营中心投影请求失败，请重试",
+    resultContext: nativeOperationsWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生运营中心投影仅对当前玩家权威会话开放");
+    }
+    return await nativePlayerAuthorityProjectionBroker.read(ownerId, "operations-workspace-v1", request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event, request) => {
+  return runRendererNativeOperation("coreCommandPaletteEntitySearchProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生命令面板设备搜索失败，请重试",
+    resultContext: nativeCommandPaletteEntitySearchResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "command-palette-entity-search-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.commandPaletteEntitySearchProjection(ownerId, request),
+    });
+  });
+});
+
+ipcMain.on("desktop:native-core-projection-subscribe", (event, request) => {
+  const port = event.ports?.[0];
+  if (!port) return;
+  try {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    const normalized = normalizeSubscriptionRequest(request);
+    const key = `${rendererOwnerId}\0${normalized.subscriptionId}`;
+    if (nativeProjectionSubscriptions.has(key)) {
+      throw Object.assign(new Error("native projection subscription ID is already active"), {
+        code: "NATIVE_PROJECTION_SUBSCRIPTION_DUPLICATE",
+      });
+    }
+    const subscription = new NativeProjectionSubscription({
+      port,
+      initialRequest: normalized,
+      readProjection: (entry) => readNativeProjectionSubscriptionFrame(rendererOwnerId, entry),
+      encodeProjection: encodeNativeProjectionTransfer,
+      onClosed: (snapshot, reason) => {
+        if (nativeProjectionSubscriptions.get(key) === subscription) {
+          nativeProjectionSubscriptions.delete(key);
+        }
+        nativeProjectionSubscriptionHistory.push(Object.freeze({ ...snapshot, reason }));
+        if (nativeProjectionSubscriptionHistory.length > 64) {
+          nativeProjectionSubscriptionHistory.splice(0,
+            nativeProjectionSubscriptionHistory.length - 64);
+        }
+      },
+    });
+    nativeProjectionSubscriptions.set(key, subscription);
+    subscription.start();
+  } catch (error) {
+    postNativeProjectionTransferError(port, error);
+  }
 });
 
 ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
@@ -925,24 +2645,196 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
   if (!port) return;
   const run = async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (!request || typeof request !== "object" ||
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Reflect.ownKeys(request).length !== 4 ||
+      !["sessionId", "projectionType", "sequence", "payload"].every(
+        (key) => Object.prototype.hasOwnProperty.call(request, key),
+      ) ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "statistics-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
     }
     const normalizedRequest = { ...request.payload, sessionId: request.sessionId };
-    const rawResult = request.projectionType === "viewport-v1"
-      ? await nativeCoreSessions.viewportProjection(ownerId, normalizedRequest)
-      : await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
+    let rawResult;
+    if (request.projectionType === "viewport-v1") {
+      rawResult = await nativeCoreSessions.viewportProjection(ownerId, normalizedRequest);
+    } else if (nativeProjectionHasPlayerAuthorityRun(normalizedRequest) ||
+        nativePlayerAuthorityProjectionBroker?.ownsSession(request.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
+      rawResult = await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        request.projectionType,
+        normalizedRequest,
+      );
+    } else if (request.projectionType === "viewport-v2") {
+      rawResult = await nativeCoreSessions.viewportProjectionV2(ownerId, normalizedRequest);
+    } else if (request.projectionType === "factory-read-model-v1") {
+      rawResult = await nativeCoreSessions.factoryReadModelProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "factory-inventory-v1") {
+      rawResult = await nativeCoreSessions.factoryInventoryProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "construction-inventory-v1") {
+      rawResult = await nativeCoreSessions.constructionInventoryProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-workspace-v1") {
+      rawResult = await nativeCoreSessions.blueprintWorkspaceProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-capture-context-v1") {
+      rawResult = await nativeCoreSessions.blueprintCaptureContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-import-context-v1") {
+      rawResult = await nativeCoreSessions.blueprintImportContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-export-context-v1") {
+      rawResult = await nativeCoreSessions.blueprintExportContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-enqueue-context-v1") {
+      rawResult = await nativeCoreSessions.blueprintEnqueueContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-direct-deploy-context-v1") {
+      rawResult = await nativeCoreSessions.blueprintDirectDeployContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "construction-placement-context-v1") {
+      rawResult = await nativeCoreSessions.constructionPlacementContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "construction-belt-placement-context-v1") {
+      rawResult = await nativeCoreSessions.constructionBeltPlacementContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "construction-belt-lane-context-v1") {
+      rawResult = await nativeCoreSessions.constructionBeltLaneContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "construction-belt-removal-context-v1") {
+      rawResult = await nativeCoreSessions.constructionBeltRemovalContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "construction-removal-context-v1") {
+      rawResult = await nativeCoreSessions.constructionRemovalContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "construction-stack-context-v1") {
+      rawResult = await nativeCoreSessions.constructionStackContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "statistics-v1") {
+      rawResult = await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "recipe-workspace-v1") {
+      rawResult = await nativeCoreSessions.recipeWorkspaceProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "star-map-overview-v1") {
+      rawResult = await nativeCoreSessions.starMapOverviewProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "star-map-catalog-v1") {
+      rawResult = await nativeCoreSessions.starMapCatalogProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "stellar-industry-v1") {
+      rawResult = await nativeCoreSessions.stellarIndustryProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "stellar-industry-v2") {
+      rawResult = await nativeCoreSessions.stellarIndustryProjectionV2(ownerId, normalizedRequest);
+    } else if (request.projectionType === "stellar-quantum-v1") {
+      rawResult = await nativeCoreSessions.stellarQuantumProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "dyson-workspace-v1") {
+      rawResult = await nativeCoreSessions.dysonWorkspaceProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "system-space-station-workspace-v1") {
+      rawResult = await nativeCoreSessions.systemSpaceStationWorkspaceProjection(ownerId, normalizedRequest);
+    } else {
+      rawResult = await nativeCoreSessions.technologyProjection(ownerId, normalizedRequest);
+    }
     const result = normalizeRendererNativeResult(
-      request.projectionType === "viewport-v1" ? "coreViewportProjection" : "coreStatisticsProjection",
+      request.projectionType === "viewport-v1"
+        ? "coreViewportProjection"
+        : request.projectionType === "viewport-v2"
+          ? "coreViewportProjectionV2"
+          : request.projectionType === "factory-read-model-v1"
+            ? "coreFactoryReadModelProjection"
+            : request.projectionType === "factory-inventory-v1"
+              ? "coreFactoryInventoryProjection"
+              : request.projectionType === "construction-inventory-v1"
+                ? "coreConstructionInventoryProjection"
+                : request.projectionType === "blueprint-workspace-v1"
+                  ? "coreBlueprintWorkspaceProjection"
+                : request.projectionType === "blueprint-capture-context-v1"
+                  ? "coreBlueprintCaptureContext"
+                : request.projectionType === "blueprint-import-context-v1"
+                  ? "coreBlueprintImportContext"
+                : request.projectionType === "blueprint-export-context-v1"
+                  ? "coreBlueprintExportContext"
+                : request.projectionType === "blueprint-enqueue-context-v1"
+                  ? "coreBlueprintEnqueueContext"
+                : request.projectionType === "blueprint-direct-deploy-context-v1"
+                  ? "coreBlueprintDirectDeployContext"
+                : request.projectionType === "construction-placement-context-v1"
+                  ? "coreConstructionPlacementContext"
+                : request.projectionType === "construction-belt-placement-context-v1"
+                  ? "coreConstructionBeltPlacementContext"
+                : request.projectionType === "construction-belt-lane-context-v1"
+                  ? "coreConstructionBeltLaneContext"
+                : request.projectionType === "construction-belt-removal-context-v1"
+                  ? "coreConstructionBeltRemovalContext"
+                : request.projectionType === "construction-removal-context-v1"
+                  ? "coreConstructionRemovalContext"
+                : request.projectionType === "construction-stack-context-v1"
+                  ? "coreConstructionStackContext"
+                : request.projectionType === "statistics-v1"
+                  ? "coreStatisticsProjection"
+              : request.projectionType === "recipe-workspace-v1"
+                ? "coreRecipeWorkspaceProjection"
+                : request.projectionType === "star-map-overview-v1"
+                  ? "coreStarMapOverviewProjection"
+                  : request.projectionType === "star-map-catalog-v1"
+                    ? "coreStarMapCatalogProjection"
+                    : request.projectionType === "stellar-industry-v1"
+                    ? "coreStellarIndustryProjection"
+                  : request.projectionType === "stellar-industry-v2"
+                    ? "coreStellarIndustryProjectionV2"
+                    : request.projectionType === "stellar-quantum-v1"
+                      ? "coreStellarQuantumProjection"
+                      : request.projectionType === "dyson-workspace-v1"
+                        ? "coreDysonWorkspaceProjection"
+                        : request.projectionType === "system-space-station-workspace-v1"
+                          ? "coreSystemSpaceStationWorkspaceProjection"
+                        : "coreTechnologyProjection",
       rawResult,
       request.projectionType === "viewport-v1"
         ? nativeViewportProjectionResultContext(request.payload)
-        : nativeStatisticsProjectionResultContext(request.payload),
+        : request.projectionType === "viewport-v2"
+          ? nativeViewportProjectionV2ResultContext(normalizedRequest)
+          : request.projectionType === "factory-read-model-v1"
+            ? nativeFactoryReadModelResultContext(normalizedRequest)
+            : request.projectionType === "factory-inventory-v1"
+              ? nativeFactoryInventoryResultContext(normalizedRequest)
+              : request.projectionType === "construction-inventory-v1"
+                ? nativeConstructionInventoryResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-workspace-v1"
+                  ? nativeBlueprintWorkspaceResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-capture-context-v1"
+                  ? nativeBlueprintCaptureContextResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-import-context-v1"
+                  ? nativeBlueprintImportContextResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-export-context-v1"
+                  ? nativeBlueprintExportContextResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-enqueue-context-v1"
+                  ? nativeBlueprintEnqueueContextResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-direct-deploy-context-v1"
+                  ? nativeBlueprintDirectDeployContextResultContext(normalizedRequest)
+                : request.projectionType === "construction-placement-context-v1"
+                  ? nativeConstructionPlacementContextResultContext(normalizedRequest)
+                : request.projectionType === "construction-belt-placement-context-v1"
+                  ? nativeConstructionBeltPlacementContextResultContext(normalizedRequest)
+                : request.projectionType === "construction-belt-lane-context-v1"
+                  ? nativeConstructionBeltLaneContextResultContext(normalizedRequest)
+                : request.projectionType === "construction-belt-removal-context-v1"
+                  ? nativeConstructionBeltRemovalContextResultContext(normalizedRequest)
+                : request.projectionType === "construction-removal-context-v1"
+                  ? nativeConstructionRemovalContextResultContext(normalizedRequest)
+                : request.projectionType === "construction-stack-context-v1"
+                  ? nativeConstructionStackContextResultContext(normalizedRequest)
+                : request.projectionType === "statistics-v1"
+                  ? nativeStatisticsProjectionResultContext(request.payload)
+              : request.projectionType === "recipe-workspace-v1"
+                ? nativeRecipeWorkspaceProjectionResultContext(normalizedRequest)
+                : request.projectionType === "star-map-overview-v1"
+                  ? nativeStarMapOverviewProjectionResultContext(normalizedRequest)
+                  : request.projectionType === "star-map-catalog-v1"
+                    ? nativeStarMapCatalogProjectionResultContext(normalizedRequest)
+                    : request.projectionType === "stellar-industry-v1"
+                    ? nativeStellarIndustryProjectionResultContext(normalizedRequest)
+                  : request.projectionType === "stellar-industry-v2"
+                    ? nativeStellarIndustryV2ProjectionResultContext(normalizedRequest)
+                    : request.projectionType === "stellar-quantum-v1"
+                      ? nativeStellarQuantumProjectionResultContext(normalizedRequest)
+                      : request.projectionType === "dyson-workspace-v1"
+                        ? nativeDysonWorkspaceProjectionResultContext(normalizedRequest)
+                        : request.projectionType === "system-space-station-workspace-v1"
+                          ? nativeSystemSpaceStationWorkspaceProjectionResultContext(normalizedRequest)
+                        : nativeTechnologyProjectionResultContext(normalizedRequest),
     );
     const transfer = encodeNativeProjectionTransfer({
       sessionId: request.sessionId,
@@ -973,13 +2865,121 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     .finally(() => closeTransferPort(port));
 });
 
+// Startup settlement is a read-only candidate transaction. Renderer supplies
+// only an exact source proof; main owns both the wall clock and the temporary
+// export identity. Rust keeps the source session/checkpoint unchanged until
+// the browser validates and persists the streamed v47 envelope.
+ipcMain.on("desktop:native-offline-startup-transfer", (event, request) => {
+  const port = event.ports?.[0];
+  if (!port) return;
+  const run = async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    await streamNativeOfflineStartupCandidate({
+      registry: nativeCoreSessions,
+      ownerId,
+      request,
+      observedNowMs: sampleNativeOfflineStartupWallClock(),
+      nativeRootPath: resolveFixedNativeSaveRootPath(
+        performanceEditionRuntimeIdentity.userDataPath,
+      ),
+      port,
+      normalizeResult: (value) => normalizeRendererNativeResult(
+        "coreOfflineCandidateExport",
+        value,
+      ),
+    });
+  };
+  void run()
+    .catch((error) => postNativeOfflineStartupTransferError(port, error))
+    .finally(() => closeTransferPort(port));
+});
+
 ipcMain.handle("desktop:native-core-apply-command", async (event, request) => {
   return runRendererNativeOperation("coreCommand", {
     fallbackCode: "NATIVE_CORE_COMMAND_FAILED",
     message: "原生影子命令执行失败，请重试",
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityCommandBroker?.ownsSession(request?.sessionId)) {
+      return nativePlayerAuthorityCommandBroker.commit(ownerId, request);
+    }
     return nativeCoreSessions.applyCommand(ownerId, request?.sessionId, request?.command);
+  });
+});
+
+ipcMain.handle("desktop:native-core-reconcile-command", async (event, request) => {
+  return runRendererNativeOperation("coreCommandReconcile", {
+    fallbackCode: "NATIVE_CORE_COMMAND_RECONCILE_FAILED",
+    message: "原生权威命令耐久收据对账失败",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityCommandBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生玩家权威命令对账会话不可用");
+    }
+    return nativePlayerAuthorityCommandBroker.reconcile(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-history-status", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_HISTORY_STATUS_FAILED",
+    message: "原生撤销历史读取失败",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityCommandBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生撤销历史会话不可用");
+    }
+    return nativePlayerAuthorityCommandBroker.historyStatus(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-history-commit", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_HISTORY_COMMIT_FAILED",
+    message: "原生撤销或重做提交失败",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityCommandBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生撤销历史会话不可用");
+    }
+    return nativePlayerAuthorityCommandBroker.commitHistory(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-system-space-station-intent", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_FAILED",
+    message: "原生恒星系空间站命令提交失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthoritySystemSpaceStationBroker) {
+      throw new Error("原生恒星系空间站权威命令不可用");
+    }
+    return nativePlayerAuthoritySystemSpaceStationBroker.commit(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-orbital-contract-intent", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_FAILED",
+    message: "原生轨道合同命令提交失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityOrbitalContractBroker) {
+      throw new Error("原生轨道合同权威命令不可用");
+    }
+    return nativePlayerAuthorityOrbitalContractBroker.commit(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-operations-setting-intent", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_FAILED",
+    message: "原生运营设置提交失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityOperationsSettingBroker) throw new Error("原生运营设置权威命令不可用");
+    return nativePlayerAuthorityOperationsSettingBroker.commit(ownerId, request);
   });
 });
 
@@ -1013,13 +3013,7 @@ ipcMain.handle("desktop:native-core-checkpoint", async (event, request) => {
   });
 });
 
-ipcMain.handle("desktop:native-core-export-v47", async (event, request) => {
-  try {
-    const ownerId = requireTrustedNativeSender(event);
-    const suggestedName = typeof request?.suggestedName === "string" && /^[A-Za-z0-9._\-\u4e00-\u9fff]{1,160}\.json$/.test(request.suggestedName)
-      ? request.suggestedName
-      : `dsp-idle-native-${Date.now()}.json`;
-    const prepared = normalizeRendererNativeResult("coreExport", await nativeCoreSessions.exportV47(ownerId, request));
+async function deliverNativeV47Export(prepared, suggestedName) {
     const sourcePath = path.join(nativeHostClient.rootPath, "exports", `${prepared.exportId}.json`);
     const sourceStat = await fs.promises.stat(sourcePath);
     const sourceSha256 = sourceStat.isFile() ? await sha256File(sourcePath) : "";
@@ -1092,10 +3086,158 @@ ipcMain.handle("desktop:native-core-export-v47", async (event, request) => {
       cancelled: false,
       fileName: path.basename(targetPath),
     };
+}
+
+function suggestedNativeExportName(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._\-\u4e00-\u9fff]{1,160}\.json$/.test(value)
+    ? value
+    : `dsp-idle-native-${Date.now()}.json`;
+}
+
+ipcMain.handle("desktop:native-core-export-v47", async (event, request) => {
+  try {
+    const ownerId = requireTrustedNativeSender(event);
+    const prepared = normalizeRendererNativeResult(
+      "coreExport",
+      await nativeCoreSessions.exportV47(ownerId, request),
+    );
+    return await deliverNativeV47Export(prepared, suggestedNativeExportName(request?.suggestedName));
   } catch (error) {
     throw createRendererNativeError(error, {
       fallbackCode: "NATIVE_CORE_V47_EXPORT_FAILED",
       message: "原生 v47 存档导出失败；目标文件不会接收未经校验的内容",
+    });
+  }
+});
+
+ipcMain.handle("desktop:native-player-authority-checkpoint", async (event) => {
+  return runRendererNativeOperation("playerAuthorityCheckpoint", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED",
+    message: "Windows 原生权威检查点验证失败，请重试",
+  }, async () => {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityPersistenceBroker) {
+      throw Object.assign(new Error("native player-authority persistence broker is unavailable"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_UNAVAILABLE",
+      });
+    }
+    return nativePlayerAuthorityPersistenceBroker.checkpoint(rendererOwnerId);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-restart-from-durable", async (event, request) => {
+  try {
+    requireTrustedNativeSender(event);
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+        Reflect.ownKeys(request).length !== 1 || !Object.hasOwn(request, "expectedRevision") ||
+        !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+        nativePlayerAuthorityRestartScheduled || !nativePlayerAuthorityRuntime || !nativeCoreSessions) {
+      throw Object.assign(new Error("native player-authority durable restart request is invalid"), {
+        code: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_INVALID",
+      });
+    }
+    const proof = nativePlayerAuthorityRuntime.prepareDurableRestart();
+    if (proof.minimumRevision !== request.expectedRevision) {
+      throw Object.assign(new Error("native player-authority durable restart revision is stale"), {
+        code: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_STALE",
+      });
+    }
+    const owned = nativeCoreSessions.inspectSession("main-player-authority", proof.sessionId);
+    if (owned?.ownerId !== "main-player-authority" || owned.slot !== "normal-main" ||
+        owned.state !== "owned" || owned.inFlight !== 0) {
+      throw Object.assign(new Error("native player-authority durable restart owner is not settled"), {
+        code: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_OWNER_INVALID",
+      });
+    }
+    const summary = await nativeCoreSessions.status("main-player-authority", proof.sessionId);
+    if (!summary || summary.stateVersion !== 47 || summary.mode !== "normal" ||
+        !Number.isSafeInteger(summary.revision) || summary.revision < proof.minimumRevision ||
+        summary.coverage?.authorityEligible !== true) {
+      throw Object.assign(new Error("native player-authority durable restart state is not recoverable"), {
+        code: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_STATE_INVALID",
+      });
+    }
+    nativePlayerAuthorityRestartScheduled = true;
+    const response = Object.freeze({
+      schemaVersion: 1,
+      accepted: true,
+      recoveryMode: "rust-durable-reconcile",
+      minimumRevision: proof.minimumRevision,
+    });
+    setTimeout(() => {
+      app.relaunch();
+      app.quit();
+    }, 100);
+    return response;
+  } catch (error) {
+    throw createRendererNativeError(error, {
+      fallbackCode: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_FAILED",
+      message: "Windows 原生权威无法从当前 durable 边界安全重启；旧 JavaScript 镜像未启用",
+    });
+  }
+});
+
+ipcMain.handle("desktop:native-player-authority-export-v47", async (event, request) => {
+  try {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityPersistenceBroker || !request || typeof request !== "object" ||
+        Reflect.ownKeys(request).some((key) => !["exportId", "savedAtMs", "suggestedName"].includes(key)) ||
+        !Object.hasOwn(request, "exportId") || !Object.hasOwn(request, "savedAtMs")) {
+      throw Object.assign(new Error("native player-authority export request is invalid"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_INVALID",
+      });
+    }
+    const prepared = normalizeRendererNativeResult(
+      "playerAuthorityExport",
+      await nativePlayerAuthorityPersistenceBroker.exportV47(rendererOwnerId, {
+        exportId: request.exportId,
+        savedAtMs: request.savedAtMs,
+      }),
+    );
+    // Validate the exact renderer-bound session/run before the temporary file
+    // can be published. A post-export UI warning must never turn a cross-lineage
+    // artifact into a successful download.
+    nativePlayerAuthorityPersistenceBroker.assertBoundRendererArtifact(
+      rendererOwnerId,
+      prepared.authority,
+      prepared.result.revision,
+    );
+    const delivered = await deliverNativeV47Export({
+      exportId: prepared.exportId,
+      mode: prepared.mode,
+      result: prepared.result,
+    }, suggestedNativeExportName(request.suggestedName));
+    return { authority: prepared.authority, ...delivered };
+  } catch (error) {
+    throw createRendererNativeError(error, {
+      fallbackCode: "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED",
+      message: "Windows 原生权威 v47 存档导出失败；目标文件不会接收未经校验的内容",
+    });
+  }
+});
+
+ipcMain.handle("desktop:native-player-authority-cloud-upload", async (event, request) => {
+  try {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityPersistenceBroker || !nativeHostClient) {
+      throw Object.assign(new Error("native player-authority persistence broker is unavailable"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_UNAVAILABLE",
+      });
+    }
+    const transfer = new NativeAuthorityCloudTransfer({
+      rootPath: nativeHostClient.rootPath,
+      resolveRequestUrl: resolveApiRequestUrl,
+      exportArtifact: (exportRequest) =>
+        nativePlayerAuthorityPersistenceBroker.exportV47(rendererOwnerId, exportRequest),
+    });
+    return await transfer.upload(request, (progress) => {
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.id !== rendererOwnerId) return;
+      mainWindow.webContents.send("desktop:native-player-authority-cloud-progress", progress);
+    });
+  } catch (error) {
+    throw createRendererNativeError(error, {
+      fallbackCode: "NATIVE_PLAYER_AUTHORITY_CLOUD_UPLOAD_FAILED",
+      message: "Windows 原生权威云上传失败；本地检查点不会被覆盖",
     });
   }
 });
@@ -1414,6 +3556,8 @@ if (!hasSingleInstanceLock) {
 
 app.on("before-quit", (event) => {
   persistWindowState();
+  resetNativePlayerAuthorityRetryCoordinators();
+  nativePlayerAuthorityRuntime?.shutdownForProcessExit();
   cancelAllAccountArchiveDownloads();
   if (updateTimer) clearInterval(updateTimer);
   const accountArchiveReady = accountArchiveQuitDrainComplete || activeAccountArchiveDownloadCompletions.size === 0;

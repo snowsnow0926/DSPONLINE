@@ -15,6 +15,7 @@ export type CanvasConnectionHint = { label: string; tone: "ready" | "blocked" | 
 interface CanvasInteractionOverlayProps {
   active: boolean;
   placement: BuildingId | null;
+  nativePlacementLabel?: string | null;
   placementCount: PlacementCount;
   cargo: CargoStack | null;
   blueprint: BlueprintDefinition | null;
@@ -53,6 +54,7 @@ function ClickConnectionPreview({ preview, pointer, tone }: {
 export const CanvasInteractionOverlay = memo(function CanvasInteractionOverlay({
   active,
   placement,
+  nativePlacementLabel = null,
   placementCount,
   cargo,
   blueprint,
@@ -89,6 +91,15 @@ export const CanvasInteractionOverlay = memo(function CanvasInteractionOverlay({
   return <>
     {clickConnectionPreview ? <ClickConnectionPreview preview={clickConnectionPreview} pointer={previewPointer} tone={clickConnectionTone} /> : null}
     <BuildingPlacementCursor buildingId={cargo ? null : placement} count={placementCount} x={pointer.x} y={pointer.y} />
+    {!cargo && !placement && nativePlacementLabel ? <div
+      className="building-placement-cursor"
+      data-native-placement-cursor="true"
+      style={{ transform: `translate3d(${pointer.x + 16}px, ${pointer.y + 16}px, 0)` }}
+    >
+      <div className="building-placement-array" aria-hidden="true"><i>◆</i></div>
+      <span>{nativePlacementLabel}</span>
+      <strong>单栋 · Rust 复核</strong>
+    </div> : null}
     <CargoCursor cargo={cargo} x={pointer.x} y={pointer.y} />
     {blueprint ? <BlueprintPlacementCursor blueprint={blueprint} x={pointer.x} y={pointer.y + (cargo ? 42 : 0)} /> : null}
     {connectionHint ? <div className={`connection-hint connection-hint--${connectionHint.tone}`} style={{ transform: `translate3d(${pointer.x + 18}px, ${pointer.y + 18}px, 0)` }}>{connectionHint.label}</div> : null}

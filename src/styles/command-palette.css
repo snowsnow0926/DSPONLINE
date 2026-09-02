@@ -68,6 +68,12 @@
 .command-palette-list > button > svg { color: var(--green); }
 .command-item-swatch { display: grid; width: 23px; height: 23px; place-items: center; border-radius: 3px; color: #0b100e; font-size: 7px; font-weight: 800; }
 .command-palette-empty { display: grid; min-height: 160px; place-items: center; color: var(--muted); font-size: 9px; }
+.command-palette-search-status { padding: 12px 10px; color: var(--muted); font-size: 9px; text-align: center; }
+.command-palette-search-status[data-status="truncated"],
+.command-palette-search-status[data-status="unavailable"] { color: var(--yellow); }
+.command-palette-pagination { display: flex; align-items: center; justify-content: center; gap: 9px; padding: 8px 6px 3px; color: var(--muted); font-size: 8px; }
+.command-palette-pagination button { min-height: 27px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 3px; background: #151d19; color: var(--text-soft); font: inherit; cursor: pointer; }
+.command-palette-pagination button:disabled { cursor: default; opacity: 0.42; }
 
 .command-palette > footer { display: flex; align-items: center; justify-content: flex-end; gap: 13px; padding: 0 12px; border-top: 1px solid var(--line); background: #0d1210; color: var(--muted); font-size: 7px; }
 .command-palette > footer span { display: flex; align-items: center; gap: 3px; }

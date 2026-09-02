@@ -1713,18 +1713,13 @@ test("production regions persist visual boundaries without blocking normal canva
   await editor.getByLabel("区域名称").fill("蓝糖生产区");
   await editor.getByLabel("区域名称").press("Enter");
   const colors = editor.locator('input[type="color"]');
-  await colors.nth(0).evaluate((element) => {
-    const input = element as HTMLInputElement;
-    input.value = "#334455";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-  await colors.nth(1).evaluate((element) => {
-    const input = element as HTMLInputElement;
-    input.value = "#77CCAA";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  });
+  const shell = page.locator(".game-shell");
+  await expect(shell).toHaveAttribute("data-primary-save-edit-lock", "false", { timeout: 15_000 });
+  await colors.nth(0).fill("#334455");
+  await expect(colors.nth(0)).toHaveValue("#334455");
+  await expect(shell).toHaveAttribute("data-primary-save-edit-lock", "false", { timeout: 15_000 });
+  await colors.nth(1).fill("#77ccaa");
+  await expect(colors.nth(1)).toHaveValue("#77ccaa");
   await expect(region.locator(".canvas-region__label")).toContainText("蓝糖生产区");
   await expect(region).toHaveCSS("border-color", "rgb(119, 204, 170)");
   const southeastHandle = page.getByLabel("调整右下角：蓝糖生产区");

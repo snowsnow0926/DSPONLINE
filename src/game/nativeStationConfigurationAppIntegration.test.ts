@@ -1,0 +1,66 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+describe("native station configuration App integration", () => {
+  const app = readFileSync(resolve("src/App.tsx"), "utf8");
+  const inspector = readFileSync(resolve("src/components/NativeFactoryInspectorPanel.tsx"), "utf8");
+
+  it("forms the station binding only from the exact Rust inspector and selection atom", () => {
+    const start = app.indexOf("const nativeStationConfigurationProjectionBinding");
+    const end = app.indexOf("const nativeTimeWarpControllerProjectionBinding", start);
+    const binding = app.slice(start, end);
+    expect(start).toBeGreaterThan(0);
+    expect(binding).toMatch(/factoryInteractionRows\.source !== "native-authoritative"/);
+    expect(binding).toMatch(/commandIdentity\.sessionId !== nativePlayerAuthorityActiveFrame\.sessionId/);
+    expect(binding).toMatch(/commandIdentity\.runId !== nativePlayerAuthorityActiveFrame\.runId/);
+    expect(binding).toMatch(/commandIdentity\.revision !== nativePlayerAuthorityActiveFrame\.revision/);
+    expect(binding).toMatch(/selectNativeProjectedStationConfigurationBinding\(\{[\s\S]*?inspector: factoryInspectorSummaryReadModel,[\s\S]*?selection: factoryMultiSelectionSummaryReadModel/);
+    expect(binding).not.toMatch(/gameRef|game\.entities|stationRoutes/);
+  });
+
+  it("rechecks selection drift, emits only typed intents, and refreshes after durable ACK", () => {
+    const start = app.indexOf("const changeNativeStationConfiguration");
+    const end = app.indexOf("const selectedBelts", start);
+    const handler = app.slice(start, end);
+    expect(start).toBeGreaterThan(0);
+    expect(handler).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current/);
+    expect(handler).toMatch(/nativeFactoryProjectionIdentityRef\.current/);
+    expect(handler).toMatch(/nativePlayerAuthorityCommandBindingRef\.current\?\.source/);
+    expect(handler).toMatch(/selectedEntityIdsRef\.current\.length !== 1[\s\S]*?selectedBeltIdsRef\.current\.length !== 0/);
+    expect(handler).toMatch(/createNativeProjectedStationSlotModeCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationSlotItemCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationSlotPriorityCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationSlotMinimumLoadCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationSlotLimitsCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationSlotRoutePolicyCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationSlotWarperBudgetCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationFleetAdjustmentCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationWarperInventoryAdjustmentCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationScalarCommand/);
+    expect(handler).toMatch(/durable revision \$\{receipt\.revision\}/);
+    expect(handler).not.toMatch(/commitGame|gameRef\.current|stationRoutes|stationDrones|stationVessels|stationWarpers|portableFleet|space_warper|inputs|outputs/);
+  });
+
+  it("wires the native panel while leaving the ordinary Web station handlers intact", () => {
+    expect(app).toMatch(/stationConfiguration=\{nativeStationConfigurationProjectionBinding\}/);
+    expect(app).toMatch(/onStationConfigurationChange=\{changeNativeStationConfiguration\}/);
+    expect(inspector).toMatch(/data-native-station-configuration="bounded-slot-intents-v1"/);
+    expect(inspector).toMatch(/aria-label=\{`Windows 原生\$\{label\}数量`\}/);
+    expect(inspector).toMatch(/aria-label="Windows 原生站内翘曲器数量"/);
+    expect(inspector).toMatch(/kind: "station-fleet-adjust"/);
+    expect(inspector).toMatch(/kind: "station-warper-inventory-adjust"/);
+    expect(inspector).toMatch(/configuration\.itemOptions\.rows\.map/);
+    expect(inspector).toMatch(/确认后会取消相关物流路线、退款对应缓存与未使用的翘曲器，并拆除匹配旧物品的输入\/输出线路/);
+    const stationStart = inspector.indexOf("function NativeStationConfiguration");
+    const stationEnd = inspector.indexOf("function NativeEntitySummary", stationStart);
+    const stationUi = inspector.slice(stationStart, stationEnd);
+    expect(stationStart).toBeGreaterThan(0);
+    expect(stationUi).not.toMatch(/gameRef|game\.entities|ITEMS\[|stationRoutes/);
+    expect(stationUi).not.toContain("物品（只读）");
+    expect(app).toMatch(/onStationPriorityChange=\{\(entityId:[\s\S]*?setStationSlotPriority/);
+    expect(app).toMatch(/onStationMinimumLoadChange=\{\(entityId:[\s\S]*?setStationSlotMinimumLoad/);
+    expect(app).toMatch(/onStationLimitsChange=\{\(entityId:[\s\S]*?setStationSlotLimits/);
+  });
+});

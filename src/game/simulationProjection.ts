@@ -1,4 +1,4 @@
-import type { BeltConnection, FactoryEntity, GameState, PlanetId } from "./types";
+import type { BeltConnection, FactoryEntity, GameState, PlanetId, ProductionHistorySample } from "./types";
 import type { FactoryAlertProjection } from "./alerts";
 
 /** Versioned, UI-only projection carried alongside the authoritative state. */
@@ -36,6 +36,33 @@ export interface SimulationProjection {
   totalProduced: number;
   /** Compact exact global alert rows derived in the authoritative Worker. */
   alerts?: FactoryAlertProjection;
+}
+
+/**
+ * Independent, read-only statistics history.  This payload is deliberately not
+ * a GameState projection: opening the statistics workspace must not make the
+ * renderer adopt unrelated deferred fields such as Dyson plans.
+ */
+export interface StatisticsHistoryReadModel {
+  schemaVersion: 1;
+  kind: "statistics-history-v1";
+  revision: number;
+  samples: ProductionHistorySample[];
+}
+
+export function createStatisticsHistoryReadModel(
+  current: GameState,
+  revision: number,
+): StatisticsHistoryReadModel {
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new RangeError("统计历史 revision 无效");
+  }
+  return {
+    schemaVersion: 1,
+    kind: "statistics-history-v1",
+    revision,
+    samples: current.productionHistory,
+  };
 }
 
 interface ProjectionFieldBaseline {

@@ -52,15 +52,31 @@ async function seedV108Factory(page: Page, options: { mobileUi?: "legacy" | "nex
 
 async function openFactory(page: Page, path = "/") {
   const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
-  await page.addLocatorHandler(offlineReport, async () => {
-    await offlineReport.getByRole("button", { name: "确认结算" }).click({ force: true });
-  });
   await page.goto(path);
   const acknowledgeRelease = page.getByRole("button", { name: "我知道了" });
   if (await acknowledgeRelease.isVisible().catch(() => false)) await acknowledgeRelease.click();
   const onboarding = page.getByRole("button", { name: /^(?:关闭|跳过)启动引导$/ });
   if (await onboarding.count()) await onboarding.first().click();
   await expect(page.locator(".factory-canvas")).toBeVisible();
+  await offlineReport.waitFor({ state: "visible", timeout: 1_500 }).catch(() => undefined);
+  if (await offlineReport.isVisible().catch(() => false)) {
+    const originalDuration = await offlineReport.locator(".offline-runtime > strong").innerText();
+    const seconds = Number(/^([1-9]\d*) 秒$/.exec(originalDuration)?.[1] ?? Number.NaN);
+    expect(Number.isInteger(seconds) && seconds <= 10).toBe(true);
+    await expect(offlineReport.locator(".offline-runtime > small")).toHaveText(`实际提交 ${seconds} 秒`);
+    const method = offlineReport.locator(".offline-report-method");
+    await expect(method).toHaveClass(/offline-report-method--exact/);
+    await expect(method.locator("header strong")).toHaveText("精确结算");
+    await expect(method.locator("dl > div").filter({ hasText: "精确校准" }).locator("dd")).toHaveText("全程精确");
+    await expect(method.locator("dl > div").filter({ hasText: "宏观覆盖" }).locator("dd")).toHaveText("未使用");
+    await expect(method.locator("dl > div").filter({ hasText: "估计最大误差" }).locator("dd")).toHaveText("0.00%");
+    await expect(method.locator("dl > div").filter({ hasText: "算法版本" }).locator("dd")).toHaveText("deterministic-exact");
+    await expect(method.locator("dl > div").filter({ hasText: "收益提交" }).locator("dd")).toHaveText("已验证提交");
+    await expect(method.locator("dl > div").filter({ hasText: "结算状态" }).locator("dd")).toHaveText("精确");
+    await expect(method.locator(".offline-report-warning")).toHaveCount(0);
+    await offlineReport.getByRole("button", { name: "确认结算" }).click();
+    await expect(offlineReport).toBeHidden();
+  }
 }
 
 function checksum(formatVersion: number, state: unknown): string {
@@ -200,7 +216,20 @@ test("classic-mobile delivery ports remain reachable at 200 percent text", async
   await seedV108Factory(page, { mobileUi: "legacy", fontScale: 2 });
   await page.setViewportSize({ width: 390, height: 844 });
   await openFactory(page, "/?mobileUi=legacy");
-  await page.locator('.react-flow__node[data-id="v108_hub"]').click();
+  const hub = page.locator('.react-flow__node[data-id="v108_hub"]');
+  await page.locator(".react-flow__controls-fitview").click();
+  await expect.poll(async () => hub.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const topmostNode = document.elementFromPoint(centerX, centerY)?.closest(".react-flow__node");
+    return rect.left >= 0
+      && rect.right <= window.innerWidth
+      && rect.top >= 0
+      && rect.bottom <= window.innerHeight
+      && topmostNode === element;
+  })).toBe(true);
+  await hub.click();
   const shell = page.locator(".game-shell");
   if (!await shell.evaluate((element) => element.classList.contains("mobile-panel--inspector"))) {
     await page.getByLabel("打开检查器").click();
@@ -218,4 +247,3 @@ test("classic-mobile delivery ports remain reachable at 200 percent text", async
   await expect.poll(() => inspector.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/v108-classic-mobile-delivery-font200-390x844.png", fullPage: true });
 });
-

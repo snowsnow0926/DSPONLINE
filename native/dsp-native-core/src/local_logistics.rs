@@ -1,28 +1,41 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
+use sha2::{Digest, Sha256};
 
-use crate::state::{CoreState, ExactRowIdIndex};
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
+use crate::state::CoreState;
+#[cfg(test)]
+use crate::state::ExactRowIdIndex;
+use crate::station_route_ledger::StationRouteLedger;
 
 const EPSILON: f64 = 0.0001;
 const SLOT_COUNT: usize = 5;
+const BUFFER_ROWS_PER_CHUNK: usize = 1_024;
 const DRONES_PER_BUILDING: f64 = 50.0;
 const CARGO_PER_DRONE: f64 = 25.0;
 const BASE_TRIP_SECONDS: f64 = 8.0;
+const LOCAL_ROUTE_DENSE_NUMERATOR: usize = 3;
+const LOCAL_ROUTE_DENSE_DENOMINATOR: usize = 4;
+const LOCAL_READY_DENSE_NUMERATOR: usize = 3;
+const LOCAL_READY_DENSE_DENOMINATOR: usize = 4;
+const LOCAL_DISPATCH_DENSE_NUMERATOR: usize = 3;
+const LOCAL_DISPATCH_DENSE_DENOMINATOR: usize = 4;
 
 #[derive(Debug, Clone)]
 struct Slot {
-    item_id: Option<String>,
+    item_id: Option<Arc<str>>,
     local_mode: LocalMode,
     minimum_load: f64,
     min_stock: f64,
     max_stock: f64,
-    priority: usize,
+    priority: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum LocalMode {
     Supply,
     Demand,
@@ -40,6 +53,7 @@ impl LocalMode {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct Ledger {
     busy: HashMap<usize, f64>,
@@ -50,6 +64,137 @@ struct Ledger {
     active_local_progress: HashMap<usize, f64>,
 }
 
+trait LocalLedgerView: Sync {
+    fn local_busy(&self, station_index: usize) -> f64;
+    fn in_flight(&self, station_index: usize, item_id: &str) -> f64;
+    fn is_active_local_station(&self, station_index: usize) -> bool;
+    #[cfg(test)]
+    fn active_local_progress(&self, station_index: usize) -> f64;
+}
+
+trait LocalDispatchLedger: LocalLedgerView {
+    fn reserved(&self, station_index: usize, item_id: &str) -> f64;
+    fn active_vehicle_load(&self, station_index: usize) -> f64;
+    #[allow(clippy::too_many_arguments)]
+    fn record_dispatch(
+        &mut self,
+        demand_index: usize,
+        supply_index: usize,
+        owner_index: usize,
+        item_id: &str,
+        cargo: f64,
+        vehicles: f64,
+        progress: f64,
+    );
+}
+
+#[cfg(test)]
+impl LocalLedgerView for Ledger {
+    fn local_busy(&self, station_index: usize) -> f64 {
+        self.busy.get(&station_index).copied().unwrap_or(0.0)
+    }
+
+    fn in_flight(&self, station_index: usize, item_id: &str) -> f64 {
+        ledger_item_amount(&self.in_flight, station_index, item_id)
+    }
+
+    fn is_active_local_station(&self, station_index: usize) -> bool {
+        self.active_local_stations.contains(&station_index)
+    }
+
+    #[cfg(test)]
+    fn active_local_progress(&self, station_index: usize) -> f64 {
+        self.active_local_progress
+            .get(&station_index)
+            .copied()
+            .unwrap_or(0.0)
+    }
+}
+
+#[cfg(test)]
+impl LocalDispatchLedger for Ledger {
+    fn reserved(&self, station_index: usize, item_id: &str) -> f64 {
+        ledger_item_amount(&self.reserved, station_index, item_id)
+    }
+
+    fn active_vehicle_load(&self, station_index: usize) -> f64 {
+        self.active_vehicle_load
+            .get(&station_index)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    fn record_dispatch(
+        &mut self,
+        demand_index: usize,
+        supply_index: usize,
+        owner_index: usize,
+        item_id: &str,
+        cargo: f64,
+        vehicles: f64,
+        _progress: f64,
+    ) {
+        *self.busy.entry(owner_index).or_default() += vehicles;
+        add_ledger_item_amount(&mut self.reserved, supply_index, item_id, cargo);
+        add_ledger_item_amount(&mut self.in_flight, demand_index, item_id, cargo);
+        for station_index in HashSet::from([demand_index, supply_index, owner_index]) {
+            *self.active_vehicle_load.entry(station_index).or_default() += vehicles;
+        }
+    }
+}
+
+impl LocalLedgerView for StationRouteLedger {
+    fn local_busy(&self, station_index: usize) -> f64 {
+        StationRouteLedger::local_busy_floor(self, station_index)
+    }
+
+    fn in_flight(&self, station_index: usize, item_id: &str) -> f64 {
+        StationRouteLedger::local_in_flight(self, station_index, item_id)
+    }
+
+    fn is_active_local_station(&self, station_index: usize) -> bool {
+        StationRouteLedger::is_active_local_station(self, station_index)
+    }
+
+    #[cfg(test)]
+    fn active_local_progress(&self, station_index: usize) -> f64 {
+        StationRouteLedger::active_local_progress(self, station_index)
+    }
+}
+
+impl LocalDispatchLedger for StationRouteLedger {
+    fn reserved(&self, station_index: usize, item_id: &str) -> f64 {
+        StationRouteLedger::local_reserved(self, station_index, item_id)
+    }
+
+    fn active_vehicle_load(&self, station_index: usize) -> f64 {
+        StationRouteLedger::local_active_vehicle_load(self, station_index)
+    }
+
+    fn record_dispatch(
+        &mut self,
+        demand_index: usize,
+        supply_index: usize,
+        owner_index: usize,
+        item_id: &str,
+        cargo: f64,
+        vehicles: f64,
+        progress: f64,
+    ) {
+        StationRouteLedger::record_local_dispatch(
+            self,
+            demand_index,
+            supply_index,
+            owner_index,
+            item_id,
+            cargo,
+            vehicles,
+            progress,
+        );
+    }
+}
+
+#[cfg(test)]
 fn ledger_item_amount(
     values: &HashMap<usize, HashMap<String, f64>>,
     station_index: usize,
@@ -62,6 +207,7 @@ fn ledger_item_amount(
         .unwrap_or(0.0)
 }
 
+#[cfg(test)]
 fn add_ledger_item_amount(
     values: &mut HashMap<usize, HashMap<String, f64>>,
     station_index: usize,
@@ -157,7 +303,10 @@ fn stacked_capacity(base: f64, count: f64, limit: f64) -> f64 {
     }
 }
 
-fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
+fn slots_with_item_symbols(
+    entity: &Map<String, Value>,
+    item_symbols: &mut HashMap<String, Arc<str>>,
+) -> anyhow::Result<Vec<Slot>> {
     let values = entity
         .get("stationSlots")
         .and_then(Value::as_array)
@@ -179,8 +328,17 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
             {
                 bail!("native local station minimum load is invalid");
             }
+            let item_id = string_at(slot, "itemId").map(|item_id| {
+                if let Some(symbol) = item_symbols.get(item_id) {
+                    Arc::clone(symbol)
+                } else {
+                    let symbol = Arc::<str>::from(item_id);
+                    item_symbols.insert(item_id.to_owned(), Arc::clone(&symbol));
+                    symbol
+                }
+            });
             Ok(Slot {
-                item_id: string_at(slot, "itemId").map(str::to_owned),
+                item_id,
                 local_mode,
                 minimum_load,
                 min_stock: finite_number(slot.get("minStock")).floor().max(0.0),
@@ -189,10 +347,14 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
                     .get("priority")
                     .and_then(Value::as_u64)
                     .unwrap_or(1)
-                    .min(2) as usize,
+                    .min(2) as u8,
             })
         })
         .collect()
+}
+
+fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
+    slots_with_item_symbols(entity, &mut HashMap::new())
 }
 
 fn station_indices(entities: &[Value]) -> Vec<usize> {
@@ -216,44 +378,917 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
         .collect()
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct LocalPeerDirectory {
-    station_indices: Vec<usize>,
-    by_planet_item: HashMap<usize, HashMap<String, LocalPeers>>,
-    station_slots: HashMap<usize, Vec<Slot>>,
-    station_planets: HashMap<usize, usize>,
+    station_indices: Arc<[usize]>,
+    runtime_station_indices: Arc<[usize]>,
+    station_ranks: Arc<HashMap<usize, usize>>,
+    by_planet_item: Arc<HashMap<usize, HashMap<Arc<str>, LocalPeers>>>,
+    station_slots: Arc<HashMap<usize, Vec<Slot>>>,
+    slot_item_allocation_bytes: usize,
+    station_planets: Arc<HashMap<usize, usize>>,
+    has_local_pair: bool,
+    local_waiting_station_indices: Arc<[usize]>,
+    local_route_demand_indices: Vec<usize>,
+    buffer_active_station_indices: Vec<usize>,
+    buffer_activity_initialized: bool,
+    /// Stations that were inventory/capacity ready at the previous power
+    /// boundary. They remain active while unpowered so a later grid recovery
+    /// can be observed without scanning every dormant station.
+    ready_station_indices: Vec<usize>,
+    /// Stable topology-order rows whose readiness may have changed since the
+    /// previous probe. Reverse peer expansion is installed only after the
+    /// inventory mutation that produced the wake has succeeded.
+    pending_readiness_station_indices: Vec<usize>,
+    readiness_all_pending: bool,
+    readiness_full_scan_required: bool,
+    readiness_signature: Option<LocalReadinessSignature>,
+    /// Stable topology-order demand rows whose local dispatch eligibility may
+    /// have changed. Supply-side inventory and vehicle changes are expanded
+    /// through `by_planet_item`, so sources never become outer work rows.
+    pending_dispatch_demand_indices: Vec<usize>,
+    /// Represents the initial/topology-reset wake without cloning the full
+    /// immutable demand index into every retained revision.
+    dispatch_all_pending: bool,
+    /// Opaque/MOD route shapes or an inexact immutable directory retain the
+    /// legacy complete station order. Once observed, the cache stays closed.
+    dispatch_full_scan_required: bool,
+    /// Local station rows that had usable power at the previous successful
+    /// dispatch boundary. A false -> true edge wakes the exact paired demand
+    /// rows even when no inventory changed in that step.
+    powered_dispatch_station_indices: Vec<usize>,
+    runtime_reset_station_indices: Vec<usize>,
+    local_congestion_reset_station_indices: Vec<usize>,
+    interstellar_congestion_reset_station_indices: Vec<usize>,
+    /// Exact session-only generation of the interstellar peer directory whose
+    /// static waiting baseline has already been written. A new directory can
+    /// change remote peer availability without creating a route, so pointer
+    /// identity (rather than a lossy hash) forces one complete congestion
+    /// refresh before sparse route-only updates resume.
+    interstellar_congestion_generation: Option<Arc<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalReadinessSignature {
+    cargo_capacity_bits: u64,
+    buffer_limit_bits: u64,
+}
+
+impl LocalReadinessSignature {
+    fn capture(base: &Map<String, Value>) -> Self {
+        Self {
+            cargo_capacity_bits: cargo_capacity(base).to_bits(),
+            buffer_limit_bits: normalized_buffer_limit(base).to_bits(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LocalReadyStationScan {
+    pub selected_station_rows: usize,
+    pub total_station_rows: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+    pub signature_fallback: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LocalDispatchScan {
+    pub selected_station_rows: usize,
+    pub total_station_rows: usize,
+    pub selected_demand_rows: usize,
+    pub total_demand_rows: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+    // Keep the ordinary hot-path receipt compact. Profiling pays for its own
+    // allocation; a disabled profiler adds only one nullable pointer instead
+    // of embedding the full observer payload in every dispatch return value.
+    pub profile: Option<Box<LocalDispatchProfile>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum LocalDispatchScanFallback {
+    #[default]
+    None,
+    ForcedFullScan,
+    Directory,
+    Dense,
+}
+
+impl LocalDispatchScanFallback {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ForcedFullScan => "forced-full-scan",
+            Self::Directory => "directory",
+            Self::Dense => "dense",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum LocalDispatchParallelFallback {
+    #[default]
+    NoSelectedDemand,
+    UnprovenPlanet,
+    SinglePlanet,
+    ShapeOnly,
+}
+
+impl LocalDispatchParallelFallback {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSelectedDemand => "no-selected-demand",
+            Self::UnprovenPlanet => "unproven-planet",
+            Self::SinglePlanet => "single-planet",
+            Self::ShapeOnly => "shape-only-requires-full-advance-gate",
+        }
+    }
+}
+
+/// Opt-in feasibility evidence for a future deterministic planet-sharded
+/// local-dispatch planner. These counters never select work or mutate state.
+/// `work_units` is a deliberately simple, stable proxy: demand rows + demand
+/// slots + peer edges + `n * ceil(log2(n))` sort units + emitted route events.
+/// Its ratios describe this local-dispatch proxy only. They never decide a
+/// performance gate: the fixed-input harness must separately divide the exact
+/// outer dispatch duration by the full native advance duration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LocalDispatchProfile {
+    pub selected_demands: usize,
+    pub total_demands: usize,
+    pub planet_shards: usize,
+    pub demand_slots: u64,
+    pub peer_edges: u64,
+    pub sort_work_units: u64,
+    pub total_work_units: u64,
+    pub largest_shard_work_units: u64,
+    pub largest_shard_ratio_ppm: u32,
+    pub parallelizable_work_units: u64,
+    pub parallelizable_ratio_ppm: u32,
+    pub route_events: u64,
+    pub shard_work_sha256: [u8; 32],
+    pub planet_identity_proven: bool,
+    pub scan_fallback: LocalDispatchScanFallback,
+    pub parallel_fallback: LocalDispatchParallelFallback,
+}
+
+#[derive(Debug, Default)]
+struct LocalDispatchProfileAccumulator {
+    selected_demands: usize,
+    demand_slots: u64,
+    peer_edges: u64,
+    sort_work_units: u64,
+    route_events: u64,
+    shard_work_units: Vec<u64>,
+    unproven_planet: bool,
+}
+
+impl LocalDispatchProfileAccumulator {
+    fn enabled(planet_capacity: usize) -> Self {
+        Self {
+            shard_work_units: vec![0; planet_capacity],
+            ..Self::default()
+        }
+    }
+
+    fn record_demand(
+        &mut self,
+        planet_key: Option<usize>,
+        demand_slots: u64,
+        peer_edges: u64,
+        sort_work_units: u64,
+        route_events: u64,
+    ) {
+        self.selected_demands = self.selected_demands.saturating_add(1);
+        self.demand_slots = self.demand_slots.saturating_add(demand_slots);
+        self.peer_edges = self.peer_edges.saturating_add(peer_edges);
+        self.sort_work_units = self.sort_work_units.saturating_add(sort_work_units);
+        self.route_events = self.route_events.saturating_add(route_events);
+        let work_units = 1_u64
+            .saturating_add(demand_slots)
+            .saturating_add(peer_edges)
+            .saturating_add(sort_work_units)
+            .saturating_add(route_events);
+        if let Some(shard) = planet_key.and_then(|key| self.shard_work_units.get_mut(key)) {
+            *shard = shard.saturating_add(work_units);
+        } else {
+            self.unproven_planet = true;
+        }
+    }
+
+    fn finish(
+        self,
+        total_demands: usize,
+        scan_fallback: LocalDispatchScanFallback,
+    ) -> LocalDispatchProfile {
+        let total_work_units = 1_u64
+            .saturating_mul(self.selected_demands as u64)
+            .saturating_add(self.demand_slots)
+            .saturating_add(self.peer_edges)
+            .saturating_add(self.sort_work_units)
+            .saturating_add(self.route_events);
+        let planet_shards = self
+            .shard_work_units
+            .iter()
+            .filter(|work| **work > 0)
+            .count();
+        let mut largest_shard_work_units = self.shard_work_units.iter().copied().max().unwrap_or(0);
+        let parallelizable_work_units = if self.unproven_planet {
+            largest_shard_work_units = total_work_units;
+            0
+        } else {
+            total_work_units.saturating_sub(largest_shard_work_units)
+        };
+        let largest_shard_ratio_ppm = work_ratio_ppm(largest_shard_work_units, total_work_units);
+        let parallelizable_ratio_ppm = work_ratio_ppm(parallelizable_work_units, total_work_units);
+        let mut shard_hasher = Sha256::new();
+        shard_hasher.update(
+            u64::try_from(self.shard_work_units.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for work_units in &self.shard_work_units {
+            shard_hasher.update(work_units.to_be_bytes());
+        }
+        let shard_work_sha256 = shard_hasher.finalize().into();
+        let parallel_fallback = if self.selected_demands == 0 {
+            LocalDispatchParallelFallback::NoSelectedDemand
+        } else if self.unproven_planet {
+            LocalDispatchParallelFallback::UnprovenPlanet
+        } else if planet_shards < 2 {
+            LocalDispatchParallelFallback::SinglePlanet
+        } else {
+            // This proxy only proves that more than one planet owns work. It
+            // deliberately never decides the full-advance 3.5% timing gate.
+            LocalDispatchParallelFallback::ShapeOnly
+        };
+        LocalDispatchProfile {
+            selected_demands: self.selected_demands,
+            total_demands,
+            planet_shards,
+            demand_slots: self.demand_slots,
+            peer_edges: self.peer_edges,
+            sort_work_units: self.sort_work_units,
+            total_work_units,
+            largest_shard_work_units,
+            largest_shard_ratio_ppm,
+            parallelizable_work_units,
+            parallelizable_ratio_ppm,
+            route_events: self.route_events,
+            shard_work_sha256,
+            planet_identity_proven: !self.unproven_planet,
+            scan_fallback,
+            parallel_fallback,
+        }
+    }
+}
+
+fn work_ratio_ppm(numerator: u64, denominator: u64) -> u32 {
+    if denominator == 0 {
+        return 0;
+    }
+    ((u128::from(numerator) * 1_000_000) / u128::from(denominator)).min(u128::from(u32::MAX)) as u32
+}
+
+fn sort_work_units(rows: usize) -> u64 {
+    if rows <= 1 {
+        return 0;
+    }
+    let passes = usize::BITS - (rows - 1).leading_zeros();
+    u64::try_from(rows)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::from(passes))
 }
 
 impl LocalPeerDirectory {
     pub(crate) fn estimated_bytes(&self) -> u64 {
-        let station_index_bytes = self.station_indices.capacity() * std::mem::size_of::<usize>();
+        let station_index_bytes = self.station_indices.len() * std::mem::size_of::<usize>()
+            + self.runtime_station_indices.len() * std::mem::size_of::<usize>()
+            + self.local_waiting_station_indices.len() * std::mem::size_of::<usize>()
+            + (self.local_route_demand_indices.capacity()
+                + self.buffer_active_station_indices.capacity()
+                + self.ready_station_indices.capacity()
+                + self.pending_readiness_station_indices.capacity()
+                + self.pending_dispatch_demand_indices.capacity()
+                + self.powered_dispatch_station_indices.capacity()
+                + self.runtime_reset_station_indices.capacity()
+                + self.local_congestion_reset_station_indices.capacity()
+                + self
+                    .interstellar_congestion_reset_station_indices
+                    .capacity())
+                * std::mem::size_of::<usize>();
         let planet_item_bytes = self
             .by_planet_item
             .values()
-            .flat_map(HashMap::iter)
-            .map(|(item_id, peers)| {
-                item_id.capacity()
-                    + (peers.supply.capacity() + peers.demand.capacity())
-                        * std::mem::size_of::<(usize, usize)>()
+            .map(|items| {
+                items.capacity()
+                    * (std::mem::size_of::<(Arc<str>, LocalPeers)>() + std::mem::size_of::<u8>())
+                    + items
+                        .values()
+                        .map(|peers| {
+                            (peers.supply.capacity() + peers.demand.capacity())
+                                * std::mem::size_of::<(usize, usize)>()
+                        })
+                        .sum::<usize>()
             })
             .sum::<usize>();
         let slot_bytes = self
             .station_slots
             .values()
-            .map(|slots| {
-                slots.capacity() * std::mem::size_of::<Slot>()
-                    + slots
-                        .iter()
-                        .filter_map(|slot| slot.item_id.as_ref())
-                        .map(String::capacity)
-                        .sum::<usize>()
-            })
-            .sum::<usize>();
+            .map(|slots| slots.capacity() * std::mem::size_of::<Slot>())
+            .sum::<usize>()
+            + self.slot_item_allocation_bytes;
         let hash_entry_bytes = self.by_planet_item.capacity()
-            * std::mem::size_of::<(usize, HashMap<String, LocalPeers>)>()
-            + self.station_slots.capacity() * std::mem::size_of::<(usize, Vec<Slot>)>()
-            + self.station_planets.capacity() * std::mem::size_of::<(usize, usize)>();
+            * (std::mem::size_of::<(usize, HashMap<Arc<str>, LocalPeers>)>()
+                + std::mem::size_of::<u8>())
+            + self.station_slots.capacity()
+                * (std::mem::size_of::<(usize, Vec<Slot>)>() + std::mem::size_of::<u8>())
+            + self.station_planets.capacity()
+                * (std::mem::size_of::<(usize, usize)>() + std::mem::size_of::<u8>())
+            + self.station_ranks.capacity()
+                * (std::mem::size_of::<(usize, usize)>() + std::mem::size_of::<u8>());
         (station_index_bytes + planet_item_bytes + slot_bytes + hash_entry_bytes) as u64
+    }
+
+    fn has_local_routes(&self) -> bool {
+        !self.local_route_demand_indices.is_empty()
+    }
+
+    fn has_local_pair(&self) -> bool {
+        self.has_local_pair
+    }
+
+    fn profile_planet_capacity(&self) -> usize {
+        let capacity = self
+            .station_planets
+            .values()
+            .copied()
+            .max()
+            .and_then(|key| key.checked_add(1))
+            .unwrap_or(0);
+        if capacity <= self.station_planets.len() {
+            capacity
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn active_local_route_demand_indices(&self) -> &[usize] {
+        &self.local_route_demand_indices
+    }
+
+    pub(crate) fn contains_local_station(&self, station_index: usize) -> bool {
+        self.station_ranks.contains_key(&station_index)
+    }
+
+    pub(crate) fn shared_station_ranks(&self) -> Arc<HashMap<usize, usize>> {
+        Arc::clone(&self.station_ranks)
+    }
+
+    /// Append the exact local power rows that can become dispatchable when
+    /// one of `changed_station_indices` mutates after readiness was sampled.
+    /// Non-local rows are irrelevant. A missing indexed local row signals a
+    /// stale or incomplete directory so the caller can fail closed.
+    pub(crate) fn append_station_power_dependencies(
+        &self,
+        changed_station_indices: &[usize],
+        target: &mut Vec<usize>,
+    ) -> bool {
+        let mut dependency_keys = Vec::new();
+        let mut seen_dependency_keys = HashSet::new();
+        for &station_index in changed_station_indices {
+            if !self.station_ranks.contains_key(&station_index) {
+                continue;
+            }
+            let Some(station_slots) = self.station_slots.get(&station_index) else {
+                return false;
+            };
+            let Some(planet_key) = self.station_planets.get(&station_index).copied() else {
+                return false;
+            };
+            target.push(station_index);
+            for slot in station_slots {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                if slot.local_mode == LocalMode::Storage {
+                    continue;
+                }
+                let key = (planet_key, item_id, slot.local_mode);
+                if seen_dependency_keys.insert(key) {
+                    dependency_keys.push(key);
+                }
+            }
+        }
+        // A dense initial refill wake commonly contains both endpoints of the
+        // same item bucket. Expand each immutable bucket/direction once so a
+        // same-item fanout remains linear instead of transiently materializing
+        // one peer list per changed station.
+        for (planet_key, item_id, local_mode) in dependency_keys {
+            let Some(peers) = self
+                .by_planet_item
+                .get(&planet_key)
+                .and_then(|items| items.get(item_id))
+            else {
+                return false;
+            };
+            let opposite = match local_mode {
+                LocalMode::Supply => peers.demand.as_slice(),
+                LocalMode::Demand => peers.supply.as_slice(),
+                LocalMode::Storage => unreachable!("storage slots were filtered"),
+            };
+            target.extend(opposite.iter().map(|(peer_index, _)| *peer_index));
+        }
+        true
+    }
+
+    /// Append demand rows whose local dispatch eligibility can change when
+    /// one of the supplied station rows changes. Demand-side capacity and
+    /// vehicle changes wake that row; supply-side inventory and vehicle
+    /// changes follow the immutable `(planet, item)` reverse directory.
+    fn append_dispatch_demand_dependencies(
+        &self,
+        changed_station_indices: &[usize],
+        target: &mut Vec<usize>,
+    ) -> bool {
+        let mut dependency_keys = Vec::new();
+        let mut seen_dependency_keys = HashSet::new();
+        for &station_index in changed_station_indices {
+            if !self.station_ranks.contains_key(&station_index) {
+                continue;
+            }
+            let Some(station_slots) = self.station_slots.get(&station_index) else {
+                return false;
+            };
+            let Some(planet_key) = self.station_planets.get(&station_index).copied() else {
+                return false;
+            };
+            for slot in station_slots {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                if slot.local_mode == LocalMode::Storage {
+                    continue;
+                }
+                // A parsed non-storage slot must always be represented in the
+                // immutable peer directory, including a one-sided bucket.
+                if self
+                    .by_planet_item
+                    .get(&planet_key)
+                    .and_then(|items| items.get(item_id))
+                    .is_none()
+                {
+                    return false;
+                }
+                match slot.local_mode {
+                    LocalMode::Demand => {
+                        if self
+                            .local_waiting_station_indices
+                            .binary_search(&station_index)
+                            .is_ok()
+                        {
+                            target.push(station_index);
+                        }
+                    }
+                    LocalMode::Supply => {
+                        let key = (planet_key, item_id);
+                        if seen_dependency_keys.insert(key) {
+                            dependency_keys.push(key);
+                        }
+                    }
+                    LocalMode::Storage => unreachable!("storage slots were filtered"),
+                }
+            }
+        }
+        for (planet_key, item_id) in dependency_keys {
+            let Some(peers) = self
+                .by_planet_item
+                .get(&planet_key)
+                .and_then(|items| items.get(item_id))
+            else {
+                return false;
+            };
+            target.extend(peers.demand.iter().filter_map(|(demand_index, _)| {
+                self.local_waiting_station_indices
+                    .binary_search(demand_index)
+                    .is_ok()
+                    .then_some(*demand_index)
+            }));
+        }
+        true
+    }
+
+    fn force_full_readiness(&mut self) {
+        self.readiness_full_scan_required = true;
+        self.readiness_all_pending = true;
+        self.pending_readiness_station_indices.clear();
+    }
+
+    fn force_full_dispatch(&mut self) {
+        self.dispatch_full_scan_required = true;
+        self.dispatch_all_pending = true;
+        self.pending_dispatch_demand_indices.clear();
+    }
+
+    fn wake_dispatch_from_changed_stations(&mut self, changed_station_indices: &[usize]) {
+        if self.dispatch_all_pending || self.dispatch_full_scan_required {
+            return;
+        }
+        let mut dependencies = Vec::new();
+        if !self.append_dispatch_demand_dependencies(changed_station_indices, &mut dependencies)
+            || dependencies.iter().any(|index| {
+                self.local_waiting_station_indices
+                    .binary_search(index)
+                    .is_err()
+            })
+        {
+            self.force_full_dispatch();
+            return;
+        }
+        self.pending_dispatch_demand_indices.extend(dependencies);
+        self.pending_dispatch_demand_indices
+            .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
+        self.pending_dispatch_demand_indices.dedup();
+    }
+
+    /// Wake the exact local endpoints whose inventory, capacity, vehicle
+    /// availability or route reservation can be affected by these station
+    /// rows. Any stale reverse key fails closed to the persisted full order.
+    pub(crate) fn wake_ready_from_changed_stations(&mut self, changed_station_indices: &[usize]) {
+        // Dispatch happens after readiness in the production step. Retain an
+        // independent wake so a late belt/quantum/capacity change cannot be
+        // consumed by the earlier readiness probe.
+        self.wake_dispatch_from_changed_stations(changed_station_indices);
+        if self.readiness_all_pending || self.readiness_full_scan_required {
+            return;
+        }
+        let mut dependencies = Vec::new();
+        if !self.append_station_power_dependencies(changed_station_indices, &mut dependencies) {
+            self.force_full_readiness();
+            return;
+        }
+        if dependencies
+            .iter()
+            .any(|index| !self.station_ranks.contains_key(index))
+        {
+            self.force_full_readiness();
+            return;
+        }
+        self.pending_readiness_station_indices.extend(dependencies);
+        self.pending_readiness_station_indices
+            .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
+        self.pending_readiness_station_indices.dedup();
+    }
+
+    fn readiness_scan_indices(
+        &self,
+        base: &Map<String, Value>,
+        ledger: &StationRouteLedger,
+    ) -> (Vec<usize>, LocalReadinessSignature, LocalReadyStationScan) {
+        let signature = LocalReadinessSignature::capture(base);
+        let signature_fallback = self.readiness_signature != Some(signature);
+        let mut directory_fallback = self.readiness_full_scan_required;
+        let mut selected = Vec::new();
+        if !directory_fallback && !self.readiness_all_pending && !signature_fallback {
+            selected.extend_from_slice(&self.ready_station_indices);
+            selected.extend_from_slice(&self.pending_readiness_station_indices);
+            selected.extend(
+                ledger
+                    .active_station_indices()
+                    .into_iter()
+                    .filter(|index| self.station_ranks.contains_key(index)),
+            );
+            directory_fallback |= selected
+                .iter()
+                .any(|index| !self.station_ranks.contains_key(index));
+            selected
+                .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
+            selected.dedup();
+        }
+        let dense_fallback = !directory_fallback
+            && !self.readiness_all_pending
+            && !signature_fallback
+            && !selected.is_empty()
+            && selected.len().saturating_mul(LOCAL_READY_DENSE_DENOMINATOR)
+                >= self
+                    .station_indices
+                    .len()
+                    .saturating_mul(LOCAL_READY_DENSE_NUMERATOR);
+        if directory_fallback || self.readiness_all_pending || signature_fallback || dense_fallback
+        {
+            selected.clear();
+            selected.extend_from_slice(&self.station_indices);
+        }
+        let scan = LocalReadyStationScan {
+            selected_station_rows: selected.len(),
+            total_station_rows: self.station_indices.len(),
+            dense_fallback,
+            directory_fallback,
+            signature_fallback,
+        };
+        (selected, signature, scan)
+    }
+
+    fn commit_readiness(&mut self, planned: &[Option<usize>], signature: LocalReadinessSignature) {
+        let planned_ready = planned.iter().flatten().copied().collect::<Vec<_>>();
+        // Inventory-ready rows are deliberately independent of power. Keeping
+        // their demand closure pending ensures an unpowered pair is retried at
+        // the next grid boundary, while a same-step recovery is also caught by
+        // the explicit dispatch power edge below.
+        self.wake_dispatch_from_changed_stations(&planned_ready);
+        self.ready_station_indices.clear();
+        self.ready_station_indices.extend(planned_ready);
+        self.pending_readiness_station_indices.clear();
+        self.readiness_all_pending = false;
+        self.readiness_signature = Some(signature);
+    }
+
+    fn plan_dispatch_power_wakes(
+        &self,
+        powers: &HashMap<usize, f64>,
+    ) -> (Vec<usize>, Vec<usize>, bool) {
+        let mut next_powered = powers
+            .iter()
+            .filter_map(|(station_index, power)| {
+                (*power > EPSILON && self.station_ranks.contains_key(station_index))
+                    .then_some(*station_index)
+            })
+            .collect::<Vec<_>>();
+        next_powered
+            .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
+        next_powered.dedup();
+        let mut directory_fallback = self
+            .powered_dispatch_station_indices
+            .iter()
+            .any(|index| !self.station_ranks.contains_key(index));
+        let recovered = next_powered
+            .iter()
+            .copied()
+            .filter(|index| {
+                self.powered_dispatch_station_indices
+                    .binary_search(index)
+                    .is_err()
+            })
+            .collect::<Vec<_>>();
+        let mut dependencies = Vec::new();
+        directory_fallback |=
+            !self.append_dispatch_demand_dependencies(&recovered, &mut dependencies);
+        dependencies
+            .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
+        dependencies.dedup();
+        directory_fallback |= dependencies.iter().any(|index| {
+            self.local_waiting_station_indices
+                .binary_search(index)
+                .is_err()
+        });
+        (next_powered, dependencies, directory_fallback)
+    }
+
+    fn dispatch_scan_indices(
+        &self,
+        power_wakes: &[usize],
+        power_directory_fallback: bool,
+        force_full_scan: bool,
+    ) -> (Vec<usize>, LocalDispatchScan) {
+        let total_station_rows = self.station_indices.len();
+        let total_demand_rows = self.local_waiting_station_indices.len();
+        let mut directory_fallback = self.dispatch_full_scan_required
+            || power_directory_fallback
+            || self.pending_dispatch_demand_indices.iter().any(|index| {
+                self.local_waiting_station_indices
+                    .binary_search(index)
+                    .is_err()
+            });
+        let mut selected = if self.dispatch_all_pending {
+            self.local_waiting_station_indices.to_vec()
+        } else {
+            self.pending_dispatch_demand_indices.clone()
+        };
+        if !directory_fallback {
+            selected.extend_from_slice(power_wakes);
+            selected
+                .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
+            selected.dedup();
+            directory_fallback |= selected.iter().any(|index| {
+                self.local_waiting_station_indices
+                    .binary_search(index)
+                    .is_err()
+            });
+        }
+        let selected_demand_rows = selected.len();
+        let dense_fallback = !force_full_scan
+            && !directory_fallback
+            && !selected.is_empty()
+            && selected
+                .len()
+                .saturating_mul(LOCAL_DISPATCH_DENSE_DENOMINATOR)
+                >= total_station_rows.saturating_mul(LOCAL_DISPATCH_DENSE_NUMERATOR);
+        if force_full_scan || directory_fallback || dense_fallback {
+            selected.clear();
+            selected.extend_from_slice(&self.station_indices);
+        }
+        let scan = LocalDispatchScan {
+            selected_station_rows: selected.len(),
+            total_station_rows,
+            selected_demand_rows,
+            total_demand_rows,
+            dense_fallback,
+            directory_fallback,
+            profile: None,
+        };
+        (selected, scan)
+    }
+
+    fn commit_dispatch(
+        &mut self,
+        next_powered: Vec<usize>,
+        activated_local_demands: &[usize],
+        directory_fallback: bool,
+    ) {
+        self.pending_dispatch_demand_indices.clear();
+        self.dispatch_all_pending = false;
+        self.powered_dispatch_station_indices = next_powered;
+        if directory_fallback {
+            self.force_full_dispatch();
+        }
+        for &demand_index in activated_local_demands {
+            self.update_local_route_demand(demand_index, true);
+        }
+    }
+
+    pub(crate) fn runtime_reset_station_indices(&self) -> &[usize] {
+        &self.runtime_reset_station_indices
+    }
+
+    pub(crate) fn replace_runtime_reset_station_indices(
+        &mut self,
+        mut station_indices: Vec<usize>,
+    ) {
+        station_indices.sort_unstable();
+        station_indices.dedup();
+        debug_assert!(
+            station_indices
+                .iter()
+                .all(|index| { self.runtime_station_indices.binary_search(index).is_ok() })
+        );
+        self.runtime_reset_station_indices = station_indices;
+    }
+
+    pub(crate) fn has_local_peer_match(
+        &self,
+        station_index: usize,
+        slot_index: usize,
+    ) -> anyhow::Result<bool> {
+        has_peer_match(self, station_index, slot_index)
+    }
+
+    pub(crate) fn local_congestion_reset_station_indices(&self) -> &[usize] {
+        &self.local_congestion_reset_station_indices
+    }
+
+    pub(crate) fn replace_local_congestion_reset_station_indices(
+        &mut self,
+        mut station_indices: Vec<usize>,
+    ) {
+        station_indices.sort_unstable();
+        station_indices.dedup();
+        debug_assert!(
+            station_indices
+                .iter()
+                .all(|index| self.station_indices.binary_search(index).is_ok())
+        );
+        self.local_congestion_reset_station_indices = station_indices;
+    }
+
+    pub(crate) fn interstellar_congestion_reset_station_indices(&self) -> &[usize] {
+        &self.interstellar_congestion_reset_station_indices
+    }
+
+    pub(crate) fn replace_interstellar_congestion_reset_station_indices(
+        &mut self,
+        mut station_indices: Vec<usize>,
+    ) {
+        station_indices.sort_unstable();
+        station_indices.dedup();
+        debug_assert!(
+            station_indices
+                .iter()
+                .all(|index| self.runtime_station_indices.binary_search(index).is_ok())
+        );
+        self.interstellar_congestion_reset_station_indices = station_indices;
+    }
+
+    pub(crate) fn interstellar_congestion_generation_matches(&self, generation: &Arc<()>) -> bool {
+        self.interstellar_congestion_generation
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, generation))
+    }
+
+    pub(crate) fn commit_interstellar_congestion_generation(&mut self, generation: &Arc<()>) {
+        self.interstellar_congestion_generation = Some(Arc::clone(generation));
+    }
+
+    fn route_scan_indices(&self) -> (Vec<usize>, bool) {
+        let active = self.local_route_demand_indices.len();
+        let total = self.station_indices.len();
+        let dense = active > 0
+            && active.saturating_mul(LOCAL_ROUTE_DENSE_DENOMINATOR)
+                >= total.saturating_mul(LOCAL_ROUTE_DENSE_NUMERATOR);
+        if dense {
+            (self.station_indices.to_vec(), true)
+        } else {
+            (self.local_route_demand_indices.clone(), false)
+        }
+    }
+
+    fn buffer_scan_indices(&self) -> (Vec<usize>, bool) {
+        if !self.buffer_activity_initialized {
+            return (self.station_indices.to_vec(), true);
+        }
+        let active = self.buffer_active_station_indices.len();
+        let total = self.station_indices.len();
+        let dense = active > 0
+            && active.saturating_mul(LOCAL_ROUTE_DENSE_DENOMINATOR)
+                >= total.saturating_mul(LOCAL_ROUTE_DENSE_NUMERATOR);
+        if dense {
+            (self.station_indices.to_vec(), true)
+        } else {
+            (self.buffer_active_station_indices.clone(), false)
+        }
+    }
+
+    fn update_local_route_demand(&mut self, station_index: usize, active: bool) {
+        let Some(rank) = self.station_ranks.get(&station_index).copied() else {
+            return;
+        };
+        match (
+            self.local_route_demand_indices
+                .binary_search_by_key(&rank, |candidate| {
+                    self.station_ranks
+                        .get(candidate)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                }),
+            active,
+        ) {
+            (Ok(position), false) => {
+                self.local_route_demand_indices.remove(position);
+            }
+            (Err(position), true) => {
+                self.local_route_demand_indices
+                    .insert(position, station_index);
+            }
+            (Ok(_), true) | (Err(_), false) => {}
+        }
+    }
+
+    fn update_buffer_station(&mut self, station_index: usize, active: bool) {
+        let Some(rank) = self.station_ranks.get(&station_index).copied() else {
+            return;
+        };
+        match (
+            self.buffer_active_station_indices
+                .binary_search_by_key(&rank, |candidate| {
+                    self.station_ranks
+                        .get(candidate)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                }),
+            active,
+        ) {
+            (Ok(position), false) => {
+                self.buffer_active_station_indices.remove(position);
+            }
+            (Err(position), true) => {
+                self.buffer_active_station_indices
+                    .insert(position, station_index);
+            }
+            (Ok(_), true) | (Err(_), false) => {}
+        }
+    }
+
+    fn replace_scanned_buffer_activity(&mut self, updates: &[(usize, bool)]) {
+        self.buffer_active_station_indices.clear();
+        self.buffer_active_station_indices.extend(
+            updates
+                .iter()
+                .filter_map(|(station_index, active)| active.then_some(*station_index)),
+        );
+        self.buffer_activity_initialized = true;
+    }
+
+    fn replace_scanned_local_route_activity(&mut self, updates: &[(usize, bool)]) {
+        // Sparse scans contain every previously active demand; dense scans
+        // contain every station. In either case this stable-order filter is a
+        // complete next activity set and avoids quadratic Vec removals when a
+        // dense batch completes many routes together.
+        self.local_route_demand_indices.clear();
+        self.local_route_demand_indices.extend(
+            updates
+                .iter()
+                .filter_map(|(station_index, active)| active.then_some(*station_index)),
+        );
     }
 }
 
@@ -263,14 +1298,51 @@ struct LocalPeers {
     demand: Vec<(usize, usize)>,
 }
 
+fn readiness_directory_is_exact(
+    station_indices: &[usize],
+    station_ranks: &HashMap<usize, usize>,
+    station_slots: &HashMap<usize, Vec<Slot>>,
+    station_planets: &HashMap<usize, usize>,
+) -> bool {
+    station_indices.windows(2).all(|pair| pair[0] < pair[1])
+        && station_indices.len() == station_ranks.len()
+        && station_indices.len() == station_slots.len()
+        && station_indices.len() == station_planets.len()
+        && station_indices.iter().enumerate().all(|(rank, index)| {
+            station_ranks.get(index) == Some(&rank)
+                && station_slots.contains_key(index)
+                && station_planets.contains_key(index)
+        })
+}
+
+fn has_opaque_local_dispatch_shape(entities: &[Value], station_indices: &[usize]) -> bool {
+    station_indices.iter().copied().any(|station_index| {
+        entities
+            .get(station_index)
+            .and_then(Value::as_object)
+            .and_then(|station| station.get("stationRoutes"))
+            .and_then(Value::as_array)
+            .is_some_and(|routes| {
+                routes.iter().any(|route| {
+                    route.as_object().is_none_or(|route| {
+                        !matches!(string_at(route, "scope"), Some("local" | "remote"))
+                    })
+                })
+            })
+    })
+}
+
 fn build_peer_directory(
     entities: &[Value],
     station_indices: &[usize],
+    runtime_station_indices: &[usize],
 ) -> anyhow::Result<LocalPeerDirectory> {
-    let mut by_planet_item = HashMap::<usize, HashMap<String, LocalPeers>>::new();
+    let mut by_planet_item = HashMap::<usize, HashMap<Arc<str>, LocalPeers>>::new();
     let mut station_slots = HashMap::with_capacity(station_indices.len());
     let mut station_planets = HashMap::with_capacity(station_indices.len());
+    let mut local_route_demand_indices = Vec::new();
     let mut planet_symbols = HashMap::<String, usize>::new();
+    let mut item_symbols = HashMap::<String, Arc<str>>::new();
     for &station_index in station_indices {
         let station = entities[station_index].as_object().expect("station object");
         if !matches!(
@@ -287,21 +1359,16 @@ fn build_peer_directory(
             planet_symbols.insert(planet_id.to_owned(), key);
             key
         };
-        let parsed_slots = slots(station)?;
+        let parsed_slots = slots_with_item_symbols(station, &mut item_symbols)?;
         for (slot_index, slot) in parsed_slots.iter().enumerate() {
-            let Some(item_id) = slot.item_id.as_deref() else {
+            let Some(item_id) = slot.item_id.as_ref() else {
                 continue;
             };
             if slot.local_mode == LocalMode::Storage {
                 continue;
             }
             let items = by_planet_item.entry(planet_key).or_default();
-            if !items.contains_key(item_id) {
-                items.insert(item_id.to_owned(), LocalPeers::default());
-            }
-            let peers = items
-                .get_mut(item_id)
-                .expect("inserted native local peer item");
+            let peers = items.entry(Arc::clone(item_id)).or_default();
             match slot.local_mode {
                 LocalMode::Supply => peers.supply.push((station_index, slot_index)),
                 LocalMode::Demand => peers.demand.push((station_index, slot_index)),
@@ -310,6 +1377,18 @@ fn build_peer_directory(
         }
         station_planets.insert(station_index, planet_key);
         station_slots.insert(station_index, parsed_slots);
+        if station
+            .get("stationRoutes")
+            .and_then(Value::as_array)
+            .is_some_and(|routes| {
+                routes
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .any(|route| string_at(route, "scope") == Some("local"))
+            })
+        {
+            local_route_demand_indices.push(station_index);
+        }
     }
     let sort_matches = |matches: &mut Vec<(usize, usize)>| {
         matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
@@ -336,12 +1415,96 @@ fn build_peer_directory(
     for peers in by_planet_item.values_mut().flat_map(HashMap::values_mut) {
         sort_matches(&mut peers.supply);
         sort_matches(&mut peers.demand);
+        peers.supply.shrink_to_fit();
+        peers.demand.shrink_to_fit();
     }
+    let has_local_demand = by_planet_item
+        .values()
+        .flat_map(HashMap::values)
+        .any(|peers| !peers.demand.is_empty());
+    let has_local_supply = by_planet_item
+        .values()
+        .flat_map(HashMap::values)
+        .any(|peers| !peers.supply.is_empty());
+    let mut local_waiting_station_indices = by_planet_item
+        .values()
+        .flat_map(HashMap::values)
+        .flat_map(|peers| {
+            peers.demand.iter().filter_map(|(demand_index, _)| {
+                peers
+                    .supply
+                    .iter()
+                    .any(|(supply_index, _)| supply_index != demand_index)
+                    .then_some(*demand_index)
+            })
+        })
+        .collect::<Vec<_>>();
+    local_waiting_station_indices.sort_unstable();
+    local_waiting_station_indices.dedup();
+    local_waiting_station_indices.shrink_to_fit();
+    for items in by_planet_item.values_mut() {
+        items.shrink_to_fit();
+    }
+    by_planet_item.shrink_to_fit();
+    station_slots.shrink_to_fit();
+    station_planets.shrink_to_fit();
+    local_route_demand_indices.shrink_to_fit();
+    // All slot and peer keys share the same immutable item symbols. Account
+    // for each Arc allocation exactly once; the temporary interning map is
+    // released before the directory becomes resident.
+    let slot_item_allocation_bytes = item_symbols
+        .values()
+        .map(|item_id| {
+            let header = std::mem::size_of::<usize>() * 2;
+            let unaligned = header + item_id.len();
+            let alignment = std::mem::align_of::<usize>();
+            unaligned.div_ceil(alignment) * alignment
+        })
+        .sum();
+    let station_ranks = station_indices
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(rank, station_index)| (station_index, rank))
+        .collect::<HashMap<_, _>>();
+    let readiness_full_scan_required = !readiness_directory_is_exact(
+        station_indices,
+        &station_ranks,
+        &station_slots,
+        &station_planets,
+    );
+    let dispatch_full_scan_required =
+        readiness_full_scan_required || has_opaque_local_dispatch_shape(entities, station_indices);
     Ok(LocalPeerDirectory {
-        station_indices: station_indices.to_vec(),
-        by_planet_item,
-        station_slots,
-        station_planets,
+        station_indices: Arc::from(station_indices),
+        runtime_station_indices: Arc::from(runtime_station_indices),
+        station_ranks: Arc::new(station_ranks),
+        by_planet_item: Arc::new(by_planet_item),
+        station_slots: Arc::new(station_slots),
+        slot_item_allocation_bytes,
+        station_planets: Arc::new(station_planets),
+        has_local_pair: has_local_demand && has_local_supply,
+        local_waiting_station_indices: Arc::from(local_waiting_station_indices),
+        local_route_demand_indices,
+        buffer_active_station_indices: Vec::new(),
+        buffer_activity_initialized: false,
+        ready_station_indices: Vec::new(),
+        pending_readiness_station_indices: Vec::new(),
+        readiness_all_pending: true,
+        readiness_full_scan_required,
+        readiness_signature: None,
+        pending_dispatch_demand_indices: Vec::new(),
+        dispatch_all_pending: true,
+        dispatch_full_scan_required,
+        powered_dispatch_station_indices: Vec::new(),
+        // A newly imported/rebuilt directory cannot prove which station was
+        // active in the previous JS/native step. Clear every persisted runtime
+        // display once; successful native steps replace this with the exact
+        // active set for the following second.
+        runtime_reset_station_indices: runtime_station_indices.to_vec(),
+        local_congestion_reset_station_indices: station_indices.to_vec(),
+        interstellar_congestion_reset_station_indices: runtime_station_indices.to_vec(),
+        interstellar_congestion_generation: None,
     })
 }
 
@@ -366,7 +1529,7 @@ pub(crate) fn prepare_step_directory(
             })
         })
         .collect::<Vec<_>>();
-    build_peer_directory(entities, &local_station_indices)
+    build_peer_directory(entities, &local_station_indices, station_indices)
 }
 
 fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
@@ -380,37 +1543,6 @@ fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
                 .map(|id| (id.to_owned(), index))
         })
         .collect()
-}
-
-fn has_local_route(entities: &[Value], station_indices: &[usize]) -> bool {
-    station_indices.iter().copied().any(|index| {
-        let Some(entity) = entities[index].as_object() else {
-            return false;
-        };
-        entity
-            .get("stationRoutes")
-            .and_then(Value::as_array)
-            .is_some_and(|routes| {
-                routes
-                    .iter()
-                    .filter_map(Value::as_object)
-                    .any(|route| string_at(route, "scope") == Some("local"))
-            })
-    })
-}
-
-fn directory_has_local_pair(directory: &LocalPeerDirectory) -> bool {
-    let has_demand = directory
-        .by_planet_item
-        .values()
-        .flat_map(HashMap::values)
-        .any(|peers| !peers.demand.is_empty());
-    let has_supply = directory
-        .by_planet_item
-        .values()
-        .flat_map(HashMap::values)
-        .any(|peers| !peers.supply.is_empty());
-    has_demand && has_supply
 }
 
 fn station_capacity(
@@ -511,6 +1643,7 @@ fn route_owner_id<'a>(demand: &'a Map<String, Value>, route: &'a Map<String, Val
         .unwrap_or_else(|| string_at(demand, "id").unwrap_or_default())
 }
 
+#[cfg(test)]
 fn build_ledger(
     entities: &[Value],
     indexes: &ExactRowIdIndex,
@@ -733,14 +1866,49 @@ pub(crate) fn reset_runtime_for_indices(
     Ok(())
 }
 
-pub(crate) fn transfer_buffers(
+fn station_has_pending_buffer_input(
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    station_index: usize,
+) -> anyhow::Result<bool> {
+    let station_slots = directory
+        .station_slots
+        .get(&station_index)
+        .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+    let station = entities[station_index]
+        .as_object()
+        .ok_or_else(|| anyhow!("native local station is invalid"))?;
+    Ok(station_slots.iter().any(|slot| {
+        slot.item_id.as_deref().is_some_and(|item_id| {
+            (item_amount(station, "inputs", item_id) + EPSILON).floor() >= 1.0
+        })
+    }))
+}
+
+fn plan_buffer_activity(
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    station_indices: &[usize],
+) -> anyhow::Result<Vec<(usize, bool)>> {
+    station_indices
+        .iter()
+        .copied()
+        .map(|station_index| {
+            station_has_pending_buffer_input(entities, directory, station_index)
+                .map(|active| (station_index, active))
+        })
+        .collect()
+}
+
+fn transfer_buffers_for_indices(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &mut [Value],
     directory: &LocalPeerDirectory,
-) -> anyhow::Result<()> {
+    station_indices: &[usize],
+) -> anyhow::Result<Vec<(usize, bool)>> {
     let buffer_limit = normalized_buffer_limit(base);
-    for &station_index in &directory.station_indices {
+    for &station_index in station_indices {
         let station_slots = directory
             .station_slots
             .get(&station_index)
@@ -766,96 +1934,386 @@ pub(crate) fn transfer_buffers(
             set_item_amount(station, "outputs", item_id, stored + moved)?;
         }
     }
+    plan_buffer_activity(entities, directory, station_indices)
+}
+
+struct BufferStationPlan {
+    station_index: usize,
+    slot_amounts: [(f64, f64); SLOT_COUNT],
+    slot_patch_mask: u8,
+    active_after: bool,
+    terminal_error: Option<anyhow::Error>,
+}
+
+fn planned_buffer_amounts(
+    station: &Map<String, Value>,
+    station_slots: &[Slot],
+    slot_amounts: &[(f64, f64); SLOT_COUNT],
+    slot_patch_mask: u8,
+    before_slot: usize,
+    item_id: &str,
+) -> (f64, f64) {
+    for previous_slot in (0..before_slot).rev() {
+        if slot_patch_mask & (1_u8 << previous_slot) == 0
+            || station_slots[previous_slot].item_id.as_deref() != Some(item_id)
+        {
+            continue;
+        }
+        return slot_amounts[previous_slot];
+    }
+    (
+        item_amount(station, "inputs", item_id),
+        item_amount(station, "outputs", item_id),
+    )
+}
+
+fn plan_buffer_station(
+    state: &CoreState,
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    buffer_limit: f64,
+    station_index: usize,
+) -> BufferStationPlan {
+    let mut plan = BufferStationPlan {
+        station_index,
+        slot_amounts: [(0.0, 0.0); SLOT_COUNT],
+        slot_patch_mask: 0,
+        active_after: false,
+        terminal_error: None,
+    };
+    let Some(station_slots) = directory.station_slots.get(&station_index) else {
+        plan.terminal_error = Some(anyhow!("native local station slots are missing"));
+        return plan;
+    };
+    let Some(station) = entities[station_index].as_object() else {
+        plan.terminal_error = Some(anyhow!("native local station is invalid"));
+        return plan;
+    };
+    if matches!(
+        string_at(station, "buildingId"),
+        Some("planetary_logistics_station" | "interstellar_logistics_station")
+    ) {
+        for (slot_index, slot) in station_slots.iter().enumerate() {
+            let Some(item_id) = slot.item_id.as_deref() else {
+                continue;
+            };
+            let capacity = match station_capacity(state, station, slot, buffer_limit) {
+                Ok(capacity) => capacity,
+                Err(error) => {
+                    plan.terminal_error = Some(error);
+                    return plan;
+                }
+            };
+            let (input_before, output_before) = planned_buffer_amounts(
+                station,
+                station_slots,
+                &plan.slot_amounts,
+                plan.slot_patch_mask,
+                slot_index,
+                item_id,
+            );
+            let incoming = (input_before + EPSILON).floor();
+            let stored = (output_before + EPSILON).floor();
+            let moved = incoming.min((capacity - stored).max(0.0));
+            plan.slot_amounts[slot_index] = (incoming - moved, stored + moved);
+            plan.slot_patch_mask |= 1_u8 << slot_index;
+        }
+    }
+
+    plan.active_after = station_slots.iter().any(|slot| {
+        slot.item_id.as_deref().is_some_and(|item_id| {
+            let (input_after, _) = planned_buffer_amounts(
+                station,
+                station_slots,
+                &plan.slot_amounts,
+                plan.slot_patch_mask,
+                SLOT_COUNT,
+                item_id,
+            );
+            (input_after + EPSILON).floor() >= 1.0
+        })
+    });
+    plan
+}
+
+fn apply_buffer_station_plan(
+    entities: &mut [Value],
+    directory: &LocalPeerDirectory,
+    mut plan: BufferStationPlan,
+) -> anyhow::Result<(usize, bool)> {
+    if plan.slot_patch_mask != 0 {
+        let station_slots = directory
+            .station_slots
+            .get(&plan.station_index)
+            .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+        let station = entities[plan.station_index]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native local station is invalid"))?;
+        for (slot_index, slot) in station_slots.iter().enumerate() {
+            if plan.slot_patch_mask & (1_u8 << slot_index) == 0 {
+                continue;
+            }
+            let item_id = slot
+                .item_id
+                .as_deref()
+                .expect("planned local buffer item disappeared");
+            let (input_after, output_after) = plan.slot_amounts[slot_index];
+            // Preserve the legacy per-slot write order. This matters when a
+            // malformed output map fails after the input write, and when MOD
+            // slots repeat one item and overwrite the same ordered map key.
+            set_item_amount(station, "inputs", item_id, input_after)?;
+            set_item_amount(station, "outputs", item_id, output_after)?;
+        }
+    }
+    if let Some(error) = plan.terminal_error.take() {
+        return Err(error);
+    }
+    Ok((plan.station_index, plan.active_after))
+}
+
+fn transfer_buffers_for_indices_with_runtime(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &mut [Value],
+    directory: &LocalPeerDirectory,
+    station_indices: &[usize],
+    executor: &DeterministicRuntime,
+) -> anyhow::Result<Vec<(usize, bool)>> {
+    if executor.worker_count_for_items(station_indices.len()) == 1 {
+        return transfer_buffers_for_indices(state, base, entities, directory, station_indices);
+    }
+
+    let buffer_limit = normalized_buffer_limit(base);
+    let chunk_results =
+        executor.ordered_chunk_map(station_indices.len(), BUFFER_ROWS_PER_CHUNK, |_, range| {
+            range
+                .map(|station_position| {
+                    plan_buffer_station(
+                        state,
+                        entities,
+                        directory,
+                        buffer_limit,
+                        station_indices[station_position],
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+    let mut plans = chunk_results.into_iter().flatten();
+    let mut updates = Vec::with_capacity(station_indices.len());
+    for &expected_station_index in station_indices {
+        let plan = plans
+            .next()
+            .ok_or_else(|| anyhow!("native local buffer plan result is missing"))?;
+        if plan.station_index != expected_station_index {
+            bail!("native local buffer plan order changed");
+        }
+        updates.push(apply_buffer_station_plan(entities, directory, plan)?);
+    }
+    if plans.next().is_some() {
+        bail!("native local buffer plan result count changed");
+    }
+    Ok(updates)
+}
+
+fn transfer_buffers_with_runtime(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &mut [Value],
+    directory: &mut LocalPeerDirectory,
+    executor: &DeterministicRuntime,
+) -> anyhow::Result<Vec<usize>> {
+    let (station_indices, _dense_fallback) = directory.buffer_scan_indices();
+    let updates = transfer_buffers_for_indices_with_runtime(
+        state,
+        base,
+        entities,
+        directory,
+        &station_indices,
+        executor,
+    )?;
+    directory.replace_scanned_buffer_activity(&updates);
+    Ok(station_indices)
+}
+
+pub(crate) fn transfer_buffers(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &mut [Value],
+    directory: &mut LocalPeerDirectory,
+) -> anyhow::Result<Vec<usize>> {
+    transfer_buffers_with_runtime(state, base, entities, directory, deterministic_runtime())
+}
+
+/// Installs exact wake evidence produced by inventory-moving subsystems. The
+/// caller supplies sorted, de-duplicated entity indices and only invokes this
+/// after the candidate inventory mutation succeeded. Non-local-station rows
+/// are ignored through the immutable topology rank map.
+pub(crate) fn wake_transfer_buffers_from_changed_entities(
+    entities: &[Value],
+    changed_entity_indices: &[usize],
+    directory: &mut LocalPeerDirectory,
+) -> anyhow::Result<()> {
+    let station_indices = changed_entity_indices
+        .iter()
+        .copied()
+        .filter(|station_index| directory.station_ranks.contains_key(station_index))
+        .collect::<Vec<_>>();
+    let updates = plan_buffer_activity(entities, directory, &station_indices)?;
+    for (station_index, active) in updates {
+        directory.update_buffer_station(station_index, active);
+    }
     Ok(())
+}
+
+pub(crate) fn refresh_step_directory_after_topology_change(
+    entities: &[Value],
+    station_indices: &[usize],
+    topology_changed: bool,
+    directory: &mut Arc<LocalPeerDirectory>,
+) -> anyhow::Result<()> {
+    if topology_changed {
+        *directory = Arc::new(prepare_step_directory(entities, station_indices)?);
+    }
+    Ok(())
+}
+
+fn plan_ready_station_indices_with<F, L>(
+    runtime: &DeterministicRuntime,
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    station_indices: &[usize],
+    ledger: &L,
+    cargo_capacity: f64,
+    station_capacity: F,
+) -> anyhow::Result<Vec<Option<usize>>>
+where
+    F: Fn(usize, &Map<String, Value>, &Slot) -> anyhow::Result<f64> + Send + Sync,
+    L: LocalLedgerView + ?Sized,
+{
+    runtime.indexed_try_map(
+        station_indices,
+        |_, station_index| -> anyhow::Result<Option<usize>> {
+            let station_index = *station_index;
+            let station = entities[station_index].as_object().expect("station object");
+            if !matches!(
+                string_at(station, "buildingId"),
+                Some("planetary_logistics_station" | "interstellar_logistics_station")
+            ) {
+                return Ok(None);
+            }
+            if ledger.is_active_local_station(station_index) {
+                return Ok(Some(station_index));
+            }
+            let station_slots = directory
+                .station_slots
+                .get(&station_index)
+                .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+            for (slot_index, slot) in station_slots.iter().enumerate() {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                if slot.local_mode == LocalMode::Storage {
+                    continue;
+                }
+                for (peer_index, peer_slot_index) in
+                    peer_matches(directory, station_index, slot_index)?
+                {
+                    let peer_slots = directory
+                        .station_slots
+                        .get(&peer_index)
+                        .ok_or_else(|| anyhow!("native local peer slots are missing"))?;
+                    let (demand_index, demand_slot, supply_index, supply_slot) =
+                        if slot.local_mode == LocalMode::Demand {
+                            (
+                                station_index,
+                                slot,
+                                peer_index,
+                                &peer_slots[peer_slot_index],
+                            )
+                        } else {
+                            (
+                                peer_index,
+                                &peer_slots[peer_slot_index],
+                                station_index,
+                                slot,
+                            )
+                        };
+                    let demand = entities[demand_index].as_object().expect("station object");
+                    let supply = entities[supply_index].as_object().expect("station object");
+                    let available = (item_amount(supply, "outputs", item_id)
+                        - supply_slot.min_stock)
+                        .max(0.0)
+                        .floor();
+                    let free = (station_capacity(demand_index, demand, demand_slot)?
+                        - item_amount(demand, "outputs", item_id)
+                        - ledger.in_flight(demand_index, item_id))
+                    .max(0.0)
+                    .floor();
+                    for (owner_index, owner_slot) in
+                        [(demand_index, demand_slot), (supply_index, supply_slot)]
+                    {
+                        let owner = entities[owner_index].as_object().expect("station object");
+                        let has_vehicle =
+                            installed_drones(owner) - ledger.local_busy(owner_index) > 0.0;
+                        let minimum = minimum_cargo(cargo_capacity, owner_slot);
+                        if has_vehicle && available >= minimum && free >= minimum {
+                            return Ok(Some(station_index));
+                        }
+                    }
+                }
+            }
+            Ok(None)
+        },
+    )
+}
+
+fn replay_ready_station_indices(planned: Vec<Option<usize>>) -> HashSet<usize> {
+    let mut ready = HashSet::with_capacity(planned.len());
+    // Replay in original topology order even though the public result is a
+    // set. The caller later sorts this set before power probes; retaining the
+    // historical insertion order also keeps this boundary ready for a future
+    // ordered representation without making it worker-schedule dependent.
+    for station_index in planned.into_iter().flatten() {
+        ready.insert(station_index);
+    }
+    ready
 }
 
 pub(crate) fn ready_station_indices(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
-    directory: &LocalPeerDirectory,
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &StationRouteLedger,
 ) -> anyhow::Result<HashSet<usize>> {
-    if !directory_has_local_pair(directory)
-        && !has_local_route(entities, &directory.station_indices)
-    {
-        return Ok(HashSet::new());
+    ready_station_indices_with_scan(state, base, entities, directory, route_ledger)
+        .map(|(ready, _)| ready)
+}
+
+fn ready_station_indices_with_scan(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &StationRouteLedger,
+) -> anyhow::Result<(HashSet<usize>, LocalReadyStationScan)> {
+    if !directory.has_local_pair() && !directory.has_local_routes() {
+        return Ok((HashSet::new(), LocalReadyStationScan::default()));
     }
-    let ledger = build_ledger(entities, &state.entity_index, &directory.station_indices);
     let buffer_limit = normalized_buffer_limit(base);
-    let cargo_capacity = cargo_capacity(base);
-    let mut ready = HashSet::new();
-    for &station_index in &directory.station_indices {
-        let station = entities[station_index].as_object().expect("station object");
-        if !matches!(
-            string_at(station, "buildingId"),
-            Some("planetary_logistics_station" | "interstellar_logistics_station")
-        ) {
-            continue;
-        }
-        if ledger.active_local_stations.contains(&station_index) {
-            ready.insert(station_index);
-            continue;
-        }
-        let station_slots = directory
-            .station_slots
-            .get(&station_index)
-            .ok_or_else(|| anyhow!("native local station slots are missing"))?;
-        'slots: for (slot_index, slot) in station_slots.iter().enumerate() {
-            let Some(item_id) = slot.item_id.as_deref() else {
-                continue;
-            };
-            if slot.local_mode == LocalMode::Storage {
-                continue;
-            }
-            for (peer_index, peer_slot_index) in peer_matches(directory, station_index, slot_index)?
-            {
-                let peer_slots = directory
-                    .station_slots
-                    .get(&peer_index)
-                    .ok_or_else(|| anyhow!("native local peer slots are missing"))?;
-                let (demand_index, demand_slot, supply_index, supply_slot) =
-                    if slot.local_mode == LocalMode::Demand {
-                        (
-                            station_index,
-                            slot,
-                            peer_index,
-                            &peer_slots[peer_slot_index],
-                        )
-                    } else {
-                        (
-                            peer_index,
-                            &peer_slots[peer_slot_index],
-                            station_index,
-                            slot,
-                        )
-                    };
-                let demand = entities[demand_index].as_object().expect("station object");
-                let supply = entities[supply_index].as_object().expect("station object");
-                let available = (item_amount(supply, "outputs", item_id) - supply_slot.min_stock)
-                    .max(0.0)
-                    .floor();
-                let free = (station_capacity(state, demand, demand_slot, buffer_limit)?
-                    - item_amount(demand, "outputs", item_id)
-                    - ledger_item_amount(&ledger.in_flight, demand_index, item_id))
-                .max(0.0)
-                .floor();
-                for (owner_index, owner_slot) in
-                    [(demand_index, demand_slot), (supply_index, supply_slot)]
-                {
-                    let owner = entities[owner_index].as_object().expect("station object");
-                    let has_vehicle = installed_drones(owner)
-                        - ledger.busy.get(&owner_index).copied().unwrap_or(0.0)
-                        > 0.0;
-                    let minimum = minimum_cargo(cargo_capacity, owner_slot);
-                    if has_vehicle && available >= minimum && free >= minimum {
-                        ready.insert(station_index);
-                        break 'slots;
-                    }
-                }
-            }
-        }
-    }
-    Ok(ready)
+    let (station_indices, signature, scan) = directory.readiness_scan_indices(base, route_ledger);
+    let planned = plan_ready_station_indices_with(
+        deterministic_runtime(),
+        entities,
+        directory,
+        &station_indices,
+        route_ledger,
+        cargo_capacity(base),
+        |_, demand, demand_slot| station_capacity(state, demand, demand_slot, buffer_limit),
+    )?;
+    let ready = replay_ready_station_indices(planned.clone());
+    directory.commit_readiness(&planned, signature);
+    Ok((ready, scan))
 }
 
 fn add_max_field(
@@ -881,24 +2339,27 @@ fn set_peer(entities: &mut [Value], index: usize, peer_id: &str) {
     }
 }
 
-pub(crate) fn dispatch(
+// Keep the optional recorder separate from simulation inputs so the const
+// generic compiles the ordinary path without allocating profile state.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized, const PROFILE: bool>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
     directory: &LocalPeerDirectory,
-) -> anyhow::Result<()> {
-    if !directory_has_local_pair(directory)
-        && !has_local_route(entities, &directory.station_indices)
-    {
-        return Ok(());
+    demand_indices: &[usize],
+    ledger: &mut L,
+    mut profile: Option<&mut LocalDispatchProfileAccumulator>,
+) -> anyhow::Result<Vec<usize>> {
+    if !directory.has_local_pair() && !directory.has_local_routes() {
+        return Ok(Vec::new());
     }
-    let indexes = &state.entity_index;
-    let mut ledger = build_ledger(entities, indexes, &directory.station_indices);
     let buffer_limit = normalized_buffer_limit(base);
     let cargo_capacity = cargo_capacity(base);
     let logistics_speed = logistics_speed(base);
-    for &demand_index in &directory.station_indices {
+    let mut activated_local_demands = Vec::new();
+    for &demand_index in demand_indices {
         let (eligible, cursor, demand_id) = {
             let demand = entities[demand_index]
                 .as_object()
@@ -935,6 +2396,14 @@ pub(crate) fn dispatch(
         if ordered_slots.is_empty() {
             continue;
         }
+        let mut demand_slot_rows = 0_u64;
+        let mut demand_peer_edges = 0_u64;
+        let mut demand_sort_work_units = 0_u64;
+        let mut demand_route_events = 0_u64;
+        if PROFILE {
+            demand_slot_rows = u64::try_from(ordered_slots.len()).unwrap_or(u64::MAX);
+            demand_sort_work_units = sort_work_units(ordered_slots.len());
+        }
         for offset in 0..ordered_slots.len() {
             let (slot_index, slot) = ordered_slots[(cursor + offset) % ordered_slots.len()];
             let item_id = slot.item_id.as_deref().expect("demand item").to_owned();
@@ -947,6 +2416,12 @@ pub(crate) fn dispatch(
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             let mut matches = peer_matches(directory, demand_index, slot_index)?;
+            if PROFILE {
+                demand_peer_edges = demand_peer_edges
+                    .saturating_add(u64::try_from(matches.len()).unwrap_or(u64::MAX));
+                demand_sort_work_units =
+                    demand_sort_work_units.saturating_add(sort_work_units(matches.len()));
+            }
             matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
                 let left = entities[*left_index].as_object().expect("station object");
                 let right = entities[*right_index].as_object().expect("station object");
@@ -964,17 +2439,8 @@ pub(crate) fn dispatch(
                     .cmp(&left_priority)
                     .then_with(|| {
                         ledger
-                            .active_vehicle_load
-                            .get(left_index)
-                            .copied()
-                            .unwrap_or(0.0)
-                            .partial_cmp(
-                                &ledger
-                                    .active_vehicle_load
-                                    .get(right_index)
-                                    .copied()
-                                    .unwrap_or(0.0),
-                            )
+                            .active_vehicle_load(*left_index)
+                            .partial_cmp(&ledger.active_vehicle_load(*right_index))
                             .unwrap_or(Ordering::Equal)
                     })
                     .then_with(|| {
@@ -998,7 +2464,7 @@ pub(crate) fn dispatch(
             let demand_now = entities[demand_index].as_object().expect("station object");
             let mut remaining_free = (station_capacity(state, demand_now, slot, buffer_limit)?
                 - item_amount(demand_now, "outputs", &item_id)
-                - ledger_item_amount(&ledger.in_flight, demand_index, &item_id)
+                - ledger.in_flight(demand_index, &item_id)
                 + EPSILON)
                 .floor()
                 .max(0.0);
@@ -1023,9 +2489,7 @@ pub(crate) fn dispatch(
                     let (free_vehicles, owner_id) = {
                         let owner = entities[owner_index].as_object().expect("station object");
                         (
-                            (installed_drones(owner)
-                                - ledger.busy.get(&owner_index).copied().unwrap_or(0.0))
-                            .max(0.0),
+                            (installed_drones(owner) - ledger.local_busy(owner_index)).max(0.0),
                             string_at(owner, "id").unwrap_or_default().to_owned(),
                         )
                     };
@@ -1036,7 +2500,7 @@ pub(crate) fn dispatch(
                     }
                     let available = (supply_output
                         - supply_slot.min_stock
-                        - ledger_item_amount(&ledger.reserved, supply_index, &item_id)
+                        - ledger.reserved(supply_index, &item_id)
                         + EPSILON)
                         .floor()
                         .max(0.0);
@@ -1097,12 +2561,19 @@ pub(crate) fn dispatch(
                         .and_then(Value::as_array_mut)
                         .expect("initialized local demand routes")
                         .push(route);
-                    *ledger.busy.entry(owner_index).or_default() += dispatchable;
-                    add_ledger_item_amount(&mut ledger.reserved, supply_index, &item_id, cargo);
-                    add_ledger_item_amount(&mut ledger.in_flight, demand_index, &item_id, cargo);
-                    for index in HashSet::from([demand_index, supply_index, owner_index]) {
-                        *ledger.active_vehicle_load.entry(index).or_default() += dispatchable;
+                    activated_local_demands.push(demand_index);
+                    if PROFILE {
+                        demand_route_events = demand_route_events.saturating_add(1);
                     }
+                    ledger.record_dispatch(
+                        demand_index,
+                        supply_index,
+                        owner_index,
+                        &item_id,
+                        cargo,
+                        dispatchable,
+                        initial_progress,
+                    );
                     remaining_free = (remaining_free - cargo).max(0.0);
                     set_number(base, "nextId", next_id + 1.0)?;
                     {
@@ -1140,24 +2611,166 @@ pub(crate) fn dispatch(
                 }
             }
         }
+        if PROFILE {
+            profile
+                .as_deref_mut()
+                .expect("profile accumulator must be present")
+                .record_demand(
+                    directory.station_planets.get(&demand_index).copied(),
+                    demand_slot_rows,
+                    demand_peer_edges,
+                    demand_sort_work_units,
+                    demand_route_events,
+                );
+        }
     }
-    Ok(())
+    activated_local_demands.sort_unstable();
+    activated_local_demands.dedup();
+    Ok(activated_local_demands)
 }
 
-pub(crate) fn advance_routes(
+// Full-scan oracle selection and opt-in profiling are execution controls, not
+// authority state, and remain explicit at this narrow candidate boundary.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+    ledger: &mut L,
+    force_full_scan: bool,
+    profile_enabled: bool,
+) -> anyhow::Result<LocalDispatchScan> {
+    let (next_powered, power_wakes, power_directory_fallback) =
+        directory.plan_dispatch_power_wakes(powers);
+    let (dispatch_indices, mut scan) =
+        directory.dispatch_scan_indices(&power_wakes, power_directory_fallback, force_full_scan);
+    let mut profile = profile_enabled
+        .then(|| LocalDispatchProfileAccumulator::enabled(directory.profile_planet_capacity()));
+    let activated_local_demands = if profile_enabled {
+        dispatch_for_indices::<L, true>(
+            state,
+            base,
+            entities,
+            powers,
+            directory,
+            &dispatch_indices,
+            ledger,
+            profile.as_mut(),
+        )?
+    } else {
+        dispatch_for_indices::<L, false>(
+            state,
+            base,
+            entities,
+            powers,
+            directory,
+            &dispatch_indices,
+            ledger,
+            None,
+        )?
+    };
+    // The pending and power caches are candidate-local runtime state. Install
+    // their next values only after every JSON/ledger mutation above succeeds.
+    directory.commit_dispatch(
+        next_powered,
+        &activated_local_demands,
+        scan.directory_fallback,
+    );
+    if let Some(profile) = profile {
+        let scan_fallback = if force_full_scan {
+            LocalDispatchScanFallback::ForcedFullScan
+        } else if scan.directory_fallback {
+            LocalDispatchScanFallback::Directory
+        } else if scan.dense_fallback {
+            LocalDispatchScanFallback::Dense
+        } else {
+            LocalDispatchScanFallback::None
+        };
+        scan.profile = Some(Box::new(
+            profile.finish(scan.total_demand_rows, scan_fallback),
+        ));
+    }
+    Ok(scan)
+}
+
+fn dispatch_with_ledger<L: LocalDispatchLedger + ?Sized>(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+    ledger: &mut L,
+) -> anyhow::Result<LocalDispatchScan> {
+    dispatch_with_ledger_mode(
+        state, base, entities, powers, directory, ledger, false, false,
+    )
+}
+
+pub(crate) fn dispatch_profiled(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &mut StationRouteLedger,
+) -> anyhow::Result<LocalDispatchScan> {
+    dispatch_with_ledger_mode(
+        state,
+        base,
+        entities,
+        powers,
+        directory,
+        route_ledger,
+        false,
+        true,
+    )
+}
+
+#[cfg(test)]
+fn dispatch_full_scan_oracle<L: LocalDispatchLedger + ?Sized>(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+    ledger: &mut L,
+) -> anyhow::Result<LocalDispatchScan> {
+    dispatch_with_ledger_mode(
+        state, base, entities, powers, directory, ledger, true, false,
+    )
+}
+
+pub(crate) fn dispatch(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &mut StationRouteLedger,
+) -> anyhow::Result<LocalDispatchScan> {
+    dispatch_with_ledger(state, base, entities, powers, directory, route_ledger)
+}
+
+struct LocalRouteAdvanceOutcome {
+    activity_updates: Vec<(usize, bool)>,
+    changed_station_indices: Vec<usize>,
+}
+
+fn advance_routes_for_indices(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    quantum_bandwidth: crate::quantum_logistics::RuntimeBandwidth,
     seconds: f64,
     powers: &HashMap<usize, f64>,
-    directory: &LocalPeerDirectory,
-) -> anyhow::Result<()> {
-    if !has_local_route(entities, &directory.station_indices) {
-        return Ok(());
-    }
+    route_scan_indices: &[usize],
+) -> anyhow::Result<LocalRouteAdvanceOutcome> {
     let indexes = &state.entity_index;
-    let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
-    for &demand_index in &directory.station_indices {
+    let mut activity_updates = Vec::with_capacity(route_scan_indices.len());
+    let mut changed_station_indices = Vec::new();
+    for &demand_index in route_scan_indices {
         let demand_id = entities[demand_index]
             .as_object()
             .ok_or_else(|| anyhow!("native local demand is invalid"))?
@@ -1171,6 +2784,7 @@ pub(crate) fn advance_routes(
             .and_then(Value::as_array_mut)
             .map(std::mem::take)
         else {
+            activity_updates.push((demand_index, false));
             continue;
         };
         let mut remaining = Vec::new();
@@ -1262,6 +2876,7 @@ pub(crate) fn advance_routes(
                 set_number(station, "stationTrips", (trips + vehicles).floor())?;
                 set_number(station, "stationLastTransfer", delivered_cargo)?;
             }
+            changed_station_indices.extend([demand_index, supply_index, owner_index]);
             completed_cargo += delivered_cargo;
             if retain_route {
                 remaining.push(route_value);
@@ -1270,6 +2885,10 @@ pub(crate) fn advance_routes(
         let demand = entities[demand_index]
             .as_object_mut()
             .expect("station object");
+        let has_local_route = remaining
+            .iter()
+            .filter_map(Value::as_object)
+            .any(|route| string_at(route, "scope") == Some("local"));
         let max_progress = remaining
             .iter()
             .filter_map(Value::as_object)
@@ -1284,6 +2903,227 @@ pub(crate) fn advance_routes(
             };
         set_number(demand, "productionRate", rate)?;
         set_number(demand, "stationProgress", max_progress)?;
+        activity_updates.push((demand_index, has_local_route));
+    }
+    changed_station_indices.sort_unstable();
+    changed_station_indices.dedup();
+    Ok(LocalRouteAdvanceOutcome {
+        activity_updates,
+        changed_station_indices,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn advance_routes(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    seconds: f64,
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+) -> anyhow::Result<Vec<usize>> {
+    let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
+    advance_routes_with_bandwidth(
+        state,
+        base,
+        entities,
+        quantum_bandwidth,
+        seconds,
+        powers,
+        directory,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn advance_routes_with_bandwidth(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    quantum_bandwidth: crate::quantum_logistics::RuntimeBandwidth,
+    seconds: f64,
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+) -> anyhow::Result<Vec<usize>> {
+    if !directory.has_local_routes() {
+        return Ok(Vec::new());
+    }
+    let (route_scan_indices, _dense_fallback) = directory.route_scan_indices();
+    let outcome = advance_routes_for_indices(
+        state,
+        base,
+        entities,
+        quantum_bandwidth,
+        seconds,
+        powers,
+        &route_scan_indices,
+    )?;
+    // A quantum-supply demand can retain completed local cargo in its station
+    // input buffer. Derive that wake only from the successfully mutated
+    // demand rows; ordinary route completions add outputs and remain dormant.
+    let buffer_updates = plan_buffer_activity(entities, directory, &route_scan_indices)?;
+    directory.replace_scanned_local_route_activity(&outcome.activity_updates);
+    for (station_index, active) in buffer_updates {
+        directory.update_buffer_station(station_index, active);
+    }
+    Ok(outcome.changed_station_indices)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CongestionUpdate {
+    station_index: usize,
+    congestion: f64,
+    active_progress: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalCongestionScan {
+    pub selected_station_rows: usize,
+    pub total_station_rows: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+    #[cfg(test)]
+    pub selected_worker_count: usize,
+    #[cfg(test)]
+    pub observed_worker_count: usize,
+    #[cfg(test)]
+    pub parallel_prepare: bool,
+}
+
+struct PlannedCongestionUpdates {
+    updates: Vec<Option<CongestionUpdate>>,
+    #[cfg(test)]
+    diagnostics: Option<crate::deterministic_runtime::IndexedPrepareDiagnostics>,
+}
+
+fn select_congestion_station_indices(
+    directory: &LocalPeerDirectory,
+    route_ledger: &StationRouteLedger,
+) -> (Vec<usize>, LocalCongestionScan) {
+    // Static waiting is a topology property. A fresh/rebuilt directory seeds
+    // every station into `local_congestion_reset_station_indices`; once that
+    // baseline commits, only current routes and the previous route endpoints
+    // can change stationCongestion/stationProgress. Re-reading every configured
+    // demand here made an otherwise idle factory O(all waiting stations).
+    let mut selected = directory.local_congestion_reset_station_indices().to_vec();
+    selected.extend(route_ledger.active_local_station_indices());
+    selected.sort_unstable();
+    selected.dedup();
+    selected.retain(|index| directory.station_indices.binary_search(index).is_ok());
+    let total_station_rows = directory.station_indices.len();
+    let directory_fallback = directory.dispatch_full_scan_required;
+    let dense_fallback = !directory_fallback
+        && !selected.is_empty()
+        && selected.len().saturating_mul(LOCAL_ROUTE_DENSE_DENOMINATOR)
+            >= total_station_rows.saturating_mul(LOCAL_ROUTE_DENSE_NUMERATOR);
+    if directory_fallback || dense_fallback {
+        selected.clear();
+        selected.extend_from_slice(&directory.station_indices);
+    }
+    let scan = LocalCongestionScan {
+        selected_station_rows: selected.len(),
+        total_station_rows,
+        dense_fallback,
+        directory_fallback,
+        #[cfg(test)]
+        selected_worker_count: 0,
+        #[cfg(test)]
+        observed_worker_count: 0,
+        #[cfg(test)]
+        parallel_prepare: false,
+    };
+    (selected, scan)
+}
+
+fn plan_idle_congestion_updates(
+    runtime: &DeterministicRuntime,
+    entities: &[Value],
+    station_indices: &[usize],
+) -> Vec<Option<CongestionUpdate>> {
+    runtime.indexed_map(station_indices, |_, station_index| {
+        let station_index = *station_index;
+        let station = entities[station_index].as_object().expect("station object");
+        matches!(
+            string_at(station, "buildingId"),
+            Some("planetary_logistics_station" | "interstellar_logistics_station")
+        )
+        .then_some(CongestionUpdate {
+            station_index,
+            congestion: 0.0,
+            active_progress: 0.0,
+        })
+    })
+}
+
+#[cfg(test)]
+fn plan_congestion_updates<L: LocalLedgerView + ?Sized>(
+    runtime: &DeterministicRuntime,
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    ledger: &L,
+) -> anyhow::Result<Vec<Option<CongestionUpdate>>> {
+    runtime.indexed_try_map(
+        directory.station_indices.as_ref(),
+        |_, station_index| -> anyhow::Result<Option<CongestionUpdate>> {
+            let station_index = *station_index;
+            let station = entities[station_index].as_object().expect("station object");
+            if !matches!(
+                string_at(station, "buildingId"),
+                Some("planetary_logistics_station" | "interstellar_logistics_station")
+            ) {
+                return Ok(None);
+            }
+            let station_slots = directory
+                .station_slots
+                .get(&station_index)
+                .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+            let mut waiting = 0.0;
+            for (slot_index, slot) in station_slots.iter().enumerate() {
+                if slot.item_id.is_some()
+                    && slot.local_mode == LocalMode::Demand
+                    && has_peer_match(directory, station_index, slot_index)?
+                {
+                    waiting += 1.0;
+                }
+            }
+            let installed = drone_capacity(station);
+            let busy = ledger.local_busy(station_index);
+            let fleet_load = if installed > 0.0 {
+                busy / installed
+            } else if waiting > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let congestion = fleet_load
+                .max(if waiting > 0.0 && busy == 0.0 {
+                    0.35
+                } else {
+                    0.0
+                })
+                .clamp(0.0, 1.0);
+            let active_progress = ledger.active_local_progress(station_index);
+            Ok(Some(CongestionUpdate {
+                station_index,
+                congestion: rounded(congestion, 3),
+                active_progress,
+            }))
+        },
+    )
+}
+
+fn apply_congestion_updates(
+    entities: &mut [Value],
+    updates: Vec<Option<CongestionUpdate>>,
+) -> anyhow::Result<()> {
+    // Replay in the original topology order. Apart from preserving the legacy
+    // local-before-remote overwrite contract, this keeps insertion order for
+    // absent JSON keys and every opaque MOD field byte-for-byte stable.
+    for update in updates.into_iter().flatten() {
+        let target = entities[update.station_index]
+            .as_object_mut()
+            .expect("station object");
+        set_number(target, "stationCongestion", update.congestion)?;
+        set_number(target, "stationProgress", update.active_progress)?;
     }
     Ok(())
 }
@@ -1291,84 +3131,115 @@ pub(crate) fn advance_routes(
 pub(crate) fn update_congestion(
     state: &CoreState,
     entities: &mut [Value],
-    directory: &LocalPeerDirectory,
-) -> anyhow::Result<()> {
-    if !directory_has_local_pair(directory)
-        && !has_local_route(entities, &directory.station_indices)
-    {
-        for &station_index in &directory.station_indices {
-            let station = entities[station_index]
-                .as_object_mut()
-                .expect("station object");
-            if matches!(
-                string_at(station, "buildingId"),
-                Some("planetary_logistics_station" | "interstellar_logistics_station")
-            ) {
-                set_number(station, "stationCongestion", 0.0)?;
-                set_number(station, "stationProgress", 0.0)?;
-            }
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &StationRouteLedger,
+) -> anyhow::Result<LocalCongestionScan> {
+    update_congestion_with_runtime(
+        deterministic_runtime(),
+        state,
+        entities,
+        directory,
+        route_ledger,
+    )
+}
+
+pub(crate) fn update_congestion_with_runtime(
+    runtime: &DeterministicRuntime,
+    _state: &CoreState,
+    entities: &mut [Value],
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &StationRouteLedger,
+) -> anyhow::Result<LocalCongestionScan> {
+    let (station_indices, scan) = select_congestion_station_indices(directory, route_ledger);
+    #[cfg(test)]
+    let mut scan = scan;
+    let plan = if !directory.has_local_pair() && !directory.has_local_routes() {
+        PlannedCongestionUpdates {
+            updates: plan_idle_congestion_updates(runtime, entities, &station_indices),
+            #[cfg(test)]
+            diagnostics: None,
         }
-        return Ok(());
-    }
-    let ledger = build_ledger(entities, &state.entity_index, &directory.station_indices);
-    let mut updates = Vec::with_capacity(directory.station_indices.len());
-    for &station_index in &directory.station_indices {
-        let station = entities[station_index].as_object().expect("station object");
-        if !matches!(
-            string_at(station, "buildingId"),
-            Some("planetary_logistics_station" | "interstellar_logistics_station")
-        ) {
-            continue;
+    } else {
+        let plan_station =
+            |_: usize, station_index: &usize| -> anyhow::Result<Option<CongestionUpdate>> {
+                let station_index = *station_index;
+                let station = entities[station_index].as_object().expect("station object");
+                if !matches!(
+                    string_at(station, "buildingId"),
+                    Some("planetary_logistics_station" | "interstellar_logistics_station")
+                ) {
+                    return Ok(None);
+                }
+                let station_slots = directory
+                    .station_slots
+                    .get(&station_index)
+                    .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+                let mut waiting = 0.0;
+                for (slot_index, slot) in station_slots.iter().enumerate() {
+                    if slot.item_id.is_some()
+                        && slot.local_mode == LocalMode::Demand
+                        && has_peer_match(directory, station_index, slot_index)?
+                    {
+                        waiting += 1.0;
+                    }
+                }
+                let installed = drone_capacity(station);
+                let busy = route_ledger.local_busy(station_index);
+                let fleet_load = if installed > 0.0 {
+                    busy / installed
+                } else if waiting > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                let congestion = fleet_load
+                    .max(if waiting > 0.0 && busy == 0.0 {
+                        0.35
+                    } else {
+                        0.0
+                    })
+                    .clamp(0.0, 1.0);
+                Ok(Some(CongestionUpdate {
+                    station_index,
+                    congestion: rounded(congestion, 3),
+                    active_progress: route_ledger.active_local_progress(station_index),
+                }))
+            };
+        #[cfg(test)]
+        let (updates, diagnostics) =
+            runtime.indexed_try_map_with_diagnostics(&station_indices, plan_station);
+        #[cfg(not(test))]
+        let updates = runtime.indexed_try_map(&station_indices, plan_station);
+        PlannedCongestionUpdates {
+            updates: updates?,
+            #[cfg(test)]
+            diagnostics: Some(diagnostics),
         }
-        let station_slots = directory
-            .station_slots
-            .get(&station_index)
-            .ok_or_else(|| anyhow!("native local station slots are missing"))?;
-        let mut waiting = 0.0;
-        for (slot_index, slot) in station_slots.iter().enumerate() {
-            if slot.item_id.is_some()
-                && slot.local_mode == LocalMode::Demand
-                && has_peer_match(directory, station_index, slot_index)?
-            {
-                waiting += 1.0;
-            }
-        }
-        let installed = drone_capacity(station);
-        let busy = ledger.busy.get(&station_index).copied().unwrap_or(0.0);
-        let fleet_load = if installed > 0.0 {
-            busy / installed
-        } else if waiting > 0.0 {
-            1.0
-        } else {
-            0.0
-        };
-        let congestion = fleet_load
-            .max(if waiting > 0.0 && busy == 0.0 {
-                0.35
-            } else {
-                0.0
-            })
-            .clamp(0.0, 1.0);
-        let active_progress = ledger
-            .active_local_progress
-            .get(&station_index)
-            .copied()
-            .unwrap_or(0.0);
-        updates.push((station_index, rounded(congestion, 3), active_progress));
+    };
+    #[cfg(test)]
+    if let Some(diagnostics) = plan.diagnostics {
+        scan.selected_worker_count = diagnostics.selected_worker_count;
+        scan.observed_worker_count = diagnostics.observed_worker_count;
+        scan.parallel_prepare = diagnostics.parallel;
     }
-    for (station_index, congestion, active_progress) in updates {
-        let target = entities[station_index]
-            .as_object_mut()
-            .expect("station object");
-        set_number(target, "stationCongestion", congestion)?;
-        set_number(target, "stationProgress", active_progress)?;
-    }
-    Ok(())
+    apply_congestion_updates(entities, plan.updates)?;
+    let mut next_reset = route_ledger.active_local_station_indices();
+    next_reset.retain(|index| directory.station_indices.binary_search(index).is_ok());
+    directory.replace_local_congestion_reset_station_indices(next_reset);
+    Ok(scan)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{
+        BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemDefinition, PlanetDefinition,
+        RuntimeCatalog,
+    };
+    use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use crate::state::CoreCheckpointIdentity;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     fn json_key_pointer(record: &Map<String, Value>, key: &str) -> usize {
         record
@@ -1510,6 +3381,788 @@ mod tests {
     }
 
     #[test]
+    fn local_directory_interns_repeated_slot_items_and_keeps_compact_slots() {
+        let entities = (0_usize..64)
+            .map(|index| {
+                local_station(
+                    &format!("station-{index}"),
+                    if index.is_multiple_of(2) {
+                        "supply"
+                    } else {
+                        "demand"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let indices = station_indices(&entities);
+        let directory = prepare_step_directory(&entities, &indices).unwrap();
+        let first_item = directory.station_slots[&indices[0]][0]
+            .item_id
+            .as_ref()
+            .expect("first station item");
+        let last_item = directory.station_slots[indices.last().expect("last station")][0]
+            .item_id
+            .as_ref()
+            .expect("last station item");
+        let peer_item = directory
+            .by_planet_item
+            .values()
+            .flat_map(HashMap::keys)
+            .next()
+            .expect("peer item");
+
+        assert!(Arc::ptr_eq(first_item, last_item));
+        assert!(Arc::ptr_eq(first_item, peer_item));
+        assert!(std::mem::size_of::<Slot>() <= 48);
+        assert!(
+            directory.slot_item_allocation_bytes < first_item.len() * directory.station_slots.len(),
+            "the resident estimate must count one shared item allocation, not one String per slot"
+        );
+    }
+
+    fn fixture_checksum(bytes: &[u8]) -> String {
+        let mut hash = 0x811c9dc5_u32;
+        for byte in bytes {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        format!("{hash:08x}")
+    }
+
+    fn route_fixture_catalog() -> RuntimeCatalog {
+        RuntimeCatalog::validate(
+            CatalogSnapshot {
+                protocol_version: 1,
+                registry_fingerprint: "local-route-active-test".to_owned(),
+                planets: vec![PlanetDefinition {
+                    id: "home".to_owned(),
+                    name: "route-test".to_owned(),
+                    system_id: "helios".to_owned(),
+                    kind: "terrestrial".to_owned(),
+                    orbit_index: 1,
+                    simulation_order: 0,
+                    orbital_yields: HashMap::new(),
+                }],
+                items: vec![ItemDefinition {
+                    id: "iron_ore".to_owned(),
+                    name: "route-item".to_owned(),
+                    kind: "solid".to_owned(),
+                    fuel_energy_mj: 0.0,
+                }],
+                buildings: [
+                    "planetary_logistics_station",
+                    "interstellar_logistics_station",
+                ]
+                .into_iter()
+                .map(|id| BuildingDefinition {
+                    id: id.to_owned(),
+                    kind: "station".to_owned(),
+                    speed: 1.0,
+                    input_capacity: 100_000.0,
+                    output_capacity: 100_000.0,
+                    power_demand_kw: 1.0,
+                    power_generation_kw: 0.0,
+                    power_charge_kw: 0.0,
+                    energy_capacity_mj: 0.0,
+                    fuel_item_ids: Vec::new(),
+                    fuel_efficiency: 1.0,
+                    family: None,
+                    accepts: None,
+                })
+                .collect(),
+                recipes: Vec::new(),
+                constructions: Vec::new(),
+                belts: vec![BeltDefinition {
+                    tier: 1,
+                    speed: 6.0,
+                }],
+                proliferators: Vec::new(),
+                technologies: Vec::new(),
+            },
+            "local-route-active-test",
+        )
+        .unwrap()
+    }
+
+    fn route_fixture_base() -> Value {
+        json!({
+            "version": 47,
+            "mode": "normal",
+            "paused": false,
+            "activePlanetId": "home",
+            "nextId": 1000,
+            "settings": {
+                "logisticsBufferLimit": 1000000,
+                "difficulty": "standard"
+            },
+            "research": { "completedTechIds": [] },
+            "endgame": {
+                "infiniteResearch": { "galactic_logistics": { "level": 0 } }
+            },
+            "mod:base/opaque": { "signedZero": -0.0, "text": "保持原样" }
+        })
+    }
+
+    fn raw_local_peer_exists(
+        entities: &[Value],
+        station_indices: &[usize],
+        station_index: usize,
+        item_id: &str,
+    ) -> anyhow::Result<bool> {
+        let station = entities[station_index]
+            .as_object()
+            .expect("local congestion oracle station");
+        let planet_id = string_at(station, "planetId").unwrap_or_default();
+        for &peer_index in station_indices {
+            if peer_index == station_index {
+                continue;
+            }
+            let Some(peer) = entities.get(peer_index).and_then(Value::as_object) else {
+                continue;
+            };
+            if string_at(peer, "planetId").unwrap_or_default() != planet_id {
+                continue;
+            }
+            if slots(peer)?.iter().any(|slot| {
+                slot.item_id.as_deref() == Some(item_id) && slot.local_mode == LocalMode::Supply
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn flat_full_congestion_oracle(
+        state: &CoreState,
+        source: &[Value],
+    ) -> anyhow::Result<Vec<Value>> {
+        // The expected path deliberately avoids LocalPeerDirectory peer
+        // buckets, its active selector, the active StationRouteLedger builder,
+        // and DeterministicRuntime. Only the dedicated full-ledger oracle is
+        // shared so route ownership is decoded from every persisted row.
+        let station_indices = state.factory_topology.station_indices.as_ref();
+        let oracle_directory = prepare_step_directory(source, station_indices)?;
+        let ledger = StationRouteLedger::build_full_oracle(state, source, &oracle_directory);
+        let mut expected = source.to_vec();
+        for &station_index in station_indices {
+            let Some(station) = source.get(station_index).and_then(Value::as_object) else {
+                continue;
+            };
+            if !matches!(
+                string_at(station, "buildingId"),
+                Some("planetary_logistics_station" | "interstellar_logistics_station")
+            ) {
+                continue;
+            }
+            let mut waiting = 0.0;
+            for slot in slots(station)? {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                if slot.local_mode == LocalMode::Demand
+                    && raw_local_peer_exists(source, station_indices, station_index, item_id)?
+                {
+                    waiting += 1.0;
+                }
+            }
+            let installed = drone_capacity(station);
+            let busy = ledger.local_busy_floor(station_index);
+            let fleet_load = if installed > 0.0 {
+                busy / installed
+            } else if waiting > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let congestion = fleet_load
+                .max(if waiting > 0.0 && busy == 0.0 {
+                    0.35
+                } else {
+                    0.0
+                })
+                .clamp(0.0, 1.0);
+            let target = expected[station_index]
+                .as_object_mut()
+                .expect("local congestion oracle target");
+            set_number(target, "stationCongestion", rounded(congestion, 3))?;
+            set_number(
+                target,
+                "stationProgress",
+                ledger.active_local_progress(station_index),
+            )?;
+        }
+        Ok(expected)
+    }
+
+    fn congestion_authority_fingerprint(state: &CoreState) -> (Vec<u8>, String, String, String) {
+        let materialized = state.materialize().unwrap();
+        let object = materialized.as_object().unwrap();
+        let mut material = Map::new();
+        for key in [
+            "tray",
+            "planetTrays",
+            "quantumInventory",
+            "totalProduced",
+            "galacticExports",
+            "constructionQueue",
+            "entities",
+            "belts",
+        ] {
+            if let Some(value) = object.get(key) {
+                material.insert(key.to_owned(), value.clone());
+            }
+        }
+        (
+            serde_json::to_vec(&materialized).unwrap(),
+            state.canonical_sha256().unwrap(),
+            state.domain_sha256().unwrap(),
+            crate::canonical::canonical_sha256(&Value::Object(material)),
+        )
+    }
+
+    fn assert_congestion_authority_equal(actual: &[Value], expected: &[Value], label: &str) {
+        assert_eq!(
+            serde_json::to_vec(actual).unwrap(),
+            serde_json::to_vec(expected).unwrap(),
+            "entity bytes diverged: {label}"
+        );
+        let actual = route_fixture_state(actual);
+        let expected = route_fixture_state(expected);
+        assert_eq!(
+            congestion_authority_fingerprint(&actual),
+            congestion_authority_fingerprint(&expected),
+            "canonical/domain/material authority diverged: {label}"
+        );
+    }
+
+    fn route_station(index: usize, mode: &str) -> Value {
+        let mut station = local_station(&format!("station/{index:05}/Ω"), mode);
+        let station = station.as_object_mut().expect("route fixture station");
+        station.insert("planetId".to_owned(), Value::from("home"));
+        station["stationSlots"]
+            .as_array_mut()
+            .and_then(|slots| slots.first_mut())
+            .and_then(Value::as_object_mut)
+            .expect("route fixture primary slot")
+            .insert("itemId".to_owned(), Value::from("iron_ore"));
+        station.insert("inputs".to_owned(), json!({ "iron_ore": 0.0 }));
+        station.insert(
+            "outputs".to_owned(),
+            json!({ "iron_ore": if index == 0 { 100000000.0 } else { 0.0 } }),
+        );
+        station.insert("stationDrones".to_owned(), Value::from(50));
+        station.insert("stationRoutes".to_owned(), Value::Array(Vec::new()));
+        station.insert("stationDispatchCursor".to_owned(), Value::from(0.0));
+        station.insert(
+            "stationLastSupplyPeerBySlot".to_owned(),
+            Value::Object(Map::new()),
+        );
+        station.insert("stationProgress".to_owned(), Value::from(0.0));
+        station.insert("stationCongestion".to_owned(), Value::from(0.0));
+        station.insert("stationTrips".to_owned(), Value::from(0.0));
+        station.insert("stationLastTransfer".to_owned(), Value::from(0.0));
+        station.insert("utilization".to_owned(), Value::from(0.0));
+        station.insert("productionRate".to_owned(), Value::from(0.0));
+        station.insert(
+            "mod:route/opaque".to_owned(),
+            json!({ "index": index, "signedZero": -0.0, "text": "原样" }),
+        );
+        Value::Object(station.clone())
+    }
+
+    #[test]
+    fn runtime_reset_is_full_once_then_exactly_sparse_and_byte_identical() {
+        let mut source = route_matrix(8, &[], 0.0, 10.0);
+        let all_indices = (0..source.len()).collect::<Vec<_>>();
+        let mut directory = prepare_step_directory(&source, &all_indices).unwrap();
+        assert_eq!(directory.runtime_reset_station_indices(), all_indices);
+
+        for index in [2_usize, 6] {
+            let station = source[index].as_object_mut().unwrap();
+            station.insert("utilization".to_owned(), Value::from(0.75));
+            station.insert("productionRate".to_owned(), Value::from(123.5));
+            station.insert(
+                "stationPeerId".to_owned(),
+                Value::from(format!("station/runtime-peer/{index}")),
+            );
+        }
+        directory.replace_runtime_reset_station_indices(vec![6, 2, 6]);
+        assert_eq!(directory.runtime_reset_station_indices(), [2, 6]);
+
+        let mut sparse = source.clone();
+        let mut full = source;
+        reset_runtime_for_indices(&mut sparse, directory.runtime_reset_station_indices()).unwrap();
+        reset_runtime_for_indices(&mut full, &all_indices).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&sparse).unwrap(),
+            serde_json::to_vec(&full).unwrap(),
+        );
+    }
+
+    #[test]
+    fn sparse_congestion_calibrates_once_then_matches_full_oracle_at_1_5_60_steps() {
+        // Keep the independent serial O(S²) peer oracle bounded; the separate
+        // large sparse-selector A/B owns the scale/performance assertion.
+        const COUNT: usize = 128;
+        let source = (0..COUNT)
+            .map(|index| {
+                route_station(
+                    index,
+                    if index == 0 {
+                        "supply"
+                    } else if index == 7 {
+                        "demand"
+                    } else {
+                        "storage"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for steps in [1_usize, 5, 60] {
+            let mut entities = source.clone();
+            entities[113]["stationRoutes"] =
+                Value::Array(vec![local_route(113, 113, 0.25, 120.0, 11.0)]);
+            let state = route_fixture_state(&entities);
+            let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+            let mut directory =
+                prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+            let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+
+            for step in 0..steps {
+                let expected = flat_full_congestion_oracle(&state, &entities).unwrap();
+                let scan =
+                    update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+                assert_eq!(scan.total_station_rows, COUNT, "steps={steps} step={step}");
+                assert!(!scan.directory_fallback, "steps={steps} step={step}");
+                if step == 0 {
+                    assert_eq!(scan.selected_station_rows, COUNT);
+                    assert!(scan.dense_fallback);
+                } else {
+                    assert_eq!(scan.selected_station_rows, 2);
+                    assert!(!scan.dense_fallback);
+                }
+                assert_congestion_authority_equal(
+                    &entities,
+                    &expected,
+                    &format!("steps={steps} step={step}"),
+                );
+            }
+            assert_eq!(entities[7]["stationCongestion"], Value::from(0.35));
+            assert_eq!(directory.local_congestion_reset_station_indices(), [0, 113]);
+        }
+    }
+
+    #[test]
+    fn sparse_congestion_resets_completed_route_once_then_visits_zero_static_rows() {
+        let count = 256;
+        let mut entities = (0..count)
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        entities[113]["stationRoutes"] =
+            Value::Array(vec![local_route(113, 113, 0.25, 120.0, 11.0)]);
+        let state = route_fixture_state(&entities);
+        let mut activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let cold = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(cold.selected_station_rows, count);
+
+        entities[113]["stationRoutes"] = Value::Array(Vec::new());
+        activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let reset = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(reset.selected_station_rows, 2);
+        assert!(
+            directory
+                .local_congestion_reset_station_indices()
+                .is_empty()
+        );
+        let quiet = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(quiet.selected_station_rows, 0);
+        assert_eq!(entities[0]["stationProgress"], Value::from(0.0));
+        assert_eq!(entities[113]["stationProgress"], Value::from(0.0));
+    }
+
+    #[test]
+    fn rebuilt_local_directory_applies_real_peer_topology_change_against_flat_oracle() {
+        const COUNT: usize = 128;
+        let mut entities = (0..COUNT)
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        let state = route_fixture_state(&entities);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(entities[7]["stationCongestion"], Value::from(0.35));
+
+        entities[0]["stationSlots"][0]["localMode"] = Value::from("storage");
+        let rebuilt_state = route_fixture_state(&entities);
+        let rebuilt_activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut rebuilt_directory =
+            prepare_step_directory(&entities, &rebuilt_state.factory_topology.station_indices)
+                .unwrap();
+        let rebuilt_ledger = StationRouteLedger::build(
+            &rebuilt_state,
+            &entities,
+            &rebuilt_directory,
+            &rebuilt_activity,
+        );
+        let expected = flat_full_congestion_oracle(&rebuilt_state, &entities).unwrap();
+        let scan = update_congestion(
+            &rebuilt_state,
+            &mut entities,
+            &mut rebuilt_directory,
+            &rebuilt_ledger,
+        )
+        .unwrap();
+        assert_eq!(scan.selected_station_rows, COUNT);
+        assert!(scan.dense_fallback);
+        assert_eq!(entities[7]["stationCongestion"], Value::from(0.0));
+        assert_congestion_authority_equal(&entities, &expected, "rebuilt local peer topology");
+    }
+
+    fn local_congestion_replay_bytes(worker_count: usize, steps: usize) -> Vec<u8> {
+        const COUNT: usize = 1_024;
+        let mut entities = (0..COUNT)
+            .map(|index| {
+                route_station(
+                    index,
+                    if index == 0 {
+                        "supply"
+                    } else if index == 7 {
+                        "demand"
+                    } else {
+                        "storage"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        entities[113]["stationRoutes"] =
+            Value::Array(vec![local_route(113, 113, 0.25, 120.0, 11.0)]);
+        let state = route_fixture_state(&entities);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let runtime = DeterministicRuntime::for_test(worker_count);
+        let mut scans = Vec::new();
+        for _ in 0..steps {
+            let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+            scans.push(
+                update_congestion_with_runtime(
+                    &runtime,
+                    &state,
+                    &mut entities,
+                    &mut directory,
+                    &ledger,
+                )
+                .unwrap(),
+            );
+        }
+        serde_json::to_vec(&json!({
+            "entities": entities,
+            "pendingReset": directory.local_congestion_reset_station_indices(),
+            "scans": scans
+                .iter()
+                .map(|scan| json!({
+                    "selected": scan.selected_station_rows,
+                    "total": scan.total_station_rows,
+                    "dense": scan.dense_fallback,
+                    "directory": scan.directory_fallback,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn local_congestion_is_exact_for_1_2_4_8_workers_across_60_internal_steps() {
+        let expected = local_congestion_replay_bytes(1, 60);
+        for worker_count in [1, 2, 4, 8] {
+            assert_eq!(
+                local_congestion_replay_bytes(worker_count, 60),
+                expected,
+                "worker_count={worker_count}"
+            );
+        }
+    }
+
+    type CongestionAuthorityFingerprint = (Vec<u8>, String, String, String);
+
+    struct LocalParallelCongestionResult {
+        entity_bytes: Vec<u8>,
+        authority: CongestionAuthorityFingerprint,
+        scan: LocalCongestionScan,
+    }
+
+    fn production_local_congestion_parallel_result(
+        worker_count: usize,
+    ) -> LocalParallelCongestionResult {
+        const COUNT: usize = PARALLEL_MIN_ITEMS + 257;
+        let mut entities = (0..COUNT)
+            .map(|index| {
+                route_station(
+                    index,
+                    if index == 0 {
+                        "supply"
+                    } else if index == 7 {
+                        "demand"
+                    } else {
+                        "storage"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = route_fixture_state(&entities);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let scan = update_congestion_with_runtime(
+            &DeterministicRuntime::for_test(worker_count),
+            &state,
+            &mut entities,
+            &mut directory,
+            &ledger,
+        )
+        .unwrap();
+        let entity_bytes = serde_json::to_vec(&entities).unwrap();
+        let committed = route_fixture_state(&entities);
+        LocalParallelCongestionResult {
+            entity_bytes,
+            authority: congestion_authority_fingerprint(&committed),
+            scan,
+        }
+    }
+
+    #[test]
+    fn production_local_congestion_updater_really_uses_2_4_8_workers_and_stays_authoritative() {
+        const COUNT: usize = PARALLEL_MIN_ITEMS + 257;
+        let expected = production_local_congestion_parallel_result(1);
+        assert_eq!(expected.scan.selected_station_rows, COUNT);
+        assert_eq!(expected.scan.selected_worker_count, 1);
+        assert_eq!(expected.scan.observed_worker_count, 1);
+        assert!(!expected.scan.parallel_prepare);
+
+        for worker_count in [2, 4, 8] {
+            let actual = production_local_congestion_parallel_result(worker_count);
+            assert_eq!(actual.scan.selected_station_rows, COUNT);
+            assert_eq!(actual.scan.selected_worker_count, worker_count);
+            assert!(actual.scan.parallel_prepare);
+            assert!(
+                (2..=worker_count).contains(&actual.scan.observed_worker_count),
+                "production updater did not actually enter multiple workers: requested={worker_count} observed={}",
+                actual.scan.observed_worker_count
+            );
+            assert_eq!(
+                actual.entity_bytes, expected.entity_bytes,
+                "entity bytes diverged at worker_count={worker_count}"
+            );
+            assert_eq!(
+                actual.authority, expected.authority,
+                "canonical/domain/material authority diverged at worker_count={worker_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn congestion_fail_closes_mod_shape_and_exact_three_quarter_density() {
+        const COUNT: usize = 256;
+        let mut opaque_entities = (0..COUNT)
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        opaque_entities[7]["stationRoutes"] = json!([{
+            "scope": "mod:wormhole/local",
+            "mod:payload": { "signedZero": -0.0, "text": "保持" }
+        }]);
+        let opaque_state = route_fixture_state(&opaque_entities);
+        let opaque_activity =
+            crate::interstellar_logistics::prepare_route_activity(&opaque_entities);
+        let mut opaque_directory = prepare_step_directory(
+            &opaque_entities,
+            &opaque_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        opaque_directory.replace_local_congestion_reset_station_indices(Vec::new());
+        let opaque_ledger = StationRouteLedger::build(
+            &opaque_state,
+            &opaque_entities,
+            &opaque_directory,
+            &opaque_activity,
+        );
+        let opaque_expected = flat_full_congestion_oracle(&opaque_state, &opaque_entities).unwrap();
+        let (opaque_indices, opaque_scan) =
+            select_congestion_station_indices(&opaque_directory, &opaque_ledger);
+        assert_eq!(opaque_indices, (0..COUNT).collect::<Vec<_>>());
+        assert!(opaque_scan.directory_fallback);
+        assert!(!opaque_scan.dense_fallback);
+        update_congestion(
+            &opaque_state,
+            &mut opaque_entities,
+            &mut opaque_directory,
+            &opaque_ledger,
+        )
+        .unwrap();
+        assert_congestion_authority_equal(&opaque_entities, &opaque_expected, "opaque MOD route");
+
+        let mut dense_entities = (0..COUNT)
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        for (index, entity) in dense_entities.iter_mut().enumerate().skip(1).take(191) {
+            entity["stationRoutes"] =
+                Value::Array(vec![local_route(index, index, 0.25, 120.0, 11.0)]);
+        }
+        let dense_state = route_fixture_state(&dense_entities);
+        let dense_activity = crate::interstellar_logistics::prepare_route_activity(&dense_entities);
+        let mut dense_directory = prepare_step_directory(
+            &dense_entities,
+            &dense_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        dense_directory.replace_local_congestion_reset_station_indices(Vec::new());
+        let dense_ledger = StationRouteLedger::build(
+            &dense_state,
+            &dense_entities,
+            &dense_directory,
+            &dense_activity,
+        );
+        let dense_expected = flat_full_congestion_oracle(&dense_state, &dense_entities).unwrap();
+        let (dense_indices, dense_scan) =
+            select_congestion_station_indices(&dense_directory, &dense_ledger);
+        assert_eq!(dense_indices, (0..COUNT).collect::<Vec<_>>());
+        assert!(!dense_scan.directory_fallback);
+        assert!(dense_scan.dense_fallback);
+        update_congestion(
+            &dense_state,
+            &mut dense_entities,
+            &mut dense_directory,
+            &dense_ledger,
+        )
+        .unwrap();
+        assert_congestion_authority_equal(&dense_entities, &dense_expected, "75% dense fallback");
+    }
+
+    fn local_route(
+        id: usize,
+        demand_index: usize,
+        progress: f64,
+        duration: f64,
+        cargo: f64,
+    ) -> Value {
+        json!({
+            "id": format!("local-route/{id:05}"),
+            "slotIndex": 0,
+            "peerId": "station/00000/Ω",
+            "itemId": "iron_ore",
+            "scope": "local",
+            "cargo": cargo,
+            "vehicleCount": 1,
+            "progress": progress,
+            "duration": duration,
+            "requiresWarp": false,
+            "waypointStationIds": [],
+            "distanceLy": 0,
+            "warpersPerVessel": 0,
+            "vehicleStationId": format!("station/{demand_index:05}/Ω")
+        })
+    }
+
+    fn route_matrix(count: usize, active: &[usize], progress: f64, duration: f64) -> Vec<Value> {
+        let active = active.iter().copied().collect::<HashSet<_>>();
+        (0..count)
+            .map(|index| {
+                let mut station =
+                    route_station(index, if index == 0 { "supply" } else { "demand" });
+                if active.contains(&index) {
+                    station["stationRoutes"] =
+                        Value::Array(vec![local_route(index, index, progress, duration, 11.0)]);
+                }
+                station
+            })
+            .collect()
+    }
+
+    fn route_fixture_state(entities: &[Value]) -> CoreState {
+        let entity_count = entities.len();
+        let base = serde_json::to_vec(&route_fixture_base()).unwrap();
+        let entities = serde_json::to_vec(entities).unwrap();
+        let belts = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
+        let chunks = [
+            ("base", "base", &base, 0, 1),
+            ("entities:00000000", "entities", &entities, 0, entity_count),
+            ("belts:00000000", "belts", &belts, 0, 0),
+        ]
+        .into_iter()
+        .map(|(id, kind, bytes, offset, count)| {
+            json!({
+                "id": id,
+                "kind": kind,
+                "offset": offset,
+                "count": count,
+                "checksum": fixture_checksum(bytes),
+                "bytes": bytes.len()
+            })
+        })
+        .collect::<Vec<_>>();
+        let manifest = serde_json::to_vec(&json!({
+            "formatVersion": 1,
+            "envelopeFormatVersion": 2,
+            "mode": "normal",
+            "slot": "main",
+            "stateVersion": 47,
+            "savedAt": 1,
+            "basePrimaryChecksum": "12345678",
+            "chunkRootChecksum": "12345678",
+            "totalBytes": base.len() + entities.len() + belts.len(),
+            "entityCount": entity_count,
+            "beltCount": 0,
+            "chunks": chunks
+        }))
+        .unwrap();
+        let records = BTreeMap::from([
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.manifest".to_owned(),
+                manifest,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.base".to_owned(),
+                base,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
+                    .to_owned(),
+                entities,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.belts%3A00000000".to_owned(),
+                belts,
+            ),
+        ]);
+        CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "local-route-active-test".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            &records,
+            route_fixture_catalog(),
+        )
+        .unwrap()
+    }
+
+    fn route_powers(count: usize, factor: f64) -> HashMap<usize, f64> {
+        (0..count).map(|index| (index, factor)).collect()
+    }
+
+    #[test]
     fn prepared_directory_survives_dynamic_updates_and_rebuilds_for_elevator_mode() {
         let mut entities = vec![
             local_station("supply", "supply"),
@@ -1532,6 +4185,2245 @@ mod tests {
         entities[0]["stationOperationMode"] = Value::from("elevator");
         let rebuilt_boundary = prepare_step_directory(&entities, &station_indices).unwrap();
         assert!(peer_matches(&rebuilt_boundary, 1, 0).unwrap().is_empty());
-        assert_eq!(rebuilt_boundary.station_indices, vec![1]);
+        assert_eq!(rebuilt_boundary.station_indices.as_ref(), &[1]);
+    }
+
+    fn parallel_buffer_source(count: usize) -> Vec<Value> {
+        (0..count)
+            .map(|index| {
+                let mut station = route_station(index, "storage");
+                let station = station.as_object_mut().expect("parallel buffer station");
+                let slots = station["stationSlots"]
+                    .as_array_mut()
+                    .expect("parallel buffer slots");
+                slots[0] = json!({
+                    "itemId": "mod:物流/Ω🚀", "localMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 5, "priority": 1
+                });
+                // Slot one repeats the same item. It must observe slot zero's
+                // output before applying its own larger stock limit.
+                slots[1] = json!({
+                    "itemId": "mod:物流/Ω🚀", "localMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 12, "priority": 1
+                });
+                slots[2] = json!({
+                    "itemId": "iron_ore", "localMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 100, "priority": 1
+                });
+
+                let mut inputs = Map::from_iter([
+                    ("alpha".to_owned(), Value::from(index)),
+                    (
+                        "iron_ore".to_owned(),
+                        Value::from((index % 7) as f64 + 0.75),
+                    ),
+                    ("omega".to_owned(), Value::from(-0.0)),
+                ]);
+                let mut outputs = Map::from_iter([
+                    ("alpha".to_owned(), Value::from(index + 1)),
+                    ("iron_ore".to_owned(), Value::from((index % 11) as f64)),
+                    ("omega".to_owned(), Value::Null),
+                ]);
+                match index % 5 {
+                    0 => {
+                        inputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(11.75));
+                        outputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(-0.0));
+                    }
+                    1 => {
+                        inputs.insert("mod:物流/Ω🚀".to_owned(), Value::Null);
+                        outputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(-0.0));
+                    }
+                    2 => {
+                        // Both keys are absent: slot zero inserts them and the
+                        // duplicate slot overwrites those exact keys in place.
+                    }
+                    3 => {
+                        inputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(9.0));
+                        outputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(12.0));
+                    }
+                    _ => {
+                        inputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(-0.0));
+                        outputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(100.0));
+                    }
+                }
+                station.insert("inputs".to_owned(), Value::Object(inputs));
+                station.insert("outputs".to_owned(), Value::Object(outputs));
+                station.insert(
+                    "mod:buffer/原样保留".to_owned(),
+                    json!({ "index": index, "signedZero": -0.0, "text": "中🚀" }),
+                );
+                Value::Object(station.clone())
+            })
+            .collect()
+    }
+
+    fn run_buffer_indices_with_workers(
+        state: &CoreState,
+        base: &Map<String, Value>,
+        source: &[Value],
+        directory: &LocalPeerDirectory,
+        station_indices: &[usize],
+        workers: usize,
+    ) -> (Vec<u8>, Vec<(usize, bool)>) {
+        let mut entities = source.to_vec();
+        let updates = transfer_buffers_for_indices_with_runtime(
+            state,
+            base,
+            &mut entities,
+            directory,
+            station_indices,
+            &DeterministicRuntime::for_test(workers),
+        )
+        .unwrap();
+        (serde_json::to_vec(&entities).unwrap(), updates)
+    }
+
+    #[test]
+    fn dense_buffer_plans_match_legacy_bytes_at_one_two_four_and_eight_workers() {
+        let source = parallel_buffer_source(PARALLEL_MIN_ITEMS + 73);
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let base = base.as_object().unwrap();
+        let directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let station_indices = directory.station_indices.to_vec();
+        let mut oracle_entities = source.clone();
+        let oracle_updates = transfer_buffers_for_indices(
+            &state,
+            base,
+            &mut oracle_entities,
+            &directory,
+            &station_indices,
+        )
+        .unwrap();
+        let expected = (
+            serde_json::to_vec(&oracle_entities).unwrap(),
+            oracle_updates,
+        );
+
+        for workers in [1, 2, 4, 8] {
+            assert_eq!(
+                run_buffer_indices_with_workers(
+                    &state,
+                    base,
+                    &source,
+                    &directory,
+                    &station_indices,
+                    workers,
+                ),
+                expected,
+                "workers={workers}"
+            );
+        }
+        assert_eq!(oracle_entities[0]["inputs"]["mod:物流/Ω🚀"], 0.0);
+        assert_eq!(oracle_entities[0]["outputs"]["mod:物流/Ω🚀"], 11.0);
+        assert_eq!(oracle_entities[3]["inputs"]["mod:物流/Ω🚀"], 9.0);
+        assert!(expected.1[3].1, "full duplicate slots remain active");
+        assert_eq!(oracle_entities[2]["mod:buffer/原样保留"]["text"], "中🚀");
+    }
+
+    #[test]
+    fn sparse_buffer_plans_match_legacy_and_leave_unselected_mod_rows_byte_exact() {
+        let selected_count = PARALLEL_MIN_ITEMS + 37;
+        let source = parallel_buffer_source(selected_count * 2 + 1);
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let base = base.as_object().unwrap();
+        let directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let station_indices = (0..selected_count)
+            .map(|index| index * 2)
+            .collect::<Vec<_>>();
+        let unselected_before = serde_json::to_vec(&source[1]).unwrap();
+        let mut oracle_entities = source.clone();
+        let oracle_updates = transfer_buffers_for_indices(
+            &state,
+            base,
+            &mut oracle_entities,
+            &directory,
+            &station_indices,
+        )
+        .unwrap();
+        let expected = (
+            serde_json::to_vec(&oracle_entities).unwrap(),
+            oracle_updates,
+        );
+
+        for workers in [1, 2, 4, 8] {
+            assert_eq!(
+                run_buffer_indices_with_workers(
+                    &state,
+                    base,
+                    &source,
+                    &directory,
+                    &station_indices,
+                    workers,
+                ),
+                expected,
+                "workers={workers}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_vec(&oracle_entities[1]).unwrap(),
+            unselected_before
+        );
+        assert_eq!(expected.1.len(), selected_count);
+        assert!(
+            expected
+                .1
+                .iter()
+                .map(|(station_index, _)| *station_index)
+                .eq(station_indices.iter().copied())
+        );
+    }
+
+    #[test]
+    fn parallel_buffer_errors_keep_legacy_first_failure_and_partial_mutation_boundary() {
+        let mut source = parallel_buffer_source(PARALLEL_MIN_ITEMS + 64);
+        let first_failure = 17;
+        let second_failure = PARALLEL_MIN_ITEMS + 5;
+        source[first_failure]["inputs"]["mod:物流/Ω🚀"] = Value::from(4.0);
+        source[first_failure]["outputs"] = Value::Null;
+        source[second_failure]["inputs"] = Value::Null;
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let base = base.as_object().unwrap();
+        let directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let station_indices = directory.station_indices.to_vec();
+        let mut oracle = source.clone();
+        let oracle_error =
+            transfer_buffers_for_indices(&state, base, &mut oracle, &directory, &station_indices)
+                .unwrap_err()
+                .to_string();
+        let expected_bytes = serde_json::to_vec(&oracle).unwrap();
+
+        for workers in [1, 2, 4, 8] {
+            let mut actual = source.clone();
+            let error = transfer_buffers_for_indices_with_runtime(
+                &state,
+                base,
+                &mut actual,
+                &directory,
+                &station_indices,
+                &DeterministicRuntime::for_test(workers),
+            )
+            .unwrap_err()
+            .to_string();
+            assert_eq!(error, oracle_error, "workers={workers}");
+            assert_eq!(
+                serde_json::to_vec(&actual).unwrap(),
+                expected_bytes,
+                "workers={workers}"
+            );
+        }
+        assert_eq!(oracle_error, "native local logistics inventory is missing");
+        assert_eq!(oracle[first_failure]["inputs"]["mod:物流/Ω🚀"], 0.0);
+        assert!(oracle[first_failure]["outputs"].is_null());
+        assert_eq!(
+            serde_json::to_vec(&oracle[first_failure + 1]).unwrap(),
+            serde_json::to_vec(&source[first_failure + 1]).unwrap()
+        );
+    }
+
+    fn run_buffer_activity_steps(
+        source: &[Value],
+        iterations: usize,
+        force_full_scan: bool,
+        worker_count: usize,
+    ) -> (Vec<Value>, LocalPeerDirectory, Vec<(usize, bool)>) {
+        let state = route_fixture_state(source);
+        let base = route_fixture_base();
+        let base = base.as_object().expect("buffer fixture base");
+        let mut entities = source.to_vec();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let executor = DeterministicRuntime::for_test(worker_count);
+        transfer_buffers_with_runtime(&state, base, &mut entities, &mut directory, &executor)
+            .unwrap();
+        assert!(directory.buffer_activity_initialized);
+
+        let active = [7, source.len() / 2, source.len() - 1];
+        let changed = [0, active[0], active[1], active[2]];
+        let mut scans = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            for station_index in active {
+                let station = entities[station_index]
+                    .as_object_mut()
+                    .expect("buffer fixture station");
+                let current = item_amount(station, "inputs", "iron_ore");
+                set_item_amount(station, "inputs", "iron_ore", current + 1.0).unwrap();
+            }
+            wake_transfer_buffers_from_changed_entities(&entities, &changed, &mut directory)
+                .unwrap();
+            let (scheduled, dense) = directory.buffer_scan_indices();
+            scans.push((scheduled.len(), dense));
+            if force_full_scan {
+                let full_indices = directory.station_indices.to_vec();
+                let updates = transfer_buffers_for_indices(
+                    &state,
+                    base,
+                    &mut entities,
+                    &directory,
+                    &full_indices,
+                )
+                .unwrap();
+                directory.replace_scanned_buffer_activity(&updates);
+            } else {
+                transfer_buffers_with_runtime(
+                    &state,
+                    base,
+                    &mut entities,
+                    &mut directory,
+                    &executor,
+                )
+                .unwrap();
+            }
+        }
+        (entities, directory, scans)
+    }
+
+    #[test]
+    fn sparse_buffer_activity_matches_full_oracle_for_1_5_60_steps() {
+        let count = PARALLEL_MIN_ITEMS + 113;
+        let source = route_matrix(count, &[], 0.0, 1.0);
+        let state = route_fixture_state(&source);
+        let source_hash = state.canonical_sha256().unwrap();
+
+        for iterations in [1, 5, 60] {
+            let oracle = run_buffer_activity_steps(&source, iterations, true, 1);
+            for workers in [1, 2, 4, 8] {
+                let scheduled = run_buffer_activity_steps(&source, iterations, false, workers);
+                assert!(scheduled.2.iter().all(|scan| *scan == (3, false)));
+                assert_eq!(
+                    serde_json::to_vec(&scheduled.0).unwrap(),
+                    serde_json::to_vec(&oracle.0).unwrap(),
+                    "sparse buffer replay diverged at {iterations} steps with {workers} workers"
+                );
+                assert_eq!(
+                    scheduled.1.buffer_active_station_indices,
+                    oracle.1.buffer_active_station_indices
+                );
+            }
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+    }
+
+    #[test]
+    fn dense_buffer_activity_falls_back_at_exact_three_quarters() {
+        let count = 100;
+        let state_source = route_matrix(count, &[], 0.0, 1.0);
+        let state = route_fixture_state(&state_source);
+        let base = route_fixture_base();
+        let base = base.as_object().unwrap();
+        let mut scheduled_entities = state_source.clone();
+        let mut scheduled =
+            prepare_step_directory(&scheduled_entities, &state.factory_topology.station_indices)
+                .unwrap();
+        transfer_buffers(&state, base, &mut scheduled_entities, &mut scheduled).unwrap();
+        for entity in scheduled_entities.iter_mut().take(75) {
+            set_item_amount(entity.as_object_mut().unwrap(), "inputs", "iron_ore", 1.0).unwrap();
+        }
+        let changed = (0..75).collect::<Vec<_>>();
+        wake_transfer_buffers_from_changed_entities(&scheduled_entities, &changed, &mut scheduled)
+            .unwrap();
+        let (scan_indices, dense) = scheduled.buffer_scan_indices();
+        assert!(dense);
+        assert_eq!(scan_indices, scheduled.station_indices.as_ref());
+
+        let mut oracle_entities = scheduled_entities.clone();
+        let mut oracle = scheduled.clone();
+        transfer_buffers(&state, base, &mut scheduled_entities, &mut scheduled).unwrap();
+        let full_indices = oracle.station_indices.to_vec();
+        let updates = transfer_buffers_for_indices(
+            &state,
+            base,
+            &mut oracle_entities,
+            &oracle,
+            &full_indices,
+        )
+        .unwrap();
+        oracle.replace_scanned_buffer_activity(&updates);
+        assert_eq!(
+            serde_json::to_vec(&scheduled_entities).unwrap(),
+            serde_json::to_vec(&oracle_entities).unwrap()
+        );
+        assert_eq!(
+            scheduled.buffer_active_station_indices,
+            oracle.buffer_active_station_indices
+        );
+    }
+
+    #[test]
+    fn blocked_buffer_stays_awake_then_drain_completion_removes_it() {
+        let mut entities = route_matrix(32, &[], 0.0, 1.0);
+        entities[7]["outputs"]["iron_ore"] = Value::from(100_000.0);
+        entities[7]["inputs"]["iron_ore"] = Value::from(9.0);
+        let state = route_fixture_state(&entities);
+        let base = route_fixture_base();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(directory.buffer_active_station_indices, vec![7]);
+        assert_eq!(entities[7]["inputs"]["iron_ore"], Value::from(9.0));
+
+        entities[7]["outputs"]["iron_ore"] = Value::from(0.0);
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(directory.buffer_active_station_indices.is_empty());
+        assert_eq!(entities[7]["inputs"]["iron_ore"], Value::from(0.0));
+        assert_eq!(entities[7]["outputs"]["iron_ore"], Value::from(9.0));
+    }
+
+    #[test]
+    fn external_input_arrival_wakes_buffer_and_empty_evidence_does_not() {
+        let mut entities = route_matrix(32, &[], 0.0, 1.0);
+        let state = route_fixture_state(&entities);
+        let base = route_fixture_base();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        wake_transfer_buffers_from_changed_entities(&entities, &[], &mut directory).unwrap();
+        assert!(directory.buffer_active_station_indices.is_empty());
+
+        entities[11]["inputs"]["iron_ore"] = Value::from(4.0);
+        wake_transfer_buffers_from_changed_entities(&entities, &[0, 11], &mut directory).unwrap();
+        assert_eq!(directory.buffer_active_station_indices, vec![11]);
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(entities[11]["outputs"]["iron_ore"], Value::from(4.0));
+        assert!(directory.buffer_active_station_indices.is_empty());
+    }
+
+    #[test]
+    fn topology_refresh_reuses_arc_without_transition_and_rebuilds_on_change() {
+        let mut entities = vec![
+            local_station("supply", "supply"),
+            local_station("demand", "demand"),
+        ];
+        let station_indices = vec![0, 1];
+        let mut directory = Arc::new(prepare_step_directory(&entities, &station_indices).unwrap());
+        let shared = Arc::clone(&directory);
+        refresh_step_directory_after_topology_change(
+            &entities,
+            &station_indices,
+            false,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&directory, &shared));
+
+        entities[0]["buildingId"] = Value::from("interstellar_logistics_station");
+        entities[0]["stationTier"] = Value::from(2);
+        entities[0]["stationOperationMode"] = Value::from("elevator");
+        refresh_step_directory_after_topology_change(
+            &entities,
+            &station_indices,
+            true,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(!Arc::ptr_eq(&directory, &shared));
+        assert_eq!(directory.station_indices.as_ref(), &[1]);
+        assert!(!directory.buffer_activity_initialized);
+    }
+
+    #[test]
+    fn failed_buffer_candidate_keeps_source_cache_and_json_atomic() {
+        let mut source = route_matrix(128, &[], 0.0, 1.0);
+        source[7]["inputs"]["iron_ore"] = Value::from(3.0);
+        source[83]["inputs"]["iron_ore"] = Value::from(5.0);
+        source[83]["outputs"] = Value::Null;
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let source_json = serde_json::to_vec(&source).unwrap();
+        let source_hash = state.canonical_sha256().unwrap();
+        let source_directory = Arc::new(
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap(),
+        );
+        let source_activity = source_directory.buffer_active_station_indices.clone();
+        let mut candidate_directory = Arc::clone(&source_directory);
+        let candidate_runtime = Arc::make_mut(&mut candidate_directory);
+        let mut candidate = source.clone();
+        let error = transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut candidate,
+            candidate_runtime,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native local logistics inventory is missing"
+        );
+        assert_eq!(
+            source_directory.buffer_active_station_indices,
+            source_activity
+        );
+        assert_eq!(
+            candidate_directory.buffer_active_station_indices,
+            source_activity
+        );
+        assert!(!source_directory.buffer_activity_initialized);
+        assert!(!candidate_directory.buffer_activity_initialized);
+        assert_eq!(serde_json::to_vec(&source).unwrap(), source_json);
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+    }
+
+    fn local_congestion_matrix(count: usize) -> (Vec<Value>, LocalPeerDirectory, Ledger) {
+        let mut entities = (0..count)
+            .map(|index| {
+                let mut station = local_station(
+                    &format!("mod:本地站/{index:05}/Ω"),
+                    if index == 0 { "supply" } else { "demand" },
+                );
+                let record = station.as_object_mut().expect("local congestion station");
+                record.insert("stationDrones".to_owned(), Value::from(50));
+                record.insert("stationRoutes".to_owned(), Value::Array(Vec::new()));
+                record.insert("stationCongestion".to_owned(), Value::from(-1));
+                record.insert("stationProgress".to_owned(), Value::from(-1));
+                record.insert(
+                    "mod:拥堵探针/原样保留".to_owned(),
+                    json!({ "index": index, "signedZero": -0.0, "opaque": "Ω🚀" }),
+                );
+                station
+            })
+            .collect::<Vec<_>>();
+        // A non-station row in the topology slice exercises the legacy skip
+        // without changing the relative replay order of station updates.
+        entities.push(json!({
+            "id": "mod:非物流实体/保持",
+            "kind": "machine",
+            "buildingId": "mod:machine",
+            "mod:payload": [3, 2, 1]
+        }));
+        let station_indices = (0..entities.len()).collect::<Vec<_>>();
+        let directory = prepare_step_directory(&entities, &station_indices).unwrap();
+        let mut ledger = Ledger::default();
+        for station_index in 0..count {
+            ledger
+                .busy
+                .insert(station_index, (station_index % 67) as f64);
+            ledger.active_local_progress.insert(
+                station_index,
+                f64::from((station_index % 101) as u32) / 101.0,
+            );
+        }
+        (entities, directory, ledger)
+    }
+
+    fn run_local_congestion_plan(worker_count: usize) -> Vec<Value> {
+        let (mut entities, directory, ledger) = local_congestion_matrix(PARALLEL_MIN_ITEMS + 37);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let updates = plan_congestion_updates(
+            &DeterministicRuntime::for_test(worker_count),
+            &entities,
+            &directory,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            source,
+            "read-only probes must not mutate their source"
+        );
+        apply_congestion_updates(&mut entities, updates).unwrap();
+        entities
+    }
+
+    #[test]
+    fn local_congestion_parallel_probe_is_bitwise_stable_for_1_2_4_8_workers() {
+        let expected = run_local_congestion_plan(1);
+        let expected_bytes = serde_json::to_vec(&expected).unwrap();
+        for worker_count in [2, 4, 8] {
+            let actual = run_local_congestion_plan(worker_count);
+            assert_eq!(serde_json::to_vec(&actual).unwrap(), expected_bytes);
+        }
+
+        let first = expected[0].as_object().unwrap();
+        let waiting = expected[67].as_object().unwrap();
+        let saturated = expected[66].as_object().unwrap();
+        assert_eq!(first["stationCongestion"], Value::from(0.0));
+        assert_eq!(waiting["stationCongestion"], Value::from(0.35));
+        assert_eq!(saturated["stationCongestion"], Value::from(1.0));
+        assert_eq!(
+            waiting["mod:拥堵探针/原样保留"]["opaque"],
+            Value::from("Ω🚀")
+        );
+    }
+
+    #[test]
+    fn local_congestion_parallel_failure_keeps_source_atomic() {
+        let entities = (0..(PARALLEL_MIN_ITEMS + 11))
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        let state = route_fixture_state(&entities);
+        let source_hash = state.canonical_sha256().unwrap();
+        let source_domain = state.domain_sha256().unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let source = serde_json::to_vec(&entities).unwrap();
+
+        for worker_count in [1, 2, 4, 8] {
+            let mut candidate_entities = entities.clone();
+            let mut candidate_directory = directory.clone();
+            Arc::make_mut(&mut candidate_directory.station_slots).remove(&7);
+            Arc::make_mut(&mut candidate_directory.station_slots).remove(&(PARALLEL_MIN_ITEMS + 3));
+            let source_pending = candidate_directory
+                .local_congestion_reset_station_indices()
+                .to_vec();
+            let error = update_congestion_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &state,
+                &mut candidate_entities,
+                &mut candidate_directory,
+                &ledger,
+            )
+            .expect_err("production updater must reject the whole probe batch");
+            assert_eq!(error.to_string(), "native local station slots are missing");
+            assert_eq!(serde_json::to_vec(&candidate_entities).unwrap(), source);
+            assert_eq!(
+                candidate_directory.local_congestion_reset_station_indices(),
+                source_pending
+            );
+            assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+            assert_eq!(state.domain_sha256().unwrap(), source_domain);
+        }
+    }
+
+    fn run_ready_station_plan(worker_count: usize) -> (Vec<Option<usize>>, Vec<usize>) {
+        let (entities, directory, mut ledger) = local_congestion_matrix(PARALLEL_MIN_ITEMS + 43);
+        ledger.active_local_stations.insert(7);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let planned = plan_ready_station_indices_with(
+            &DeterministicRuntime::for_test(worker_count),
+            &entities,
+            &directory,
+            directory.station_indices.as_ref(),
+            &ledger,
+            25.0,
+            |demand_index, _, _| Ok(if demand_index % 2 == 0 { 100.0 } else { 10.0 }),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            source,
+            "ready probes must not mutate routes, inventories, or MOD fields"
+        );
+        let mut ready = replay_ready_station_indices(planned.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        ready.sort_unstable();
+        (planned, ready)
+    }
+
+    #[test]
+    fn ready_station_parallel_probe_is_exact_for_1_2_4_8_workers() {
+        let expected = run_ready_station_plan(1);
+        for worker_count in [2, 4, 8] {
+            assert_eq!(run_ready_station_plan(worker_count), expected);
+        }
+
+        let (planned, ready) = expected;
+        assert_eq!(planned[0], Some(0));
+        assert_eq!(planned[1], None);
+        assert_eq!(planned[2], Some(2));
+        assert_eq!(planned[7], Some(7));
+        assert!(ready.contains(&0));
+        assert!(ready.contains(&2));
+        assert!(ready.contains(&7));
+        assert!(!ready.contains(&1));
+        assert!(!ready.contains(&9));
+    }
+
+    #[test]
+    fn ready_station_parallel_failure_uses_lowest_index_and_keeps_source_atomic() {
+        let (entities, directory, ledger) = local_congestion_matrix(PARALLEL_MIN_ITEMS + 23);
+        let source = serde_json::to_vec(&entities).unwrap();
+        let later_failure = PARALLEL_MIN_ITEMS + 11;
+
+        for worker_count in [1, 2, 4, 8] {
+            let visited_later_failure = AtomicBool::new(false);
+            let error = plan_ready_station_indices_with(
+                &DeterministicRuntime::for_test(worker_count),
+                &entities,
+                &directory,
+                directory.station_indices.as_ref(),
+                &ledger,
+                25.0,
+                |demand_index, _, _| {
+                    if demand_index == later_failure {
+                        visited_later_failure.store(true, AtomicOrdering::SeqCst);
+                        bail!("later local ready probe failure");
+                    }
+                    if demand_index == 7 {
+                        bail!("first local ready probe failure");
+                    }
+                    Ok(100.0)
+                },
+            )
+            .expect_err("any failed readiness probe must reject the whole batch");
+            assert_eq!(error.to_string(), "first local ready probe failure");
+            assert!(
+                visited_later_failure.load(AtomicOrdering::SeqCst),
+                "all probes must finish before the lowest input error is selected"
+            );
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn small_ready_station_batches_stay_serial() {
+        let (entities, directory, ledger) = local_congestion_matrix(31);
+        let saw_rayon_worker = AtomicBool::new(false);
+        let planned = plan_ready_station_indices_with(
+            &DeterministicRuntime::for_test(8),
+            &entities,
+            &directory,
+            directory.station_indices.as_ref(),
+            &ledger,
+            25.0,
+            |_, _, _| {
+                if rayon::current_thread_index().is_some() {
+                    saw_rayon_worker.store(true, AtomicOrdering::SeqCst);
+                }
+                Ok(100.0)
+            },
+        )
+        .unwrap();
+        assert_eq!(planned.len(), directory.station_indices.len());
+        assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
+    }
+
+    fn sparse_readiness_matrix(count: usize, demand_count: usize) -> Vec<Value> {
+        assert!(demand_count < count);
+        let mut entities = (0..count)
+            .map(|index| {
+                route_station(
+                    index,
+                    if index == 0 {
+                        "supply"
+                    } else if index <= demand_count {
+                        "demand"
+                    } else {
+                        "storage"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        entities[0]["outputs"]["iron_ore"] = Value::from(0.0);
+        entities
+    }
+
+    #[test]
+    fn sparse_readiness_wake_matches_full_power_dispatch_and_route_oracle_at_1_5_60() {
+        let count = 32;
+        let source = sparse_readiness_matrix(count, 1);
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let base = base.as_object().expect("local readiness base");
+        let mut initialized_directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let initial_activity = crate::interstellar_logistics::prepare_route_activity(&source);
+        let initial_ledger =
+            StationRouteLedger::build(&state, &source, &initialized_directory, &initial_activity);
+        let (initial_ready, initial_scan) = ready_station_indices_with_scan(
+            &state,
+            base,
+            &source,
+            &mut initialized_directory,
+            &initial_ledger,
+        )
+        .unwrap();
+        assert!(initial_ready.is_empty());
+        assert_eq!(initial_scan.selected_station_rows, count);
+        assert!(initial_scan.signature_fallback);
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let mut indexed_entities = source.clone();
+            indexed_entities[0]["outputs"]["iron_ore"] = Value::from(100.0);
+            let mut oracle_entities = indexed_entities.clone();
+            let mut indexed_base = base.clone();
+            let mut oracle_base = base.clone();
+            let mut indexed_directory = initialized_directory.clone();
+            let mut oracle_directory = initialized_directory.clone();
+            indexed_directory.wake_ready_from_changed_stations(&[0]);
+
+            let indexed_activity =
+                crate::interstellar_logistics::prepare_route_activity(&indexed_entities);
+            let oracle_activity =
+                crate::interstellar_logistics::prepare_route_activity(&oracle_entities);
+            let mut indexed_ledger = StationRouteLedger::build(
+                &state,
+                &indexed_entities,
+                &indexed_directory,
+                &indexed_activity,
+            );
+            let mut oracle_ledger = StationRouteLedger::build(
+                &state,
+                &oracle_entities,
+                &oracle_directory,
+                &oracle_activity,
+            );
+            let (indexed_ready, scan) = ready_station_indices_with_scan(
+                &state,
+                &indexed_base,
+                &indexed_entities,
+                &mut indexed_directory,
+                &indexed_ledger,
+            )
+            .unwrap();
+            assert_eq!(scan.selected_station_rows, 2, "sparse scan at {seconds}s");
+            assert_eq!(scan.total_station_rows, count);
+            assert!(!scan.dense_fallback);
+            assert!(!scan.directory_fallback);
+            assert!(!scan.signature_fallback);
+
+            let full_planned = plan_ready_station_indices_with(
+                &DeterministicRuntime::for_test(4),
+                &oracle_entities,
+                &oracle_directory,
+                oracle_directory.station_indices.as_ref(),
+                &oracle_ledger,
+                cargo_capacity(&oracle_base),
+                |_, demand, slot| {
+                    station_capacity(&state, demand, slot, normalized_buffer_limit(&oracle_base))
+                },
+            )
+            .unwrap();
+            let full_ready = replay_ready_station_indices(full_planned);
+            let mut indexed_ready_ordered = indexed_ready.iter().copied().collect::<Vec<_>>();
+            let mut full_ready_ordered = full_ready.iter().copied().collect::<Vec<_>>();
+            indexed_ready_ordered.sort_unstable();
+            full_ready_ordered.sort_unstable();
+            assert_eq!(indexed_ready_ordered, vec![0, 1]);
+            assert_eq!(indexed_ready_ordered, full_ready_ordered);
+
+            let indexed_powers = indexed_ready
+                .iter()
+                .map(|index| (*index, 1.0))
+                .collect::<HashMap<_, _>>();
+            let oracle_powers = full_ready
+                .iter()
+                .map(|index| (*index, 1.0))
+                .collect::<HashMap<_, _>>();
+            let dispatch_scan = dispatch(
+                &state,
+                &mut indexed_base,
+                &mut indexed_entities,
+                &indexed_powers,
+                &mut indexed_directory,
+                &mut indexed_ledger,
+            )
+            .unwrap();
+            assert_eq!(dispatch_scan.selected_station_rows, 1);
+            assert_eq!(dispatch_scan.total_station_rows, count);
+            assert!(!dispatch_scan.dense_fallback);
+            assert!(!dispatch_scan.directory_fallback);
+            dispatch_full_scan_oracle(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &oracle_powers,
+                &mut oracle_directory,
+                &mut oracle_ledger,
+            )
+            .unwrap();
+            advance_routes(
+                &state,
+                &mut indexed_base,
+                &mut indexed_entities,
+                seconds,
+                &indexed_powers,
+                &mut indexed_directory,
+            )
+            .unwrap();
+            advance_routes(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                seconds,
+                &oracle_powers,
+                &mut oracle_directory,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_vec(&json!({
+                    "base": indexed_base,
+                    "entities": indexed_entities,
+                }))
+                .unwrap(),
+                serde_json::to_vec(&json!({
+                    "base": oracle_base,
+                    "entities": oracle_entities,
+                }))
+                .unwrap(),
+                "sparse local readiness diverged from full scan at {seconds}s"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_uses_exact_three_quarter_dense_signature_and_mismatch_fallbacks() {
+        let count = 16;
+        let mut entities = sparse_readiness_matrix(count, 11);
+        let state = route_fixture_state(&entities);
+        let mut base = route_fixture_base();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        ready_station_indices_with_scan(
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            &mut directory,
+            &ledger,
+        )
+        .unwrap();
+
+        entities[0]["outputs"]["iron_ore"] = Value::from(1_000.0);
+        directory.wake_ready_from_changed_stations(&[0]);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let (_, dense_scan) = ready_station_indices_with_scan(
+            &state,
+            base.as_object().unwrap(),
+            &entities,
+            &mut directory,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(dense_scan.selected_station_rows, count);
+        assert!(dense_scan.dense_fallback);
+        assert!(!dense_scan.directory_fallback);
+
+        base["settings"]["logisticsBufferLimit"] = Value::from(2_000.0);
+        let (_, _, signature_scan) =
+            directory.readiness_scan_indices(base.as_object().unwrap(), &ledger);
+        assert_eq!(signature_scan.selected_station_rows, count);
+        assert!(signature_scan.signature_fallback);
+
+        let mut substituted_ranks = directory.station_ranks.as_ref().clone();
+        let rank = substituted_ranks.remove(&0).unwrap();
+        substituted_ranks.insert(count + 9, rank);
+        assert_eq!(substituted_ranks.len(), directory.station_ranks.len());
+        assert!(!readiness_directory_is_exact(
+            directory.station_indices.as_ref(),
+            &substituted_ranks,
+            &directory.station_slots,
+            &directory.station_planets,
+        ));
+
+        let mut mismatched_indices = directory.station_indices.to_vec();
+        mismatched_indices[1] = mismatched_indices[0];
+        let mismatched = build_peer_directory(
+            &entities,
+            &mismatched_indices,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let (_, _, mismatch_scan) =
+            mismatched.readiness_scan_indices(base.as_object().unwrap(), &ledger);
+        assert_eq!(mismatch_scan.selected_station_rows, count);
+        assert!(mismatch_scan.directory_fallback);
+    }
+
+    fn run_local_dispatch_slice(
+        source: &[Value],
+        seconds: usize,
+        force_full_scan: bool,
+    ) -> (Vec<u8>, Vec<LocalDispatchScan>) {
+        let state = route_fixture_state(source);
+        let mut base = route_fixture_base();
+        let mut entities = source.to_vec();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let powers = HashMap::from([(0, 1.0), (1, 1.0)]);
+        let mut scans = Vec::with_capacity(seconds);
+        for _ in 0..seconds {
+            let remote_activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+            let mut ledger =
+                StationRouteLedger::build(&state, &entities, &directory, &remote_activity);
+            let scan = if force_full_scan {
+                dispatch_full_scan_oracle(
+                    &state,
+                    base.as_object_mut().unwrap(),
+                    &mut entities,
+                    &powers,
+                    &mut directory,
+                    &mut ledger,
+                )
+            } else {
+                dispatch(
+                    &state,
+                    base.as_object_mut().unwrap(),
+                    &mut entities,
+                    &powers,
+                    &mut directory,
+                    &mut ledger,
+                )
+            }
+            .unwrap();
+            scans.push(scan);
+            let changed = advance_routes(
+                &state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                1.0,
+                &powers,
+                &mut directory,
+            )
+            .unwrap();
+            directory.wake_ready_from_changed_stations(&changed);
+        }
+        (
+            serde_json::to_vec(&json!({ "base": base, "entities": entities })).unwrap(),
+            scans,
+        )
+    }
+
+    fn run_profiled_dispatch_once(
+        source: &[Value],
+        profile_enabled: bool,
+    ) -> (Vec<u8>, LocalDispatchScan) {
+        let state = route_fixture_state(source);
+        let mut base = route_fixture_base();
+        let mut entities = source.to_vec();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let powers = route_powers(entities.len(), 1.0);
+        let scan = if profile_enabled {
+            dispatch_profiled(
+                &state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                &powers,
+                &mut directory,
+                &mut ledger,
+            )
+        } else {
+            dispatch(
+                &state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                &powers,
+                &mut directory,
+                &mut ledger,
+            )
+        }
+        .unwrap();
+        (
+            serde_json::to_vec(&json!({ "base": base, "entities": entities })).unwrap(),
+            scan,
+        )
+    }
+
+    #[test]
+    fn local_dispatch_profiler_is_opt_in_and_preserves_serial_state() {
+        assert!(std::mem::size_of::<LocalDispatchScan>() <= 64);
+        let mut source = sparse_readiness_matrix(32, 1);
+        source[0]["outputs"]["iron_ore"] = Value::from(5_000.0);
+
+        let (ordinary_bytes, ordinary_scan) = run_profiled_dispatch_once(&source, false);
+        let (profiled_bytes, profiled_scan) = run_profiled_dispatch_once(&source, true);
+
+        assert_eq!(profiled_bytes, ordinary_bytes);
+        assert_eq!(
+            profiled_scan.selected_station_rows,
+            ordinary_scan.selected_station_rows
+        );
+        assert_eq!(
+            profiled_scan.total_station_rows,
+            ordinary_scan.total_station_rows
+        );
+        assert_eq!(
+            profiled_scan.selected_demand_rows,
+            ordinary_scan.selected_demand_rows
+        );
+        assert_eq!(
+            profiled_scan.total_demand_rows,
+            ordinary_scan.total_demand_rows
+        );
+        assert_eq!(profiled_scan.dense_fallback, ordinary_scan.dense_fallback);
+        assert_eq!(
+            profiled_scan.directory_fallback,
+            ordinary_scan.directory_fallback
+        );
+        assert!(ordinary_scan.profile.is_none());
+
+        let profile = profiled_scan.profile.expect("opt-in dispatch profile");
+        assert_eq!(profile.selected_demands, 1);
+        assert_eq!(profile.total_demands, 1);
+        assert_eq!(profile.planet_shards, 1);
+        assert_eq!(profile.demand_slots, 1);
+        assert_eq!(profile.peer_edges, 1);
+        assert_eq!(profile.sort_work_units, 0);
+        assert_eq!(profile.total_work_units, 4);
+        assert_eq!(profile.largest_shard_work_units, 4);
+        assert_eq!(profile.largest_shard_ratio_ppm, 1_000_000);
+        assert_eq!(profile.parallelizable_work_units, 0);
+        assert_eq!(profile.parallelizable_ratio_ppm, 0);
+        assert_eq!(profile.route_events, 1);
+        assert!(profile.planet_identity_proven);
+        assert_eq!(hex::encode(profile.shard_work_sha256).len(), 64);
+        assert_eq!(profile.scan_fallback, LocalDispatchScanFallback::None);
+        assert_eq!(
+            profile.parallel_fallback,
+            LocalDispatchParallelFallback::SinglePlanet
+        );
+    }
+
+    #[test]
+    fn local_dispatch_profiler_reports_sparse_empty_and_dense_scan_fallbacks() {
+        let source = sparse_readiness_matrix(32, 1);
+        let state = route_fixture_state(&source);
+        let mut base = route_fixture_base();
+        let mut entities = source;
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let powers = route_powers(entities.len(), 1.0);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        dispatch_profiled(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut directory,
+            &mut ledger,
+        )
+        .unwrap();
+        let empty_scan = dispatch_profiled(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut directory,
+            &mut ledger,
+        )
+        .unwrap();
+        let empty = empty_scan.profile.expect("empty dispatch profile");
+        assert_eq!(empty.selected_demands, 0);
+        assert_eq!(empty.total_demands, 1);
+        assert_eq!(empty.planet_shards, 0);
+        assert_eq!(empty.total_work_units, 0);
+        assert_eq!(empty.largest_shard_ratio_ppm, 0);
+        assert_eq!(empty.parallelizable_ratio_ppm, 0);
+        assert_eq!(
+            empty.parallel_fallback,
+            LocalDispatchParallelFallback::NoSelectedDemand
+        );
+
+        let dense_source = sparse_readiness_matrix(16, 12);
+        let dense_state = route_fixture_state(&dense_source);
+        let mut dense_base = route_fixture_base();
+        let mut dense_entities = dense_source;
+        let mut dense_directory = prepare_step_directory(
+            &dense_entities,
+            &dense_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let dense_activity = crate::interstellar_logistics::prepare_route_activity(&dense_entities);
+        let mut dense_ledger = StationRouteLedger::build(
+            &dense_state,
+            &dense_entities,
+            &dense_directory,
+            &dense_activity,
+        );
+        let dense_powers = route_powers(dense_entities.len(), 1.0);
+        let dense_scan = dispatch_profiled(
+            &dense_state,
+            dense_base.as_object_mut().unwrap(),
+            &mut dense_entities,
+            &dense_powers,
+            &mut dense_directory,
+            &mut dense_ledger,
+        )
+        .unwrap();
+        let dense = dense_scan.profile.expect("dense dispatch profile");
+        assert_eq!(dense.selected_demands, 12);
+        assert_eq!(dense.total_demands, 12);
+        assert_eq!(dense.scan_fallback, LocalDispatchScanFallback::Dense);
+        assert_eq!(
+            dense.parallel_fallback,
+            LocalDispatchParallelFallback::SinglePlanet
+        );
+    }
+
+    #[test]
+    fn local_dispatch_profiler_counts_peer_sort_after_storage_only_planet_gap() {
+        let mut entities = vec![
+            route_station(0, "storage"),
+            route_station(1, "supply"),
+            route_station(2, "supply"),
+            route_station(3, "demand"),
+        ];
+        entities[0]["planetId"] = Value::from("planet/storage-only");
+        for entity in entities.iter_mut().skip(1) {
+            entity["planetId"] = Value::from("planet/working");
+        }
+        for index in [1_usize, 2] {
+            entities[index]["outputs"]["iron_ore"] = Value::from(100_000_000.0);
+        }
+
+        let (_, scan) = run_profiled_dispatch_once(&entities, true);
+        let profile = scan.profile.expect("gapped planet profile");
+        assert_eq!(profile.selected_demands, 1);
+        assert_eq!(profile.total_demands, 1);
+        assert_eq!(profile.planet_shards, 1);
+        assert_eq!(profile.demand_slots, 1);
+        assert_eq!(profile.peer_edges, 2);
+        assert_eq!(profile.sort_work_units, 2);
+        assert_eq!(profile.scan_fallback, LocalDispatchScanFallback::None);
+        assert_eq!(
+            profile.parallel_fallback,
+            LocalDispatchParallelFallback::SinglePlanet
+        );
+    }
+
+    #[test]
+    fn local_dispatch_profiler_never_applies_the_full_advance_timing_gate_to_proxy_work() {
+        let mut accumulator = LocalDispatchProfileAccumulator::enabled(2);
+        accumulator.record_demand(Some(0), 1, 1, 100, 0);
+        accumulator.record_demand(Some(1), 1, 0, 0, 0);
+        let profile = accumulator.finish(2, LocalDispatchScanFallback::None);
+
+        assert_eq!(profile.planet_shards, 2);
+        assert_eq!(profile.total_work_units, 105);
+        assert_eq!(profile.largest_shard_work_units, 103);
+        assert_eq!(profile.parallelizable_work_units, 2);
+        assert_eq!(profile.parallelizable_ratio_ppm, 19_047);
+        assert_eq!(
+            profile.parallel_fallback,
+            LocalDispatchParallelFallback::ShapeOnly
+        );
+        assert_eq!(
+            profile.parallel_fallback.as_str(),
+            "shape-only-requires-full-advance-gate"
+        );
+    }
+
+    fn two_planet_dispatch_fixture() -> Vec<Value> {
+        let mut entities = vec![
+            route_station(0, "supply"),
+            route_station(1, "demand"),
+            route_station(2, "supply"),
+            route_station(3, "demand"),
+        ];
+        for index in [0_usize, 1] {
+            entities[index]["planetId"] = Value::from("planet/a");
+        }
+        for index in [2_usize, 3] {
+            entities[index]["planetId"] = Value::from("planet/b");
+        }
+        entities[2]["outputs"]["iron_ore"] = Value::from(100_000_000.0);
+        entities
+    }
+
+    #[test]
+    fn local_dispatch_profiler_reports_stable_multi_planet_parallel_work() {
+        let source = two_planet_dispatch_fixture();
+        let (expected_bytes, expected_scan) = run_profiled_dispatch_once(&source, true);
+        let expected = expected_scan.profile.expect("multi-planet profile");
+        assert_eq!(expected.selected_demands, 2);
+        assert_eq!(expected.total_demands, 2);
+        assert_eq!(expected.planet_shards, 2);
+        assert_eq!(expected.demand_slots, 2);
+        assert_eq!(expected.peer_edges, 2);
+        assert_eq!(expected.sort_work_units, 0);
+        assert_eq!(expected.total_work_units, 8);
+        assert_eq!(expected.largest_shard_work_units, 4);
+        assert_eq!(expected.largest_shard_ratio_ppm, 500_000);
+        assert_eq!(expected.parallelizable_work_units, 4);
+        assert_eq!(expected.parallelizable_ratio_ppm, 500_000);
+        assert_eq!(expected.route_events, 2);
+        assert_eq!(expected.scan_fallback, LocalDispatchScanFallback::None);
+        assert_eq!(
+            expected.parallel_fallback,
+            LocalDispatchParallelFallback::ShapeOnly
+        );
+        assert_eq!(
+            expected.parallel_fallback.as_str(),
+            "shape-only-requires-full-advance-gate"
+        );
+        assert_eq!(sort_work_units(2), 2);
+        assert_eq!(sort_work_units(5), 15);
+
+        for _ in 0..4 {
+            let (actual_bytes, actual_scan) = run_profiled_dispatch_once(&source, true);
+            assert_eq!(actual_bytes, expected_bytes);
+            assert_eq!(
+                actual_scan.profile.expect("stable dispatch profile"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_dispatch_queue_matches_full_station_oracle_at_1_5_60_seconds() {
+        let count = 32;
+        let mut source = sparse_readiness_matrix(count, 1);
+        // Two complete drone fleets depart per cycle. Leaving another cycle's
+        // cargo behind proves that local route completion re-wakes dispatch.
+        source[0]["outputs"]["iron_ore"] = Value::from(5_000.0);
+
+        for seconds in [1_usize, 5, 60] {
+            let (indexed, indexed_scans) = run_local_dispatch_slice(&source, seconds, false);
+            let (oracle, oracle_scans) = run_local_dispatch_slice(&source, seconds, true);
+            assert_eq!(
+                indexed, oracle,
+                "local dispatch slice diverged from the full station oracle at {seconds}s"
+            );
+            assert_eq!(indexed_scans[0].selected_station_rows, 1);
+            assert_eq!(indexed_scans[0].total_station_rows, count);
+            assert_eq!(indexed_scans[0].selected_demand_rows, 1);
+            assert_eq!(indexed_scans[0].total_demand_rows, 1);
+            assert!(!indexed_scans[0].dense_fallback);
+            assert!(!indexed_scans[0].directory_fallback);
+            assert!(
+                indexed_scans
+                    .iter()
+                    .all(|scan| scan.selected_station_rows <= 1)
+            );
+            assert!(
+                oracle_scans
+                    .iter()
+                    .all(|scan| scan.selected_station_rows == count)
+            );
+            if seconds >= 5 {
+                assert!(
+                    indexed_scans
+                        .iter()
+                        .skip(1)
+                        .any(|scan| scan.selected_station_rows == 0),
+                    "dormant steps must not rescan the demand row"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_reverse_wakes_are_stable_and_power_recovery_is_explicit() {
+        let source = sparse_readiness_matrix(16, 3);
+        let state = route_fixture_state(&source);
+        let mut directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let (initial, initial_scan) = directory.dispatch_scan_indices(&[], false, false);
+        assert_eq!(initial, vec![1, 2, 3]);
+        assert_eq!(initial_scan.selected_station_rows, 3);
+        directory.commit_dispatch(Vec::new(), &[], false);
+
+        // A source-side inventory/vehicle change expands to all matching
+        // demands in persisted entity order.
+        directory.wake_ready_from_changed_stations(&[0]);
+        let (source_wake, _) = directory.dispatch_scan_indices(&[], false, false);
+        assert_eq!(source_wake, vec![1, 2, 3]);
+        directory.commit_dispatch(Vec::new(), &[], false);
+
+        // A demand-side capacity release only wakes that demand.
+        directory.wake_ready_from_changed_stations(&[2]);
+        let (capacity_wake, _) = directory.dispatch_scan_indices(&[], false, false);
+        assert_eq!(capacity_wake, vec![2]);
+        directory.commit_dispatch(Vec::new(), &[], false);
+
+        // No inventory wake is needed for a grid recovery. The successful
+        // dispatch boundary remembers power separately from the demand queue.
+        let off = HashMap::from([(0, 0.0), (1, 0.0), (2, 0.0), (3, 0.0)]);
+        let (off_powered, off_wakes, off_fallback) = directory.plan_dispatch_power_wakes(&off);
+        assert!(off_powered.is_empty());
+        assert!(off_wakes.is_empty());
+        assert!(!off_fallback);
+        directory.commit_dispatch(off_powered, &[], false);
+        let on = HashMap::from([(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)]);
+        let (on_powered, on_wakes, on_fallback) = directory.plan_dispatch_power_wakes(&on);
+        assert_eq!(on_wakes, vec![1, 2, 3]);
+        assert!(!on_fallback);
+        let (recovered, _) = directory.dispatch_scan_indices(&on_wakes, false, false);
+        assert_eq!(recovered, vec![1, 2, 3]);
+        directory.commit_dispatch(on_powered, &[], false);
+
+        // Storage-only writes have no local dispatch dependency.
+        directory.wake_ready_from_changed_stations(&[9]);
+        let (storage_wake, _) = directory.dispatch_scan_indices(&[], false, false);
+        assert!(storage_wake.is_empty());
+    }
+
+    #[test]
+    fn dispatch_capacity_release_and_power_recovery_create_routes_without_full_scan() {
+        let mut capacity_source = route_matrix(2, &[], 0.0, 8.0);
+        capacity_source[1]["outputs"]["iron_ore"] = Value::from(100.0);
+        let capacity_state = route_fixture_state(&capacity_source);
+        let mut capacity_base = route_fixture_base();
+        let mut capacity_entities = capacity_source;
+        let mut capacity_directory = prepare_step_directory(
+            &capacity_entities,
+            &capacity_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&capacity_entities);
+        let mut ledger = StationRouteLedger::build(
+            &capacity_state,
+            &capacity_entities,
+            &capacity_directory,
+            &activity,
+        );
+        let powers = route_powers(2, 1.0);
+        dispatch(
+            &capacity_state,
+            capacity_base.as_object_mut().unwrap(),
+            &mut capacity_entities,
+            &powers,
+            &mut capacity_directory,
+            &mut ledger,
+        )
+        .unwrap();
+        assert!(
+            capacity_entities[1]["stationRoutes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        capacity_entities[1]["outputs"]["iron_ore"] = Value::from(0.0);
+        capacity_directory.wake_ready_from_changed_stations(&[1]);
+        let scan = dispatch(
+            &capacity_state,
+            capacity_base.as_object_mut().unwrap(),
+            &mut capacity_entities,
+            &powers,
+            &mut capacity_directory,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(scan.selected_station_rows, 1);
+        assert_eq!(
+            capacity_entities[1]["stationRoutes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let power_source = route_matrix(2, &[], 0.0, 8.0);
+        let power_state = route_fixture_state(&power_source);
+        let mut power_base = route_fixture_base();
+        let mut power_entities = power_source;
+        let mut power_directory = prepare_step_directory(
+            &power_entities,
+            &power_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&power_entities);
+        let mut ledger =
+            StationRouteLedger::build(&power_state, &power_entities, &power_directory, &activity);
+        dispatch(
+            &power_state,
+            power_base.as_object_mut().unwrap(),
+            &mut power_entities,
+            &route_powers(2, 0.0),
+            &mut power_directory,
+            &mut ledger,
+        )
+        .unwrap();
+        assert!(
+            power_entities[1]["stationRoutes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let recovered_scan = dispatch(
+            &power_state,
+            power_base.as_object_mut().unwrap(),
+            &mut power_entities,
+            &route_powers(2, 1.0),
+            &mut power_directory,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(recovered_scan.selected_station_rows, 1);
+        assert_eq!(
+            power_entities[1]["stationRoutes"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn dispatch_uses_exact_three_quarter_and_fail_closed_directory_boundaries() {
+        let dense_source = sparse_readiness_matrix(16, 12);
+        let dense_state = route_fixture_state(&dense_source);
+        let mut dense_base = route_fixture_base();
+        let mut dense_entities = dense_source;
+        let mut dense_directory = prepare_step_directory(
+            &dense_entities,
+            &dense_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&dense_entities);
+        let mut ledger =
+            StationRouteLedger::build(&dense_state, &dense_entities, &dense_directory, &activity);
+        let dense_scan = dispatch(
+            &dense_state,
+            dense_base.as_object_mut().unwrap(),
+            &mut dense_entities,
+            &route_powers(16, 1.0),
+            &mut dense_directory,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(dense_scan.selected_demand_rows, 12);
+        assert_eq!(dense_scan.selected_station_rows, 16);
+        assert!(dense_scan.dense_fallback);
+        assert!(!dense_scan.directory_fallback);
+
+        let mut opaque_entities = sparse_readiness_matrix(16, 1);
+        opaque_entities[7]["stationRoutes"] = json!([{
+            "scope": "mod:wormhole/local",
+            "mod:payload": { "signedZero": -0.0, "text": "保持" }
+        }]);
+        let opaque_directory =
+            prepare_step_directory(&opaque_entities, &(0..16).collect::<Vec<_>>()).unwrap();
+        let (opaque_indices, opaque_scan) =
+            opaque_directory.dispatch_scan_indices(&[], false, false);
+        assert_eq!(opaque_indices, (0..16).collect::<Vec<_>>());
+        assert!(opaque_scan.directory_fallback);
+
+        let exact_directory =
+            prepare_step_directory(&opaque_entities, &(0..16).collect::<Vec<_>>()).unwrap();
+        let mut invalid_pending = exact_directory.clone();
+        invalid_pending.dispatch_full_scan_required = false;
+        invalid_pending.dispatch_all_pending = false;
+        invalid_pending.pending_dispatch_demand_indices = vec![9];
+        let (invalid_indices, invalid_scan) =
+            invalid_pending.dispatch_scan_indices(&[], false, false);
+        assert_eq!(invalid_indices, (0..16).collect::<Vec<_>>());
+        assert!(invalid_scan.directory_fallback);
+
+        let mut mismatched_indices = (0..16).collect::<Vec<_>>();
+        mismatched_indices[1] = mismatched_indices[0];
+        let mismatched = build_peer_directory(
+            &opaque_entities,
+            &mismatched_indices,
+            &(0..16).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let (_, mismatch_scan) = mismatched.dispatch_scan_indices(&[], false, false);
+        assert!(mismatch_scan.directory_fallback);
+    }
+
+    #[test]
+    fn readiness_technology_and_topology_boundaries_rewake_local_dispatch() {
+        let mut source = sparse_readiness_matrix(16, 1);
+        source[0]["outputs"]["iron_ore"] = Value::from(100.0);
+        let state = route_fixture_state(&source);
+        let mut base = route_fixture_base();
+        let mut directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&source);
+        let ledger = StationRouteLedger::build(&state, &source, &directory, &activity);
+        ready_station_indices_with_scan(
+            &state,
+            base.as_object().unwrap(),
+            &source,
+            &mut directory,
+            &ledger,
+        )
+        .unwrap();
+        directory.commit_dispatch(Vec::new(), &[], false);
+
+        base["research"]["completedTechIds"] = json!(["logistics_capacity_1"]);
+        let (_, signature_scan) = ready_station_indices_with_scan(
+            &state,
+            base.as_object().unwrap(),
+            &source,
+            &mut directory,
+            &ledger,
+        )
+        .unwrap();
+        assert!(signature_scan.signature_fallback);
+        let (technology_wake, _) = directory.dispatch_scan_indices(&[], false, false);
+        assert_eq!(technology_wake, vec![1]);
+
+        let mut retained = Arc::new(directory);
+        refresh_step_directory_after_topology_change(
+            &source,
+            &state.factory_topology.station_indices,
+            true,
+            &mut retained,
+        )
+        .unwrap();
+        let (topology_wake, _) = retained.dispatch_scan_indices(&[], false, false);
+        assert_eq!(topology_wake, vec![1]);
+    }
+
+    #[test]
+    fn failed_dispatch_keeps_pending_power_and_route_caches_uncommitted() {
+        let source = route_matrix(2, &[], 0.0, 8.0);
+        let state = route_fixture_state(&source);
+        let mut base = route_fixture_base();
+        let mut entities = source;
+        entities[1]["stationLastSupplyPeerBySlot"] = Value::Null;
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let pending_before = directory.pending_dispatch_demand_indices.clone();
+        let all_before = directory.dispatch_all_pending;
+        let powered_before = directory.powered_dispatch_station_indices.clone();
+        let routes_before = directory.local_route_demand_indices.clone();
+
+        let error = dispatch(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &route_powers(2, 1.0),
+            &mut directory,
+            &mut ledger,
+        )
+        .expect_err("invalid fairness map must reject the candidate");
+        assert_eq!(error.to_string(), "native local fairness record is missing");
+        assert_eq!(directory.pending_dispatch_demand_indices, pending_before);
+        assert_eq!(directory.dispatch_all_pending, all_before);
+        assert_eq!(directory.powered_dispatch_station_indices, powered_before);
+        assert_eq!(directory.local_route_demand_indices, routes_before);
+    }
+
+    fn run_route_step(
+        state: &CoreState,
+        source: &[Value],
+        seconds: f64,
+        force_full_scan: bool,
+    ) -> (Value, Vec<Value>, LocalPeerDirectory, usize, bool) {
+        let mut base = route_fixture_base();
+        let mut entities = source.to_vec();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let (planned_indices, dense) = directory.route_scan_indices();
+        let scan_count = if force_full_scan {
+            directory.station_indices.len()
+        } else {
+            planned_indices.len()
+        };
+        if force_full_scan {
+            let full_indices = directory.station_indices.to_vec();
+            let quantum_bandwidth =
+                crate::quantum_logistics::runtime_bandwidth(base.as_object().unwrap(), &entities);
+            let outcome = advance_routes_for_indices(
+                state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                quantum_bandwidth,
+                seconds,
+                &route_powers(source.len(), 1.0),
+                &full_indices,
+            )
+            .unwrap();
+            directory.replace_scanned_local_route_activity(&outcome.activity_updates);
+        } else {
+            advance_routes(
+                state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                seconds,
+                &route_powers(source.len(), 1.0),
+                &mut directory,
+            )
+            .unwrap();
+        }
+        (base, entities, directory, scan_count, dense)
+    }
+
+    fn assert_shared_local_ledger_matches_legacy(
+        state: &CoreState,
+        entities: &[Value],
+        directory: &LocalPeerDirectory,
+    ) {
+        let remote_activity = crate::interstellar_logistics::prepare_route_activity(entities);
+        let shared = StationRouteLedger::build(state, entities, directory, &remote_activity);
+        let full = StationRouteLedger::build_full_oracle(state, entities, directory);
+        let legacy = build_ledger(
+            entities,
+            &state.entity_index,
+            directory.station_indices.as_ref(),
+        );
+
+        for &station_index in directory.station_indices.iter() {
+            assert_eq!(
+                shared.local_busy_floor(station_index),
+                legacy.busy.get(&station_index).copied().unwrap_or(0.0)
+            );
+            assert_eq!(
+                shared.local_in_flight(station_index, "iron_ore"),
+                ledger_item_amount(&legacy.in_flight, station_index, "iron_ore")
+            );
+            assert_eq!(
+                shared.local_reserved(station_index, "iron_ore"),
+                ledger_item_amount(&legacy.reserved, station_index, "iron_ore")
+            );
+            assert_eq!(
+                shared.local_active_vehicle_load(station_index),
+                legacy
+                    .active_vehicle_load
+                    .get(&station_index)
+                    .copied()
+                    .unwrap_or(0.0)
+            );
+            assert_eq!(
+                shared.is_active_local_station(station_index),
+                legacy.active_local_stations.contains(&station_index)
+            );
+            assert_eq!(
+                shared.active_local_progress(station_index),
+                legacy
+                    .active_local_progress
+                    .get(&station_index)
+                    .copied()
+                    .unwrap_or(0.0)
+            );
+            assert_eq!(
+                shared.local_busy_floor(station_index),
+                full.local_busy_floor(station_index)
+            );
+            assert_eq!(
+                shared.local_in_flight(station_index, "iron_ore"),
+                full.local_in_flight(station_index, "iron_ore")
+            );
+            assert_eq!(
+                shared.local_reserved(station_index, "iron_ore"),
+                full.local_reserved(station_index, "iron_ore")
+            );
+            assert_eq!(
+                shared.local_active_vehicle_load(station_index),
+                full.local_active_vehicle_load(station_index)
+            );
+        }
+
+        let runtime = DeterministicRuntime::for_test(4);
+        let legacy_ready = plan_ready_station_indices_with(
+            &runtime,
+            entities,
+            directory,
+            directory.station_indices.as_ref(),
+            &legacy,
+            25.0,
+            |_, _, _| Ok(100_000.0),
+        )
+        .unwrap();
+        let shared_ready = plan_ready_station_indices_with(
+            &runtime,
+            entities,
+            directory,
+            directory.station_indices.as_ref(),
+            &shared,
+            25.0,
+            |_, _, _| Ok(100_000.0),
+        )
+        .unwrap();
+        assert_eq!(shared_ready, legacy_ready);
+
+        let legacy_congestion =
+            plan_congestion_updates(&runtime, entities, directory, &legacy).unwrap();
+        let shared_congestion =
+            plan_congestion_updates(&runtime, entities, directory, &shared).unwrap();
+        assert_eq!(shared_congestion, legacy_congestion);
+    }
+
+    #[test]
+    fn shared_station_route_ledger_matches_legacy_local_oracle_at_1_5_60_seconds() {
+        let count = 256;
+        let active = [7, 113, 251];
+        let source = route_matrix(count, &active, 0.125, 120.0);
+        let state = route_fixture_state(&source);
+        let source_hash = state.canonical_sha256().unwrap();
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let (_, entities, directory, _, _) = run_route_step(&state, &source, seconds, false);
+            let remote_activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+            let ledger = StationRouteLedger::build(&state, &entities, &directory, &remote_activity);
+            let active_order_input_rows = directory.active_local_route_demand_indices().len()
+                + remote_activity.active_remote_route_demand_indices().len()
+                + remote_activity.opaque_route_demand_indices().len();
+            assert_eq!(
+                ledger.scan(),
+                crate::station_route_ledger::StationRouteLedgerScan {
+                    selected_demands: active.len(),
+                    total_candidate_rows: count,
+                    dense_fallback: false,
+                    active_order_input_rows,
+                    active_order_duplicate_rows: active_order_input_rows - active.len(),
+                    active_order_fallback: false,
+                },
+                "unexpected shared-ledger scan at {seconds}s"
+            );
+            assert_shared_local_ledger_matches_legacy(&state, &entities, &directory);
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+    }
+
+    #[test]
+    fn sparse_route_advancement_scans_only_active_and_matches_full_oracle_at_1_5_60_seconds() {
+        let count = PARALLEL_MIN_ITEMS + 113;
+        let active = [7, 2_057, count - 1];
+        let source = route_matrix(count, &active, 0.125, 120.0);
+        let state = route_fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let sparse = run_route_step(&state, &source, seconds, false);
+            let oracle = run_route_step(&state, &source, seconds, true);
+            assert_eq!(sparse.3, active.len(), "sparse scan count at {seconds}s");
+            assert!(!sparse.4);
+            assert_eq!(
+                serde_json::to_vec(&(&sparse.0, &sparse.1)).unwrap(),
+                serde_json::to_vec(&(&oracle.0, &oracle.1)).unwrap(),
+                "active route replay diverged from full scan at {seconds}s"
+            );
+            assert_eq!(
+                sparse.2.local_route_demand_indices,
+                oracle.2.local_route_demand_indices
+            );
+            assert_eq!(sparse.2.local_route_demand_indices, active);
+            for (before, after) in source.iter().zip(&sparse.1) {
+                assert_eq!(
+                    serde_json::to_vec(&before["mod:route/opaque"]).unwrap(),
+                    serde_json::to_vec(&after["mod:route/opaque"]).unwrap()
+                );
+            }
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+    }
+
+    #[test]
+    fn dense_route_activity_explicitly_falls_back_to_full_station_order() {
+        let count = 80;
+        let active = (1..=60).collect::<Vec<_>>();
+        let source = route_matrix(count, &active, 0.2, 90.0);
+        let state = route_fixture_state(&source);
+        let directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let (scan_indices, dense) = directory.route_scan_indices();
+        assert!(dense);
+        assert_eq!(scan_indices, directory.station_indices.as_ref());
+        assert_eq!(scan_indices.len(), count);
+        let remote_activity = crate::interstellar_logistics::prepare_route_activity(&source);
+        let shared = StationRouteLedger::build(&state, &source, &directory, &remote_activity);
+        let active_order_input_rows = directory.active_local_route_demand_indices().len()
+            + remote_activity.active_remote_route_demand_indices().len()
+            + remote_activity.opaque_route_demand_indices().len();
+        assert_eq!(
+            shared.scan(),
+            crate::station_route_ledger::StationRouteLedgerScan {
+                selected_demands: count,
+                total_candidate_rows: count,
+                dense_fallback: true,
+                active_order_input_rows,
+                active_order_duplicate_rows: active_order_input_rows - active.len(),
+                active_order_fallback: false,
+            }
+        );
+        assert_shared_local_ledger_matches_legacy(&state, &source, &directory);
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let scheduled = run_route_step(&state, &source, seconds, false);
+            let oracle = run_route_step(&state, &source, seconds, true);
+            assert!(scheduled.4);
+            assert_eq!(scheduled.3, count);
+            assert_eq!(
+                serde_json::to_vec(&(&scheduled.0, &scheduled.1)).unwrap(),
+                serde_json::to_vec(&(&oracle.0, &oracle.1)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn powerless_route_stays_awake_then_completion_removes_it_without_material_loss() {
+        let source = route_matrix(32, &[7], 0.0, 8.0);
+        let state = route_fixture_state(&source);
+        let mut base = route_fixture_base();
+        let mut entities = source.clone();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let material_before = item_amount(entities[0].as_object().unwrap(), "outputs", "iron_ore")
+            + item_amount(entities[7].as_object().unwrap(), "outputs", "iron_ore");
+        let powerless = route_powers(entities.len(), 0.0);
+
+        advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            60.0,
+            &powerless,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(directory.local_route_demand_indices, vec![7]);
+        assert_eq!(
+            entities[7]["stationRoutes"][0]["progress"],
+            Value::from(0.0)
+        );
+
+        let powered = route_powers(entities.len(), 1.0);
+        advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            8.0,
+            &powered,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(directory.local_route_demand_indices.is_empty());
+        assert_eq!(entities[7]["stationRoutes"], json!([]));
+        let material_after = item_amount(entities[0].as_object().unwrap(), "outputs", "iron_ore")
+            + item_amount(entities[7].as_object().unwrap(), "outputs", "iron_ore");
+        assert_eq!(material_after, material_before);
+        assert_eq!(entities[7]["outputs"]["iron_ore"], Value::from(11.0));
+    }
+
+    #[test]
+    fn quantum_local_route_completion_wakes_retained_station_input() {
+        let mut entities = route_matrix(2, &[1], 0.0, 1.0);
+        entities[1]["buildingId"] = Value::from("interstellar_logistics_station");
+        entities[1]["quantumMode"] = Value::from("quantum");
+        entities[1]["stationSlots"][0]["remoteMode"] = Value::from("supply");
+        entities[1]["stationSlots"][0]["minStock"] = Value::from(100);
+        let state = route_fixture_state(&entities);
+        let mut base = route_fixture_base();
+        base["quantumLogisticsNetwork"] = json!({
+            "enabled": true,
+            "inventory": {},
+            "itemCapacities": { "iron_ore": "1000000" },
+            "routingCursors": {},
+            "uploadRoutingCursors": {}
+        });
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        // Model the prior successful dispatch boundary so this assertion
+        // observes the route-completion wake rather than the initial all-wake.
+        directory.commit_dispatch(Vec::new(), &[], false);
+        let powers = route_powers(entities.len(), 1.0);
+
+        let changed = advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            1.0,
+            &powers,
+            &mut directory,
+        )
+        .unwrap();
+        directory.wake_ready_from_changed_stations(&changed);
+        let (dispatch_wake, _) = directory.dispatch_scan_indices(&[], false, false);
+        assert_eq!(dispatch_wake, vec![1]);
+        assert_eq!(entities[1]["inputs"]["iron_ore"], Value::from(11.0));
+        assert_eq!(directory.buffer_active_station_indices, vec![1]);
+
+        transfer_buffers(
+            &state,
+            base.as_object().unwrap(),
+            &mut entities,
+            &mut directory,
+        )
+        .unwrap();
+        assert_eq!(entities[1]["inputs"]["iron_ore"], Value::from(0.0));
+        assert_eq!(entities[1]["outputs"]["iron_ore"], Value::from(11.0));
+        assert!(directory.buffer_active_station_indices.is_empty());
+    }
+
+    fn assert_local_dispatch_shared_ledger_matches_full_scan(
+        source: &[Value],
+        power_factor: f64,
+        label: &str,
+    ) {
+        let state = route_fixture_state(source);
+        let source_hash = state.canonical_sha256().unwrap();
+        let powers = route_powers(source.len(), power_factor);
+
+        let mut legacy_base = route_fixture_base();
+        let mut legacy_entities = source.to_vec();
+        let mut legacy_directory =
+            prepare_step_directory(&legacy_entities, &state.factory_topology.station_indices)
+                .unwrap();
+        let mut legacy_ledger = build_ledger(
+            &legacy_entities,
+            &state.entity_index,
+            legacy_directory.station_indices.as_ref(),
+        );
+        dispatch_full_scan_oracle(
+            &state,
+            legacy_base.as_object_mut().unwrap(),
+            &mut legacy_entities,
+            &powers,
+            &mut legacy_directory,
+            &mut legacy_ledger,
+        )
+        .unwrap();
+
+        let mut shared_base = route_fixture_base();
+        let mut shared_entities = source.to_vec();
+        let mut shared_directory =
+            prepare_step_directory(&shared_entities, &state.factory_topology.station_indices)
+                .unwrap();
+        let remote_activity =
+            crate::interstellar_logistics::prepare_route_activity(&shared_entities);
+        let mut shared_ledger = StationRouteLedger::build(
+            &state,
+            &shared_entities,
+            &shared_directory,
+            &remote_activity,
+        );
+        let expected_active = shared_directory.active_local_route_demand_indices().len();
+        assert_eq!(
+            shared_ledger.scan().selected_demands,
+            expected_active,
+            "{label}"
+        );
+        assert!(!shared_ledger.scan().dense_fallback, "{label}");
+        dispatch_with_ledger(
+            &state,
+            shared_base.as_object_mut().unwrap(),
+            &mut shared_entities,
+            &powers,
+            &mut shared_directory,
+            &mut shared_ledger,
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_vec(&(&shared_base, &shared_entities)).unwrap(),
+            serde_json::to_vec(&(&legacy_base, &legacy_entities)).unwrap(),
+            "dispatch result diverged for {label}"
+        );
+        assert_eq!(
+            shared_directory.local_route_demand_indices,
+            legacy_directory.local_route_demand_indices,
+            "active route order diverged for {label}"
+        );
+
+        let full =
+            StationRouteLedger::build_full_oracle(&state, &shared_entities, &shared_directory);
+        for &station_index in state.factory_topology.station_indices.iter() {
+            assert_eq!(
+                shared_ledger.local_busy_floor(station_index),
+                legacy_ledger
+                    .busy
+                    .get(&station_index)
+                    .copied()
+                    .unwrap_or(0.0),
+                "busy ledger diverged for {label}"
+            );
+            assert_eq!(
+                shared_ledger.local_reserved(station_index, "iron_ore"),
+                ledger_item_amount(&legacy_ledger.reserved, station_index, "iron_ore"),
+                "reserved ledger diverged for {label}"
+            );
+            assert_eq!(
+                shared_ledger.local_in_flight(station_index, "iron_ore"),
+                ledger_item_amount(&legacy_ledger.in_flight, station_index, "iron_ore"),
+                "in-flight ledger diverged for {label}"
+            );
+            assert_eq!(
+                shared_ledger.local_active_vehicle_load(station_index),
+                legacy_ledger
+                    .active_vehicle_load
+                    .get(&station_index)
+                    .copied()
+                    .unwrap_or(0.0),
+                "vehicle-load ledger diverged for {label}"
+            );
+            assert_eq!(
+                shared_ledger.local_reserved(station_index, "iron_ore"),
+                full.local_reserved(station_index, "iron_ore"),
+                "incremental reserved ledger diverged from full scan for {label}"
+            );
+            assert_eq!(
+                shared_ledger.local_in_flight(station_index, "iron_ore"),
+                full.local_in_flight(station_index, "iron_ore"),
+                "incremental in-flight ledger diverged from full scan for {label}"
+            );
+            assert_eq!(
+                shared_ledger.interstellar_reserved(station_index, "iron_ore"),
+                full.interstellar_reserved(station_index, "iron_ore"),
+                "local dispatch did not update the remote reserved view for {label}"
+            );
+            assert_eq!(
+                shared_ledger.interstellar_in_flight(station_index, "iron_ore"),
+                full.interstellar_in_flight(station_index, "iron_ore"),
+                "local dispatch did not update the remote in-flight view for {label}"
+            );
+            assert_eq!(
+                shared_ledger.interstellar_active_vehicle_load(station_index),
+                full.interstellar_active_vehicle_load(station_index),
+                "local dispatch did not update the remote load view for {label}"
+            );
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+    }
+
+    #[test]
+    fn dispatch_reuses_shared_ledger_and_matches_full_scan_for_sparse_wake_states() {
+        let normal = route_matrix(2, &[], 0.0, 8.0);
+
+        let mut source_empty = normal.clone();
+        source_empty[0]["outputs"]["iron_ore"] = Value::from(0.0);
+
+        let mut target_full = normal.clone();
+        target_full[1]["outputs"]["iron_ore"] = Value::from(100.0);
+
+        let preexisting_route = route_matrix(2, &[1], 0.25, 8.0);
+
+        for (source, power_factor, label) in [
+            (&normal, 1.0, "normal inventory wake"),
+            (&source_empty, 1.0, "source empty"),
+            (&target_full, 1.0, "target full"),
+            (&normal, 0.0, "power limited"),
+            (&preexisting_route, 1.0, "route already active"),
+        ] {
+            assert_local_dispatch_shared_ledger_matches_full_scan(source, power_factor, label);
+        }
+    }
+
+    #[test]
+    fn dispatch_after_external_inventory_arrival_immediately_wakes_route_advancement() {
+        let mut entities = route_matrix(2, &[], 0.0, 8.0);
+        entities[0]["outputs"]["iron_ore"] = Value::from(0.0);
+        let state = route_fixture_state(&entities);
+        let mut base = route_fixture_base();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let powers = route_powers(entities.len(), 1.0);
+        let remote_activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut route_ledger =
+            StationRouteLedger::build(&state, &entities, &directory, &remote_activity);
+
+        dispatch(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut directory,
+            &mut route_ledger,
+        )
+        .unwrap();
+        assert!(!directory.has_local_routes());
+
+        entities[0]["outputs"]["iron_ore"] = Value::from(100.0);
+        directory.wake_ready_from_changed_stations(&[0]);
+        dispatch(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut directory,
+            &mut route_ledger,
+        )
+        .unwrap();
+        assert_eq!(directory.local_route_demand_indices, vec![1]);
+        assert_eq!(entities[1]["stationRoutes"].as_array().unwrap().len(), 1);
+        let remote_activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        assert_eq!(
+            StationRouteLedger::build(&state, &entities, &directory, &remote_activity)
+                .scan()
+                .selected_demands,
+            1,
+            "inventory-triggered dispatch must wake the shared ledger"
+        );
+
+        advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            8.0,
+            &powers,
+            &mut directory,
+        )
+        .unwrap();
+        assert!(!directory.has_local_routes());
+        let remote_activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        assert_eq!(
+            StationRouteLedger::build(&state, &entities, &directory, &remote_activity)
+                .scan()
+                .selected_demands,
+            0,
+            "route completion must leave no stale shared-ledger demand"
+        );
+        assert_eq!(entities[0]["outputs"]["iron_ore"], Value::from(0.0));
+        assert_eq!(entities[1]["outputs"]["iron_ore"], Value::from(100.0));
+    }
+
+    #[test]
+    fn failed_candidate_keeps_source_activity_cache_and_source_json_unchanged() {
+        let source = route_matrix(128, &[7, 83], 0.2, 30.0);
+        let state = route_fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+        let source_json = serde_json::to_vec(&source).unwrap();
+        let source_directory = Arc::new(
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap(),
+        );
+        let source_activity = source_directory.local_route_demand_indices.clone();
+        let source_station_indices = Arc::clone(&source_directory.station_indices);
+        let mut candidate_directory = Arc::clone(&source_directory);
+        let candidate_runtime = Arc::make_mut(&mut candidate_directory);
+        assert!(Arc::ptr_eq(
+            &source_station_indices,
+            &candidate_runtime.station_indices
+        ));
+        let mut candidate = source.clone();
+        candidate[7]["stationRoutes"][0] = Value::Null;
+        let candidate_before = serde_json::to_vec(&candidate).unwrap();
+        let mut base = route_fixture_base();
+        let powers = route_powers(candidate.len(), 1.0);
+
+        let error = advance_routes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut candidate,
+            1.0,
+            &powers,
+            candidate_runtime,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "native local route is invalid");
+        assert_eq!(source_directory.local_route_demand_indices, source_activity);
+        assert_eq!(
+            candidate_directory.local_route_demand_indices, source_activity,
+            "failed replay must not partially install activity updates"
+        );
+        assert_eq!(serde_json::to_vec(&source).unwrap(), source_json);
+        assert_ne!(serde_json::to_vec(&candidate).unwrap(), candidate_before);
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
     }
 }

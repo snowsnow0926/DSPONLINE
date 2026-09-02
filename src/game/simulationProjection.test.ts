@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "./engine";
-import { applySimulationProjectionToState, captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjection, createSimulationProjectionStateIndex, createSimulationProjectionWithBaseline } from "./simulationProjection";
+import { applySimulationProjectionToState, captureSimulationProjectionBaseline, chunkFullRecordSimulationProjection, createDeferredTopLevelSimulationProjection, createFullCurrentPlanetSimulationProjection, createSimulationProjection, createSimulationProjectionStateIndex, createSimulationProjectionWithBaseline, createStatisticsHistoryReadModel } from "./simulationProjection";
 
 describe("simulation projection", () => {
   it("reports only changed runtime ids while preserving aggregate counts", () => {
@@ -125,6 +125,29 @@ describe("simulation projection", () => {
     expect(applied.totalProduced.iron_ore).toBe(321);
     expect(applied.entities[0].progress).toBe(0.625);
     expect(applied.productionHistory).toBe(previous.productionHistory);
+  });
+
+  it("creates an independent statistics history read model without unrelated state", () => {
+    const current = createInitialState();
+    current.productionHistory = [{
+      elapsedSeconds: 5,
+      productionPerMinute: { iron_ore: 60 },
+      consumptionPerMinute: {},
+      inventory: { iron_ore: 5 },
+      generationKw: 0,
+      demandKw: 0,
+    }];
+    const readModel = createStatisticsHistoryReadModel(current, 7);
+    expect(readModel).toEqual({
+      schemaVersion: 1,
+      kind: "statistics-history-v1",
+      revision: 7,
+      samples: current.productionHistory,
+    });
+    expect(readModel).not.toHaveProperty("entities");
+    expect(readModel).not.toHaveProperty("belts");
+    expect(readModel).not.toHaveProperty("dysonPlans");
+    expect(() => createStatisticsHistoryReadModel(current, -1)).toThrow(/revision/);
   });
 
   it("detects in-place top-level mutation from the pre-step baseline", () => {

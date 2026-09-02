@@ -1,11 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopNativeCoreProjectionTransferResult } from "../desktop";
 import {
   advanceNativeCoreSegmented,
+  attachWindowsNativeCoreMainOwnedAuthority,
   decodeNativeCoreProjectionTransfer,
   partitionNativeAdvanceBudget,
+  type NativeCoreAdvanceSegmentExecutor,
 } from "./nativeCore";
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("Windows native core segmented advance", () => {
   it("preserves exact simulation and wall totals across cancellable boundaries", () => {
@@ -42,6 +46,7 @@ describe("Windows native core segmented advance", () => {
       onProgress: () => controller.abort(),
     });
     expect(requests).toHaveLength(1);
+    expect(requests[0]).not.toHaveProperty("advanceMode");
     expect(result).toEqual({
       supported: true,
       revision: 8,
@@ -49,6 +54,71 @@ describe("Windows native core segmented advance", () => {
       advancedSimulationSeconds: 600,
       advancedWallSeconds: 301 * 600 / 1_201,
     });
+  });
+
+  it("preserves the pure-idle mode on every acknowledged segment", async () => {
+    const requests: Array<Parameters<NativeCoreAdvanceSegmentExecutor>[0]> = [];
+    const result = await advanceNativeCoreSegmented(async (request) => {
+      requests.push(request);
+      return { supported: true, revision: request.baseRevision + 1 };
+    }, {
+      baseRevision: 11,
+      simulationSeconds: 1_201,
+      wallSeconds: 301,
+      advanceMode: "pure-idle-conservative-v2",
+      maxSegmentSeconds: 600,
+    });
+
+    expect(requests).toHaveLength(3);
+    expect(requests.map((request) => request.advanceMode)).toEqual([
+      "pure-idle-conservative-v2",
+      "pure-idle-conservative-v2",
+      "pure-idle-conservative-v2",
+    ]);
+    expect(requests.map((request) => request.baseRevision)).toEqual([11, 12, 13]);
+    expect(result).toMatchObject({
+      supported: true,
+      revision: 14,
+      cancelled: false,
+      advancedSimulationSeconds: 1_201,
+      advancedWallSeconds: 301,
+    });
+  });
+
+  it("preserves the wire-distinct macro-v10 mode on every segment", async () => {
+    const requests: Array<Parameters<NativeCoreAdvanceSegmentExecutor>[0]> = [];
+    const result = await advanceNativeCoreSegmented(async (request) => {
+      requests.push(request);
+      return { supported: true, revision: request.baseRevision + 1 };
+    }, {
+      baseRevision: 20,
+      simulationSeconds: 1_201,
+      wallSeconds: 301,
+      advanceMode: "pure-idle-macro-v10",
+      maxSegmentSeconds: 600,
+    });
+
+    expect(requests.map((request) => request.advanceMode)).toEqual([
+      "pure-idle-macro-v10",
+      "pure-idle-macro-v10",
+      "pure-idle-macro-v10",
+    ]);
+    expect(result).toMatchObject({ supported: true, revision: 23, cancelled: false });
+  });
+
+  it("refuses to split the one-shot offline macro into repeated calibration windows", async () => {
+    const advance = vi.fn(async (request: Parameters<NativeCoreAdvanceSegmentExecutor>[0]) => ({
+      supported: true,
+      revision: request.baseRevision + 1,
+    }));
+    await expect(advanceNativeCoreSegmented(advance, {
+      baseRevision: 20,
+      simulationSeconds: 1_201,
+      wallSeconds: 1_201,
+      advanceMode: "offline-macro-v1",
+      maxSegmentSeconds: 600,
+    })).rejects.toThrow(/单个耐久事务/);
+    expect(advance).not.toHaveBeenCalled();
   });
 
   it("stops at an unsupported boundary and rejects a non-advancing revision", async () => {
@@ -87,7 +157,7 @@ async function transferFor(value: Record<string, unknown>): Promise<DesktopNativ
       sessionId: "core-1",
       revision: Number(value.revision),
       sequence: 9,
-      projectionType: value.projectionType as "viewport-v1",
+      projectionType: value.projectionType as DesktopNativeCoreProjectionTransferResult["header"]["projectionType"],
       payloadLength: bodyBuffer.byteLength,
       sha256,
     },
@@ -96,6 +166,43 @@ async function transferFor(value: Record<string, unknown>): Promise<DesktopNativ
 }
 
 describe("native core transferable projections", () => {
+  it("routes the bounded system-space-station workspace through the binary thin-UI channel", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "system-space-station-workspace-v1",
+      revision: 17,
+    } as const;
+    const transfer = await transferFor(value);
+    const requestNativeCoreProjectionTransfer = vi.fn(async () => transfer);
+    vi.stubGlobal("window", { dspDesktop: { requestNativeCoreProjectionTransfer } });
+    const shadow = attachWindowsNativeCoreMainOwnedAuthority("core-1", {
+      generation: 4,
+      rootHash: "a".repeat(64),
+      revision: 17,
+    });
+    const request = {
+      runId: "run-station-1",
+      expectedRevision: 17,
+      expectedRegistryFingerprint: "builtin:test",
+      systemId: "helios",
+      requirementCursor: 0,
+      requirementLimit: 8,
+      inventoryCursor: 0,
+      inventoryLimit: 8,
+      trayCursor: 0,
+      trayLimit: 8,
+      stationCursor: 0,
+      stationLimit: 8,
+    };
+
+    await expect(shadow.systemSpaceStationWorkspaceProjection?.(request)).resolves.toEqual(value);
+    expect(requestNativeCoreProjectionTransfer).toHaveBeenCalledWith({
+      sessionId: "core-1",
+      projectionType: "system-space-station-workspace-v1",
+      payload: request,
+    });
+  });
+
   it("verifies and decodes one bounded viewport block", async () => {
     const value = {
       schemaVersion: 1,
@@ -113,6 +220,203 @@ describe("native core transferable projections", () => {
       sessionId: "core-1",
       projectionType: "viewport-v1",
     })).resolves.toEqual(value);
+  });
+
+  it("verifies and decodes a schema-v2 viewport block without weakening the v1 transport envelope", async () => {
+    const value = {
+      schemaVersion: 2,
+      projectionType: "viewport-v2",
+      revision: 13,
+      planetId: "MOD-星球",
+      bounds: { minX: -1, minY: -1, maxX: 1, maxY: 1 },
+      base: {},
+      entities: [],
+      belts: [],
+      pinnedEntityIds: [],
+      pinnedBeltIds: [],
+      nextEntityCursor: null,
+      nextBeltCursor: null,
+      planetTotals: { entities: 0, belts: 0 },
+      viewportTotals: { entities: 0, belts: 0 },
+      worldBounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
+      minimap: {
+        bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
+        entityCount: 0,
+        beltCount: 0,
+        occupiedCellCount: 0,
+        cellSize: 512,
+      },
+      broadQueryFallback: false,
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "viewport-v2",
+    })).resolves.toEqual(value);
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor({ ...value, schemaVersion: 1 }), {
+      sessionId: "core-1",
+      projectionType: "viewport-v2",
+    })).rejects.toThrow(/正文身份无效/);
+  });
+
+  it("verifies and decodes a factory read-model block over the bounded transfer", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "factory-read-model-v1",
+      revision: 14,
+      shell: { schema: "factory-read-model-v1", source: "native-core" },
+      planetNavigation: {},
+      selection: {},
+      construction: {},
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "factory-read-model-v1",
+    })).resolves.toEqual(value);
+  });
+
+  it("verifies and decodes a factory inventory page over the bounded transfer", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "factory-inventory-v1",
+      source: "native-core",
+      revision: 14,
+      stateVersion: 47,
+      registryFingerprint: "builtin:test",
+      activePlanetId: "home",
+      cargo: null,
+      pickupTargetAmount: 100,
+      portableFleet: { logistics_drone: 0, logistics_vessel: 0 },
+      productionBufferLimit: 1_000_000,
+      trayItemLimit: 1_000,
+      trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
+      request: { expectedRevision: 14, cursor: 0, limit: 32 },
+      totalCount: 0,
+      rows: [],
+      nextCursor: null,
+      truncated: false,
+      limits: { rows: 256, projectionBytes: 1_048_576 },
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "factory-inventory-v1",
+    })).resolves.toEqual(value);
+  });
+
+  it("verifies and decodes a read-only construction inventory page over the bounded transfer", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "construction-inventory-v1",
+      source: "native-core",
+      revision: 14,
+      stateVersion: 47,
+      registryFingerprint: "builtin:test",
+      readOnly: true,
+      request: {
+        expectedRevision: 14,
+        expectedRegistryFingerprint: "builtin:test",
+        cursor: 0,
+        limit: 32,
+      },
+      totalCount: 1,
+      rows: [{ buildingId: "MOD/building-beta", amount: 3 }],
+      nextCursor: null,
+      truncated: false,
+      limits: { rows: 256, projectionBytes: 1_048_576 },
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "construction-inventory-v1",
+    })).resolves.toEqual(value);
+  });
+
+  it("verifies and decodes a same-revision construction placement context", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "construction-placement-context-v1",
+      source: "native-core",
+      revision: 14,
+      stateVersion: 47,
+      registryFingerprint: "builtin:test",
+      request: {
+        expectedRevision: 14,
+        expectedRegistryFingerprint: "builtin:test",
+        buildingId: "MOD/building-beta",
+      },
+      activePlanetId: "home",
+      available: 3,
+      appendEntityIndex: 8,
+      nextEntityId: "entity_12",
+      support: { supported: false, reason: "unknown-building" },
+      placement: null,
+      limits: { projectionBytes: 1_048_576 },
+    } as const;
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "construction-placement-context-v1",
+    })).resolves.toEqual(value);
+  });
+
+  it("verifies and decodes a same-revision construction removal context", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "construction-removal-context-v1",
+      source: "native-core",
+      revision: 14,
+      stateVersion: 47,
+      registryFingerprint: "builtin:test",
+      request: {
+        expectedRevision: 14,
+        expectedRegistryFingerprint: "builtin:test",
+        entityId: "MOD/设备-一",
+      },
+      activePlanetId: "home",
+      entityId: "MOD/设备-一",
+      buildingId: "MOD/building-beta",
+      machineCount: 2,
+      currentConstruction: 3,
+      refundAfterRemoval: 5,
+      support: { supported: true, reason: null },
+      limits: { projectionBytes: 1_048_576 },
+    } as const;
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "construction-removal-context-v1",
+    })).resolves.toEqual(value);
+  });
+
+  it.each(["star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "dyson-workspace-v1", "system-space-station-workspace-v1"] as const)(
+    "verifies and decodes the bounded %s block",
+    async (projectionType) => {
+      const value = {
+        schemaVersion: 1,
+        projectionType,
+        revision: 15,
+        registryFingerprint: "builtin:test",
+        stateVersion: 47,
+      };
+      await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+        sessionId: "core-1",
+        projectionType,
+      })).resolves.toEqual(value);
+    },
+  );
+
+  it("verifies a schema-v2 stellar industry route page without accepting the v1 body schema", async () => {
+    const value = {
+      schemaVersion: 2,
+      projectionType: "stellar-industry-v2",
+      revision: 16,
+      registryFingerprint: "builtin:test",
+      stateVersion: 47,
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "stellar-industry-v2",
+    })).resolves.toEqual(value);
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor({ ...value, schemaVersion: 1 }), {
+      sessionId: "core-1",
+      projectionType: "stellar-industry-v2",
+    })).rejects.toThrow(/正文身份无效/);
   });
 
   it("rejects a corrupted payload before installing it", async () => {

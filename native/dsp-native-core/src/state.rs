@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::io::Write as IoWrite;
 use std::mem::size_of;
-use std::ops::{Deref, DerefMut, Index};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::{Context, anyhow, bail};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
@@ -14,13 +15,21 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::{fnv1a_utf8, update_canonical, update_canonical_object};
 use crate::catalog::RuntimeCatalog;
-use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
+use crate::deterministic_runtime::{
+    DeterministicRuntime, IndexedPrepareDiagnostics, runtime as deterministic_runtime,
+};
 use crate::entity_raw::encode_entity_records_full;
 #[cfg(test)]
 use crate::entity_raw::json_bitwise_eq;
 
 const INTERNAL_MANIFEST_SUFFIX: &str = "manifest";
 const MAX_INTERNAL_RECORDS: usize = 4_096;
+const MAX_REPEATED_CHECKPOINT_CACHE_BYTES: usize = 32 * 1024 * 1024;
+/// A decoded serde_json entity graph is useful for small saves, but it is a
+/// second resident copy of every entity map. Keep it only below this bound;
+/// large saves reparse the authoritative raw rows on demand so opening a save
+/// does not retain hundreds of megabytes of allocator-owned JSON nodes.
+const MAX_RESIDENT_PARSED_ENTITY_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ENTITY_COUNT: usize = 2_000_000;
 const MAX_BELT_COUNT: usize = 4_000_000;
 const MAX_PROJECTION_ENTITIES: usize = 32;
@@ -29,12 +38,43 @@ const MAX_PROJECTION_BASE_FIELDS: usize = 64;
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const MAX_VIEWPORT_PROJECTION_ENTITIES: usize = 4_096;
 const MAX_VIEWPORT_PROJECTION_BELTS: usize = 8_192;
+const MAX_VIEWPORT_PINNED_ENTITIES: usize = 64;
+const MAX_VIEWPORT_PINNED_BELTS: usize = 128;
+const MAX_VIEWPORT_OPAQUE_ID_BYTES: usize = 1_024;
+const VIEWPORT_SPATIAL_CELL_SIZE: f64 = 512.0;
+const MAX_VIEWPORT_GRID_CELL_PROBES: u64 = 4_096;
 const MAX_STATISTICS_PROJECTION_SAMPLES: usize = 512;
+const MAX_TECHNOLOGY_PROJECTION_TECH_ROWS: usize = 512;
+const MAX_TECHNOLOGY_PROJECTION_PROGRESS_ITEMS: usize = 16;
+const MAX_TECHNOLOGY_PROJECTION_INFINITE_ROWS: usize = 8;
+const TECHNOLOGY_PROJECTION_MATRIX_ITEMS: [&str; 6] = [
+    "electromagnetic_matrix",
+    "energy_matrix",
+    "structure_matrix",
+    "information_matrix",
+    "gravity_matrix",
+    "universe_matrix",
+];
 const NONE_SYMBOL: u32 = u32::MAX;
 const ENTITY_CHECKPOINT_CHUNK_SIZE: usize = 1_024;
 const BELT_CHECKPOINT_CHUNK_SIZE: usize = 2_048;
+const LEGACY_INTERNAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
+const DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION: u16 = 2;
 pub(crate) const PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS: f64 = 30.0;
 const PURE_IDLE_SESSION_FORMAT_VERSION: u8 = 1;
+pub(crate) const PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS: u8 = 30;
+pub(crate) const PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS: u8 = 30;
+const MAX_JS_SAFE_INTEGER_U64: u64 = 9_007_199_254_740_991;
+
+/// Renderer projections never need route ledgers. They can be large, contain
+/// in-flight material accounting, and must not become an accidental command
+/// oracle. The authoritative record remains untouched.
+fn renderer_entity_projection(mut entity: Value) -> Value {
+    if let Some(object) = entity.as_object_mut() {
+        object.remove("stationRoutes");
+    }
+    entity
+}
 
 /// A cloneable synchronization cell for the two diagnostic/persistence caches
 /// that are reachable through shared `CoreState` references. Keeping interior
@@ -81,6 +121,87 @@ impl<T: fmt::Debug> fmt::Debug for SyncCell<T> {
     }
 }
 
+/// One-shot decoded entity graph for the next sequential factory revision.
+///
+/// Raw JSON records remain authoritative. A successful simulation installs
+/// the exact Values it just encoded; the next transaction moves that graph
+/// out instead of reparsing every entity. Shared transactional clones compete
+/// for the same one-shot value, so at most one full decoded graph is retained.
+/// Invalidating any entity record clears the cache for every clone. Losing the
+/// cache after a failed candidate is only a performance loss: the next caller
+/// rebuilds it from the unchanged raw records.
+#[derive(Default)]
+struct EntityRuntimeCache(Mutex<Option<Vec<Value>>>);
+
+impl EntityRuntimeCache {
+    fn with_values(values: Vec<Value>) -> Self {
+        Self(Mutex::new(Some(values)))
+    }
+
+    fn take(&self, expected_rows: usize) -> Option<Vec<Value>> {
+        let mut cached = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if cached
+            .as_ref()
+            .is_some_and(|values| values.len() == expected_rows)
+        {
+            cached.take()
+        } else {
+            // A mismatched runtime cache is never a source of gameplay truth.
+            // Discard it and let the caller decode the authoritative rows.
+            cached.take();
+            None
+        }
+    }
+
+    fn clear(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+    }
+
+    fn estimated_bytes(&self, raw_entity_bytes: u64) -> u64 {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|values| {
+                // JSON text bytes are a conservative lower-bound proxy for
+                // strings/map allocations; add the outer Value allocation.
+                raw_entity_bytes.saturating_add((values.capacity() * size_of::<Value>()) as u64)
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn resident_rows(&self) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(0)
+    }
+}
+
+impl fmt::Debug for EntityRuntimeCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EntityRuntimeCache")
+            .field(
+                "resident_rows",
+                &self
+                    .0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+                    .map(Vec::len)
+                    .unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
 /// Clone-on-write ownership for immutable factory indexes and scalar columns.
 /// Ordinary simulation revisions share these tables in O(1); topology edits
 /// keep the existing mutation syntax and clone a table only on first write.
@@ -90,6 +211,11 @@ pub(crate) struct SharedArc<T: Clone>(Arc<T>);
 impl<T: Clone> SharedArc<T> {
     fn new(value: T) -> Self {
         Self(Arc::new(value))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -353,7 +479,8 @@ impl ExactRowIdIndex {
 
 #[derive(Debug, Clone, Default)]
 struct SaveDirtyPages {
-    base: bool,
+    base_domains: [bool; BASE_CHECKPOINT_DOMAIN_COUNT],
+    base_domain_generations: [u64; BASE_CHECKPOINT_DOMAIN_COUNT],
     entity_pages: BTreeSet<usize>,
     belt_pages: BTreeSet<usize>,
     entity_topology: bool,
@@ -361,6 +488,25 @@ struct SaveDirtyPages {
 }
 
 impl SaveDirtyPages {
+    fn mark_base(&mut self, domain: BaseCheckpointDomain) {
+        let index = domain.index();
+        if !self.base_domains[index] {
+            self.base_domain_generations[index] =
+                self.base_domain_generations[index].saturating_add(1);
+        }
+        self.base_domains[index] = true;
+    }
+
+    fn mark_all_base(&mut self) {
+        for domain in BASE_CHECKPOINT_DOMAINS {
+            self.mark_base(domain);
+        }
+    }
+
+    fn base_is_dirty(&self, domain: BaseCheckpointDomain) -> bool {
+        self.base_domains[domain.index()]
+    }
+
     fn mark_entity(&mut self, index: usize) {
         self.entity_pages
             .insert(index / ENTITY_CHECKPOINT_CHUNK_SIZE);
@@ -381,7 +527,11 @@ impl SaveDirtyPages {
     }
 
     fn clear(&mut self) {
-        *self = Self::default();
+        self.base_domains.fill(false);
+        self.entity_pages.clear();
+        self.belt_pages.clear();
+        self.entity_topology = false;
+        self.belt_topology = false;
     }
 }
 
@@ -677,7 +827,12 @@ impl DomainCoverage {
             galactic_exports: true,
             speedrun_clock_and_milestones: true,
             exact_segmented_offline: true,
-            pure_idle_macro: false,
+            // MacroV10 and OfflineMacroV1 now share the same bounded exact
+            // prefix, closed material ledger, deterministic segmentation and
+            // fail-closed tail policy. This flag is a development coverage
+            // fact only; `authority_eligible` remains an independent release
+            // gate that still requires the external Gate C evidence.
+            pure_idle_macro: true,
             mining: true,
             production: true,
             research: true,
@@ -687,7 +842,7 @@ impl DomainCoverage {
             dyson: true,
             construction: true,
             space_station: true,
-            offline_and_time_warp: false,
+            offline_and_time_warp: true,
             content_packs: true,
             authority_eligible: false,
         }
@@ -715,6 +870,18 @@ pub struct CoreStateSummary {
     pub coverage: DomainCoverage,
 }
 
+/// Small, allocation-free clock proof used by a native Host before it admits
+/// an integer multi-second Exact request. It is runtime API only and does not
+/// add any field to GameState, checkpoints, envelopes, or cloud schemas.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreExactHistoryClock {
+    pub revision: u64,
+    pub elapsed_seconds: f64,
+    pub history_recorded_at: f64,
+    pub history_clock_aligned: bool,
+}
+
 struct CanonicalDigestBundle {
     canonical_sha256: String,
     canonical_components: BTreeMap<String, String>,
@@ -731,6 +898,221 @@ struct ChunkMetadata {
     count: usize,
     checksum: String,
     bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseCheckpointDomain {
+    Core,
+    Logistics,
+    Dyson,
+    Statistics,
+    Unknown,
+}
+
+const BASE_CHECKPOINT_DOMAIN_COUNT: usize = 5;
+
+const BASE_CHECKPOINT_DOMAINS: [BaseCheckpointDomain; 5] = [
+    BaseCheckpointDomain::Core,
+    BaseCheckpointDomain::Logistics,
+    BaseCheckpointDomain::Dyson,
+    BaseCheckpointDomain::Statistics,
+    BaseCheckpointDomain::Unknown,
+];
+
+impl BaseCheckpointDomain {
+    const fn index(self) -> usize {
+        match self {
+            Self::Core => 0,
+            Self::Logistics => 1,
+            Self::Dyson => 2,
+            Self::Statistics => 3,
+            Self::Unknown => 4,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Core => "base:core",
+            Self::Logistics => "base:logistics",
+            Self::Dyson => "base:dyson",
+            Self::Statistics => "base:statistics",
+            Self::Unknown => "base:unknown-mod",
+        }
+    }
+
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Core => "base-core",
+            Self::Logistics => "base-logistics",
+            Self::Dyson => "base-dyson",
+            Self::Statistics => "base-statistics",
+            Self::Unknown => "base-unknown-mod",
+        }
+    }
+}
+
+fn base_checkpoint_domain_changed(
+    previous: &Map<String, Value>,
+    current: &Map<String, Value>,
+    domain: BaseCheckpointDomain,
+) -> bool {
+    previous
+        .iter()
+        .filter(|(key, _)| classify_base_checkpoint_key(key) == domain)
+        .any(|(key, value)| current.get(key) != Some(value))
+        || current
+            .iter()
+            .filter(|(key, _)| classify_base_checkpoint_key(key) == domain)
+            .any(|(key, value)| previous.get(key) != Some(value))
+}
+
+fn classify_base_checkpoint_key(key: &str) -> BaseCheckpointDomain {
+    match key {
+        "cargo"
+        | "tray"
+        | "planetTrays"
+        | "planetTrayItemLimits"
+        | "portableFleet"
+        | "systemSpaceStations"
+        | "galacticHubNetwork"
+        | "quantumLogisticsNetwork"
+        | "orbitalStation" => BaseCheckpointDomain::Logistics,
+        "dysonSwarm" | "dysonSphere" | "dysonEngineering" | "dysonPlans" => {
+            BaseCheckpointDomain::Dyson
+        }
+        "manualMined" | "totalProduced" | "productionHistory" | "historyRecordedAt" | "metrics"
+        | "planetMetrics" | "powerGridMetrics" => BaseCheckpointDomain::Statistics,
+        "version"
+        | "mode"
+        | "nextId"
+        | "activePlanetId"
+        | "construction"
+        | "constructionAutomation"
+        | "research"
+        | "exploration"
+        | "galaxy"
+        | "recipeFocus"
+        | "settings"
+        | "contentPacks"
+        | "achievements"
+        | "campaign"
+        | "planetViewports"
+        | "canvasBookmarks"
+        | "canvasRegions"
+        | "blueprints"
+        | "blueprintVersions"
+        | "constructionQueue"
+        | "handcraftQueue"
+        | "productionPlans"
+        | "idleSettlement"
+        | "speedrun"
+        | "elapsedSeconds"
+        | "timeWarp"
+        | "endgame"
+        | "paused" => BaseCheckpointDomain::Core,
+        _ => BaseCheckpointDomain::Unknown,
+    }
+}
+
+pub(crate) fn is_known_base_checkpoint_key(key: &str) -> bool {
+    classify_base_checkpoint_key(key) != BaseCheckpointDomain::Unknown
+}
+
+struct BaseCheckpointDomainView<'a> {
+    base: &'a Map<String, Value>,
+    domain: BaseCheckpointDomain,
+}
+
+impl BaseCheckpointDomainView<'_> {
+    fn field_count(&self) -> usize {
+        self.base
+            .keys()
+            .filter(|key| classify_base_checkpoint_key(key) == self.domain)
+            .count()
+    }
+}
+
+impl Serialize for BaseCheckpointDomainView<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut output = serializer.serialize_map(Some(self.field_count()))?;
+        for (key, value) in self.base {
+            if classify_base_checkpoint_key(key) == self.domain {
+                output.serialize_entry(key, value)?;
+            }
+        }
+        output.end()
+    }
+}
+
+fn encode_base_checkpoint_domain(
+    base: &Map<String, Value>,
+    domain: BaseCheckpointDomain,
+) -> anyhow::Result<(String, usize)> {
+    if base.contains_key("entities") || base.contains_key("belts") {
+        bail!("native core base contains an unbounded collection");
+    }
+    let view = BaseCheckpointDomainView { base, domain };
+    let count = view.field_count();
+    Ok((serde_json::to_string(&view)?, count))
+}
+
+fn checkpoint_chunk_metadata(
+    id: impl Into<String>,
+    kind: impl Into<String>,
+    offset: usize,
+    count: usize,
+    text: &str,
+) -> ChunkMetadata {
+    ChunkMetadata {
+        id: id.into(),
+        kind: kind.into(),
+        offset,
+        count,
+        checksum: fnv1a_utf8(text.as_bytes()),
+        bytes: text.len(),
+        sha256: Some(hex::encode(Sha256::digest(text.as_bytes()))),
+    }
+}
+
+fn checkpoint_chunk_content_matches(left: &ChunkMetadata, right: &ChunkMetadata) -> bool {
+    left.id == right.id
+        && left.kind == right.kind
+        && left.offset == right.offset
+        && left.count == right.count
+        && left.checksum == right.checksum
+        && left.bytes == right.bytes
+        && left.sha256.is_some()
+        && left.sha256 == right.sha256
+}
+
+fn checkpoint_chunk_has_valid_sha256_metadata(metadata: &ChunkMetadata) -> bool {
+    metadata.sha256.as_ref().is_some_and(|expected| {
+        expected.len() == 64 && expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn checkpoint_root_material(metadata: &[ChunkMetadata]) -> anyhow::Result<String> {
+    let mut material = String::new();
+    for chunk in metadata {
+        use std::fmt::Write as _;
+        write!(
+            material,
+            "{}:{}:{}:{}:{}:{}:{};",
+            chunk.id,
+            chunk.kind,
+            chunk.offset,
+            chunk.count,
+            chunk.checksum,
+            chunk.bytes,
+            chunk.sha256.as_deref().unwrap_or("-")
+        )?;
+    }
+    Ok(material)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -747,6 +1129,61 @@ struct ChunkedManifest {
     chunks: Vec<ChunkMetadata>,
     #[serde(default, deserialize_with = "deserialize_present_pure_idle_session")]
     pure_idle_session: Option<PureIdleSessionState>,
+    // Kept separate from the legacy field so an older native host can ignore
+    // the new private cache instead of rejecting the whole checkpoint because
+    // PureIdleSessionState uses deny_unknown_fields.
+    #[serde(default, deserialize_with = "deserialize_present_pure_idle_session")]
+    pure_idle_macro_session: Option<PureIdleSessionState>,
+    // Kept outside PureIdleSessionState so older native builds can ignore the
+    // optional key instead of rejecting that deny_unknown_fields payload.
+    #[serde(default)]
+    pure_idle_macro_construction_carry_seconds: Option<u8>,
+    // This private cursor is intentionally outside PureIdleSessionState so an
+    // older native host can ignore it. Missing means the historical checkpoint
+    // has not consumed the new bounded construction-only quantum replay yet.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_construction_quantum_replay_seconds"
+    )]
+    pure_idle_macro_construction_quantum_replay_remaining_seconds: Option<u8>,
+    // Ordinary macro flow can provision quantum inventory before construction
+    // has accumulated one canonical 30-second block. This private attribution
+    // ledger prevents that inventory from becoming unowned starting stock.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_construction_quantum_pending_credits"
+    )]
+    pure_idle_macro_construction_quantum_pending_credits: Option<BTreeMap<String, u64>>,
+}
+
+fn deserialize_present_construction_quantum_replay_seconds<'de, D>(
+    deserializer: D,
+) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u8::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_construction_quantum_pending_credits<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, u64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BTreeMap::<String, u64>::deserialize(deserializer).map(Some)
+}
+
+fn validate_construction_quantum_pending_credits(
+    credits: &BTreeMap<String, u64>,
+) -> anyhow::Result<()> {
+    if credits
+        .iter()
+        .any(|(item_id, amount)| item_id.is_empty() || *amount > MAX_JS_SAFE_INTEGER_U64)
+    {
+        bail!("native core macro construction quantum pending credits are invalid");
+    }
+    Ok(())
 }
 
 fn deserialize_present_pure_idle_session<'de, D>(
@@ -770,6 +1207,12 @@ pub(crate) struct PureIdleSessionState {
     format_version: u8,
     exact_simulation_seconds_used: f64,
     last_committed_revision: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    macro_v10: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl PureIdleSessionState {
@@ -895,16 +1338,34 @@ pub(crate) type RawRecord = Arc<str>;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EntityColumns {
     pub ids: ExactRowIds,
-    pub kinds: Vec<u32>,
-    pub planets: Vec<u32>,
-    pub buildings: Vec<u32>,
-    pub recipes: Vec<u32>,
-    pub resources: Vec<u32>,
-    pub stored_items: Vec<u32>,
-    pub machine_counts: Vec<f64>,
-    pub miner_counts: Vec<f64>,
-    pub position_x: Vec<f64>,
-    pub position_y: Vec<f64>,
+    pub kinds: SharedArc<Vec<u32>>,
+    pub planets: SharedArc<Vec<u32>>,
+    pub buildings: SharedArc<Vec<u32>>,
+    pub recipes: SharedArc<Vec<u32>>,
+    pub resources: SharedArc<Vec<u32>>,
+    pub stored_items: SharedArc<Vec<u32>>,
+    pub machine_counts: SharedArc<Vec<f64>>,
+    pub miner_counts: SharedArc<Vec<f64>>,
+    pub position_x: SharedArc<Vec<f64>>,
+    pub position_y: SharedArc<Vec<f64>>,
+}
+
+impl EntityColumns {
+    fn with_capacity(rows: usize) -> Self {
+        Self {
+            ids: ExactRowIds::default(),
+            kinds: Vec::with_capacity(rows).into(),
+            planets: Vec::with_capacity(rows).into(),
+            buildings: Vec::with_capacity(rows).into(),
+            recipes: Vec::with_capacity(rows).into(),
+            resources: Vec::with_capacity(rows).into(),
+            stored_items: Vec::with_capacity(rows).into(),
+            machine_counts: Vec::with_capacity(rows).into(),
+            miner_counts: Vec::with_capacity(rows).into(),
+            position_x: Vec::with_capacity(rows).into(),
+            position_y: Vec::with_capacity(rows).into(),
+        }
+    }
 }
 
 /// Exact JSON shape retained by the resident entity columns. Raw entity JSON
@@ -1150,6 +1611,296 @@ pub(crate) struct BeltColumns {
     pub priorities: Vec<u8>,
 }
 
+impl BeltColumns {
+    fn with_capacity(rows: usize) -> Self {
+        Self {
+            ids: ExactRowIds::default(),
+            planets: Vec::with_capacity(rows),
+            sources: Vec::with_capacity(rows),
+            targets: Vec::with_capacity(rows),
+            items: Vec::with_capacity(rows),
+            lanes: Vec::with_capacity(rows),
+            tiers: Vec::with_capacity(rows),
+            stack_sizes: Vec::with_capacity(rows),
+            priorities: Vec::with_capacity(rows),
+        }
+    }
+}
+
+pub(crate) const BELT_DYNAMIC_PAGE_ROWS: usize = 1_024;
+const BELT_DYNAMIC_GROUP_PAGES: usize = 64;
+const BELT_DYNAMIC_GROUPS: usize = 64;
+const BELT_DYNAMIC_MAX_ROWS: usize =
+    BELT_DYNAMIC_PAGE_ROWS * BELT_DYNAMIC_GROUP_PAGES * BELT_DYNAMIC_GROUPS;
+const BELT_DYNAMIC_PAGE_BITMAP_WORDS: usize =
+    BELT_DYNAMIC_GROUP_PAGES * BELT_DYNAMIC_GROUPS / u64::BITS as usize;
+
+#[derive(Debug, Clone)]
+struct BeltPagedGroup<T: Copy> {
+    pages: [Option<Arc<[T; BELT_DYNAMIC_PAGE_ROWS]>>; BELT_DYNAMIC_GROUP_PAGES],
+}
+
+impl<T: Copy> Default for BeltPagedGroup<T> {
+    fn default() -> Self {
+        Self {
+            pages: std::array::from_fn(|_| None),
+        }
+    }
+}
+
+/// Fixed-depth, page-granular clone-on-write storage for mutable belt signals.
+///
+/// The maximum v47 belt count fits in 64 top-level groups, each containing 64
+/// independently shared 1,024-row pages. Cloning a column therefore copies a
+/// fixed 64 Arc directory entries rather than `len` values. A sparse write
+/// clones at most one 64-entry group directory and one bounded page per newly
+/// touched page. Missing pages read as the column default, which lets runtime-
+/// only boolean evidence start at logical length B without allocating B bits.
+#[derive(Debug, Clone)]
+pub(crate) struct BeltPagedColumn<T: Copy> {
+    len: usize,
+    default_value: T,
+    groups: [Option<Arc<BeltPagedGroup<T>>>; BELT_DYNAMIC_GROUPS],
+    dirty_pages: [u64; BELT_DYNAMIC_PAGE_BITMAP_WORDS],
+    allocated_pages: usize,
+}
+
+impl<T: Copy + Default> Default for BeltPagedColumn<T> {
+    fn default() -> Self {
+        Self::with_len_default(0)
+    }
+}
+
+impl<T: Copy + Default> BeltPagedColumn<T> {
+    pub(crate) fn with_len_default(len: usize) -> Self {
+        assert!(
+            len <= BELT_DYNAMIC_MAX_ROWS,
+            "native belt paged column exceeds its fixed address space"
+        );
+        Self {
+            len,
+            default_value: T::default(),
+            groups: std::array::from_fn(|_| None),
+            dirty_pages: [0; BELT_DYNAMIC_PAGE_BITMAP_WORDS],
+            allocated_pages: 0,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub(crate) fn push(&mut self, value: T) -> anyhow::Result<()> {
+        if self.len == BELT_DYNAMIC_MAX_ROWS {
+            bail!("native belt paged column exceeds its fixed address space");
+        }
+        let index = self.len;
+        self.len += 1;
+        self[index] = value;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        let index = self.len.checked_sub(1)?;
+        let value = self[index];
+        self.len = index;
+        Some(value)
+    }
+
+    #[inline]
+    fn page_coordinates(index: usize) -> (usize, usize, usize, usize) {
+        let page_index = index / BELT_DYNAMIC_PAGE_ROWS;
+        (
+            page_index,
+            page_index / BELT_DYNAMIC_GROUP_PAGES,
+            page_index % BELT_DYNAMIC_GROUP_PAGES,
+            index % BELT_DYNAMIC_PAGE_ROWS,
+        )
+    }
+
+    #[inline]
+    fn page(&self, page_index: usize) -> Option<&Arc<[T; BELT_DYNAMIC_PAGE_ROWS]>> {
+        let group_index = page_index / BELT_DYNAMIC_GROUP_PAGES;
+        let group_page = page_index % BELT_DYNAMIC_GROUP_PAGES;
+        self.groups[group_index]
+            .as_ref()
+            .and_then(|group| group.pages[group_page].as_ref())
+    }
+
+    fn page_mut(&mut self, page_index: usize) -> &mut [T; BELT_DYNAMIC_PAGE_ROWS] {
+        let group_index = page_index / BELT_DYNAMIC_GROUP_PAGES;
+        let group_page = page_index % BELT_DYNAMIC_GROUP_PAGES;
+        let group =
+            self.groups[group_index].get_or_insert_with(|| Arc::new(BeltPagedGroup::default()));
+        let group = Arc::make_mut(group);
+        let page = group.pages[group_page].get_or_insert_with(|| {
+            self.allocated_pages += 1;
+            Arc::new([self.default_value; BELT_DYNAMIC_PAGE_ROWS])
+        });
+        Arc::make_mut(page)
+    }
+
+    #[inline]
+    fn mark_page_dirty(&mut self, page_index: usize) {
+        self.dirty_pages[page_index / u64::BITS as usize] |=
+            1_u64 << (page_index % u64::BITS as usize);
+    }
+
+    pub(crate) fn clear_dirty(&mut self) {
+        self.dirty_pages.fill(0);
+    }
+
+    pub(crate) fn dirty_page_count(&self) -> usize {
+        self.dirty_pages
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
+    }
+
+    fn dirty_page_words(&self) -> &[u64; BELT_DYNAMIC_PAGE_BITMAP_WORDS] {
+        &self.dirty_pages
+    }
+
+    pub(crate) fn iter(&self) -> BeltPagedIter<'_, T> {
+        BeltPagedIter {
+            column: self,
+            index: 0,
+        }
+    }
+
+    /// Materializes and uniquely owns every logical page. Callers use this
+    /// only after the active selector deliberately chose the dense fallback.
+    /// Sparse revisions must never call it.
+    pub(crate) fn materialized_pages_mut(&mut self) -> Vec<&mut [T]> {
+        let page_count = self.len.div_ceil(BELT_DYNAMIC_PAGE_ROWS);
+        for page_index in 0..page_count {
+            self.mark_page_dirty(page_index);
+        }
+        let mut remaining = self.len;
+        let mut pages = Vec::with_capacity(page_count);
+        for group_slot in &mut self.groups {
+            if remaining == 0 {
+                break;
+            }
+            let group = group_slot.get_or_insert_with(|| Arc::new(BeltPagedGroup::default()));
+            let group = Arc::make_mut(group);
+            for page_slot in &mut group.pages {
+                if remaining == 0 {
+                    break;
+                }
+                let page = page_slot.get_or_insert_with(|| {
+                    self.allocated_pages += 1;
+                    Arc::new([self.default_value; BELT_DYNAMIC_PAGE_ROWS])
+                });
+                let used = remaining.min(BELT_DYNAMIC_PAGE_ROWS);
+                pages.push(&mut Arc::make_mut(page)[..used]);
+                remaining -= used;
+            }
+        }
+        debug_assert_eq!(remaining, 0);
+        pages
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        let group_count = self.groups.iter().filter(|group| group.is_some()).count();
+        (group_count * size_of::<BeltPagedGroup<T>>()
+            + self.allocated_pages * size_of::<[T; BELT_DYNAMIC_PAGE_ROWS]>()) as u64
+    }
+
+    #[cfg(test)]
+    pub(crate) fn changed_page_count_from(&self, source: &Self) -> usize {
+        let page_count = self.len.max(source.len).div_ceil(BELT_DYNAMIC_PAGE_ROWS);
+        (0..page_count)
+            .filter(
+                |&page_index| match (self.page(page_index), source.page(page_index)) {
+                    (Some(left), Some(right)) => !Arc::ptr_eq(left, right),
+                    (None, None) => false,
+                    _ => true,
+                },
+            )
+            .count()
+    }
+}
+
+impl<T: Copy + Default> Index<usize> for BeltPagedColumn<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        assert!(
+            index < self.len,
+            "native belt paged column index out of bounds"
+        );
+        let (page_index, _, _, offset) = Self::page_coordinates(index);
+        self.page(page_index)
+            .map_or(&self.default_value, |page| &page[offset])
+    }
+}
+
+impl<T: Copy + Default> IndexMut<usize> for BeltPagedColumn<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        assert!(
+            index < self.len,
+            "native belt paged column index out of bounds"
+        );
+        let (page_index, _, _, offset) = Self::page_coordinates(index);
+        self.mark_page_dirty(page_index);
+        &mut self.page_mut(page_index)[offset]
+    }
+}
+
+pub(crate) struct BeltPagedIter<'a, T: Copy + Default> {
+    column: &'a BeltPagedColumn<T>,
+    index: usize,
+}
+
+impl<'a, T: Copy + Default> Iterator for BeltPagedIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index == self.column.len {
+            return None;
+        }
+        let index = self.index;
+        self.index += 1;
+        Some(&self.column[index])
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.column.len - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T: Copy + Default> ExactSizeIterator for BeltPagedIter<'_, T> {}
+
+impl<'a, T: Copy + Default> IntoIterator for &'a BeltPagedColumn<T> {
+    type Item = &'a T;
+    type IntoIter = BeltPagedIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T: Copy + Default> FromIterator<T> for BeltPagedColumn<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(values: I) -> Self {
+        let mut column = Self::default();
+        for value in values {
+            column
+                .push(value)
+                .expect("native belt paged iterator exceeds fixed address space");
+        }
+        column
+    }
+}
+
 /// Compact authoritative mirror of the four mutable belt signals. The raw JSON
 /// records remain the persistence/canonical source of truth; these columns are
 /// rebuilt from raw records on load/topology commands and replaced only with a
@@ -1158,11 +1909,12 @@ pub(crate) struct BeltColumns {
 /// IEEE bits (including negative zero).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BeltDynamicColumns {
-    pub progress: Vec<f64>,
-    pub total_transferred: Vec<f64>,
-    pub congestion: Vec<f64>,
-    pub last_flow: Vec<f64>,
-    pub number_mask: Vec<u8>,
+    pub progress: BeltPagedColumn<f64>,
+    pub total_transferred: BeltPagedColumn<f64>,
+    pub congestion: BeltPagedColumn<f64>,
+    pub last_flow: BeltPagedColumn<f64>,
+    pub number_mask: BeltPagedColumn<u8>,
+    missing_required_rows: Vec<u32>,
 }
 
 impl BeltDynamicColumns {
@@ -1171,6 +1923,37 @@ impl BeltDynamicColumns {
     pub(crate) const CONGESTION: usize = 2;
     pub(crate) const LAST_FLOW: usize = 3;
     const VALID_MASK: u8 = (1 << 4) - 1;
+
+    fn with_capacity(rows: usize) -> Self {
+        assert!(rows <= MAX_BELT_COUNT);
+        Self {
+            progress: BeltPagedColumn::default(),
+            total_transferred: BeltPagedColumn::default(),
+            congestion: BeltPagedColumn::default(),
+            last_flow: BeltPagedColumn::default(),
+            number_mask: BeltPagedColumn::default(),
+            missing_required_rows: Vec::new(),
+        }
+    }
+
+    pub(crate) fn from_runtime_columns(
+        progress: BeltPagedColumn<f64>,
+        total_transferred: BeltPagedColumn<f64>,
+        congestion: BeltPagedColumn<f64>,
+        last_flow: BeltPagedColumn<f64>,
+        number_mask: BeltPagedColumn<u8>,
+    ) -> Self {
+        Self {
+            progress,
+            total_transferred,
+            congestion,
+            last_flow,
+            number_mask,
+            // Every historically missing progress/congestion/lastFlow row is
+            // included in the runtime evidence and canonicalized on commit.
+            missing_required_rows: Vec::new(),
+        }
+    }
 
     fn signals_from_object(object: &Map<String, Value>) -> [Option<f64>; 4] {
         let read = |key: &str| {
@@ -1187,11 +1970,12 @@ impl BeltDynamicColumns {
         ]
     }
 
-    pub(crate) fn push_from_object(&mut self, object: &Map<String, Value>) {
-        self.push_signals(Self::signals_from_object(object));
+    pub(crate) fn push_from_object(&mut self, object: &Map<String, Value>) -> anyhow::Result<()> {
+        self.push_signals(Self::signals_from_object(object))
     }
 
-    fn push_signals(&mut self, signals: [Option<f64>; 4]) {
+    fn push_signals(&mut self, signals: [Option<f64>; 4]) -> anyhow::Result<()> {
+        let index = self.progress.len();
         let mut mask = 0_u8;
         let mut read = |slot: usize| {
             signals[slot].map_or(0.0, |value| {
@@ -1199,11 +1983,16 @@ impl BeltDynamicColumns {
                 value
             })
         };
-        self.progress.push(read(Self::PROGRESS));
-        self.total_transferred.push(read(Self::TOTAL_TRANSFERRED));
-        self.congestion.push(read(Self::CONGESTION));
-        self.last_flow.push(read(Self::LAST_FLOW));
-        self.number_mask.push(mask);
+        self.progress.push(read(Self::PROGRESS))?;
+        self.total_transferred.push(read(Self::TOTAL_TRANSFERRED))?;
+        self.congestion.push(read(Self::CONGESTION))?;
+        self.last_flow.push(read(Self::LAST_FLOW))?;
+        self.number_mask.push(mask)?;
+        if mask & Self::required_runtime_mask() != Self::required_runtime_mask() {
+            self.missing_required_rows
+                .push(u32::try_from(index).context("compact missing belt dynamic index")?);
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1211,7 +2000,16 @@ impl BeltDynamicColumns {
         self.progress.len()
     }
 
-    pub(crate) fn validate(&self, expected: usize) -> anyhow::Result<()> {
+    #[inline]
+    fn required_runtime_mask() -> u8 {
+        (1 << Self::PROGRESS) | (1 << Self::LAST_FLOW) | (1 << Self::CONGESTION)
+    }
+
+    pub(crate) fn missing_required_rows(&self) -> &[u32] {
+        &self.missing_required_rows
+    }
+
+    pub(crate) fn validate_shape(&self, expected: usize) -> anyhow::Result<()> {
         if self.progress.len() != expected
             || self.total_transferred.len() != expected
             || self.congestion.len() != expected
@@ -1220,32 +2018,110 @@ impl BeltDynamicColumns {
         {
             bail!("native belt dynamic column topology changed");
         }
-        for index in 0..expected {
-            if self.number_mask[index] & !Self::VALID_MASK != 0
-                || !self.progress[index].is_finite()
-                || !self.total_transferred[index].is_finite()
-                || !self.congestion[index].is_finite()
-                || !self.last_flow[index].is_finite()
-            {
-                bail!("native belt dynamic column is invalid");
-            }
-            for (slot, value) in [
-                self.progress[index],
-                self.total_transferred[index],
-                self.congestion[index],
-                self.last_flow[index],
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if self.number_mask[index] & (1 << slot) == 0
-                    && value.to_bits() != 0.0_f64.to_bits()
-                {
-                    bail!("native belt absent dynamic column is nonzero");
-                }
+        if self
+            .missing_required_rows
+            .iter()
+            .any(|&index| index as usize >= expected)
+            || self
+                .missing_required_rows
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            bail!("native belt missing-signal index is invalid");
+        }
+        Ok(())
+    }
+
+    fn validate_row(&self, index: usize) -> anyhow::Result<()> {
+        if self.number_mask[index] & !Self::VALID_MASK != 0
+            || !self.progress[index].is_finite()
+            || !self.total_transferred[index].is_finite()
+            || !self.congestion[index].is_finite()
+            || !self.last_flow[index].is_finite()
+        {
+            bail!("native belt dynamic column is invalid");
+        }
+        for (slot, value) in [
+            self.progress[index],
+            self.total_transferred[index],
+            self.congestion[index],
+            self.last_flow[index],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if self.number_mask[index] & (1 << slot) == 0 && value.to_bits() != 0.0_f64.to_bits() {
+                bail!("native belt absent dynamic column is nonzero");
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn validate(&self, expected: usize) -> anyhow::Result<()> {
+        self.validate_shape(expected)?;
+        let mut missing_position = 0_usize;
+        for index in 0..expected {
+            self.validate_row(index)?;
+            if self.number_mask[index] & Self::required_runtime_mask()
+                != Self::required_runtime_mask()
+            {
+                if self.missing_required_rows.get(missing_position).copied() != Some(index as u32) {
+                    bail!("native belt missing-signal index is inconsistent");
+                }
+                missing_position += 1;
+            }
+        }
+        if missing_position != self.missing_required_rows.len() {
+            bail!("native belt missing-signal index is inconsistent");
+        }
+        Ok(())
+    }
+
+    /// Validates only pages made writable since this state was forked. The
+    /// fixed 4,096-bit union scan is independent of B; value work is bounded
+    /// by the number of pages touched by the active frontier.
+    pub(crate) fn validate_dirty(&self, expected: usize) -> anyhow::Result<usize> {
+        self.validate_shape(expected)?;
+        let columns = [
+            self.progress.dirty_page_words(),
+            self.total_transferred.dirty_page_words(),
+            self.congestion.dirty_page_words(),
+            self.last_flow.dirty_page_words(),
+            self.number_mask.dirty_page_words(),
+        ];
+        let mut checked = 0_usize;
+        for word_index in 0..BELT_DYNAMIC_PAGE_BITMAP_WORDS {
+            let mut word = columns
+                .iter()
+                .fold(0_u64, |union, column| union | column[word_index]);
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                let page_index = word_index * u64::BITS as usize + bit;
+                let start = page_index * BELT_DYNAMIC_PAGE_ROWS;
+                let end = (start + BELT_DYNAMIC_PAGE_ROWS).min(expected);
+                for index in start..end {
+                    self.validate_row(index)?;
+                }
+                checked += end.saturating_sub(start);
+                word &= word - 1;
+            }
+        }
+        Ok(checked)
+    }
+
+    pub(crate) fn clear_dirty(&mut self) {
+        self.progress.clear_dirty();
+        self.total_transferred.clear_dirty();
+        self.congestion.clear_dirty();
+        self.last_flow.clear_dirty();
+        self.number_mask.clear_dirty();
+    }
+
+    pub(crate) fn dynamic_dirty_page_count(&self) -> usize {
+        self.progress.dirty_page_count()
+            + self.total_transferred.dirty_page_count()
+            + self.congestion.dirty_page_count()
+            + self.last_flow.dirty_page_count()
     }
 
     #[inline]
@@ -1280,12 +2156,12 @@ impl BeltDynamicColumns {
     }
 
     fn estimated_bytes(&self) -> u64 {
-        ((self.progress.capacity()
-            + self.total_transferred.capacity()
-            + self.congestion.capacity()
-            + self.last_flow.capacity())
-            * size_of::<f64>()
-            + self.number_mask.capacity() * size_of::<u8>()) as u64
+        self.progress.estimated_bytes()
+            + self.total_transferred.estimated_bytes()
+            + self.congestion.estimated_bytes()
+            + self.last_flow.estimated_bytes()
+            + self.number_mask.estimated_bytes()
+            + (self.missing_required_rows.capacity() * size_of::<u32>()) as u64
     }
 }
 
@@ -1306,10 +2182,295 @@ impl BeltCommitSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ViewportWorldBounds {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+impl ViewportWorldBounds {
+    fn include(&mut self, x: f64, y: f64, first: bool) {
+        debug_assert!(x.is_finite() && y.is_finite());
+        if first {
+            *self = Self {
+                min_x: x,
+                min_y: y,
+                max_x: x,
+                max_y: y,
+            };
+            return;
+        }
+        self.min_x = self.min_x.min(x);
+        self.min_y = self.min_y.min(y);
+        self.max_x = self.max_x.max(x);
+        self.max_y = self.max_y.max(y);
+    }
+
+    fn as_json(self) -> Value {
+        serde_json::json!({
+            "minX": self.min_x,
+            "minY": self.min_y,
+            "maxX": self.max_x,
+            "maxY": self.max_y,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ViewportCellKey {
+    x: i32,
+    y: i32,
+}
+
+fn viewport_cell_coordinate(value: f64) -> i64 {
+    let scaled = (value / VIEWPORT_SPATIAL_CELL_SIZE).floor();
+    if scaled <= i64::MIN as f64 {
+        i64::MIN
+    } else if scaled >= i64::MAX as f64 {
+        i64::MAX
+    } else {
+        scaled as i64
+    }
+}
+
+#[inline]
+fn compact_topology_index(value: usize, label: &'static str) -> anyhow::Result<u32> {
+    u32::try_from(value)
+        .with_context(|| format!("native {label} exceeds the compact topology limit"))
+}
+
+#[inline]
+fn expand_topology_index(value: u32) -> usize {
+    usize::try_from(value).expect("validated compact topology index must fit usize")
+}
+
+/// Immutable per-planet spatial index. Cell members are persisted entity row
+/// indexes, and every query re-sorts only the touched rows by that index. This
+/// keeps viewport order independent from grid-cell traversal order.
+#[derive(Debug, Clone, Default)]
+struct PlanetViewportIndex {
+    cell_keys: Vec<ViewportCellKey>,
+    cell_offsets: Vec<u32>,
+    entity_indices: Vec<u32>,
+    world_bounds: ViewportWorldBounds,
+    broad_fallback_only: bool,
+}
+
+impl PlanetViewportIndex {
+    fn build(entity_indices: &[u32], entities: &EntityColumns) -> anyhow::Result<Self> {
+        let mut cells = BTreeMap::<ViewportCellKey, Vec<u32>>::new();
+        let mut world_bounds = ViewportWorldBounds::default();
+        let mut broad_fallback_only = false;
+        for (ordinal, &compact_entity_index) in entity_indices.iter().enumerate() {
+            let entity_index = expand_topology_index(compact_entity_index);
+            let x = entities.position_x[entity_index];
+            let y = entities.position_y[entity_index];
+            world_bounds.include(x, y, ordinal == 0);
+            let (Ok(cell_x), Ok(cell_y)) = (
+                i32::try_from(viewport_cell_coordinate(x)),
+                i32::try_from(viewport_cell_coordinate(y)),
+            ) else {
+                broad_fallback_only = true;
+                continue;
+            };
+            cells
+                .entry(ViewportCellKey {
+                    x: cell_x,
+                    y: cell_y,
+                })
+                .or_default()
+                .push(compact_entity_index);
+        }
+
+        // One out-of-range MOD coordinate makes the grid incomplete. Retain
+        // exact world bounds, but release every partial cell so all queries
+        // deterministically use the persisted-order broad scan instead of
+        // silently omitting the outlier.
+        if broad_fallback_only {
+            return Ok(Self {
+                world_bounds,
+                broad_fallback_only: true,
+                ..Self::default()
+            });
+        }
+
+        let mut cell_keys = Vec::with_capacity(cells.len());
+        let mut cell_offsets = Vec::with_capacity(cells.len().saturating_add(1));
+        let mut flattened = Vec::with_capacity(entity_indices.len());
+        cell_offsets.push(0);
+        for (key, indices) in cells {
+            cell_keys.push(key);
+            flattened.extend(indices);
+            cell_offsets.push(compact_topology_index(
+                flattened.len(),
+                "viewport cell offset",
+            )?);
+        }
+        cell_keys.shrink_to_fit();
+        cell_offsets.shrink_to_fit();
+        flattened.shrink_to_fit();
+        Ok(Self {
+            cell_keys,
+            cell_offsets,
+            entity_indices: flattened,
+            world_bounds,
+            broad_fallback_only: false,
+        })
+    }
+
+    fn query(
+        &self,
+        planet_entities: &[u32],
+        entities: &EntityColumns,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+    ) -> (Vec<usize>, bool) {
+        let min_cell_x = viewport_cell_coordinate(min_x);
+        let min_cell_y = viewport_cell_coordinate(min_y);
+        let max_cell_x = viewport_cell_coordinate(max_x);
+        let max_cell_y = viewport_cell_coordinate(max_y);
+        let span_x = i128::from(max_cell_x) - i128::from(min_cell_x) + 1;
+        let span_y = i128::from(max_cell_y) - i128::from(min_cell_y) + 1;
+        let cell_probes = span_x
+            .checked_mul(span_y)
+            .filter(|value| *value >= 0)
+            .and_then(|value| u64::try_from(value).ok());
+        let compact_bounds = (
+            i32::try_from(min_cell_x),
+            i32::try_from(min_cell_y),
+            i32::try_from(max_cell_x),
+            i32::try_from(max_cell_y),
+        );
+        let broad_fallback = self.broad_fallback_only
+            || compact_bounds.0.is_err()
+            || compact_bounds.1.is_err()
+            || compact_bounds.2.is_err()
+            || compact_bounds.3.is_err()
+            || cell_probes.is_none_or(|count| {
+                count > MAX_VIEWPORT_GRID_CELL_PROBES
+                    || count > self.cell_keys.len() as u64 * 16 + 64
+            });
+
+        let mut candidates = if broad_fallback {
+            planet_entities
+                .iter()
+                .copied()
+                .map(expand_topology_index)
+                .collect()
+        } else {
+            let mut candidates = Vec::new();
+            let (min_cell_x, min_cell_y, max_cell_x, max_cell_y) = (
+                compact_bounds.0.expect("validated compact viewport bound"),
+                compact_bounds.1.expect("validated compact viewport bound"),
+                compact_bounds.2.expect("validated compact viewport bound"),
+                compact_bounds.3.expect("validated compact viewport bound"),
+            );
+            for cell_x in min_cell_x..=max_cell_x {
+                for cell_y in min_cell_y..=max_cell_y {
+                    let key = ViewportCellKey {
+                        x: cell_x,
+                        y: cell_y,
+                    };
+                    if let Ok(index) = self.cell_keys.binary_search(&key) {
+                        let start = expand_topology_index(self.cell_offsets[index]);
+                        let end = expand_topology_index(self.cell_offsets[index + 1]);
+                        candidates.extend(
+                            self.entity_indices[start..end]
+                                .iter()
+                                .copied()
+                                .map(expand_topology_index),
+                        );
+                    }
+                }
+            }
+            candidates.sort_unstable();
+            candidates
+        };
+        candidates.retain(|&index| {
+            let x = entities.position_x[index];
+            let y = entities.position_y[index];
+            x >= min_x && x <= max_x && y >= min_y && y <= max_y
+        });
+        (candidates, broad_fallback)
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        (self.cell_keys.capacity() * size_of::<ViewportCellKey>()
+            + self.cell_offsets.capacity() * size_of::<u32>()
+            + self.entity_indices.capacity() * size_of::<u32>()) as u64
+    }
+}
+
+/// Immutable CSR mapping from persisted entity rows to incident persisted
+/// belt rows. It is rebuilt only with topology and is never serialized.
+#[derive(Debug, Clone, Default)]
+struct EntityBeltAdjacency {
+    offsets: Vec<u32>,
+    belt_indices: Vec<u32>,
+}
+
+impl EntityBeltAdjacency {
+    fn from_rows(mut rows: Vec<Vec<u32>>) -> anyhow::Result<Self> {
+        let edge_count = rows.iter().map(Vec::len).sum();
+        let mut offsets = Vec::with_capacity(rows.len().saturating_add(1));
+        let mut belt_indices = Vec::with_capacity(edge_count);
+        offsets.push(0);
+        for row in &mut rows {
+            row.sort_unstable();
+            row.dedup();
+            belt_indices.extend_from_slice(row);
+            offsets.push(compact_topology_index(
+                belt_indices.len(),
+                "entity belt adjacency offset",
+            )?);
+        }
+        offsets.shrink_to_fit();
+        belt_indices.shrink_to_fit();
+        Ok(Self {
+            offsets,
+            belt_indices,
+        })
+    }
+
+    fn incident(&self, entity_index: usize) -> &[u32] {
+        self.offsets
+            .get(entity_index..=entity_index.saturating_add(1))
+            .filter(|range| range.len() == 2)
+            .map_or(&[], |range| {
+                &self.belt_indices[expand_topology_index(range[0])..expand_topology_index(range[1])]
+            })
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        ((self.offsets.capacity() + self.belt_indices.capacity()) * size_of::<u32>()) as u64
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FactoryTopology {
+    /// Catalog semantic hash used when compiling planet-order-dependent
+    /// aggregate indexes. Public catalog replacement is outside the authority
+    /// contract; projections fail closed instead of pairing a new directory
+    /// with stale per-planet vectors.
+    pub catalog_sha256: String,
     pub station_indices: Vec<usize>,
+    /// Stable persisted-row order for exact orbital collectors. The normal
+    /// simulation path can visit only these producers instead of discovering
+    /// them with an O(all entities) scan on every revision.
+    pub orbital_collector_indices: Vec<usize>,
+    /// Non-station rows carrying the built-in collector ID are accepted by
+    /// legacy/MOD saves. Preserve their permissive full-scan behavior rather
+    /// than assuming that the canonical station shape is exhaustive.
+    pub orbital_collector_full_scan_required: bool,
     pub quantum_endpoint_indices: Vec<usize>,
+    /// A built-in quantum building carried by a non-station/MOD row is outside
+    /// the exact endpoint directory. Preserve the permissive legacy scan for
+    /// that topology instead of claiming the canonical index is exhaustive.
+    pub quantum_endpoint_full_scan_required: bool,
     pub construction_center_indices: Vec<usize>,
     pub time_warp_indices: Vec<usize>,
     pub logistics_buffer_indices: Vec<usize>,
@@ -1317,21 +2478,93 @@ pub(crate) struct FactoryTopology {
     pub orbital_cargo_terminal_indices: Vec<usize>,
     pub galactic_material_exporter_indices: Vec<usize>,
     pub space_station_launcher_indices: Vec<usize>,
+    /// Stable persisted-row order for every entity whose built-in ID can
+    /// participate in system-space-station power or hub settlement. Include
+    /// non-station legacy/MOD rows because the historical elevator predicate
+    /// intentionally keys off the building ID, tier, and operation mode only.
+    pub system_space_station_entity_indices: Vec<usize>,
+    /// A save dominated by system-station candidates is cheaper to visit in
+    /// persisted entity order than to retain a near-complete duplicate index.
+    /// The full scan is selected once during topology compilation and remains
+    /// deterministic for the lifetime of the native session.
+    pub system_space_station_full_scan_required: bool,
+    /// Stable persisted-row order for every ray receiver. Runtime recipe,
+    /// technology, output-capacity, and power eligibility still belong to the
+    /// exact Dyson probe; this immutable index only removes the O(all
+    /// non-stations) discovery scan from every simulation revision.
+    pub ray_receiver_indices: Vec<usize>,
     pub power_source_indices: Vec<usize>,
     pub vein_indices: Vec<usize>,
     pub ordinary_machine_indices: Vec<usize>,
+    /// Stable persisted-row order for every entity that can contribute a
+    /// production-history item rate. The common non-refresh sample can visit
+    /// only these rows; ten-second inventory snapshots and pending campaign
+    /// probes deliberately retain their complete entity scan.
+    pub production_history_rate_indices: Vec<usize>,
+    /// Dense rate producers deliberately use persisted entity order directly.
+    /// Keeping a near-complete duplicate row index would spend session memory
+    /// without reducing work, so topology compilation releases that vector
+    /// and records the stable full-scan decision here instead.
+    pub production_history_rate_full_scan_required: bool,
+    /// Persisted rows with at least one material entry in `inputs` or
+    /// `outputs`. Ten-second inventory snapshots consume this directory
+    /// independently from rates/campaign metrics, avoiding an all-entity JSON
+    /// scan for sparse factories.
+    pub production_history_inventory_indices: Vec<usize>,
+    pub production_history_inventory_full_scan_required: bool,
     pub non_station_indices: Vec<usize>,
     pub research_entity_indices: Vec<usize>,
     pub entity_planet_indices: Vec<usize>,
     pub entity_grid_indices: Vec<usize>,
-    pub entities_by_planet: Vec<Vec<usize>>,
-    pub belts_by_planet: Vec<Vec<usize>>,
+    pub entities_by_planet: Vec<Vec<u32>>,
+    /// Exact per-planet persisted belt counts. Incident belt lookup reuses the
+    /// compact entity adjacency below, so retaining another full belt-row list
+    /// would duplicate hundreds of KiB in large sessions.
+    pub belt_counts_by_planet: Vec<u32>,
+    /// Sum of machine/miner stacks per planet for bounded UI projections.
+    /// Counts are rebuilt with the immutable topology columns, so reading the
+    /// planet navigator never scans every entity on a simulation revision.
+    pub device_counts_by_planet: Vec<f64>,
+    planet_viewport_indexes: Vec<PlanetViewportIndex>,
+    entity_belt_adjacency: EntityBeltAdjacency,
     pub has_galactic_material_exporter: bool,
 }
 
 impl FactoryTopology {
+    fn shrink_to_fit(&mut self) {
+        self.station_indices.shrink_to_fit();
+        self.orbital_collector_indices.shrink_to_fit();
+        self.quantum_endpoint_indices.shrink_to_fit();
+        self.construction_center_indices.shrink_to_fit();
+        self.time_warp_indices.shrink_to_fit();
+        self.logistics_buffer_indices.shrink_to_fit();
+        self.material_delivery_hub_indices.shrink_to_fit();
+        self.orbital_cargo_terminal_indices.shrink_to_fit();
+        self.galactic_material_exporter_indices.shrink_to_fit();
+        self.space_station_launcher_indices.shrink_to_fit();
+        self.system_space_station_entity_indices.shrink_to_fit();
+        self.ray_receiver_indices.shrink_to_fit();
+        self.power_source_indices.shrink_to_fit();
+        self.vein_indices.shrink_to_fit();
+        self.ordinary_machine_indices.shrink_to_fit();
+        self.production_history_rate_indices.shrink_to_fit();
+        self.production_history_inventory_indices.shrink_to_fit();
+        self.non_station_indices.shrink_to_fit();
+        self.research_entity_indices.shrink_to_fit();
+        self.entity_planet_indices.shrink_to_fit();
+        self.entity_grid_indices.shrink_to_fit();
+        for indices in self.entities_by_planet.iter_mut() {
+            indices.shrink_to_fit();
+        }
+        self.entities_by_planet.shrink_to_fit();
+        self.belt_counts_by_planet.shrink_to_fit();
+        self.device_counts_by_planet.shrink_to_fit();
+        self.planet_viewport_indexes.shrink_to_fit();
+    }
+
     fn estimated_bytes(&self) -> u64 {
         let index_capacity = self.station_indices.capacity()
+            + self.orbital_collector_indices.capacity()
             + self.quantum_endpoint_indices.capacity()
             + self.construction_center_indices.capacity()
             + self.time_warp_indices.capacity()
@@ -1340,9 +2573,13 @@ impl FactoryTopology {
             + self.orbital_cargo_terminal_indices.capacity()
             + self.galactic_material_exporter_indices.capacity()
             + self.space_station_launcher_indices.capacity()
+            + self.system_space_station_entity_indices.capacity()
+            + self.ray_receiver_indices.capacity()
             + self.power_source_indices.capacity()
             + self.vein_indices.capacity()
             + self.ordinary_machine_indices.capacity()
+            + self.production_history_rate_indices.capacity()
+            + self.production_history_inventory_indices.capacity()
             + self.non_station_indices.capacity()
             + self.research_entity_indices.capacity()
             + self.entity_planet_indices.capacity()
@@ -1350,10 +2587,31 @@ impl FactoryTopology {
         let planet_index_capacity = self
             .entities_by_planet
             .iter()
-            .chain(self.belts_by_planet.iter())
             .map(Vec::capacity)
             .sum::<usize>();
-        ((index_capacity + planet_index_capacity) * size_of::<usize>()) as u64
+        let index_bytes = (index_capacity * size_of::<usize>()) as u64;
+        let planet_bytes = (planet_index_capacity * size_of::<u32>()) as u64;
+        let aggregate_bytes = (self.belt_counts_by_planet.capacity() * size_of::<u32>()) as u64
+            + (self.device_counts_by_planet.capacity() * size_of::<f64>()) as u64;
+        let viewport_bytes = (self.planet_viewport_indexes.capacity()
+            * size_of::<PlanetViewportIndex>()) as u64
+            + self
+                .planet_viewport_indexes
+                .iter()
+                .map(PlanetViewportIndex::estimated_bytes)
+                .sum::<u64>();
+        let adjacency_bytes = self.entity_belt_adjacency.estimated_bytes();
+        if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tmemory-factory-breakdown\tindex={index_bytes},planet={planet_bytes},aggregate={aggregate_bytes},viewport={viewport_bytes},adjacency={adjacency_bytes},indexRows={index_capacity}"
+            );
+        }
+        index_bytes
+            + planet_bytes
+            + aggregate_bytes
+            + viewport_bytes
+            + adjacency_bytes
+            + self.catalog_sha256.capacity() as u64
     }
 }
 
@@ -1361,10 +2619,15 @@ impl FactoryTopology {
 pub struct CoreState {
     pub identity: CoreCheckpointIdentity,
     pub revision: u64,
-    pub catalog: Arc<RuntimeCatalog>,
+    /// Immutable session catalog. External hosts construct it through
+    /// `RuntimeCatalog::validate` and hand ownership to `CoreState`; they may
+    /// not mutate derived maps behind the topology/catalog semantic seal.
+    pub(crate) catalog: Arc<RuntimeCatalog>,
     base: Map<String, Value>,
     entity_raw: SharedArc<Vec<RawRecord>>,
     belt_raw: SharedArc<Vec<RawRecord>>,
+    /// Process-local one-shot cache; never persisted or hashed.
+    parsed_entity_runtime: Arc<EntityRuntimeCache>,
     pub(crate) entity_index: SharedArc<ExactRowIdIndex>,
     pub(crate) belt_index: SharedArc<ExactRowIdIndex>,
     pub(crate) symbols: SharedArc<Symbols>,
@@ -1374,11 +2637,65 @@ pub struct CoreState {
     pub(crate) belts: SharedArc<BeltColumns>,
     pub(crate) belt_dynamics: SharedArc<BeltDynamicColumns>,
     pub(crate) factory_topology: Arc<FactoryTopology>,
+    /// Runtime-only exact set of entity rows that currently carry material.
+    /// It is independently copy-on-write so advancing one revision never
+    /// clones the much larger immutable factory topology.
+    pub(crate) production_history_inventory_runtime:
+        Arc<crate::production_history::ProductionHistoryInventoryRuntime>,
     coverage: DomainCoverage,
     factory_static_admission_checked: bool,
     factory_static_admission_reason: Option<&'static str>,
     prepared_belt_routes: Option<Arc<crate::belts::PreparedRoutes>>,
+    /// Runtime-only deterministic wake set paired with the exact prepared
+    /// route graph. It is installed only after a successful revision commit.
+    prepared_belt_activity: Option<Arc<crate::belts::BeltActivitySnapshot>>,
+    /// Runtime-only event queue for ordinary storage/splitter buffer bridges.
+    /// Inventory writes wake exact rows and a successful candidate installs
+    /// the drained queue together with its entity revision.
+    prepared_logistics_buffer_runtime:
+        Option<Arc<crate::logistics_buffers::LogisticsBufferRuntime>>,
+    /// Runtime-only wake queue for the two ordered material-delivery drains.
+    /// It is candidate-owned and never enters GameState or checkpoint bytes.
+    prepared_material_delivery_runtime:
+        Option<Arc<crate::material_delivery::MaterialDeliveryRuntime>>,
+    /// Runtime-only deterministic wake index for built-in local machines and
+    /// veins. It is candidate-owned during simulation and published only
+    /// after the matching entity revision commits.
+    prepared_ordinary_production_runtime:
+        Option<Arc<crate::ordinary_production::OrdinaryProductionRuntime>>,
+    /// Runtime-only ordered probe cache for planet production and power
+    /// reserves. It is candidate-owned and installed only after commit.
+    prepared_planet_metrics_runtime: Option<Arc<crate::simple_factory::PlanetMetricsRuntime>>,
+    /// Runtime-only compact renewable source probes plus the writer-closed
+    /// dynamic source index. It never enters a checkpoint or canonical hash.
+    prepared_power_probe_runtime: Option<Arc<crate::simple_factory::PowerProbeRuntime>>,
     prepared_local_peer_directory: Option<Arc<crate::local_logistics::LocalPeerDirectory>>,
+    /// Runtime-only static quantum endpoint/slot directory plus active wake
+    /// queues. Installed only after the complete simulation candidate commits.
+    prepared_quantum_logistics_directory:
+        Option<Arc<crate::quantum_logistics::QuantumLogisticsDirectory>>,
+    /// Runtime-only stable construction-center rows and dependency wake
+    /// queues. Installed only after the complete simulation candidate commits.
+    prepared_construction_runtime: Option<Arc<crate::construction::ConstructionRuntime>>,
+    /// Runtime-only persisted-order wake set for pending station mode
+    /// transitions. It advances with the simulation candidate and is installed
+    /// only after the corresponding entity revision commits.
+    prepared_station_mode_transition_runtime:
+        Option<Arc<crate::system_space_station::ModeTransitionRuntime>>,
+    /// Runtime-only active rows for five-second quantum attachment/mode
+    /// settlement. The candidate clone advances transactionally and replaces
+    /// this value only after the corresponding simulation revision commits.
+    prepared_quantum_transition_runtime:
+        Option<Arc<crate::quantum_logistics::QuantumTransitionRuntime>>,
+    /// Immutable traditional interstellar peer/reverse-wake graph. It is
+    /// shared across committed revisions and rebuilt only when record
+    /// topology, station mode, research, or exploration membership changes.
+    prepared_interstellar_peer_directory:
+        Option<Arc<crate::interstellar_logistics::InterstellarPeerDirectory>>,
+    /// Runtime-only deterministic wake set for in-flight interstellar routes.
+    /// It is installed only after a successful candidate revision commits.
+    prepared_interstellar_route_activity:
+        Option<Arc<crate::interstellar_logistics::InterstellarRouteActivity>>,
     /// Persistence dirtiness is deliberately independent from the simulation
     /// wake queues. A successful checkpoint clears only this structure; belt
     /// or logistics scheduling state is never acknowledged by the saver.
@@ -1389,11 +2706,58 @@ pub struct CoreState {
     /// continuous conservative pure-idle session. It is persisted only in the
     /// private chunk manifest, never in public saves or canonical hashes.
     pure_idle_session: Option<PureIdleSessionState>,
+    /// Whole construction-tail seconds waiting for the next canonical block.
+    /// This is private checkpoint state and never enters public v47 or its
+    /// canonical hash.
+    pure_idle_macro_construction_carry_seconds: u8,
+    /// Remaining construction-only quantum replay granted to one continuous
+    /// macro-v10 session. The cursor is private checkpoint state: it never
+    /// enters public GameState v47 or its canonical hash.
+    pure_idle_macro_construction_quantum_replay_remaining_seconds: u8,
+    /// Ordinary macro quantum credits that remain attributable to construction
+    /// until the next canonical 30-second block consumes or releases them.
+    /// This ledger is private checkpoint state and never enters public v47.
+    pure_idle_macro_construction_quantum_pending_credits: BTreeMap<String, u64>,
+    /// Runtime-only macro-v10 calibration snapshots and ordinary-flow proof.
+    /// A checkpoint reload deliberately drops this cache; pure-idle rebuilds
+    /// it with a disposable exact probe before authorizing any productive tail.
+    pub(crate) pure_idle_macro_runtime: Option<crate::pure_idle::PureIdleMacroRuntimeCache>,
     /// Canonical diagnostics are intentionally expensive on very large saves.
     /// A revision is immutable from the protocol's point of view, so repeated
     /// status/compare/checkpoint calls can safely reuse the small digest result
     /// instead of reparsing every entity and belt again.
-    summary_cache: SyncCell<Option<(u64, CoreStateSummary)>>,
+    summary_cache: SyncCell<Option<CachedCoreStateSummary>>,
+    /// Runtime-only four-level production-history index. This cache is never
+    /// serialized and never participates in the public v47 canonical hash.
+    /// The established JS-authority `base.productionHistory` remains byte-for-
+    /// byte unchanged for differential and cloud compatibility.
+    production_history_tiers: SharedArc<crate::production_history::TieredProductionHistory>,
+    /// Session-only Operations alert/summary projection cache. Transactional
+    /// clones deliberately start empty; exact simulation may move and patch
+    /// the live cache only after every candidate proof has succeeded.
+    pub(crate) operations_projection_runtime:
+        crate::operations_workspace::OperationsProjectionRuntime,
+    /// Session-only Campaign factory-metric cache. The first projection scans
+    /// the factory; committed simulation revisions patch only changed rows.
+    /// It is disposable and excluded from every persistent/canonical surface.
+    pub(crate) campaign_projection_runtime: crate::campaign::CampaignProjectionRuntime,
+    /// Last successful exact-factory execution evidence. It is bounded,
+    /// disposable and excluded from every checkpoint/canonical surface.
+    last_factory_execution_diagnostics:
+        Option<crate::factory_writer_events::FactoryExecutionDiagnostics>,
+}
+
+pub(crate) struct PreparedSimulationRuntimeUpdates {
+    pub campaign_projection: crate::campaign::PreparedCampaignProjectionUpdate,
+    pub production_history_tiers: Option<crate::production_history::TieredProductionHistory>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCoreStateSummary {
+    revision: u64,
+    operations_projection_runtime_bytes: u64,
+    campaign_projection_runtime_bytes: u64,
+    summary: CoreStateSummary,
 }
 
 fn object_string<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -1456,6 +2820,16 @@ fn parse_records_with_runtime(
     label: &'static str,
 ) -> anyhow::Result<Vec<Value>> {
     runtime.indexed_try_map(records, |index, raw| {
+        serde_json::from_str(raw).with_context(|| format!("decode {label} at index {index}"))
+    })
+}
+
+fn parse_records_with_runtime_diagnostics(
+    runtime: &DeterministicRuntime,
+    records: &[RawRecord],
+    label: &'static str,
+) -> (anyhow::Result<Vec<Value>>, IndexedPrepareDiagnostics) {
+    runtime.indexed_try_map_with_diagnostics(records, |index, raw| {
         serde_json::from_str(raw).with_context(|| format!("decode {label} at index {index}"))
     })
 }
@@ -1574,37 +2948,133 @@ fn verify_chunk(metadata: &ChunkMetadata, bytes: &[u8]) -> anyhow::Result<()> {
             metadata.id
         );
     }
+    if let Some(expected) = metadata.sha256.as_deref()
+        && (expected.len() != 64
+            || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || hex::encode(Sha256::digest(bytes)) != expected)
+    {
+        bail!(
+            "native core checkpoint chunk sha256 is invalid: {}",
+            metadata.id
+        );
+    }
     Ok(())
 }
 
-fn take_manifest(
-    records: &mut BTreeMap<String, Vec<u8>>,
-) -> anyhow::Result<(String, ChunkedManifest)> {
-    let mut candidates = Vec::new();
-    for (key, bytes) in records.iter() {
-        if !key.ends_with(INTERNAL_MANIFEST_SUFFIX) {
-            continue;
-        }
-        let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-            continue;
-        };
-        if value.get("formatVersion").and_then(Value::as_u64) != Some(1)
-            || value.get("chunks").and_then(Value::as_array).is_none()
-        {
-            continue;
-        }
-        let manifest = serde_json::from_value::<ChunkedManifest>(value)
-            .context("decode native core chunk manifest")?;
-        candidates.push((key.clone(), manifest));
+type InternalCheckpointLoader<'a> = Box<dyn FnMut(&str) -> anyhow::Result<Vec<u8>> + 'a>;
+
+struct InternalCheckpointRecords<'a> {
+    remaining: BTreeSet<String>,
+    repeated: HashMap<String, Arc<[u8]>>,
+    repeated_bytes: usize,
+    loader: InternalCheckpointLoader<'a>,
+}
+
+impl<'a> InternalCheckpointRecords<'a> {
+    fn from_owned(mut records: BTreeMap<String, Vec<u8>>) -> anyhow::Result<Self> {
+        let remaining = records.keys().cloned().collect::<BTreeSet<_>>();
+        Self::new(remaining.into_iter().collect(), move |key| {
+            records
+                .remove(key)
+                .ok_or_else(|| anyhow!("native core checkpoint record is missing: {key}"))
+        })
     }
+
+    fn new(
+        keys: Vec<String>,
+        loader: impl FnMut(&str) -> anyhow::Result<Vec<u8>> + 'a,
+    ) -> anyhow::Result<Self> {
+        if keys.is_empty() || keys.len() > MAX_INTERNAL_RECORDS {
+            bail!("native core checkpoint record count is invalid");
+        }
+        let key_count = keys.len();
+        let remaining = keys.into_iter().collect::<BTreeSet<_>>();
+        if remaining.is_empty()
+            || remaining.len() != key_count
+            || remaining.len() > MAX_INTERNAL_RECORDS
+        {
+            bail!("native core checkpoint record keys are invalid");
+        }
+        Ok(Self {
+            remaining,
+            repeated: HashMap::new(),
+            repeated_bytes: 0,
+            loader: Box::new(loader),
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.remaining.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
+    fn manifest_keys(&self) -> Vec<String> {
+        self.remaining
+            .iter()
+            .filter(|key| key.ends_with(INTERNAL_MANIFEST_SUFFIX))
+            .cloned()
+            .collect()
+    }
+
+    fn take(&mut self, key: &str, referenced_again: bool) -> anyhow::Result<Arc<[u8]>> {
+        if !self.remaining.contains(key) {
+            bail!("native core checkpoint record is missing: {key}");
+        }
+        let bytes = if referenced_again {
+            if let Some(bytes) = self.repeated.get(key) {
+                Arc::clone(bytes)
+            } else {
+                let bytes = Arc::<[u8]>::from((self.loader)(key)?);
+                // A deduplicated manifest may reference one chunk many times.
+                // Keep only a bounded working set; an uncached chunk is safely
+                // verified again on its next reference instead of growing the
+                // open-time heap with the save size.
+                if self
+                    .repeated_bytes
+                    .checked_add(bytes.len())
+                    .is_some_and(|size| size <= MAX_REPEATED_CHECKPOINT_CACHE_BYTES)
+                {
+                    self.repeated_bytes += bytes.len();
+                    self.repeated.insert(key.to_owned(), Arc::clone(&bytes));
+                }
+                bytes
+            }
+        } else if let Some(bytes) = self.repeated.remove(key) {
+            self.repeated_bytes = self.repeated_bytes.saturating_sub(bytes.len());
+            bytes
+        } else {
+            Arc::<[u8]>::from((self.loader)(key)?)
+        };
+        if !referenced_again {
+            self.remaining.remove(key);
+        }
+        Ok(bytes)
+    }
+}
+
+fn take_manifest(
+    records: &mut InternalCheckpointRecords<'_>,
+) -> anyhow::Result<(String, ChunkedManifest)> {
+    let mut candidates = records.manifest_keys();
     if candidates.len() != 1 {
         bail!("native core checkpoint must contain exactly one chunk manifest");
     }
-    let (manifest_key, manifest) = candidates.pop().expect("one manifest");
-    let manifest_bytes = records
-        .remove(&manifest_key)
-        .ok_or_else(|| anyhow!("native core checkpoint manifest disappeared during open"))?;
-    drop(manifest_bytes);
+    let manifest_key = candidates.pop().expect("one manifest");
+    let manifest_bytes = records.take(&manifest_key, false)?;
+    let value = serde_json::from_slice::<Value>(manifest_bytes.as_ref())
+        .context("decode native core chunk manifest")?;
+    if !matches!(
+        value.get("formatVersion").and_then(Value::as_u64),
+        Some(1 | 2)
+    ) || value.get("chunks").and_then(Value::as_array).is_none()
+    {
+        bail!("native core checkpoint chunk manifest is invalid");
+    }
+    let manifest = serde_json::from_value::<ChunkedManifest>(value)
+        .context("decode native core chunk manifest")?;
     Ok((manifest_key, manifest))
 }
 
@@ -1615,37 +3085,16 @@ fn chunk_record_key(manifest_key: &str, id: &str) -> anyhow::Result<String> {
     Ok(format!("{prefix}chunk.{}", encoded_chunk_id(id)))
 }
 
-enum ChunkRecordBytes<'a> {
-    Borrowed(&'a [u8]),
-    Owned(Vec<u8>),
-}
-
-impl AsRef<[u8]> for ChunkRecordBytes<'_> {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Borrowed(bytes) => bytes,
-            Self::Owned(bytes) => bytes,
-        }
-    }
-}
-
-fn take_chunk_record<'a>(
-    records: &'a mut BTreeMap<String, Vec<u8>>,
+fn take_chunk_record(
+    records: &mut InternalCheckpointRecords<'_>,
     manifest_key: &str,
     id: &str,
     referenced_again: bool,
-) -> anyhow::Result<ChunkRecordBytes<'a>> {
+) -> anyhow::Result<Arc<[u8]>> {
     let key = chunk_record_key(manifest_key, id)?;
-    if referenced_again {
-        return records
-            .get(&key)
-            .map(|bytes| ChunkRecordBytes::Borrowed(bytes.as_slice()))
-            .ok_or_else(|| anyhow!("native core checkpoint chunk is missing: {id}"));
-    }
     records
-        .remove(&key)
-        .map(ChunkRecordBytes::Owned)
-        .ok_or_else(|| anyhow!("native core checkpoint chunk is missing: {id}"))
+        .take(&key, referenced_again)
+        .with_context(|| format!("read native core checkpoint chunk: {id}"))
 }
 
 fn has_later_chunk_reference(
@@ -1659,6 +3108,92 @@ fn has_later_chunk_reference(
         .checked_sub(1)
         .ok_or_else(|| anyhow!("native core checkpoint chunk accounting is invalid"))?;
     Ok(*remaining > 0)
+}
+
+fn load_checkpoint_base(
+    records: &mut InternalCheckpointRecords<'_>,
+    manifest_key: &str,
+    manifest: &ChunkedManifest,
+    remaining_chunk_references: &mut HashMap<String, usize>,
+) -> anyhow::Result<Map<String, Value>> {
+    if manifest.format_version == LEGACY_INTERNAL_CHECKPOINT_FORMAT_VERSION {
+        let base_metadata = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == "base")
+            .collect::<Vec<_>>();
+        if base_metadata.len() != 1 || base_metadata[0].offset != 0 || base_metadata[0].count != 1 {
+            bail!("native core checkpoint base chunk is invalid");
+        }
+        let metadata = base_metadata[0];
+        let referenced_again = has_later_chunk_reference(remaining_chunk_references, &metadata.id)?;
+        let bytes = take_chunk_record(records, manifest_key, &metadata.id, referenced_again)?;
+        verify_chunk(metadata, bytes.as_ref())?;
+        let base = match serde_json::from_slice::<Value>(bytes.as_ref())
+            .context("decode native core base chunk")?
+        {
+            Value::Object(base) => base,
+            _ => bail!("native core base chunk is not an object"),
+        };
+        if base.contains_key("entities") || base.contains_key("belts") {
+            bail!("native core base chunk contains an unbounded collection");
+        }
+        return Ok(base);
+    }
+
+    let mut base = Map::<String, Value>::new();
+    for domain in BASE_CHECKPOINT_DOMAINS {
+        let candidates = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == domain.kind())
+            .collect::<Vec<_>>();
+        if candidates.len() != 1 {
+            bail!(
+                "native core checkpoint base domain chunk is invalid: {}",
+                domain.id()
+            );
+        }
+        let metadata = candidates[0];
+        if metadata.id != domain.id() || metadata.offset != 0 || metadata.sha256.is_none() {
+            bail!(
+                "native core checkpoint base domain metadata is invalid: {}",
+                domain.id()
+            );
+        }
+        let referenced_again = has_later_chunk_reference(remaining_chunk_references, &metadata.id)?;
+        let bytes = take_chunk_record(records, manifest_key, &metadata.id, referenced_again)?;
+        verify_chunk(metadata, bytes.as_ref())?;
+        let fields = match serde_json::from_slice::<Value>(bytes.as_ref())
+            .with_context(|| format!("decode native core base domain chunk: {}", domain.id()))?
+        {
+            Value::Object(fields) => fields,
+            _ => bail!(
+                "native core base domain chunk is not an object: {}",
+                domain.id()
+            ),
+        };
+        if fields.len() != metadata.count {
+            bail!(
+                "native core checkpoint base domain count is invalid: {}",
+                domain.id()
+            );
+        }
+        for (key, value) in fields {
+            if matches!(key.as_str(), "entities" | "belts")
+                || classify_base_checkpoint_key(&key) != domain
+            {
+                bail!(
+                    "native core checkpoint base domain ownership is invalid: {}",
+                    domain.id()
+                );
+            }
+            if base.insert(key, value).is_some() {
+                bail!("native core checkpoint base domains overlap");
+            }
+        }
+    }
+    Ok(base)
 }
 
 impl CoreState {
@@ -1676,7 +3211,31 @@ impl CoreState {
 
     pub fn from_owned_internal_records(
         identity: CoreCheckpointIdentity,
-        mut records: BTreeMap<String, Vec<u8>>,
+        records: BTreeMap<String, Vec<u8>>,
+        catalog: RuntimeCatalog,
+    ) -> anyhow::Result<Self> {
+        let records = InternalCheckpointRecords::from_owned(records)?;
+        Self::from_internal_checkpoint_source(identity, records, catalog)
+    }
+
+    /// Opens one immutable checkpoint through a bounded pull reader. At most
+    /// one decoded chunk (plus the final raw/indexed representation) is held
+    /// by this loader unless a manifest deliberately references the same chunk
+    /// more than once. The caller remains responsible for verifying the
+    /// generation identity and every compressed chunk before returning bytes.
+    pub fn from_streamed_internal_records<'a>(
+        identity: CoreCheckpointIdentity,
+        record_keys: Vec<String>,
+        read_record: impl FnMut(&str) -> anyhow::Result<Vec<u8>> + 'a,
+        catalog: RuntimeCatalog,
+    ) -> anyhow::Result<Self> {
+        let records = InternalCheckpointRecords::new(record_keys, read_record)?;
+        Self::from_internal_checkpoint_source(identity, records, catalog)
+    }
+
+    fn from_internal_checkpoint_source(
+        identity: CoreCheckpointIdentity,
+        mut records: InternalCheckpointRecords<'_>,
         catalog: RuntimeCatalog,
     ) -> anyhow::Result<Self> {
         if records.is_empty() || records.len() > MAX_INTERNAL_RECORDS {
@@ -1698,8 +3257,10 @@ impl CoreState {
             bail!("native core checkpoint identity is invalid");
         }
         let (manifest_key, manifest) = take_manifest(&mut records)?;
-        if manifest.format_version != 1
-            || manifest.envelope_format_version != 2
+        if !matches!(
+            manifest.format_version,
+            LEGACY_INTERNAL_CHECKPOINT_FORMAT_VERSION | DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION
+        ) || manifest.envelope_format_version != 2
             || manifest.state_version != identity.state_version
             || manifest.mode != identity.mode
             || manifest.entity_count > MAX_ENTITY_COUNT
@@ -1717,48 +3278,106 @@ impl CoreState {
         {
             bail!("native core checkpoint manifest identity is invalid");
         }
-        let pure_idle_session = manifest
-            .pure_idle_session
-            .map(|session| session.validate(identity.revision))
-            .transpose()?;
-        let base_metadata = manifest
-            .chunks
-            .iter()
-            .filter(|chunk| chunk.kind == "base")
-            .collect::<Vec<_>>();
-        if base_metadata.len() != 1 || base_metadata[0].offset != 0 || base_metadata[0].count != 1 {
-            bail!("native core checkpoint base chunk is invalid");
+        if manifest.format_version == DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION {
+            if let Some(metadata) = manifest
+                .chunks
+                .iter()
+                .find(|metadata| !checkpoint_chunk_has_valid_sha256_metadata(metadata))
+            {
+                bail!(
+                    "native core v2 checkpoint chunk requires sha256: {}",
+                    metadata.id
+                );
+            }
+            let root_material = checkpoint_root_material(&manifest.chunks)?;
+            if fnv1a_utf8(root_material.as_bytes()) != manifest.chunk_root_checksum {
+                bail!("native core checkpoint manifest chunk root is invalid");
+            }
         }
+        let pure_idle_session = match (manifest.pure_idle_session, manifest.pure_idle_macro_session)
+        {
+            (Some(_), Some(_)) => {
+                bail!("native core checkpoint contains conflicting pure-idle sessions")
+            }
+            (Some(session), None) if session.macro_v10 => {
+                bail!("native core legacy pure-idle session has the wrong mode")
+            }
+            (None, Some(session)) if !session.macro_v10 => {
+                bail!("native core macro pure-idle session has the wrong mode")
+            }
+            (Some(session), None) | (None, Some(session)) => {
+                Some(session.validate(identity.revision)?)
+            }
+            (None, None) => None,
+        };
+        let pure_idle_macro_construction_carry_seconds = match (
+            pure_idle_session,
+            manifest.pure_idle_macro_construction_carry_seconds,
+        ) {
+            (Some(session), Some(carry))
+                if session.macro_v10 && carry < PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS =>
+            {
+                carry
+            }
+            (Some(session), None) if session.macro_v10 => 0,
+            (_, None) => 0,
+            _ => bail!("native core macro construction cursor checkpoint is invalid"),
+        };
+        let pure_idle_macro_construction_quantum_replay_remaining_seconds = match (
+            pure_idle_session,
+            manifest.pure_idle_macro_construction_quantum_replay_remaining_seconds,
+        ) {
+            (Some(session), Some(remaining))
+                if session.macro_v10
+                    && remaining <= PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS =>
+            {
+                remaining
+            }
+            (Some(session), None) if session.macro_v10 => {
+                PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+            }
+            (_, None) => PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+            _ => bail!("native core macro construction quantum replay checkpoint is invalid"),
+        };
+        let pure_idle_macro_construction_quantum_pending_credits = match manifest
+            .pure_idle_macro_construction_quantum_pending_credits
+            .clone()
+        {
+            Some(credits)
+                if pure_idle_session.is_some_and(|session| session.macro_v10)
+                    && pure_idle_macro_construction_quantum_replay_remaining_seconds > 0 =>
+            {
+                validate_construction_quantum_pending_credits(&credits)?;
+                credits
+            }
+            None => BTreeMap::new(),
+            Some(_) => {
+                bail!(
+                    "native core macro construction quantum pending credits checkpoint is invalid"
+                )
+            }
+        };
         let mut remaining_chunk_references = HashMap::<String, usize>::new();
         for metadata in &manifest.chunks {
             *remaining_chunk_references
                 .entry(metadata.id.clone())
                 .or_default() += 1;
         }
-        let base_referenced_again =
-            has_later_chunk_reference(&mut remaining_chunk_references, &base_metadata[0].id)?;
-        let base_bytes = take_chunk_record(
+        let base = load_checkpoint_base(
             &mut records,
             &manifest_key,
-            &base_metadata[0].id,
-            base_referenced_again,
+            &manifest,
+            &mut remaining_chunk_references,
         )?;
-        verify_chunk(base_metadata[0], base_bytes.as_ref())?;
-        let base = match serde_json::from_slice::<Value>(base_bytes.as_ref())
-            .context("decode native core base chunk")?
-        {
-            Value::Object(base) => base,
-            _ => bail!("native core base chunk is not an object"),
-        };
-        drop(base_bytes);
-        if base.contains_key("entities") || base.contains_key("belts") {
-            bail!("native core base chunk contains an unbounded collection");
-        }
 
         let mut entity_raw = vec![None; manifest.entity_count];
         let mut belt_raw = vec![None; manifest.belt_count];
         for metadata in &manifest.chunks {
-            if metadata.kind == "base" {
+            if metadata.kind == "base"
+                || BASE_CHECKPOINT_DOMAINS
+                    .iter()
+                    .any(|domain| metadata.kind == domain.kind())
+            {
                 continue;
             }
             let target = match metadata.kind.as_str() {
@@ -1819,6 +3438,9 @@ impl CoreState {
             catalog,
             manifest.chunks,
             pure_idle_session,
+            pure_idle_macro_construction_carry_seconds,
+            pure_idle_macro_construction_quantum_replay_remaining_seconds,
+            pure_idle_macro_construction_quantum_pending_credits,
             SaveDirtyPages::default(),
         )
     }
@@ -1862,8 +3484,12 @@ impl CoreState {
             catalog,
             Vec::new(),
             None,
+            0,
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+            BTreeMap::new(),
             SaveDirtyPages {
-                base: true,
+                base_domains: [true; BASE_CHECKPOINT_DOMAIN_COUNT],
+                base_domain_generations: [1; BASE_CHECKPOINT_DOMAIN_COUNT],
                 entity_topology: true,
                 belt_topology: true,
                 ..SaveDirtyPages::default()
@@ -1880,8 +3506,22 @@ impl CoreState {
         catalog: RuntimeCatalog,
         checkpoint_chunks: Vec<ChunkMetadata>,
         pure_idle_session: Option<PureIdleSessionState>,
+        pure_idle_macro_construction_carry_seconds: u8,
+        pure_idle_macro_construction_quantum_replay_remaining_seconds: u8,
+        pure_idle_macro_construction_quantum_pending_credits: BTreeMap<String, u64>,
         save_dirty: SaveDirtyPages,
     ) -> anyhow::Result<Self> {
+        validate_construction_quantum_pending_credits(
+            &pure_idle_macro_construction_quantum_pending_credits,
+        )?;
+        if !pure_idle_macro_construction_quantum_pending_credits.is_empty()
+            && (pure_idle_session.is_none_or(|session| !session.macro_v10)
+                || pure_idle_macro_construction_quantum_replay_remaining_seconds == 0)
+        {
+            bail!("native core macro construction quantum pending credits are orphaned");
+        }
+        let production_history_tiers =
+            crate::production_history::TieredProductionHistory::from_base(&base);
         let mut state = Self {
             revision: identity.revision,
             identity,
@@ -1889,6 +3529,7 @@ impl CoreState {
             base,
             entity_raw: entity_raw.into(),
             belt_raw: belt_raw.into(),
+            parsed_entity_runtime: Arc::new(EntityRuntimeCache::default()),
             entity_index: ExactRowIdIndex::default().into(),
             belt_index: ExactRowIdIndex::default().into(),
             symbols: Symbols::default().into(),
@@ -1898,16 +3539,40 @@ impl CoreState {
             belts: BeltColumns::default().into(),
             belt_dynamics: BeltDynamicColumns::default().into(),
             factory_topology: Arc::new(FactoryTopology::default()),
+            production_history_inventory_runtime: Arc::new(
+                crate::production_history::ProductionHistoryInventoryRuntime::default(),
+            ),
             coverage: DomainCoverage::implemented_beta_scope(),
             factory_static_admission_checked: false,
             factory_static_admission_reason: None,
             prepared_belt_routes: None,
+            prepared_belt_activity: None,
+            prepared_logistics_buffer_runtime: None,
+            prepared_material_delivery_runtime: None,
+            prepared_ordinary_production_runtime: None,
+            prepared_planet_metrics_runtime: None,
+            prepared_power_probe_runtime: None,
             prepared_local_peer_directory: None,
+            prepared_quantum_logistics_directory: None,
+            prepared_construction_runtime: None,
+            prepared_station_mode_transition_runtime: None,
+            prepared_quantum_transition_runtime: None,
+            prepared_interstellar_peer_directory: None,
+            prepared_interstellar_route_activity: None,
             save_dirty,
             checkpoint_chunks,
             pending_checkpoint_chunks: SyncCell::new(None),
             pure_idle_session,
+            pure_idle_macro_construction_carry_seconds,
+            pure_idle_macro_construction_quantum_replay_remaining_seconds,
+            pure_idle_macro_construction_quantum_pending_credits,
+            pure_idle_macro_runtime: None,
             summary_cache: SyncCell::new(None),
+            production_history_tiers: production_history_tiers.into(),
+            operations_projection_runtime:
+                crate::operations_workspace::OperationsProjectionRuntime::default(),
+            campaign_projection_runtime: crate::campaign::CampaignProjectionRuntime::default(),
+            last_factory_execution_diagnostics: None,
         };
         // Entity records remain shared by startup admission, route preparation
         // and the canonical proof. Belt records are intentionally decoded one
@@ -1916,22 +3581,78 @@ impl CoreState {
         let parsed_entities = state.parse_entities_parallel()?;
         state.rebuild_indexes_from_parsed_entities(&parsed_entities)?;
         state.refresh_factory_static_admission_with_entities(&parsed_entities)?;
-        if state.factory_static_admission_reason.is_none() {
-            state.prepared_belt_routes = Some(Arc::new(crate::belts::prepare_routes_from_state(
+        let raw_entity_bytes = state
+            .entity_raw
+            .iter()
+            .map(|value| value.len() as u64)
+            .sum::<u64>();
+        let retain_large_runtime_caches =
+            raw_entity_bytes <= MAX_RESIDENT_PARSED_ENTITY_CACHE_BYTES;
+        // Pending campaign tasks consult factory topology every simulation
+        // revision, so seed their disposable metric ledger from the entity
+        // records already parsed for startup admission. For a large save the
+        // first exact advance rebuilds this small cache on demand; keeping it
+        // at cold-open would add a second per-entity allocation to the menu
+        // path for a projection that may never be viewed.
+        if retain_large_runtime_caches && crate::campaign::factory_metrics_needed(&state.base) {
+            state.campaign_projection_runtime.seed_from_records(
                 &state,
                 &parsed_entities,
-            )?));
-            state.prepared_local_peer_directory =
-                Some(Arc::new(crate::local_logistics::prepare_step_directory(
-                    &parsed_entities,
-                    &state.factory_topology.station_indices,
-                )?));
+                crate::deterministic_runtime::runtime(),
+            );
+        }
+        if state.factory_static_admission_reason.is_none() {
+            let prepared = crate::simple_factory::prepare_factory_domains_with_runtime(
+                &state,
+                &state.base,
+                &parsed_entities,
+                crate::deterministic_runtime::runtime(),
+            )?;
+            if crate::profile_evidence::profile_environment_enabled() {
+                let scheduler = prepared.scheduler;
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\tpartitioned-open-domain-prepare\tactive={}/8\twork-items={}\tselected-workers={}\tobserved-workers={}\tparallel={}",
+                    scheduler.active_partitions,
+                    scheduler.work_items,
+                    scheduler.selected_worker_count,
+                    scheduler.observed_worker_count,
+                    scheduler.parallel,
+                );
+            }
+            state.prepared_belt_routes = Some(prepared.belt_routes);
+            state.prepared_logistics_buffer_runtime = Some(prepared.logistics_buffer_runtime);
+            state.prepared_material_delivery_runtime = Some(prepared.material_delivery_runtime);
+            state.prepared_ordinary_production_runtime = Some(prepared.ordinary_production_runtime);
+            state.prepared_planet_metrics_runtime =
+                retain_large_runtime_caches.then_some(prepared.planet_metrics_runtime);
+            state.prepared_power_probe_runtime = Some(prepared.power_probe_runtime);
+            state.prepared_local_peer_directory = Some(prepared.local_peer_directory);
+            state.prepared_quantum_logistics_directory = Some(prepared.quantum_logistics_directory);
+            state.prepared_construction_runtime = Some(prepared.construction_runtime);
+            state.prepared_station_mode_transition_runtime =
+                Some(prepared.station_mode_transition_runtime);
+            state.prepared_quantum_transition_runtime = Some(prepared.quantum_transition_runtime);
+            state.prepared_interstellar_peer_directory = Some(prepared.interstellar_peer_directory);
+            state.prepared_interstellar_route_activity = Some(prepared.interstellar_route_activity);
         }
         // `coreOpen` must return a verified canonical proof. Reuse the parsed
         // entity graph while canonicalizing each raw belt independently.
         let canonical = state.canonical_digest_bundle_with_parsed(Some(&parsed_entities), None)?;
-        let summary = state.summary_from_digest(canonical);
-        state.summary_cache.replace(Some((state.revision, summary)));
+        let mut summary = state.summary_from_digest(canonical);
+        if !sync_record_drop_enabled() && raw_entity_bytes <= MAX_RESIDENT_PARSED_ENTITY_CACHE_BYTES
+        {
+            state.parsed_entity_runtime =
+                Arc::new(EntityRuntimeCache::with_values(parsed_entities));
+        }
+        summary.memory = state.memory_estimate();
+        state.summary_cache.replace(Some(CachedCoreStateSummary {
+            revision: state.revision,
+            operations_projection_runtime_bytes: state
+                .operations_projection_runtime
+                .estimated_bytes(),
+            campaign_projection_runtime_bytes: state.campaign_projection_runtime.estimated_bytes(),
+            summary,
+        }));
         Ok(state)
     }
 
@@ -1958,14 +3679,13 @@ impl CoreState {
                         text: String|
          -> anyhow::Result<()> {
             let bytes = text.len();
-            metadata.push(ChunkMetadata {
-                id: id.clone(),
-                kind: kind.to_owned(),
+            metadata.push(checkpoint_chunk_metadata(
+                id.clone(),
+                kind,
                 offset,
                 count,
-                checksum: fnv1a_utf8(text.as_bytes()),
-                bytes,
-            });
+                &text,
+            ));
             total_bytes = total_bytes.saturating_add(bytes);
             let key = format!("{prefix}chunk.{}", encoded_chunk_id(&id));
             visit(&key, &text)?;
@@ -1973,13 +3693,10 @@ impl CoreState {
             Ok(())
         };
 
-        emit(
-            "base".to_owned(),
-            "base",
-            0,
-            1,
-            serde_json::to_string(&Value::Object(self.base.clone()))?,
-        )?;
+        for domain in BASE_CHECKPOINT_DOMAINS {
+            let (text, count) = encode_base_checkpoint_domain(&self.base, domain)?;
+            emit(domain.id().to_owned(), domain.kind(), 0, count, text)?;
+        }
         #[allow(clippy::type_complexity)]
         let emit_raw_ranges =
             |values: &[RawRecord],
@@ -2029,18 +3746,10 @@ impl CoreState {
             &mut emit,
         )?;
 
-        let mut root_material = String::new();
-        for chunk in &metadata {
-            use std::fmt::Write as _;
-            write!(
-                root_material,
-                "{}:{}:{}:{}:{}:{};",
-                chunk.id, chunk.kind, chunk.offset, chunk.count, chunk.checksum, chunk.bytes
-            )?;
-        }
+        let root_material = checkpoint_root_material(&metadata)?;
         let manifest_key = format!("{prefix}manifest");
         let mut manifest_value = serde_json::json!({
-            "formatVersion": 1,
+            "formatVersion": DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION,
             "envelopeFormatVersion": 2,
             "mode": self.identity.mode,
             "slot": "main",
@@ -2057,10 +3766,54 @@ impl CoreState {
             .pure_idle_session
             .filter(|session| session.last_committed_revision == self.revision)
         {
+            let key = if session.macro_v10 {
+                "pureIdleMacroSession"
+            } else {
+                "pureIdleSession"
+            };
             manifest_value
                 .as_object_mut()
                 .expect("native checkpoint manifest is an object")
-                .insert("pureIdleSession".to_owned(), serde_json::to_value(session)?);
+                .insert(key.to_owned(), serde_json::to_value(session)?);
+            if session.macro_v10 && self.pure_idle_macro_construction_carry_seconds > 0 {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionCarrySeconds".to_owned(),
+                        Value::from(self.pure_idle_macro_construction_carry_seconds),
+                    );
+            }
+            if session.macro_v10
+                && self.pure_idle_macro_construction_quantum_replay_remaining_seconds
+                    != PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+            {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionQuantumReplayRemainingSeconds".to_owned(),
+                        Value::from(
+                            self.pure_idle_macro_construction_quantum_replay_remaining_seconds,
+                        ),
+                    );
+            }
+            if session.macro_v10
+                && self.pure_idle_macro_construction_quantum_replay_remaining_seconds > 0
+                && !self
+                    .pure_idle_macro_construction_quantum_pending_credits
+                    .is_empty()
+            {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionQuantumPendingCredits".to_owned(),
+                        serde_json::to_value(
+                            &self.pure_idle_macro_construction_quantum_pending_credits,
+                        )?,
+                    );
+            }
         }
         let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
@@ -2106,38 +3859,50 @@ impl CoreState {
             Ok(())
         };
 
-        let base_text = self
-            .save_dirty
-            .base
-            .then(|| serde_json::to_string(&Value::Object(self.base.clone())))
-            .transpose()?;
-        if let Some(text) = base_text {
-            install(
-                ChunkMetadata {
-                    id: "base".to_owned(),
-                    kind: "base".to_owned(),
-                    offset: 0,
-                    count: 1,
-                    checksum: fnv1a_utf8(text.as_bytes()),
-                    bytes: text.len(),
-                },
-                Some(text),
-            )?;
-        } else if let Some(chunk) = previous.get("base") {
-            install(chunk.clone(), None)?;
-        } else {
-            let text = serde_json::to_string(&Value::Object(self.base.clone()))?;
-            install(
-                ChunkMetadata {
-                    id: "base".to_owned(),
-                    kind: "base".to_owned(),
-                    offset: 0,
-                    count: 1,
-                    checksum: fnv1a_utf8(text.as_bytes()),
-                    bytes: text.len(),
-                },
-                Some(text),
-            )?;
+        // Production checkpoints do not serialize or hash a clean base
+        // domain. Every writer crosses one of the centralized dirty APIs; a
+        // verified chunk can therefore be reused directly. Debug/test builds
+        // still encode the clean view as an audit oracle so a newly added
+        // writer cannot silently forget to mark its owning domain.
+        for domain in BASE_CHECKPOINT_DOMAINS {
+            let cached = previous.get(domain.id()).filter(|chunk| {
+                chunk.kind == domain.kind()
+                    && chunk.offset == 0
+                    && checkpoint_chunk_has_valid_sha256_metadata(chunk)
+            });
+            if !self.save_dirty.base_is_dirty(domain)
+                && let Some(cached) = cached
+            {
+                #[cfg(debug_assertions)]
+                {
+                    let (audit_text, audit_count) =
+                        encode_base_checkpoint_domain(&self.base, domain)?;
+                    let audit = checkpoint_chunk_metadata(
+                        domain.id(),
+                        domain.kind(),
+                        0,
+                        audit_count,
+                        &audit_text,
+                    );
+                    if !checkpoint_chunk_content_matches(cached, &audit) {
+                        bail!(
+                            "native checkpoint base-domain dirty audit detected an unmarked writer: {}",
+                            domain.id()
+                        )
+                    }
+                }
+                install(cached.clone(), None)?;
+                continue;
+            }
+            let (text, count) = encode_base_checkpoint_domain(&self.base, domain)?;
+            let candidate = checkpoint_chunk_metadata(domain.id(), domain.kind(), 0, count, &text);
+            if let Some(cached) =
+                cached.filter(|cached| checkpoint_chunk_content_matches(cached, &candidate))
+            {
+                install(cached.clone(), None)?;
+            } else {
+                install(candidate, Some(text))?;
+            }
         }
 
         let mut install_pages = |values: &[RawRecord],
@@ -2153,7 +3918,10 @@ impl CoreState {
                 let count = end.saturating_sub(offset);
                 let id = format!("{kind}:{offset:08}");
                 let cached = previous.get(&id).filter(|chunk| {
-                    chunk.kind == kind && chunk.offset == offset && chunk.count == count
+                    chunk.kind == kind
+                        && chunk.offset == offset
+                        && chunk.count == count
+                        && checkpoint_chunk_has_valid_sha256_metadata(chunk)
                 });
                 if !topology_dirty
                     && !dirty_pages.contains(&page)
@@ -2176,17 +3944,8 @@ impl CoreState {
                     text.push_str(raw);
                 }
                 text.push(']');
-                install(
-                    ChunkMetadata {
-                        id,
-                        kind: kind.to_owned(),
-                        offset,
-                        count,
-                        checksum: fnv1a_utf8(text.as_bytes()),
-                        bytes: text.len(),
-                    },
-                    Some(text),
-                )?;
+                let metadata = checkpoint_chunk_metadata(id, kind, offset, count, &text);
+                install(metadata, Some(text))?;
             }
             Ok(())
         };
@@ -2206,18 +3965,10 @@ impl CoreState {
         )?;
 
         let total_bytes = metadata.iter().map(|chunk| chunk.bytes).sum::<usize>();
-        let mut root_material = String::new();
-        for chunk in &metadata {
-            use std::fmt::Write as _;
-            write!(
-                root_material,
-                "{}:{}:{}:{}:{}:{};",
-                chunk.id, chunk.kind, chunk.offset, chunk.count, chunk.checksum, chunk.bytes
-            )?;
-        }
+        let root_material = checkpoint_root_material(&metadata)?;
         let manifest_key = format!("{prefix}manifest");
         let mut manifest_value = serde_json::json!({
-            "formatVersion": 1,
+            "formatVersion": DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION,
             "envelopeFormatVersion": 2,
             "mode": self.identity.mode,
             "slot": "main",
@@ -2234,10 +3985,54 @@ impl CoreState {
             .pure_idle_session
             .filter(|session| session.last_committed_revision == self.revision)
         {
+            let key = if session.macro_v10 {
+                "pureIdleMacroSession"
+            } else {
+                "pureIdleSession"
+            };
             manifest_value
                 .as_object_mut()
                 .expect("native checkpoint manifest is an object")
-                .insert("pureIdleSession".to_owned(), serde_json::to_value(session)?);
+                .insert(key.to_owned(), serde_json::to_value(session)?);
+            if session.macro_v10 && self.pure_idle_macro_construction_carry_seconds > 0 {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionCarrySeconds".to_owned(),
+                        Value::from(self.pure_idle_macro_construction_carry_seconds),
+                    );
+            }
+            if session.macro_v10
+                && self.pure_idle_macro_construction_quantum_replay_remaining_seconds
+                    != PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+            {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionQuantumReplayRemainingSeconds".to_owned(),
+                        Value::from(
+                            self.pure_idle_macro_construction_quantum_replay_remaining_seconds,
+                        ),
+                    );
+            }
+            if session.macro_v10
+                && self.pure_idle_macro_construction_quantum_replay_remaining_seconds > 0
+                && !self
+                    .pure_idle_macro_construction_quantum_pending_credits
+                    .is_empty()
+            {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionQuantumPendingCredits".to_owned(),
+                        serde_json::to_value(
+                            &self.pure_idle_macro_construction_quantum_pending_credits,
+                        )?,
+                    );
+            }
         }
         let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
@@ -2291,6 +4086,39 @@ impl CoreState {
         self.factory_static_admission_checked = false;
         self.factory_static_admission_reason = None;
         self.prepared_belt_routes = None;
+        self.prepared_belt_activity = None;
+        self.prepared_logistics_buffer_runtime = None;
+        self.prepared_material_delivery_runtime = None;
+        self.prepared_ordinary_production_runtime = None;
+        self.prepared_planet_metrics_runtime = None;
+        self.prepared_power_probe_runtime = None;
+        self.prepared_quantum_logistics_directory = None;
+        self.prepared_construction_runtime = None;
+        self.prepared_quantum_transition_runtime = None;
+        // Non-pause top-level commands can change research, exploration,
+        // routing settings, or tray-backed warper availability. Re-admit the
+        // complete interstellar reverse graph and demand wake queue rather
+        // than attempting to infer an unsafe partial invalidation here.
+        self.prepared_interstellar_peer_directory = None;
+        self.prepared_interstellar_route_activity = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_prepared_factory_domains_for_test(&mut self) {
+        self.prepared_belt_routes = None;
+        self.prepared_belt_activity = None;
+        self.prepared_logistics_buffer_runtime = None;
+        self.prepared_material_delivery_runtime = None;
+        self.prepared_ordinary_production_runtime = None;
+        self.prepared_planet_metrics_runtime = None;
+        self.prepared_power_probe_runtime = None;
+        self.prepared_local_peer_directory = None;
+        self.prepared_quantum_logistics_directory = None;
+        self.prepared_construction_runtime = None;
+        self.prepared_station_mode_transition_runtime = None;
+        self.prepared_quantum_transition_runtime = None;
+        self.prepared_interstellar_peer_directory = None;
+        self.prepared_interstellar_route_activity = None;
     }
 
     pub(crate) fn prepared_belt_routes(&self) -> Option<Arc<crate::belts::PreparedRoutes>> {
@@ -2304,10 +4132,110 @@ impl CoreState {
         self.prepared_belt_routes = Some(routes);
     }
 
+    pub(crate) fn prepared_belt_activity(&self) -> Option<Arc<crate::belts::BeltActivitySnapshot>> {
+        self.prepared_belt_activity.clone()
+    }
+
+    pub(crate) fn install_prepared_belt_activity(
+        &mut self,
+        activity: Arc<crate::belts::BeltActivitySnapshot>,
+    ) {
+        // A transition candidate owns a detached scratch pool until the state
+        // revision has committed. Publishing here is intentionally infallible
+        // and is the only point that disarms rollback to the prior snapshot.
+        activity.publish_reusable_pool();
+        self.prepared_belt_activity = Some(activity);
+    }
+
     pub(crate) fn prepared_local_peer_directory(
         &self,
     ) -> Option<Arc<crate::local_logistics::LocalPeerDirectory>> {
         self.prepared_local_peer_directory.clone()
+    }
+
+    pub(crate) fn prepared_logistics_buffer_runtime(
+        &self,
+    ) -> Option<Arc<crate::logistics_buffers::LogisticsBufferRuntime>> {
+        self.prepared_logistics_buffer_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_logistics_buffer_runtime(
+        &mut self,
+        runtime: Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
+    ) {
+        self.prepared_logistics_buffer_runtime = Some(runtime);
+    }
+
+    pub(crate) fn prepared_material_delivery_runtime(
+        &self,
+    ) -> Option<Arc<crate::material_delivery::MaterialDeliveryRuntime>> {
+        self.prepared_material_delivery_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_material_delivery_runtime(
+        &mut self,
+        runtime: Arc<crate::material_delivery::MaterialDeliveryRuntime>,
+    ) {
+        self.prepared_material_delivery_runtime = Some(runtime);
+    }
+
+    pub(crate) fn prepared_ordinary_production_runtime(
+        &self,
+    ) -> Option<Arc<crate::ordinary_production::OrdinaryProductionRuntime>> {
+        self.prepared_ordinary_production_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_ordinary_production_runtime(
+        &mut self,
+        runtime: Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
+    ) {
+        self.prepared_ordinary_production_runtime = Some(runtime);
+    }
+
+    pub(crate) fn prepared_planet_metrics_runtime(
+        &self,
+    ) -> Option<Arc<crate::simple_factory::PlanetMetricsRuntime>> {
+        self.prepared_planet_metrics_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_planet_metrics_runtime(
+        &mut self,
+        mut runtime: Arc<crate::simple_factory::PlanetMetricsRuntime>,
+    ) {
+        Arc::make_mut(&mut runtime).bind_committed_revision(self.revision);
+        self.prepared_planet_metrics_runtime = Some(runtime);
+    }
+
+    /// A pause-only durable command advances the authority revision without
+    /// changing any entity, catalog, directory, or topology field consumed by
+    /// planet metrics or power-source probes. Preserve those proven caches
+    /// while binding them to the new committed revision; all other commands
+    /// still invalidate them through `invalidate_factory_static_admission`.
+    pub(crate) fn rebind_prepared_planet_metrics_runtime_revision(&mut self) {
+        if let Some(runtime) = &mut self.prepared_planet_metrics_runtime {
+            Arc::make_mut(runtime).bind_committed_revision(self.revision);
+        }
+        if let Some(runtime) = &mut self.prepared_power_probe_runtime {
+            Arc::make_mut(runtime).bind_committed_revision(self.revision);
+        }
+    }
+
+    pub(crate) fn invalidate_prepared_planet_metrics_runtime(&mut self) {
+        self.prepared_planet_metrics_runtime = None;
+    }
+
+    pub(crate) fn prepared_power_probe_runtime(
+        &self,
+    ) -> Option<Arc<crate::simple_factory::PowerProbeRuntime>> {
+        self.prepared_power_probe_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_power_probe_runtime(
+        &mut self,
+        mut runtime: Arc<crate::simple_factory::PowerProbeRuntime>,
+    ) {
+        Arc::make_mut(&mut runtime).bind_committed_revision(self.revision);
+        self.prepared_power_probe_runtime = Some(runtime);
     }
 
     pub(crate) fn install_prepared_local_peer_directory(
@@ -2317,9 +4245,206 @@ impl CoreState {
         self.prepared_local_peer_directory = Some(directory);
     }
 
+    pub(crate) fn prepared_quantum_logistics_directory(
+        &self,
+    ) -> Option<Arc<crate::quantum_logistics::QuantumLogisticsDirectory>> {
+        self.prepared_quantum_logistics_directory.clone()
+    }
+
+    pub(crate) fn install_prepared_quantum_logistics_directory(
+        &mut self,
+        directory: Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
+    ) {
+        self.prepared_quantum_logistics_directory = Some(directory);
+    }
+
+    /// Drops only the immutable quantum endpoint/slot directory after a
+    /// construction-only quantum replay mutates inventories behind the ordinary
+    /// logistics step. All unrelated prepared runtimes remain reusable.
+    pub(crate) fn invalidate_prepared_quantum_logistics_directory(&mut self) {
+        self.prepared_quantum_logistics_directory = None;
+    }
+
+    pub(crate) fn prepared_construction_runtime(
+        &self,
+    ) -> Option<Arc<crate::construction::ConstructionRuntime>> {
+        self.prepared_construction_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_construction_runtime(
+        &mut self,
+        runtime: Arc<crate::construction::ConstructionRuntime>,
+    ) {
+        self.prepared_construction_runtime = Some(runtime);
+    }
+
+    pub(crate) fn prepared_station_mode_transition_runtime(
+        &self,
+    ) -> Option<Arc<crate::system_space_station::ModeTransitionRuntime>> {
+        self.prepared_station_mode_transition_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_station_mode_transition_runtime(
+        &mut self,
+        runtime: Arc<crate::system_space_station::ModeTransitionRuntime>,
+    ) {
+        self.prepared_station_mode_transition_runtime = Some(runtime);
+    }
+
+    pub(crate) fn prepared_quantum_transition_runtime(
+        &self,
+    ) -> Option<Arc<crate::quantum_logistics::QuantumTransitionRuntime>> {
+        self.prepared_quantum_transition_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_quantum_transition_runtime(
+        &mut self,
+        runtime: Arc<crate::quantum_logistics::QuantumTransitionRuntime>,
+    ) {
+        self.prepared_quantum_transition_runtime = Some(runtime);
+    }
+
+    pub(crate) fn prepared_interstellar_route_activity(
+        &self,
+    ) -> Option<Arc<crate::interstellar_logistics::InterstellarRouteActivity>> {
+        self.prepared_interstellar_route_activity.clone()
+    }
+
+    pub(crate) fn prepared_interstellar_peer_directory(
+        &self,
+    ) -> Option<Arc<crate::interstellar_logistics::InterstellarPeerDirectory>> {
+        self.prepared_interstellar_peer_directory.clone()
+    }
+
+    pub(crate) fn install_prepared_interstellar_peer_directory(
+        &mut self,
+        directory: Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
+    ) {
+        self.prepared_interstellar_peer_directory = Some(directory);
+    }
+
+    pub(crate) fn install_prepared_interstellar_route_activity(
+        &mut self,
+        activity: Arc<crate::interstellar_logistics::InterstellarRouteActivity>,
+    ) {
+        self.prepared_interstellar_route_activity = Some(activity);
+    }
+
     pub(crate) fn rebuild_indexes(&mut self) -> anyhow::Result<()> {
         let entities = self.parse_entities_parallel()?;
-        self.rebuild_indexes_from_parsed_entities(&entities)
+        self.rebuild_indexes_from_parsed_entities(&entities)?;
+        if !sync_record_drop_enabled() {
+            self.install_parsed_entity_runtime(entities);
+        }
+        Ok(())
+    }
+
+    /// Refreshes the only resident indexes affected by a position-only player
+    /// command. Entity IDs, symbols, planet membership, belt topology and all
+    /// simulation-domain directories remain byte-for-byte valid, so parsing
+    /// every entity and every belt here would turn a one-row drag into an
+    /// O(E+B) operation on large Windows saves.
+    ///
+    /// Callers must invoke this only after the raw replacement records have
+    /// been installed on a disposable candidate. Every row is re-read and
+    /// checked against the immutable topology before either the SoA position
+    /// columns or the per-planet viewport index is published.
+    pub(crate) fn refresh_entity_position_indexes(
+        &mut self,
+        entity_ids: &[String],
+    ) -> anyhow::Result<()> {
+        if entity_ids.is_empty() {
+            bail!("native position index refresh has no entity rows");
+        }
+
+        let mut seen = HashSet::<&str>::with_capacity(entity_ids.len());
+        let mut updates = Vec::<(usize, usize, f64, f64)>::with_capacity(entity_ids.len());
+        let mut affected_planets = Vec::<usize>::new();
+        for entity_id in entity_ids {
+            if !seen.insert(entity_id.as_str()) {
+                bail!("native position index refresh repeats an entity row");
+            }
+            let entity_index = *self
+                .entity_index
+                .get(entity_id)
+                .ok_or_else(|| anyhow!("native position index refresh entity is missing"))?;
+            let entity = self.parse_entity(entity_index)?;
+            let object = entity
+                .as_object()
+                .ok_or_else(|| anyhow!("native position index refresh entity is invalid"))?;
+            if object_string(object, "id") != Some(entity_id.as_str()) {
+                bail!("native position index refresh entity ID drifted");
+            }
+            let planet_id = object_string(object, "planetId")
+                .ok_or_else(|| anyhow!("native position index refresh planet is missing"))?;
+            let planet_index = self
+                .catalog
+                .planets
+                .iter()
+                .position(|planet| planet.id == planet_id)
+                .ok_or_else(|| anyhow!("native position index refresh planet is unknown"))?;
+            if self
+                .factory_topology
+                .entity_planet_indices
+                .get(entity_index)
+                .copied()
+                != Some(planet_index)
+                || self.symbols.resolve(self.entities.planets[entity_index]) != Some(planet_id)
+            {
+                bail!("native position index refresh changed entity topology");
+            }
+            let position = object
+                .get("position")
+                .and_then(Value::as_object)
+                .filter(|position| {
+                    position.len() == 2 && position.contains_key("x") && position.contains_key("y")
+                })
+                .ok_or_else(|| anyhow!("native position index refresh position is invalid"))?;
+            let x = position
+                .get("x")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| anyhow!("native position index refresh X is invalid"))?;
+            let y = position
+                .get("y")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| anyhow!("native position index refresh Y is invalid"))?;
+            updates.push((entity_index, planet_index, x, y));
+            affected_planets.push(planet_index);
+        }
+
+        // Clone the compact position table once, regardless of how many rows
+        // a semantic layout intent moved.
+        for &(entity_index, _, x, y) in &updates {
+            self.entities.position_x[entity_index] = x;
+            self.entities.position_y[entity_index] = y;
+        }
+
+        affected_planets.sort_unstable();
+        affected_planets.dedup();
+        let rebuilt = affected_planets
+            .iter()
+            .map(|&planet_index| {
+                let rows = self
+                    .factory_topology
+                    .entities_by_planet
+                    .get(planet_index)
+                    .ok_or_else(|| anyhow!("native position viewport planet is invalid"))?;
+                Ok((
+                    planet_index,
+                    PlanetViewportIndex::build(rows, &self.entities)?,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let topology = Arc::make_mut(&mut self.factory_topology);
+        for (planet_index, viewport) in rebuilt {
+            *topology
+                .planet_viewport_indexes
+                .get_mut(planet_index)
+                .ok_or_else(|| anyhow!("native position viewport index is missing"))? = viewport;
+        }
+        Ok(())
     }
 
     fn rebuild_indexes_from_parsed_entities(
@@ -2330,11 +4455,11 @@ impl CoreState {
             bail!("native core parsed record count is inconsistent");
         }
         self.symbols = Symbols::default().into();
-        self.entities = EntityColumns::default().into();
+        self.entities = EntityColumns::with_capacity(entity_values.len()).into();
         self.entity_dynamics = EntityDynamicColumns::default().into();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
-        self.belts = BeltColumns::default().into();
-        self.belt_dynamics = BeltDynamicColumns::default().into();
+        self.belts = BeltColumns::with_capacity(self.belt_raw.len()).into();
+        self.belt_dynamics = BeltDynamicColumns::with_capacity(self.belt_raw.len()).into();
         self.entity_index = ExactRowIdIndex::default().into();
         self.belt_index = ExactRowIdIndex::default().into();
         let mut entity_ids = Vec::<Box<str>>::with_capacity(entity_values.len());
@@ -2347,10 +4472,13 @@ impl CoreState {
             .map(|(index, planet)| (planet.id.as_str(), index))
             .collect::<HashMap<_, _>>();
         let mut factory_topology = FactoryTopology {
+            catalog_sha256: self.catalog.fingerprint.clone(),
             entities_by_planet: vec![Vec::new(); self.catalog.planets.len()],
-            belts_by_planet: vec![Vec::new(); self.catalog.planets.len()],
+            belt_counts_by_planet: vec![0; self.catalog.planets.len()],
+            device_counts_by_planet: vec![0.0; self.catalog.planets.len()],
             ..FactoryTopology::default()
         };
+        let mut station_mode_transition_indices = Vec::new();
         let mut entity_dynamics = EntityDynamicColumns::with_capacity(entity_values.len());
         for (index, value) in entity_values.iter().enumerate() {
             let object = value
@@ -2403,6 +4531,30 @@ impl CoreState {
             let kind = object_string(object, "kind").unwrap_or_default();
             let building = object_string(object, "buildingId").unwrap_or_default();
             let recipe = object_string(object, "recipeId").unwrap_or_default();
+            if matches!(kind, "machine" | "vein") || building == "orbital_collector" {
+                factory_topology.production_history_rate_indices.push(index);
+            }
+            if ["inputs", "outputs"].into_iter().any(|key| {
+                object
+                    .get(key)
+                    .and_then(Value::as_object)
+                    .is_some_and(|record| !record.is_empty())
+            }) {
+                factory_topology
+                    .production_history_inventory_indices
+                    .push(index);
+            }
+            if building == "orbital_collector" {
+                factory_topology.orbital_collector_indices.push(index);
+                factory_topology.orbital_collector_full_scan_required |= kind != "station";
+            }
+            if matches!(
+                building,
+                "interstellar_logistics_station" | "orbital_collector"
+            ) && kind != "station"
+            {
+                factory_topology.quantum_endpoint_full_scan_required = true;
+            }
             if kind == "station" {
                 factory_topology.station_indices.push(index);
                 if matches!(
@@ -2437,6 +4589,23 @@ impl CoreState {
             if building == "space_station_construction_launcher" {
                 factory_topology.space_station_launcher_indices.push(index);
             }
+            if matches!(
+                building,
+                "interstellar_logistics_station" | "space_station_construction_launcher"
+            ) {
+                factory_topology
+                    .system_space_station_entity_indices
+                    .push(index);
+            }
+            // Preserve the permissive legacy predicate: any object row with a
+            // string transition participates, including MOD-defined kinds and
+            // building IDs. Admission validation remains unchanged.
+            if object_string(object, "stationModeTransition").is_some() {
+                station_mode_transition_indices.push(index);
+            }
+            if kind == "machine" && building == "ray_receiver" {
+                factory_topology.ray_receiver_indices.push(index);
+            }
             if kind == "power"
                 || (kind == "machine" && building == "ray_receiver" && recipe == "ray_power")
             {
@@ -2467,7 +4636,14 @@ impl CoreState {
                 .unwrap_or(usize::MAX);
             factory_topology.entity_planet_indices.push(entity_planet);
             if let Some(indices) = factory_topology.entities_by_planet.get_mut(entity_planet) {
-                indices.push(index);
+                indices.push(compact_topology_index(index, "planet entity row")?);
+            }
+            if let Some(device_count) = factory_topology
+                .device_counts_by_planet
+                .get_mut(entity_planet)
+            {
+                *device_count +=
+                    self.entities.machine_counts[index] + self.entities.miner_counts[index];
             }
             factory_topology.entity_grid_indices.push(
                 match object_string(object, "powerGridId").unwrap_or("grid-a") {
@@ -2481,6 +4657,7 @@ impl CoreState {
         let entity_index = ExactRowIdIndex::from_boxed(entity_ids, "entity")?;
         self.entities.ids = entity_index.ids();
         self.entity_index = entity_index.into();
+        let mut entity_belt_rows = vec![Vec::<u32>::new(); entity_values.len()];
 
         for index in 0..self.belt_raw.len() {
             let value = self.parse_belt(index)?;
@@ -2490,15 +4667,13 @@ impl CoreState {
             let id = object_string(object, "id")
                 .ok_or_else(|| anyhow!("native core belt ID is missing"))?;
             belt_ids.push(id.into());
+            let source_id = object_string(object, "source");
+            let target_id = object_string(object, "target");
             self.belts
                 .planets
                 .push(self.symbols.intern(object_string(object, "planetId")));
-            self.belts
-                .sources
-                .push(self.symbols.intern(object_string(object, "source")));
-            self.belts
-                .targets
-                .push(self.symbols.intern(object_string(object, "target")));
+            self.belts.sources.push(self.symbols.intern(source_id));
+            self.belts.targets.push(self.symbols.intern(target_id));
             self.belts
                 .items
                 .push(self.symbols.intern(object_string(object, "itemId")));
@@ -2530,12 +4705,20 @@ impl CoreState {
                     .unwrap_or(1)
                     .min(2) as u8,
             );
-            self.belt_dynamics.push_from_object(object);
-            if let Some(planet) = object_string(object, "planetId")
+            self.belt_dynamics.push_from_object(object)?;
+            if let Some(count) = object_string(object, "planetId")
                 .and_then(|id| planet_indices.get(id).copied())
-                .and_then(|planet| factory_topology.belts_by_planet.get_mut(planet))
+                .and_then(|planet| factory_topology.belt_counts_by_planet.get_mut(planet))
             {
-                planet.push(index);
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("native planet belt count exceeds the compact limit"))?;
+            }
+            for endpoint_id in [source_id, target_id].into_iter().flatten() {
+                if let Some(&entity_index) = self.entity_index.get(endpoint_id) {
+                    entity_belt_rows[entity_index]
+                        .push(compact_topology_index(index, "entity belt row")?);
+                }
             }
         }
         let belt_index = ExactRowIdIndex::from_boxed(belt_ids, "belt")?;
@@ -2544,11 +4727,84 @@ impl CoreState {
         entity_dynamics.validate(entity_values.len())?;
         self.entity_dynamics = entity_dynamics.into();
         self.belt_dynamics.validate(self.belt_raw.len())?;
+        self.belt_dynamics.clear_dirty();
+        factory_topology.planet_viewport_indexes = factory_topology
+            .entities_by_planet
+            .iter()
+            .map(|indices| PlanetViewportIndex::build(indices, &self.entities))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        factory_topology.entity_belt_adjacency = EntityBeltAdjacency::from_rows(entity_belt_rows)?;
+        if !factory_topology.production_history_rate_indices.is_empty()
+            && factory_topology
+                .production_history_rate_indices
+                .len()
+                .saturating_mul(4)
+                >= entity_values.len().saturating_mul(3)
+        {
+            factory_topology.production_history_rate_indices = Vec::new();
+            factory_topology.production_history_rate_full_scan_required = true;
+        }
+        if !factory_topology
+            .production_history_inventory_indices
+            .is_empty()
+            && factory_topology
+                .production_history_inventory_indices
+                .len()
+                .saturating_mul(4)
+                >= entity_values.len().saturating_mul(3)
+        {
+            factory_topology.production_history_inventory_indices = Vec::new();
+            factory_topology.production_history_inventory_full_scan_required = true;
+        }
+        if !factory_topology
+            .system_space_station_entity_indices
+            .is_empty()
+            && factory_topology
+                .system_space_station_entity_indices
+                .len()
+                .saturating_mul(4)
+                >= entity_values.len().saturating_mul(3)
+        {
+            factory_topology.system_space_station_entity_indices = Vec::new();
+            factory_topology.system_space_station_full_scan_required = true;
+        }
+        // The inventory directory changes as empty rows receive or consume
+        // their first material. Move its startup seed into an independent COW
+        // runtime instead of retaining the same vector twice in topology.
+        let production_history_inventory_runtime =
+            crate::production_history::ProductionHistoryInventoryRuntime::from_parts(
+                std::mem::take(&mut factory_topology.production_history_inventory_indices),
+                factory_topology.production_history_inventory_full_scan_required,
+            );
+        factory_topology.production_history_inventory_full_scan_required = false;
+        // These immutable indexes live for the complete native session. Trim
+        // geometric growth slack once, after construction, so a large save
+        // does not retain several MiB of unreachable topology capacity.
+        factory_topology.shrink_to_fit();
         self.factory_topology = Arc::new(factory_topology);
+        self.production_history_inventory_runtime = Arc::new(production_history_inventory_runtime);
+        self.prepared_station_mode_transition_runtime = Some(Arc::new(
+            crate::system_space_station::ModeTransitionRuntime::from_indices(
+                entity_values.len(),
+                station_mode_transition_indices,
+            ),
+        ));
+        self.prepared_quantum_transition_runtime = Some(Arc::new(
+            crate::quantum_logistics::QuantumTransitionRuntime::build(entity_values),
+        ));
         // Record commands may alter station slots or elevator mode. The next
         // admitted advance recompiles this immutable directory from the new
         // records; keeping the previous one would route against stale topology.
         self.prepared_local_peer_directory = None;
+        self.prepared_logistics_buffer_runtime = None;
+        self.prepared_material_delivery_runtime = None;
+        self.prepared_ordinary_production_runtime = None;
+        self.prepared_planet_metrics_runtime = None;
+        self.prepared_power_probe_runtime = None;
+        self.prepared_quantum_logistics_directory = None;
+        self.prepared_construction_runtime = None;
+        self.prepared_interstellar_peer_directory = None;
+        self.prepared_interstellar_route_activity = None;
         Ok(())
     }
 
@@ -2558,6 +4814,38 @@ impl CoreState {
 
     pub(crate) fn parse_belt(&self, index: usize) -> anyhow::Result<Value> {
         serde_json::from_str(&self.belt_raw[index]).context("decode native core belt")
+    }
+
+    pub(crate) fn entity_raw_matches(
+        &self,
+        own_index: usize,
+        other: &CoreState,
+        other_index: usize,
+    ) -> bool {
+        self.entity_raw[own_index] == other.entity_raw[other_index]
+    }
+
+    pub(crate) fn belt_raw_matches(
+        &self,
+        own_index: usize,
+        other: &CoreState,
+        other_index: usize,
+    ) -> bool {
+        self.belt_raw[own_index] == other.belt_raw[other_index]
+    }
+
+    /// Immutable persisted-order belt rows incident to one entity. Command
+    /// eligibility uses this adjacency instead of scanning every belt.
+    pub(crate) fn incident_belt_indices(
+        &self,
+        entity_index: usize,
+    ) -> impl Iterator<Item = usize> + '_ {
+        self.factory_topology
+            .entity_belt_adjacency
+            .incident(entity_index)
+            .iter()
+            .copied()
+            .map(expand_topology_index)
     }
 
     pub(crate) fn belt_raw_record(&self, index: usize) -> &RawRecord {
@@ -2578,7 +4866,10 @@ impl CoreState {
         {
             bail!("native belt runtime topology changed");
         }
-        self.belt_dynamics.validate(rows)?;
+        // Full value validation is paid when records enter the resident state.
+        // Per-revision runtimes only need this fixed-depth shape proof; every
+        // subsequently writable page is value-validated before publication.
+        self.belt_dynamics.validate_shape(rows)?;
         Ok(rows)
     }
 
@@ -2593,6 +4884,42 @@ impl CoreState {
 
     pub(crate) fn parse_entities_parallel(&self) -> anyhow::Result<Vec<Value>> {
         parse_records_parallel(&self.entity_raw, "native core entity")
+    }
+
+    pub(crate) fn parse_entities_with_runtime_diagnostics(
+        &self,
+        runtime: &DeterministicRuntime,
+    ) -> (anyhow::Result<Vec<Value>>, IndexedPrepareDiagnostics) {
+        parse_records_with_runtime_diagnostics(runtime, &self.entity_raw, "native core entity")
+    }
+
+    pub(crate) fn take_entities_for_simulation(&self) -> anyhow::Result<Vec<Value>> {
+        if let Some(values) = self.parsed_entity_runtime.take(self.entity_raw.len()) {
+            if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\tstate-entity-runtime-cache\treused\trows={}",
+                    values.len()
+                );
+            }
+            return Ok(values);
+        }
+        if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tstate-entity-runtime-cache\tdecoded\trows={}",
+                self.entity_raw.len()
+            );
+        }
+        self.parse_entities_parallel()
+    }
+
+    fn install_parsed_entity_runtime(&mut self, values: Vec<Value>) {
+        debug_assert_eq!(values.len(), self.entity_raw.len());
+        self.parsed_entity_runtime = Arc::new(EntityRuntimeCache::with_values(values));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parsed_entity_runtime_rows_for_test(&self) -> usize {
+        self.parsed_entity_runtime.resident_rows()
     }
 
     /// Read-only scalar access over the authoritative raw row. The former dense
@@ -2658,12 +4985,184 @@ impl CoreState {
     }
 
     pub(crate) fn base_value_mut(&mut self) -> &mut Map<String, Value> {
+        // This escape hatch is intentionally conservative. Product hot paths
+        // use typed commit/install APIs below; ad-hoc callers (mostly tests and
+        // recovery tools) cannot mutate a base field without dirtying every
+        // domain and therefore can never cause a stale checkpoint reuse.
+        self.save_dirty.mark_all_base();
         self.summary_cache.get_mut().take();
-        self.save_dirty.base = true;
+        self.production_history_tiers.invalidate();
+        self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         &mut self.base
+    }
+
+    /// Commands are applied to a disposable cloned state. Moving the base map
+    /// out through this boundary avoids cloning or invalidating the private
+    /// history tiers before the command has been classified. The caller must
+    /// rebuild the tiers whenever a patch can touch their public source.
+    pub(crate) fn take_base_for_command(&mut self) -> Map<String, Value> {
+        self.summary_cache.get_mut().take();
+        self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
+        std::mem::take(&mut self.base)
+    }
+
+    pub(crate) fn install_base_from_command(
+        &mut self,
+        base: Map<String, Value>,
+        rebuild_production_history: bool,
+    ) {
+        self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
+        self.base = base;
+        if rebuild_production_history {
+            self.rebuild_production_history_tiers();
+        }
+    }
+
+    pub(crate) fn mark_base_command_changes(
+        &mut self,
+        top_level_changes: &[crate::command::ValuePatch],
+        force_core: bool,
+    ) {
+        if force_core {
+            self.save_dirty.mark_base(BaseCheckpointDomain::Core);
+        }
+        for change in top_level_changes {
+            let Some(crate::command::PathSegment::Key(key)) = change.path.first() else {
+                self.save_dirty.mark_all_base();
+                continue;
+            };
+            self.save_dirty.mark_base(classify_base_checkpoint_key(key));
+        }
+    }
+
+    pub(crate) fn mark_base_command_derived_keys(&mut self, keys: &[&str]) {
+        for key in keys {
+            self.save_dirty.mark_base(classify_base_checkpoint_key(key));
+        }
     }
     pub(crate) fn base_value(&self) -> &Map<String, Value> {
         &self.base
+    }
+
+    /// Mirrors the public v47 continuum-simulation offline cap without
+    /// exposing the base object to Host. Missing optional research state is
+    /// level zero; malformed present values fail closed before any settlement.
+    pub fn offline_limit_seconds(&self) -> anyhow::Result<u64> {
+        const BASE_OFFLINE_SECONDS: u64 = 7 * 24 * 60 * 60;
+        const MAX_OFFLINE_SECONDS: u64 = 30 * 24 * 60 * 60;
+        const PER_LEVEL_SECONDS: u64 = 24 * 60 * 60;
+        let Some(endgame) = self.base.get("endgame") else {
+            return Ok(BASE_OFFLINE_SECONDS);
+        };
+        let endgame = endgame
+            .as_object()
+            .ok_or_else(|| anyhow!("native offline endgame state is invalid"))?;
+        let Some(infinite_research) = endgame.get("infiniteResearch") else {
+            return Ok(BASE_OFFLINE_SECONDS);
+        };
+        let infinite_research = infinite_research
+            .as_object()
+            .ok_or_else(|| anyhow!("native offline infinite research state is invalid"))?;
+        let Some(continuum) = infinite_research.get("continuum_simulation") else {
+            return Ok(BASE_OFFLINE_SECONDS);
+        };
+        let continuum = continuum
+            .as_object()
+            .ok_or_else(|| anyhow!("native offline continuum research state is invalid"))?;
+        let Some(level) = continuum.get("level") else {
+            return Ok(BASE_OFFLINE_SECONDS);
+        };
+        let level = level
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or_else(|| anyhow!("native offline continuum research level is invalid"))?;
+        let maximum_bonus_levels = (MAX_OFFLINE_SECONDS - BASE_OFFLINE_SECONDS) / PER_LEVEL_SECONDS;
+        let bounded_level = level.floor().min(maximum_bonus_levels as f64) as u64;
+        Ok(BASE_OFFLINE_SECONDS + bounded_level * PER_LEVEL_SECONDS)
+    }
+
+    pub fn exact_history_clock(&self) -> anyhow::Result<CoreExactHistoryClock> {
+        let read = |key: &str| {
+            self.base
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(|| anyhow!("native exact history clock field is invalid: {key}"))
+        };
+        let elapsed_seconds = read("elapsedSeconds")?;
+        let history_recorded_at = read("historyRecordedAt")?;
+        if history_recorded_at > elapsed_seconds + 0.0001 {
+            bail!("native exact history clock regressed before its sample cursor");
+        }
+        Ok(CoreExactHistoryClock {
+            revision: self.revision,
+            elapsed_seconds,
+            history_recorded_at,
+            history_clock_aligned: (elapsed_seconds - history_recorded_at).abs() <= 0.0001,
+        })
+    }
+
+    /// Read-only validated catalog payload for Host diagnostics/export. The
+    /// authoritative `Arc<RuntimeCatalog>` remains private so callers cannot
+    /// mutate derived maps behind topology and projection seals.
+    pub fn catalog_snapshot(&self) -> &crate::catalog::CatalogSnapshot {
+        &self.catalog.snapshot
+    }
+
+    pub(crate) fn invalidate_summary_cache(&self) {
+        self.summary_cache.replace(None);
+    }
+
+    pub(crate) fn refresh_production_history_tiers(&mut self) {
+        self.production_history_tiers
+            .refresh_after_internal_sample(&self.base);
+    }
+
+    pub(crate) fn production_history_tiers_candidate(
+        &self,
+    ) -> crate::production_history::TieredProductionHistory {
+        (*self.production_history_tiers).clone()
+    }
+
+    pub(crate) fn rebuild_production_history_tiers(&mut self) {
+        self.production_history_tiers.refresh_from_base(&self.base);
+    }
+
+    /// Exports only the disposable desktop diagnostics cache. The returned
+    /// value is excluded from public v47 state, canonical hashes and the
+    /// authoritative checkpoint manifest.
+    pub fn production_history_sidecar(&self) -> Option<Value> {
+        self.production_history_tiers.sidecar_value(&self.base)
+    }
+
+    pub fn factory_execution_diagnostics(
+        &self,
+    ) -> Option<&crate::factory_writer_events::FactoryExecutionDiagnostics> {
+        self.last_factory_execution_diagnostics
+            .as_ref()
+            .filter(|diagnostics| diagnostics.result_revision == self.revision)
+    }
+
+    pub(crate) fn install_factory_execution_diagnostics(
+        &mut self,
+        diagnostics: crate::factory_writer_events::FactoryExecutionDiagnostics,
+    ) -> anyhow::Result<()> {
+        if diagnostics.result_revision != self.revision {
+            bail!("native factory execution diagnostics revision is stale");
+        }
+        self.last_factory_execution_diagnostics = Some(diagnostics);
+        Ok(())
+    }
+
+    /// Installs a previously validated, identity-bound diagnostics cache.
+    /// Callers must treat every error as a cache miss and keep the history
+    /// rebuilt from public v47 state.
+    pub fn restore_production_history_sidecar(&mut self, value: Value) -> anyhow::Result<()> {
+        self.production_history_tiers
+            .restore_sidecar(&self.base, value)
     }
 
     /// Returns progress only when no other committed operation has interrupted
@@ -2671,9 +5170,45 @@ impl CoreState {
     /// move `revision`; observing that mismatch is the reset boundary.
     pub(crate) fn pure_idle_exact_seconds_used(&self) -> f64 {
         self.pure_idle_session
-            .filter(|session| session.last_committed_revision == self.revision)
+            .filter(|session| {
+                session.last_committed_revision == self.revision && !session.macro_v10
+            })
             .map(|session| session.exact_simulation_seconds_used)
             .unwrap_or(0.0)
+    }
+
+    pub(crate) fn pure_idle_macro_exact_seconds_used(&self) -> f64 {
+        self.pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision && session.macro_v10)
+            .map(|session| session.exact_simulation_seconds_used)
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn pure_idle_macro_construction_carry_seconds(&self) -> u8 {
+        self.pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision && session.macro_v10)
+            .map(|_| self.pure_idle_macro_construction_carry_seconds)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn pure_idle_macro_construction_quantum_replay_remaining_seconds(&self) -> u8 {
+        self.pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision && session.macro_v10)
+            .map(|_| self.pure_idle_macro_construction_quantum_replay_remaining_seconds)
+            .unwrap_or(PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS)
+    }
+
+    pub(crate) fn pure_idle_macro_construction_quantum_pending_credits(
+        &self,
+    ) -> BTreeMap<String, u64> {
+        self.pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision && session.macro_v10)
+            .filter(|_| self.pure_idle_macro_construction_quantum_replay_remaining_seconds > 0)
+            .map(|_| {
+                self.pure_idle_macro_construction_quantum_pending_credits
+                    .clone()
+            })
+            .unwrap_or_default()
     }
 
     /// Installs session progress on a disposable candidate. Callers must do
@@ -2683,37 +5218,122 @@ impl CoreState {
         &mut self,
         exact_simulation_seconds_used: f64,
     ) -> anyhow::Result<()> {
-        PureIdleSessionState {
+        let session = PureIdleSessionState {
             format_version: PURE_IDLE_SESSION_FORMAT_VERSION,
             exact_simulation_seconds_used,
             last_committed_revision: self.revision,
+            macro_v10: false,
         }
-        .validate(self.revision)
-        .map(|session| self.pure_idle_session = Some(session))
+        .validate(self.revision)?;
+        self.pure_idle_session = Some(session);
+        self.pure_idle_macro_construction_carry_seconds = 0;
+        self.pure_idle_macro_construction_quantum_replay_remaining_seconds =
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS;
+        self.pure_idle_macro_construction_quantum_pending_credits
+            .clear();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_pure_idle_macro_session_progress(
+        &mut self,
+        exact_simulation_seconds_used: f64,
+    ) -> anyhow::Result<()> {
+        let quantum_replay_remaining_seconds =
+            self.pure_idle_macro_construction_quantum_replay_remaining_seconds();
+        let quantum_pending_credits = self.pure_idle_macro_construction_quantum_pending_credits();
+        self.install_pure_idle_macro_session_progress_with_construction_state(
+            exact_simulation_seconds_used,
+            0,
+            quantum_replay_remaining_seconds,
+            quantum_pending_credits,
+        )
+    }
+
+    pub(crate) fn install_pure_idle_macro_session_progress_with_construction_state(
+        &mut self,
+        exact_simulation_seconds_used: f64,
+        construction_carry_seconds: u8,
+        construction_quantum_replay_remaining_seconds: u8,
+        construction_quantum_pending_credits: BTreeMap<String, u64>,
+    ) -> anyhow::Result<()> {
+        if construction_carry_seconds >= PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS {
+            bail!("native core macro construction cursor is invalid");
+        }
+        if construction_quantum_replay_remaining_seconds
+            > PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        {
+            bail!("native core macro construction quantum replay cursor is invalid");
+        }
+        validate_construction_quantum_pending_credits(&construction_quantum_pending_credits)?;
+        if construction_quantum_replay_remaining_seconds == 0
+            && !construction_quantum_pending_credits.is_empty()
+        {
+            bail!("native core macro construction quantum pending credits are orphaned");
+        }
+        let session = PureIdleSessionState {
+            format_version: PURE_IDLE_SESSION_FORMAT_VERSION,
+            exact_simulation_seconds_used,
+            last_committed_revision: self.revision,
+            macro_v10: true,
+        }
+        .validate(self.revision)?;
+        self.pure_idle_session = Some(session);
+        self.pure_idle_macro_construction_carry_seconds = construction_carry_seconds;
+        self.pure_idle_macro_construction_quantum_replay_remaining_seconds =
+            construction_quantum_replay_remaining_seconds;
+        self.pure_idle_macro_construction_quantum_pending_credits =
+            construction_quantum_pending_credits;
+        Ok(())
+    }
+
+    /// Drops every runtime/private pure-idle cursor without touching public
+    /// GameState v47. One-shot offline settlement calls this before commit so
+    /// a later powered time-warp session cannot inherit calibration credit,
+    /// construction carry, or quantum replay allowance from another clock
+    /// authority.
+    pub(crate) fn clear_pure_idle_private_session(&mut self) {
+        self.pure_idle_session = None;
+        self.pure_idle_macro_construction_carry_seconds = 0;
+        self.pure_idle_macro_construction_quantum_replay_remaining_seconds =
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS;
+        self.pure_idle_macro_construction_quantum_pending_credits
+            .clear();
+        self.pure_idle_macro_runtime = None;
     }
 
     pub(crate) fn replace_entity_raw(&mut self, index: usize, value: RawRecord) {
+        self.parsed_entity_runtime.clear();
         self.summary_cache.get_mut().take();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
+        self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         self.entity_raw[index] = value;
         self.save_dirty.mark_entity(index);
     }
 
     pub(crate) fn replace_belt_raw(&mut self, index: usize, value: RawRecord) {
         self.summary_cache.get_mut().take();
+        self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         self.belt_raw[index] = value;
         self.save_dirty.mark_belt(index);
     }
 
     pub(crate) fn entity_raw_mut_topology(&mut self) -> &mut Vec<RawRecord> {
+        self.parsed_entity_runtime.clear();
         self.summary_cache.get_mut().take();
         self.save_dirty.mark_entity_topology();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
+        self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         &mut self.entity_raw
     }
 
     pub(crate) fn belt_raw_mut_topology(&mut self) -> &mut Vec<RawRecord> {
         self.summary_cache.get_mut().take();
+        self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         self.save_dirty.mark_belt_topology();
         &mut self.belt_raw
     }
@@ -2726,6 +5346,78 @@ impl CoreState {
         next_revision: u64,
         populate_summary_cache: bool,
     ) -> anyhow::Result<Option<CoreStateSummary>> {
+        self.commit_simulated_state_with_campaign_writers(
+            base,
+            entities,
+            belt_commit,
+            next_revision,
+            populate_summary_cache,
+            None,
+        )
+    }
+
+    pub(crate) fn commit_simulated_state_with_campaign_writers(
+        &mut self,
+        base: Map<String, Value>,
+        entities: Vec<Value>,
+        belt_commit: crate::belts::BeltCommitBatch,
+        next_revision: u64,
+        populate_summary_cache: bool,
+        campaign_metric_writer_indices: Option<&[usize]>,
+    ) -> anyhow::Result<Option<CoreStateSummary>> {
+        let campaign_projection_update =
+            self.campaign_projection_runtime.prepare_simulation_update(
+                self,
+                &entities,
+                campaign_metric_writer_indices,
+                next_revision,
+            );
+        self.commit_simulated_state_with_campaign_projection_update(
+            base,
+            entities,
+            belt_commit,
+            next_revision,
+            populate_summary_cache,
+            campaign_projection_update,
+        )
+    }
+
+    pub(crate) fn commit_simulated_state_with_campaign_projection_update(
+        &mut self,
+        base: Map<String, Value>,
+        entities: Vec<Value>,
+        belt_commit: crate::belts::BeltCommitBatch,
+        next_revision: u64,
+        populate_summary_cache: bool,
+        campaign_projection_update: crate::campaign::PreparedCampaignProjectionUpdate,
+    ) -> anyhow::Result<Option<CoreStateSummary>> {
+        self.commit_simulated_state_with_campaign_projection_update_and_history(
+            base,
+            entities,
+            belt_commit,
+            next_revision,
+            populate_summary_cache,
+            PreparedSimulationRuntimeUpdates {
+                campaign_projection: campaign_projection_update,
+                production_history_tiers: None,
+            },
+        )
+    }
+
+    pub(crate) fn commit_simulated_state_with_campaign_projection_update_and_history(
+        &mut self,
+        base: Map<String, Value>,
+        entities: Vec<Value>,
+        belt_commit: crate::belts::BeltCommitBatch,
+        next_revision: u64,
+        populate_summary_cache: bool,
+        runtime_updates: PreparedSimulationRuntimeUpdates,
+    ) -> anyhow::Result<Option<CoreStateSummary>> {
+        let PreparedSimulationRuntimeUpdates {
+            campaign_projection: campaign_projection_update,
+            production_history_tiers,
+        } = runtime_updates;
+        let production_history_tiers_prepared = production_history_tiers.is_some();
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
         macro_rules! profile_mark {
@@ -2768,6 +5460,13 @@ impl CoreState {
         let entity_writeback =
             encode_entity_records_full(&entities, &self.entity_raw, &self.entities.ids)?;
         let (entity_writeback, inventory_entry_count, shared_rows) = entity_writeback.into_parts();
+        let changed_entity_indices = entity_writeback
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                (!Arc::ptr_eq(row, &self.entity_raw[index])).then_some(index)
+            })
+            .collect::<Vec<_>>();
         let entity_dynamics =
             EntityDynamicColumns::from_full_encode(entities.len(), inventory_entry_count);
         let entity_dynamics_changed = !entity_dynamics.bitwise_eq(&self.entity_dynamics);
@@ -2776,6 +5475,8 @@ impl CoreState {
             shared_rows,
             changed_rows: entity_writeback.len() - shared_rows,
         };
+        let changed_base_domains = BASE_CHECKPOINT_DOMAINS
+            .map(|domain| base_checkpoint_domain_changed(&self.base, &base, domain));
         if profile_enabled {
             eprintln!(
                 "DSP_NATIVE_CORE_PROFILE\tcommit-entity-raw-full-encode\t{:.3}\tencoded={}\tshared={}\tchanged={}",
@@ -2792,13 +5493,16 @@ impl CoreState {
         // valid candidate may replace `self`.
         let mut candidate = self.clone();
         candidate.summary_cache.get_mut().take();
-        if candidate.base != base {
-            candidate.save_dirty.base = true;
-        }
-        for (index, row) in entity_writeback.iter().enumerate() {
-            if !Arc::ptr_eq(row, &self.entity_raw[index]) {
-                candidate.save_dirty.mark_entity(index);
+        for (domain, changed) in BASE_CHECKPOINT_DOMAINS
+            .into_iter()
+            .zip(changed_base_domains)
+        {
+            if changed {
+                candidate.save_dirty.mark_base(domain);
             }
+        }
+        for &index in &changed_entity_indices {
+            candidate.save_dirty.mark_entity(index);
         }
         for patch in belt_patches {
             let (index, raw) = patch.into_parts();
@@ -2810,9 +5514,14 @@ impl CoreState {
             }
         }
         candidate.base = base;
+        if let Some(production_history_tiers) = production_history_tiers.as_ref() {
+            production_history_tiers.validate_current(&candidate.base)?;
+        }
         if writeback_diagnostics.changed_rows != 0 {
             candidate.entity_raw = entity_writeback.into();
         }
+        candidate
+            .update_production_history_inventory_runtime(&entities, &changed_entity_indices)?;
         candidate.last_entity_raw_writeback = writeback_diagnostics;
         if entity_dynamics_changed {
             candidate.entity_dynamics = entity_dynamics.into();
@@ -2820,19 +5529,71 @@ impl CoreState {
         if let Some(belt_dynamics) = belt_dynamics {
             candidate.belt_dynamics = belt_dynamics.into();
         }
+        if let Some(production_history_tiers) = production_history_tiers {
+            candidate.production_history_tiers = production_history_tiers.into();
+        }
         candidate.revision = next_revision;
-        let summary = if populate_summary_cache {
+        // Operations is a disposable, hash-neutral read model. Failure to
+        // derive its incremental projection must never make an otherwise
+        // valid simulation commit depend on whether the player opened the
+        // Operations workspace. Drop the cache and rebuild it lazily instead.
+        let operations_projection_update = self
+            .operations_projection_runtime
+            .prepare_simulation_update(
+                self,
+                &candidate.base,
+                &entities,
+                &changed_entity_indices,
+                next_revision,
+            )
+            .unwrap_or_else(|_| {
+                crate::operations_workspace::PreparedOperationsProjectionUpdate::reset_after_prepare_error()
+            });
+        let mut summary = if populate_summary_cache {
             let canonical = candidate.canonical_digest_bundle_with_parsed(Some(&entities), None)?;
             let summary = candidate.summary_from_digest(canonical);
-            candidate
-                .summary_cache
-                .replace(Some((candidate.revision, summary.clone())));
             Some(summary)
         } else {
             None
         };
+        let retired_entities = if sync_record_drop_enabled() {
+            Some(entities)
+        } else {
+            candidate.install_parsed_entity_runtime(entities);
+            None
+        };
+        // All fallible candidate work is complete. Move the live disposable
+        // cache now, apply its already-proved patch, and publish it together
+        // with the same state revision. Transactional clones never shared this
+        // cache, so a failed candidate above left the source projection intact.
+        let operations_projection_runtime = std::mem::take(&mut self.operations_projection_runtime);
+        operations_projection_runtime.install_simulation_update(operations_projection_update);
+        candidate.operations_projection_runtime = operations_projection_runtime;
+        let campaign_projection_runtime = std::mem::take(&mut self.campaign_projection_runtime);
+        campaign_projection_runtime.install_simulation_update(campaign_projection_update);
+        candidate.campaign_projection_runtime = campaign_projection_runtime;
+        if let Some(value) = summary.as_mut() {
+            value.memory = candidate.memory_estimate();
+            candidate
+                .summary_cache
+                .replace(Some(CachedCoreStateSummary {
+                    revision: candidate.revision,
+                    operations_projection_runtime_bytes: candidate
+                        .operations_projection_runtime
+                        .estimated_bytes(),
+                    campaign_projection_runtime_bytes: candidate
+                        .campaign_projection_runtime
+                        .estimated_bytes(),
+                    summary: value.clone(),
+                }));
+        }
         *self = candidate;
-        retire_record_values(entities, Vec::new());
+        if !production_history_tiers_prepared {
+            self.refresh_production_history_tiers();
+        }
+        if let Some(entities) = retired_entities {
+            retire_record_values(entities, Vec::new());
+        }
         profile_last!("install");
         Ok(summary)
     }
@@ -2857,9 +5618,12 @@ impl CoreState {
         let checksum;
         {
             let mut write = |text: &str| -> anyhow::Result<()> {
+                let next_byte_length = byte_length
+                    .checked_add(u64::try_from(text.len())?)
+                    .ok_or_else(|| anyhow!("native v47 export byte length overflowed"))?;
                 writer.write_all(text.as_bytes())?;
                 envelope_sha.update(text.as_bytes());
-                byte_length = byte_length.saturating_add(text.len() as u64);
+                byte_length = next_byte_length;
                 Ok(())
             };
             let prefix = format!(
@@ -2982,7 +5746,7 @@ impl CoreState {
         let entities = entity_ids
             .iter()
             .filter_map(|id| self.entity_index.get(id).copied())
-            .map(|index| self.parse_entity(index))
+            .map(|index| self.parse_entity(index).map(renderer_entity_projection))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let belts = belt_ids
             .iter()
@@ -3058,34 +5822,37 @@ impl CoreState {
             .entities_by_planet
             .get(planet_index)
             .ok_or_else(|| anyhow!("native viewport projection planet index is invalid"))?;
-        let matching = candidates.iter().copied().filter(|&index| {
-            let x = self.entities.position_x[index];
-            let y = self.entities.position_y[index];
-            x >= min_x && x <= max_x && y >= min_y && y <= max_y
-        });
+        let matching = candidates
+            .iter()
+            .copied()
+            .map(expand_topology_index)
+            .filter(|&index| {
+                let x = self.entities.position_x[index];
+                let y = self.entities.position_y[index];
+                x >= min_x && x <= max_x && y >= min_y && y <= max_y
+            });
         let mut selected_indices = matching
             .skip(entity_cursor)
             .take(entity_limit.saturating_add(1))
             .collect::<Vec<_>>();
         let has_more_entities = selected_indices.len() > entity_limit;
         selected_indices.truncate(entity_limit);
-        let selected_ids = selected_indices
+        let mut incident_belts = selected_indices
             .iter()
-            .map(|&index| &self.entities.ids[index])
-            .collect::<HashSet<_>>();
-        let mut selected_belts = self
-            .factory_topology
-            .belts_by_planet
-            .get(planet_index)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|&index| {
-                let source = self.symbols.resolve(self.belts.sources[index]);
-                let target = self.symbols.resolve(self.belts.targets[index]);
-                source.is_some_and(|id| selected_ids.contains(id))
-                    || target.is_some_and(|id| selected_ids.contains(id))
+            .flat_map(|&entity_index| {
+                self.factory_topology
+                    .entity_belt_adjacency
+                    .incident(entity_index)
+                    .iter()
+                    .copied()
+                    .map(expand_topology_index)
             })
+            .collect::<Vec<_>>();
+        incident_belts.sort_unstable();
+        incident_belts.dedup();
+        let mut selected_belts = incident_belts
+            .into_iter()
+            .filter(|&index| self.symbols.resolve(self.belts.planets[index]) == Some(planet_id))
             .take(belt_limit.saturating_add(1))
             .collect::<Vec<_>>();
         let has_more_belts = selected_belts.len() > belt_limit;
@@ -3100,7 +5867,7 @@ impl CoreState {
         let entities = selected_indices
             .iter()
             .copied()
-            .map(|index| self.parse_entity(index))
+            .map(|index| self.parse_entity(index).map(renderer_entity_projection))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let belts = selected_belts
             .iter()
@@ -3122,6 +5889,295 @@ impl CoreState {
         });
         if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
             bail!("native viewport projection exceeds the byte limit");
+        }
+        Ok(value)
+    }
+
+    /// Second-generation viewport projection with independently pageable
+    /// entity and belt streams. Ordinary entities come from the immutable
+    /// per-planet spatial grid; ordinary belts come from the immutable
+    /// entity-to-belt CSR for every visible entity, never merely the current
+    /// entity page. Explicitly pinned IDs are merged after pagination so a
+    /// selected off-screen object remains available to the thin renderer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn viewport_projection_v2(
+        &self,
+        base_fields: &[String],
+        planet_id: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        entity_cursor: usize,
+        entity_limit: usize,
+        belt_cursor: usize,
+        belt_limit: usize,
+        pinned_entity_ids: &[String],
+        pinned_belt_ids: &[String],
+    ) -> anyhow::Result<Value> {
+        self.viewport_projection_v2_with_entity_presentation(
+            base_fields,
+            planet_id,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            entity_cursor,
+            entity_limit,
+            belt_cursor,
+            belt_limit,
+            pinned_entity_ids,
+            pinned_belt_ids,
+            None,
+        )
+    }
+
+    /// Opt-in extension of [`Self::viewport_projection_v2`] that appends a
+    /// projection-only presentation row for every returned entity. The legacy
+    /// entry point above retains both its signature and exact response shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn viewport_projection_v2_with_entity_presentation(
+        &self,
+        base_fields: &[String],
+        planet_id: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        entity_cursor: usize,
+        entity_limit: usize,
+        belt_cursor: usize,
+        belt_limit: usize,
+        pinned_entity_ids: &[String],
+        pinned_belt_ids: &[String],
+        entity_presentation_version: Option<u8>,
+    ) -> anyhow::Result<Value> {
+        if entity_presentation_version.is_some_and(|version| version != 1) {
+            bail!("native viewport v2 entity presentation version is unsupported");
+        }
+        if base_fields.len() > MAX_PROJECTION_BASE_FIELDS
+            || entity_limit == 0
+            || entity_limit > MAX_VIEWPORT_PROJECTION_ENTITIES
+            || belt_limit == 0
+            || belt_limit > MAX_VIEWPORT_PROJECTION_BELTS
+            || pinned_entity_ids.len() > MAX_VIEWPORT_PINNED_ENTITIES
+            || pinned_belt_ids.len() > MAX_VIEWPORT_PINNED_BELTS
+            || entity_cursor > self.entity_raw.len()
+            || belt_cursor > self.belt_raw.len()
+            || [min_x, min_y, max_x, max_y]
+                .iter()
+                .any(|value| !value.is_finite())
+            || min_x > max_x
+            || min_y > max_y
+            || max_x - min_x > 10_000_000.0
+            || max_y - min_y > 10_000_000.0
+        {
+            bail!("native viewport v2 bounds or limits are invalid");
+        }
+        let valid_base_key = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 160
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')
+                })
+        };
+        // Entity, belt and planet IDs are opaque content-pack identifiers.
+        // Bound only their encoded size and NUL use; do not impose the core
+        // catalog's ASCII spelling on MOD-owned IDs.
+        let valid_opaque_id = |value: &str| {
+            !value.is_empty()
+                && value.len() <= MAX_VIEWPORT_OPAQUE_ID_BYTES
+                && !value.contains('\0')
+        };
+        if !valid_opaque_id(planet_id)
+            || base_fields.iter().any(|field| {
+                !valid_base_key(field) || matches!(field.as_str(), "entities" | "belts")
+            })
+            || pinned_entity_ids.iter().any(|id| !valid_opaque_id(id))
+            || pinned_belt_ids.iter().any(|id| !valid_opaque_id(id))
+        {
+            bail!("native viewport v2 selector is invalid");
+        }
+
+        let planet_index = self
+            .catalog
+            .planets
+            .iter()
+            .position(|planet| planet.id == planet_id)
+            .ok_or_else(|| anyhow!("native viewport v2 planet is missing"))?;
+        let planet_entities = self
+            .factory_topology
+            .entities_by_planet
+            .get(planet_index)
+            .ok_or_else(|| anyhow!("native viewport v2 planet index is invalid"))?;
+        let planet_belt_count = self
+            .factory_topology
+            .belt_counts_by_planet
+            .get(planet_index)
+            .copied()
+            .ok_or_else(|| anyhow!("native viewport v2 belt planet index is invalid"))?;
+        let spatial = self
+            .factory_topology
+            .planet_viewport_indexes
+            .get(planet_index)
+            .ok_or_else(|| anyhow!("native viewport v2 spatial index is missing"))?;
+        let (visible_entity_indices, broad_query_fallback) =
+            spatial.query(planet_entities, &self.entities, min_x, min_y, max_x, max_y);
+        if entity_cursor > visible_entity_indices.len() {
+            bail!("native viewport v2 entity cursor is invalid");
+        }
+
+        let entity_page_end = entity_cursor
+            .saturating_add(entity_limit)
+            .min(visible_entity_indices.len());
+        let mut returned_entity_indices =
+            visible_entity_indices[entity_cursor..entity_page_end].to_vec();
+        let mut resolved_pinned_entity_indices = pinned_entity_ids
+            .iter()
+            .filter_map(|id| self.entity_index.get(id).copied())
+            .filter(|&index| self.factory_topology.entity_planet_indices[index] == planet_index)
+            .collect::<Vec<_>>();
+        resolved_pinned_entity_indices.sort_unstable();
+        resolved_pinned_entity_indices.dedup();
+        returned_entity_indices.extend_from_slice(&resolved_pinned_entity_indices);
+        returned_entity_indices.sort_unstable();
+        returned_entity_indices.dedup();
+
+        // The ordinary belt stream is derived from every visible node plus
+        // any selected off-screen node. It therefore remains identical while
+        // entity pages advance through the same viewport.
+        let mut belt_source_entities = visible_entity_indices.clone();
+        belt_source_entities.extend_from_slice(&resolved_pinned_entity_indices);
+        belt_source_entities.sort_unstable();
+        belt_source_entities.dedup();
+        let mut visible_belt_indices = Vec::new();
+        for entity_index in belt_source_entities {
+            visible_belt_indices.extend(
+                self.factory_topology
+                    .entity_belt_adjacency
+                    .incident(entity_index)
+                    .iter()
+                    .copied()
+                    .map(expand_topology_index),
+            );
+        }
+        visible_belt_indices.sort_unstable();
+        visible_belt_indices.dedup();
+        visible_belt_indices
+            .retain(|&index| self.symbols.resolve(self.belts.planets[index]) == Some(planet_id));
+        if belt_cursor > visible_belt_indices.len() {
+            bail!("native viewport v2 belt cursor is invalid");
+        }
+
+        let belt_page_end = belt_cursor
+            .saturating_add(belt_limit)
+            .min(visible_belt_indices.len());
+        let mut returned_belt_indices = visible_belt_indices[belt_cursor..belt_page_end].to_vec();
+        let mut resolved_pinned_belt_indices = pinned_belt_ids
+            .iter()
+            .filter_map(|id| self.belt_index.get(id).copied())
+            .filter(|&index| self.symbols.resolve(self.belts.planets[index]) == Some(planet_id))
+            .collect::<Vec<_>>();
+        resolved_pinned_belt_indices.sort_unstable();
+        resolved_pinned_belt_indices.dedup();
+        returned_belt_indices.extend_from_slice(&resolved_pinned_belt_indices);
+        returned_belt_indices.sort_unstable();
+        returned_belt_indices.dedup();
+
+        let mut base = Map::new();
+        for field in base_fields {
+            if let Some(value) = self.base.get(field) {
+                base.insert(field.clone(), value.clone());
+            }
+        }
+        let (entities, entity_presentation) = if entity_presentation_version == Some(1) {
+            let rows = returned_entity_indices
+                .iter()
+                .copied()
+                .map(|index| {
+                    let entity = renderer_entity_projection(self.parse_entity(index)?);
+                    let presentation = crate::factory_canvas_presentation::project_entity(
+                        &self.identity.registry_fingerprint,
+                        &self.catalog,
+                        &self.base,
+                        &entity,
+                    );
+                    Ok((entity, presentation))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let (entities, presentation) = rows.into_iter().unzip();
+            (entities, Some(presentation))
+        } else {
+            (
+                returned_entity_indices
+                    .iter()
+                    .copied()
+                    .map(|index| self.parse_entity(index).map(renderer_entity_projection))
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                None,
+            )
+        };
+        let belts = returned_belt_indices
+            .iter()
+            .copied()
+            .map(|index| self.parse_belt(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let pinned_entity_ids = resolved_pinned_entity_indices
+            .iter()
+            .map(|&index| self.entities.ids[index].to_owned())
+            .collect::<Vec<_>>();
+        let pinned_belt_ids = resolved_pinned_belt_indices
+            .iter()
+            .map(|&index| self.belts.ids[index].to_owned())
+            .collect::<Vec<_>>();
+        let next_entity_cursor =
+            (entity_page_end < visible_entity_indices.len()).then_some(entity_page_end);
+        let next_belt_cursor =
+            (belt_page_end < visible_belt_indices.len()).then_some(belt_page_end);
+        let world_bounds = spatial.world_bounds.as_json();
+        let mut value = serde_json::json!({
+            "schemaVersion": 2,
+            "projectionType": "viewport-v2",
+            "revision": self.revision,
+            "planetId": planet_id,
+            "bounds": { "minX": min_x, "minY": min_y, "maxX": max_x, "maxY": max_y },
+            "base": base,
+            "entities": entities,
+            "belts": belts,
+            "pinnedEntityIds": pinned_entity_ids,
+            "pinnedBeltIds": pinned_belt_ids,
+            "nextEntityCursor": next_entity_cursor,
+            "nextBeltCursor": next_belt_cursor,
+            "planetTotals": {
+                "entities": planet_entities.len(),
+                "belts": planet_belt_count,
+            },
+            "viewportTotals": {
+                "entities": visible_entity_indices.len(),
+                "belts": visible_belt_indices.len(),
+            },
+            "worldBounds": world_bounds,
+            "minimap": {
+                "bounds": spatial.world_bounds.as_json(),
+                "entityCount": planet_entities.len(),
+                "beltCount": planet_belt_count,
+                "occupiedCellCount": spatial.cell_keys.len(),
+                "cellSize": VIEWPORT_SPATIAL_CELL_SIZE,
+            },
+            "broadQueryFallback": broad_query_fallback,
+        });
+        if let Some(entity_presentation) = entity_presentation {
+            let object = value
+                .as_object_mut()
+                .expect("viewport v2 projection is always a JSON object");
+            object.insert("entityPresentationVersion".to_owned(), Value::from(1));
+            object.insert(
+                "entityPresentation".to_owned(),
+                Value::Array(entity_presentation),
+            );
+        }
+        if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
+            bail!("native viewport v2 projection exceeds the byte limit");
         }
         Ok(value)
     }
@@ -3172,11 +6228,8 @@ impl CoreState {
             bail!("native statistics projection item is missing");
         }
         let history = self
-            .base
-            .get("productionHistory")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+            .production_history_tiers
+            .samples_if_current(&self.base)?;
         let matching = history.iter().filter(|sample| {
             sample
                 .get("elapsedSeconds")
@@ -3221,6 +6274,277 @@ impl CoreState {
         });
         if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
             bail!("native statistics projection exceeds the byte limit");
+        }
+        Ok(value)
+    }
+
+    /// Builds the complete dynamic read model for the technology workspace.
+    ///
+    /// The payload is constant-size with respect to factory entities and belts:
+    /// entity records are inspected only inside the native process to aggregate
+    /// the six matrix stocks and are never cloned into the renderer. Research
+    /// collections retain their total counts and explicit truncation markers so
+    /// an over-limit save can be rejected as one atom by the renderer.
+    pub fn technology_projection(&self) -> anyhow::Result<Value> {
+        let research = self
+            .base
+            .get("research")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection research is missing"))?;
+        let endgame = self
+            .base
+            .get("endgame")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection endgame is missing"))?;
+        let settings = self
+            .base
+            .get("settings")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection settings are missing"))?;
+
+        let optional_id = |record: &Map<String, Value>, key: &str| -> anyhow::Result<Value> {
+            match record.get(key) {
+                None | Some(Value::Null) => Ok(Value::Null),
+                Some(Value::String(value)) if !value.is_empty() && value.len() <= 1_024 => {
+                    Ok(Value::String(value.clone()))
+                }
+                _ => bail!("native technology projection {key} is invalid"),
+            }
+        };
+        let bounded_ids = |key: &str| -> anyhow::Result<(Vec<Value>, usize, bool)> {
+            let values = research
+                .get(key)
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("native technology projection {key} is missing"))?;
+            let rows = values
+                .iter()
+                .take(MAX_TECHNOLOGY_PROJECTION_TECH_ROWS)
+                .map(|value| match value {
+                    Value::String(id) if !id.is_empty() && id.len() <= 1_024 => {
+                        Ok(Value::String(id.clone()))
+                    }
+                    _ => bail!("native technology projection {key} row is invalid"),
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok((
+                rows,
+                values.len(),
+                values.len() > MAX_TECHNOLOGY_PROJECTION_TECH_ROWS,
+            ))
+        };
+        let (completed_tech_ids, completed_count, completed_truncated) =
+            bounded_ids("completedTechIds")?;
+        let (queued_tech_ids, queued_count, queued_truncated) = bounded_ids("queuedTechIds")?;
+
+        let progress = research
+            .get("progressByTech")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection progress is missing"))?;
+        let mut progress_entries = progress.iter().collect::<Vec<_>>();
+        progress_entries.sort_by(|left, right| left.0.cmp(right.0));
+        let mut progress_truncated = progress_entries.len() > MAX_TECHNOLOGY_PROJECTION_TECH_ROWS;
+        let mut progress_rows = Vec::with_capacity(
+            progress_entries
+                .len()
+                .min(MAX_TECHNOLOGY_PROJECTION_TECH_ROWS),
+        );
+        for (tech_id, value) in progress_entries
+            .into_iter()
+            .take(MAX_TECHNOLOGY_PROJECTION_TECH_ROWS)
+        {
+            if tech_id.is_empty() || tech_id.len() > 1_024 {
+                bail!("native technology projection progress technology is invalid");
+            }
+            let items = value
+                .as_object()
+                .ok_or_else(|| anyhow!("native technology projection progress row is invalid"))?;
+            let mut item_entries = items.iter().collect::<Vec<_>>();
+            item_entries.sort_by(|left, right| left.0.cmp(right.0));
+            let row_truncated = item_entries.len() > MAX_TECHNOLOGY_PROJECTION_PROGRESS_ITEMS;
+            progress_truncated |= row_truncated;
+            let item_rows = item_entries
+                .into_iter()
+                .take(MAX_TECHNOLOGY_PROJECTION_PROGRESS_ITEMS)
+                .map(|(item_id, amount)| {
+                    let amount = amount.as_f64().filter(|amount| {
+                        amount.is_finite() && *amount >= 0.0 && amount.fract() == 0.0
+                    });
+                    if item_id.is_empty() || item_id.len() > 1_024 || amount.is_none() {
+                        bail!("native technology projection progress item is invalid");
+                    }
+                    Ok(serde_json::json!({ "itemId": item_id, "amount": amount.unwrap() }))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            progress_rows.push(serde_json::json!({
+                "techId": tech_id,
+                "totalCount": items.len(),
+                "truncated": row_truncated,
+                "items": item_rows,
+            }));
+        }
+
+        let infinite = endgame
+            .get("infiniteResearch")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native technology projection infinite research is missing"))?;
+        let mut infinite_entries = infinite.iter().collect::<Vec<_>>();
+        infinite_entries.sort_by(|left, right| left.0.cmp(right.0));
+        let infinite_truncated = infinite_entries.len() > MAX_TECHNOLOGY_PROJECTION_INFINITE_ROWS;
+        let infinite_rows = infinite_entries
+            .into_iter()
+            .take(MAX_TECHNOLOGY_PROJECTION_INFINITE_ROWS)
+            .map(|(research_id, value)| {
+                if research_id.is_empty() || research_id.len() > 1_024 {
+                    bail!("native technology projection infinite research id is invalid");
+                }
+                let value = value.as_object().ok_or_else(|| {
+                    anyhow!("native technology projection infinite research row is invalid")
+                })?;
+                let level = value
+                    .get("level")
+                    .and_then(Value::as_f64)
+                    .filter(|level| level.is_finite() && *level >= 0.0 && level.fract() == 0.0)
+                    .ok_or_else(|| {
+                        anyhow!("native technology projection infinite level is invalid")
+                    })?;
+                let historical_level = match value.get("historicalLevel") {
+                    None | Some(Value::Null) => Value::Null,
+                    Some(value) => {
+                        let level = value.as_f64().filter(|level| {
+                            level.is_finite() && *level >= 0.0 && level.fract() == 0.0
+                        });
+                        match level {
+                            Some(level) => Value::from(level),
+                            None => bail!(
+                                "native technology projection infinite historical level is invalid"
+                            ),
+                        }
+                    }
+                };
+                let progress = value
+                    .get("progress")
+                    .and_then(Value::as_str)
+                    .filter(|progress| {
+                        !progress.is_empty()
+                            && progress.len() <= 1_024
+                            && progress.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    .ok_or_else(|| {
+                        anyhow!("native technology projection infinite progress is invalid")
+                    })?;
+                Ok(serde_json::json!({
+                    "researchId": research_id,
+                    "level": level,
+                    "historicalLevel": historical_level,
+                    "progress": progress,
+                }))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let mut matrix_stock = [0.0_f64; TECHNOLOGY_PROJECTION_MATRIX_ITEMS.len()];
+        for index in 0..self.entity_raw.len() {
+            let entity = self.parse_entity(index)?;
+            for inventory in [entity.get("inputs"), entity.get("outputs")]
+                .into_iter()
+                .filter_map(|value| value.and_then(Value::as_object))
+            {
+                for (matrix_index, item_id) in TECHNOLOGY_PROJECTION_MATRIX_ITEMS.iter().enumerate()
+                {
+                    matrix_stock[matrix_index] += inventory
+                        .get(*item_id)
+                        .and_then(Value::as_f64)
+                        .filter(|amount| amount.is_finite())
+                        .unwrap_or(0.0);
+                }
+            }
+        }
+        let active_planet_id = self
+            .base
+            .get("activePlanetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native technology projection active planet is missing"))?;
+        let active_tray = self.base.get("tray").and_then(Value::as_object);
+        let planet_trays = self.base.get("planetTrays").and_then(Value::as_object);
+        for planet in &self.catalog.planets {
+            let tray = if planet.id == active_planet_id {
+                active_tray
+            } else {
+                planet_trays
+                    .and_then(|trays| trays.get(&planet.id))
+                    .and_then(Value::as_object)
+            };
+            for (matrix_index, item_id) in TECHNOLOGY_PROJECTION_MATRIX_ITEMS.iter().enumerate() {
+                matrix_stock[matrix_index] += tray
+                    .and_then(|tray| tray.get(*item_id))
+                    .and_then(Value::as_f64)
+                    .filter(|amount| amount.is_finite())
+                    .unwrap_or(0.0);
+            }
+        }
+        if let Some(cargo) = self.base.get("cargo").and_then(Value::as_object)
+            && let (Some(item_id), Some(amount)) = (
+                cargo.get("itemId").and_then(Value::as_str),
+                cargo
+                    .get("amount")
+                    .and_then(Value::as_f64)
+                    .filter(|amount| amount.is_finite()),
+            )
+            && let Some(matrix_index) = TECHNOLOGY_PROJECTION_MATRIX_ITEMS
+                .iter()
+                .position(|candidate| *candidate == item_id)
+        {
+            matrix_stock[matrix_index] += amount;
+        }
+        let matrix_stock = TECHNOLOGY_PROJECTION_MATRIX_ITEMS
+            .iter()
+            .enumerate()
+            .map(|(index, item_id)| {
+                (
+                    (*item_id).to_owned(),
+                    Value::from(matrix_stock[index].floor()),
+                )
+            })
+            .collect::<Map<_, _>>();
+
+        let truncated =
+            completed_truncated || queued_truncated || progress_truncated || infinite_truncated;
+        let value = serde_json::json!({
+            "schemaVersion": 1,
+            "projectionType": "technology-v1",
+            "revision": self.revision,
+            "truncated": truncated,
+            "limits": {
+                "techRows": MAX_TECHNOLOGY_PROJECTION_TECH_ROWS,
+                "progressItemsPerTech": MAX_TECHNOLOGY_PROJECTION_PROGRESS_ITEMS,
+                "infiniteRows": MAX_TECHNOLOGY_PROJECTION_INFINITE_ROWS,
+            },
+            "counts": {
+                "completedTechIds": completed_count,
+                "queuedTechIds": queued_count,
+                "progressTechs": progress.len(),
+                "infiniteResearch": infinite.len(),
+            },
+            "selectedTechId": optional_id(research, "selectedTechId")?,
+            "pausedTechId": optional_id(research, "pausedTechId")?,
+            "completedTechIds": completed_tech_ids,
+            "queuedTechIds": queued_tech_ids,
+            "progressByTech": progress_rows,
+            "activeInfiniteResearchId": optional_id(endgame, "activeInfiniteResearchId")?,
+            "autoResearch": endgame.get("autoResearch").and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("native technology projection auto research is invalid"))?,
+            "infiniteResearch": infinite_rows,
+            "settings": {
+                "technologyLayout": settings.get("technologyLayout").cloned()
+                    .ok_or_else(|| anyhow!("native technology projection layout is missing"))?,
+                "fontScale": settings.get("fontScale").cloned()
+                    .ok_or_else(|| anyhow!("native technology projection font scale is missing"))?,
+                "difficulty": settings.get("difficulty").cloned()
+                    .unwrap_or_else(|| Value::String("standard".to_owned())),
+            },
+            "matrixStock": matrix_stock,
+        });
+        if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
+            bail!("native technology projection exceeds the byte limit");
         }
         Ok(value)
     }
@@ -3580,12 +6904,17 @@ impl CoreState {
     }
 
     pub fn memory_estimate(&self) -> RuntimeMemoryEstimate {
-        let raw_record_bytes = self
+        let raw_entity_bytes = self
             .entity_raw
             .iter()
-            .chain(self.belt_raw.iter())
             .map(|value| value.len() as u64)
-            .sum();
+            .sum::<u64>();
+        let raw_belt_bytes = self
+            .belt_raw
+            .iter()
+            .map(|value| value.len() as u64)
+            .sum::<u64>();
+        let raw_record_bytes = raw_entity_bytes.saturating_add(raw_belt_bytes);
         // Raw records remain authoritative. E1 values are decoded one row at
         // a time, and full writeback encoding keeps no per-row proof or target
         // mirror. Inventory cardinality is diagnostic rather than allocating
@@ -3604,17 +6933,104 @@ impl CoreState {
         let numeric_columns = entity_rows * 72 + belt_rows * 72;
         let index_overhead =
             self.entity_index.estimated_bytes() + self.belt_index.estimated_bytes();
-        let topology_index_bytes = self
+        let prepared_belt_route_bytes = self
             .prepared_belt_routes
             .as_ref()
             .map(|routes| routes.estimated_bytes())
-            .unwrap_or(0)
-            + self
-                .prepared_local_peer_directory
-                .as_ref()
-                .map(|directory| directory.estimated_bytes())
-                .unwrap_or(0)
-            + self.factory_topology.estimated_bytes();
+            .unwrap_or(0);
+        let prepared_local_peer_bytes = self
+            .prepared_local_peer_directory
+            .as_ref()
+            .map(|directory| directory.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_logistics_buffer_bytes = self
+            .prepared_logistics_buffer_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_material_delivery_bytes = self
+            .prepared_material_delivery_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_ordinary_production_bytes = self
+            .prepared_ordinary_production_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_planet_metrics_bytes = self
+            .prepared_planet_metrics_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_power_probe_bytes = self
+            .prepared_power_probe_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_quantum_logistics_bytes = self
+            .prepared_quantum_logistics_directory
+            .as_ref()
+            .map(|directory| directory.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_construction_runtime_bytes = self
+            .prepared_construction_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_station_mode_transition_bytes = self
+            .prepared_station_mode_transition_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_quantum_transition_bytes = self
+            .prepared_quantum_transition_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_interstellar_peer_bytes = self
+            .prepared_interstellar_peer_directory
+            .as_ref()
+            .map(|directory| directory.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_interstellar_activity_bytes = self
+            .prepared_interstellar_route_activity
+            .as_ref()
+            .map(|activity| activity.estimated_bytes())
+            .unwrap_or(0);
+        let factory_topology_bytes = self.factory_topology.estimated_bytes();
+        let production_history_inventory_runtime_bytes =
+            self.production_history_inventory_runtime.estimated_bytes();
+        let topology_index_bytes = prepared_belt_route_bytes
+            + prepared_logistics_buffer_bytes
+            + prepared_material_delivery_bytes
+            + prepared_ordinary_production_bytes
+            + prepared_planet_metrics_bytes
+            + prepared_power_probe_bytes
+            + prepared_local_peer_bytes
+            + prepared_quantum_logistics_bytes
+            + prepared_construction_runtime_bytes
+            + prepared_station_mode_transition_bytes
+            + prepared_quantum_transition_bytes
+            + prepared_interstellar_peer_bytes
+            + prepared_interstellar_activity_bytes
+            + factory_topology_bytes
+            + production_history_inventory_runtime_bytes;
+        if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},buffers={prepared_logistics_buffer_bytes},materialDelivery={prepared_material_delivery_bytes},production={prepared_ordinary_production_bytes},planetMetrics={prepared_planet_metrics_bytes},powerProbes={prepared_power_probe_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes},historyInventory={production_history_inventory_runtime_bytes}"
+            );
+        }
+        let belt_activity_runtime_bytes = self
+            .prepared_belt_activity
+            .as_ref()
+            .map(|activity| activity.estimated_bytes())
+            .unwrap_or(0);
+        let parsed_entity_runtime_bytes =
+            self.parsed_entity_runtime.estimated_bytes(raw_entity_bytes);
+        let operations_projection_runtime_bytes =
+            self.operations_projection_runtime.estimated_bytes();
+        let campaign_projection_runtime_bytes = self.campaign_projection_runtime.estimated_bytes();
         let estimated_runtime_bytes = raw_record_bytes
             + indexed_string_bytes
             + numeric_columns
@@ -3622,9 +7038,23 @@ impl CoreState {
             + self.belt_dynamics.estimated_bytes()
             + index_overhead
             + topology_index_bytes
+            + belt_activity_runtime_bytes
+            + parsed_entity_runtime_bytes
+            + operations_projection_runtime_bytes
+            + campaign_projection_runtime_bytes
             + serde_json::to_vec(&self.base)
                 .map(|bytes| bytes.len() as u64)
                 .unwrap_or(0);
+        if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tmemory-estimate-breakdown\traw={raw_record_bytes},indexedStrings={indexed_string_bytes},numericColumns={numeric_columns},entityDynamics={},beltDynamics={},rowIndexes={index_overhead},topology={topology_index_bytes},beltActivity={belt_activity_runtime_bytes},parsedEntities={parsed_entity_runtime_bytes},operations={operations_projection_runtime_bytes},campaign={campaign_projection_runtime_bytes},base={},total={estimated_runtime_bytes}",
+                self.entity_dynamics.estimated_bytes(),
+                self.belt_dynamics.estimated_bytes(),
+                serde_json::to_vec(&self.base)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(0),
+            );
+        }
         RuntimeMemoryEstimate {
             raw_record_bytes,
             indexed_string_bytes,
@@ -3678,19 +7108,31 @@ impl CoreState {
     }
 
     pub fn summary(&self) -> anyhow::Result<CoreStateSummary> {
+        let operations_projection_runtime_bytes =
+            self.operations_projection_runtime.estimated_bytes();
+        let campaign_projection_runtime_bytes = self.campaign_projection_runtime.estimated_bytes();
         if let Some(summary) = self
             .summary_cache
             .borrow()
             .as_ref()
-            .filter(|(revision, _)| *revision == self.revision)
-            .map(|(_, summary)| summary.clone())
+            .filter(|cached| {
+                cached.revision == self.revision
+                    && cached.operations_projection_runtime_bytes
+                        == operations_projection_runtime_bytes
+                    && cached.campaign_projection_runtime_bytes == campaign_projection_runtime_bytes
+            })
+            .map(|cached| cached.summary.clone())
         {
             return Ok(summary);
         }
         let canonical = self.canonical_digest_bundle()?;
         let summary = self.summary_from_digest(canonical);
-        self.summary_cache
-            .replace(Some((self.revision, summary.clone())));
+        self.summary_cache.replace(Some(CachedCoreStateSummary {
+            revision: self.revision,
+            operations_projection_runtime_bytes,
+            campaign_projection_runtime_bytes,
+            summary: summary.clone(),
+        }));
         Ok(summary)
     }
 }
@@ -3936,6 +7378,16 @@ mod tests {
         ])
     }
 
+    fn apply_checkpoint_delta(
+        records: &mut BTreeMap<String, Vec<u8>>,
+        visit: &InternalCheckpointVisitResult,
+        delta: BTreeMap<String, Vec<u8>>,
+    ) {
+        let active_keys = visit.active_keys.iter().cloned().collect::<HashSet<_>>();
+        records.retain(|key, _| active_keys.contains(key));
+        records.extend(delta);
+    }
+
     fn replace_fixture_entity_chunk(
         records: &mut BTreeMap<String, Vec<u8>>,
         bytes: Vec<u8>,
@@ -4111,13 +7563,22 @@ mod tests {
     }
 
     #[test]
-    fn owned_internal_records_load_valid_checkpoint() {
-        let state = CoreState::from_owned_internal_records(
-            fixture_identity(7),
-            fixture_records(),
-            fixture_catalog(),
+    fn owned_internal_records_load_legacy_v1_checkpoint_without_sha256() {
+        let records = fixture_records();
+        let manifest: Value = serde_json::from_slice(
+            &records["dsp-idle-network.internal.v1.chunked.v1.normal.manifest"],
         )
         .unwrap();
+        assert!(
+            manifest["chunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|chunk| chunk.get("sha256").is_none())
+        );
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
 
         assert_eq!(state.revision, 7);
         assert_eq!(state.entity_raw.len(), 1);
@@ -4128,6 +7589,76 @@ mod tests {
     }
 
     #[test]
+    fn streamed_internal_records_pull_each_checkpoint_chunk_once() {
+        let mut source = fixture_records();
+        let keys = source.keys().cloned().collect::<Vec<_>>();
+        let expected_reads = keys.len();
+        let mut reads = Vec::new();
+
+        let state = CoreState::from_streamed_internal_records(
+            fixture_identity(7),
+            keys,
+            |key| {
+                reads.push(key.to_owned());
+                source
+                    .remove(key)
+                    .ok_or_else(|| anyhow!("test record is missing"))
+            },
+            fixture_catalog(),
+        )
+        .unwrap();
+
+        assert_eq!(reads.len(), expected_reads);
+        assert_eq!(reads.iter().collect::<HashSet<_>>().len(), expected_reads);
+        assert!(source.is_empty());
+        assert_eq!(state.revision, 7);
+        assert_eq!(state.entity_raw.len(), 1);
+        assert_eq!(state.belt_raw.len(), 1);
+    }
+
+    #[test]
+    fn owned_internal_records_reject_v2_chunk_without_sha256() {
+        let state = CoreState::from_owned_internal_records(
+            fixture_identity(7),
+            fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+
+        for index in 0..manifest["chunks"].as_array().unwrap().len() {
+            let mut candidate_records = records.clone();
+            let mut candidate_manifest = manifest.clone();
+            let chunk = candidate_manifest["chunks"][index].as_object_mut().unwrap();
+            let id = chunk["id"].as_str().unwrap().to_owned();
+            assert!(chunk.remove("sha256").is_some());
+            candidate_records.insert(
+                manifest_key.to_owned(),
+                serde_json::to_vec(&candidate_manifest).unwrap(),
+            );
+
+            let error = CoreState::from_owned_internal_records(
+                fixture_identity(7),
+                candidate_records,
+                fixture_catalog(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("native core v2 checkpoint chunk requires sha256: {id}")
+            );
+        }
+    }
+
+    #[test]
     fn owned_internal_records_reject_missing_chunk() {
         let mut records = fixture_records();
         records.remove("dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000");
@@ -4135,10 +7666,9 @@ mod tests {
         let error =
             CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
                 .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("checkpoint chunk is missing: entities:00000000")
+        assert_eq!(
+            format!("{error:#}"),
+            "read native core checkpoint chunk: entities:00000000: native core checkpoint record is missing: dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
         );
     }
 
@@ -4378,6 +7908,895 @@ mod tests {
     }
 
     #[test]
+    fn resident_columns_and_factory_topology_drop_geometric_capacity_slack() {
+        let entities = (0..17)
+            .map(|index| {
+                json!({
+                    "id": format!("vein-{index}"),
+                    "kind": "vein",
+                    "planetId": "home",
+                    "buildingId": if index == 0 {
+                        "interstellar_logistics_station"
+                    } else {
+                        "mining_machine"
+                    },
+                    "resourceId": "iron_ore",
+                    "minerCount": 1,
+                    "inputs": {},
+                    "outputs": {"iron_ore": 1},
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut records = fixture_records_with_entity_json(
+            &serde_json::to_string(&entities).unwrap(),
+            entities.len(),
+        );
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
+
+        for capacity in [
+            state.entities.kinds.capacity(),
+            state.entities.planets.capacity(),
+            state.entities.buildings.capacity(),
+            state.entities.recipes.capacity(),
+            state.entities.resources.capacity(),
+            state.entities.stored_items.capacity(),
+            state.entities.machine_counts.capacity(),
+            state.entities.miner_counts.capacity(),
+            state.entities.position_x.capacity(),
+            state.entities.position_y.capacity(),
+        ] {
+            assert_eq!(capacity, entities.len());
+        }
+        assert_eq!(
+            state
+                .factory_topology
+                .system_space_station_entity_indices
+                .capacity(),
+            1
+        );
+        assert_eq!(
+            state.factory_topology.estimated_bytes(),
+            (state.factory_topology.station_indices.capacity()
+                + state.factory_topology.orbital_collector_indices.capacity()
+                + state.factory_topology.quantum_endpoint_indices.capacity()
+                + state
+                    .factory_topology
+                    .construction_center_indices
+                    .capacity()
+                + state.factory_topology.time_warp_indices.capacity()
+                + state.factory_topology.logistics_buffer_indices.capacity()
+                + state
+                    .factory_topology
+                    .material_delivery_hub_indices
+                    .capacity()
+                + state
+                    .factory_topology
+                    .orbital_cargo_terminal_indices
+                    .capacity()
+                + state
+                    .factory_topology
+                    .galactic_material_exporter_indices
+                    .capacity()
+                + state
+                    .factory_topology
+                    .space_station_launcher_indices
+                    .capacity()
+                + state
+                    .factory_topology
+                    .system_space_station_entity_indices
+                    .capacity()
+                + state.factory_topology.ray_receiver_indices.capacity()
+                + state.factory_topology.power_source_indices.capacity()
+                + state.factory_topology.vein_indices.capacity()
+                + state.factory_topology.ordinary_machine_indices.capacity()
+                + state
+                    .factory_topology
+                    .production_history_rate_indices
+                    .capacity()
+                + state.factory_topology.non_station_indices.capacity()
+                + state.factory_topology.research_entity_indices.capacity()
+                + state.factory_topology.entity_planet_indices.capacity()
+                + state.factory_topology.entity_grid_indices.capacity()) as u64
+                * size_of::<usize>() as u64
+                + (state.factory_topology.entities_by_planet[0].len() * size_of::<u32>()) as u64
+                + (state.factory_topology.belt_counts_by_planet.capacity() * size_of::<u32>())
+                    as u64
+                + (state.factory_topology.device_counts_by_planet.capacity() * size_of::<f64>())
+                    as u64
+                + (state.factory_topology.planet_viewport_indexes.capacity()
+                    * size_of::<PlanetViewportIndex>()) as u64
+                + state.factory_topology.planet_viewport_indexes[0].estimated_bytes()
+                + state
+                    .factory_topology
+                    .entity_belt_adjacency
+                    .estimated_bytes()
+                + state.factory_topology.catalog_sha256.capacity() as u64
+        );
+        assert_eq!(
+            state.memory_estimate().topology_index_bytes,
+            state.factory_topology.estimated_bytes()
+                + state
+                    .prepared_belt_routes
+                    .as_ref()
+                    .map(|routes| routes.estimated_bytes())
+                    .unwrap_or(0)
+                + state
+                    .prepared_local_peer_directory
+                    .as_ref()
+                    .map(|directory| directory.estimated_bytes())
+                    .unwrap_or(0)
+                + state
+                    .prepared_quantum_logistics_directory
+                    .as_ref()
+                    .map(|directory| directory.estimated_bytes())
+                    .unwrap_or(0)
+                + state
+                    .prepared_construction_runtime
+                    .as_ref()
+                    .map(|runtime| runtime.estimated_bytes())
+                    .unwrap_or(0)
+                + state
+                    .prepared_quantum_transition_runtime
+                    .as_ref()
+                    .map(|runtime| runtime.estimated_bytes())
+                    .unwrap_or(0)
+        );
+    }
+
+    #[test]
+    fn viewport_topology_uses_checked_compact_rows_and_counts_belts_once() {
+        assert_eq!(size_of::<ViewportCellKey>(), 2 * size_of::<i32>());
+        if let Some(overflow) = (u32::MAX as usize).checked_add(1) {
+            assert!(compact_topology_index(overflow, "test row").is_err());
+        }
+
+        let entities = json!([
+            {"id":"left","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":0,"y":0},"inputs":{},"outputs":{},"stationRoutes":[{"id":"must-not-cross-ipc","cargo":123}]},
+            {"id":"right","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":900,"y":0},"inputs":{},"outputs":{}}
+        ]);
+        let belts = json!([
+            {"id":"line","planetId":"home","source":"left","target":"right","itemId":"iron_ore","lanes":1,"tier":1,"priority":1}
+        ]);
+        let records = fixture_records_with_raw_entities_and_belts(
+            &entities.to_string(),
+            2,
+            &belts.to_string(),
+            1,
+        );
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+
+        assert_eq!(state.factory_topology.entities_by_planet[0], [0_u32, 1]);
+        assert_eq!(state.factory_topology.belt_counts_by_planet[0], 1);
+        assert_eq!(
+            state.factory_topology.entity_belt_adjacency.incident(0),
+            [0_u32]
+        );
+        assert_eq!(
+            state.factory_topology.entity_belt_adjacency.incident(1),
+            [0_u32]
+        );
+        assert_eq!(
+            state
+                .factory_topology
+                .entity_belt_adjacency
+                .estimated_bytes(),
+            5 * size_of::<u32>() as u64,
+            "three CSR offsets plus two endpoint references stay compact"
+        );
+        let legacy_projection = state
+            .viewport_projection(&[], "home", -1.0, -1.0, 1_000.0, 1.0, 0, 2, 2)
+            .unwrap();
+        assert_eq!(legacy_projection["entities"].as_array().unwrap().len(), 2);
+        assert!(
+            legacy_projection["entities"][0]
+                .get("stationRoutes")
+                .is_none()
+        );
+        assert_eq!(legacy_projection["belts"].as_array().unwrap().len(), 1);
+        assert_eq!(legacy_projection["belts"][0]["id"], "line");
+        let bounded_projection = state.projection(&[], &["left".to_owned()], &[]).unwrap();
+        assert!(
+            bounded_projection["entities"][0]
+                .get("stationRoutes")
+                .is_none()
+        );
+        let v2 = state
+            .viewport_projection_v2(&[], "home", -1.0, -1.0, 1_000.0, 1.0, 0, 2, 0, 2, &[], &[])
+            .unwrap();
+        assert!(v2["entities"][0].get("stationRoutes").is_none());
+    }
+
+    #[test]
+    fn ray_receiver_topology_index_is_compact_and_counted_in_memory_diagnostics() {
+        let receiver_rows = [1_usize, 4];
+        let entities = (0..6)
+            .map(|index| {
+                if receiver_rows.contains(&index) {
+                    json!({
+                        "id": format!("receiver-{index}"),
+                        "kind": "machine",
+                        "planetId": "home",
+                        "buildingId": "ray_receiver",
+                        "recipeId": if index == 1 { "ray_power" } else { "critical_photon" },
+                        "machineCount": 1,
+                        "inputs": {},
+                        "outputs": {"critical_photon": 0},
+                    })
+                } else {
+                    json!({
+                        "id": format!("vein-{index}"),
+                        "kind": "vein",
+                        "planetId": "home",
+                        "resourceId": "iron_ore",
+                        "minerCount": 1,
+                        "inputs": {},
+                        "outputs": {"iron_ore": 1},
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut records = fixture_records_with_entity_json(
+            &serde_json::to_string(&entities).unwrap(),
+            entities.len(),
+        );
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
+
+        assert_eq!(state.factory_topology.ray_receiver_indices, receiver_rows);
+        assert_eq!(
+            state.factory_topology.ray_receiver_indices.capacity(),
+            receiver_rows.len(),
+            "the immutable session index must not retain geometric growth slack"
+        );
+        let indexed_bytes = (receiver_rows.len() * size_of::<usize>()) as u64;
+        let mut topology_without_receivers = (*state.factory_topology).clone();
+        topology_without_receivers.ray_receiver_indices = Vec::new();
+        assert_eq!(
+            state.factory_topology.estimated_bytes(),
+            topology_without_receivers.estimated_bytes() + indexed_bytes
+        );
+        assert!(
+            state.memory_estimate().topology_index_bytes
+                >= state.factory_topology.estimated_bytes(),
+            "public memory diagnostics must include the dedicated receiver index"
+        );
+    }
+
+    #[test]
+    fn production_history_rate_index_is_complete_compact_and_counted() {
+        let entities = json!([
+            {"id":"vein","kind":"vein","planetId":"home","resourceId":"iron_ore","minerCount":1,"inputs":{},"outputs":{},"productionRate":1},
+            {"id":"machine","kind":"machine","planetId":"home","buildingId":"mining_machine","recipeId":"iron_ingot","machineCount":1,"inputs":{},"outputs":{},"productionRate":2},
+            {"id":"collector","kind":"station","planetId":"home","buildingId":"orbital_collector","storedItemId":"iron_ore","inputs":{},"outputs":{},"productionRate":3},
+            {"id":"station","kind":"station","planetId":"home","buildingId":"interstellar_logistics_station","inputs":{},"outputs":{},"productionRate":4},
+            {"id":"mod-collector","kind":"storage","planetId":"home","buildingId":"orbital_collector","storedItemId":"iron_ore","inputs":{},"outputs":{},"productionRate":5},
+            {"id":"power","kind":"power","planetId":"home","buildingId":"solar_panel","inputs":{},"outputs":{},"productionRate":6}
+        ]);
+        let values = entities.as_array().unwrap();
+        let mut records =
+            fixture_records_with_entity_json(&serde_json::to_string(values).unwrap(), values.len());
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
+
+        let expected = vec![0_usize, 1, 2, 4];
+        assert_eq!(
+            state.factory_topology.production_history_rate_indices,
+            expected
+        );
+        assert_eq!(
+            state
+                .factory_topology
+                .production_history_rate_indices
+                .capacity(),
+            expected.len(),
+            "the immutable rate index must not retain geometric growth slack"
+        );
+        let indexed_bytes = (expected.len() * size_of::<usize>()) as u64;
+        let mut topology_without_rates = (*state.factory_topology).clone();
+        topology_without_rates.production_history_rate_indices = Vec::new();
+        assert_eq!(
+            state.factory_topology.estimated_bytes(),
+            topology_without_rates.estimated_bytes() + indexed_bytes
+        );
+        assert!(
+            state.memory_estimate().topology_index_bytes
+                >= state.factory_topology.estimated_bytes(),
+            "public memory diagnostics must include the history rate index"
+        );
+    }
+
+    #[test]
+    fn dense_production_history_rate_index_releases_duplicate_session_memory() {
+        let entities = (0..16)
+            .map(|index| {
+                json!({
+                    "id": format!("machine-{index}"),
+                    "kind": "machine",
+                    "planetId": "home",
+                    "buildingId": "mining_machine",
+                    "recipeId": "iron_ingot",
+                    "machineCount": 1,
+                    "inputs": {},
+                    "outputs": {},
+                    "productionRate": index,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut records = fixture_records_with_entity_json(
+            &serde_json::to_string(&entities).unwrap(),
+            entities.len(),
+        );
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let state =
+            CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
+                .unwrap();
+
+        assert!(
+            state
+                .factory_topology
+                .production_history_rate_full_scan_required
+        );
+        assert!(
+            state
+                .factory_topology
+                .production_history_rate_indices
+                .is_empty(),
+            "a dense persisted-order scan must not retain a duplicate row index"
+        );
+    }
+
+    #[test]
+    fn viewport_v2_paginates_dense_entities_and_belts_independently_in_persisted_order() {
+        let entities = (0..7)
+            .map(|index| {
+                json!({
+                    "id": format!("entity-{index}"),
+                    "kind": "vein",
+                    "planetId": "home",
+                    "resourceId": "iron_ore",
+                    "minerCount": 1,
+                    // Alternate grid cells so grid traversal order differs
+                    // from persisted row order.
+                    "position": {"x": if index % 2 == 0 { 900 + index } else { index }, "y": index},
+                    "inputs": {},
+                    "outputs": {"iron_ore": 1},
+                })
+            })
+            .collect::<Vec<_>>();
+        let belts = (0..6)
+            .map(|index| {
+                json!({
+                    "id": format!("belt-{index}"),
+                    "planetId": "home",
+                    "source": format!("entity-{index}"),
+                    "target": format!("entity-{}", index + 1),
+                    "itemId": "iron_ore",
+                    "lanes": 1,
+                    "tier": 1,
+                    "priority": 1,
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = fixture_records_with_raw_entities_and_belts(
+            &serde_json::to_string(&entities).unwrap(),
+            entities.len(),
+            &serde_json::to_string(&belts).unwrap(),
+            belts.len(),
+        );
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let project = |entity_cursor, belt_cursor| {
+            state
+                .viewport_projection_v2(
+                    &[],
+                    "home",
+                    -1.0,
+                    -1.0,
+                    1_000.0,
+                    100.0,
+                    entity_cursor,
+                    2,
+                    belt_cursor,
+                    2,
+                    &[],
+                    &[],
+                )
+                .unwrap()
+        };
+
+        let first = project(0, 0);
+        assert_eq!(first["schemaVersion"], 2);
+        assert_eq!(first["projectionType"], "viewport-v2");
+        assert_eq!(first["planetTotals"]["entities"], 7);
+        assert_eq!(first["planetTotals"]["belts"], 6);
+        assert_eq!(first["viewportTotals"]["entities"], 7);
+        assert_eq!(first["viewportTotals"]["belts"], 6);
+        assert_eq!(first["entities"][0]["id"], "entity-0");
+        assert_eq!(first["entities"][1]["id"], "entity-1");
+        assert_eq!(first["belts"][0]["id"], "belt-0");
+        assert_eq!(first["belts"][1]["id"], "belt-1");
+        assert_eq!(first["nextEntityCursor"], 2);
+        assert_eq!(first["nextBeltCursor"], 2);
+
+        let second_entity_page = project(2, 0);
+        assert_eq!(second_entity_page["entities"][0]["id"], "entity-2");
+        assert_eq!(second_entity_page["entities"][1]["id"], "entity-3");
+        assert_eq!(second_entity_page["belts"], first["belts"]);
+
+        let mut entity_ids = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = project(cursor, 0);
+            entity_ids.extend(
+                page["entities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|entity| entity["id"].as_str().unwrap().to_owned()),
+            );
+            let Some(next) = page["nextEntityCursor"].as_u64() else {
+                break;
+            };
+            cursor = next as usize;
+        }
+        assert_eq!(
+            entity_ids,
+            (0..7)
+                .map(|index| format!("entity-{index}"))
+                .collect::<Vec<_>>()
+        );
+
+        let mut belt_ids = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = project(0, cursor);
+            belt_ids.extend(
+                page["belts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|belt| belt["id"].as_str().unwrap().to_owned()),
+            );
+            let Some(next) = page["nextBeltCursor"].as_u64() else {
+                break;
+            };
+            cursor = next as usize;
+        }
+        assert_eq!(
+            belt_ids,
+            (0..6)
+                .map(|index| format!("belt-{index}"))
+                .collect::<Vec<_>>()
+        );
+
+        for key in ["minX", "minY", "maxX", "maxY"] {
+            assert!(first["worldBounds"][key].as_f64().unwrap().is_finite());
+            assert!(
+                first["minimap"]["bounds"][key]
+                    .as_f64()
+                    .unwrap()
+                    .is_finite()
+            );
+        }
+        let broad = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                -5_000_000.0,
+                -5_000_000.0,
+                5_000_000.0,
+                5_000_000.0,
+                0,
+                7,
+                0,
+                6,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(broad["broadQueryFallback"], true);
+        assert_eq!(broad["entities"].as_array().unwrap().len(), 7);
+        assert_eq!(broad["entities"][0]["id"], "entity-0");
+        assert_eq!(broad["entities"][6]["id"], "entity-6");
+    }
+
+    #[test]
+    fn viewport_v2_keeps_opaque_out_of_view_pins_and_incident_belts() {
+        let pinned_entity_id = "mod:节点/Ω [selected]";
+        let pinned_belt_id = "mod:线路/β #pinned";
+        let entities = json!([
+            {"id": pinned_entity_id, "kind":"vein", "planetId":"home", "resourceId":"iron_ore", "position":{"x":2000,"y":2000}, "inputs":{}, "outputs":{"iron_ore":1}},
+            {"id":"visible", "kind":"vein", "planetId":"home", "resourceId":"iron_ore", "position":{"x":0,"y":0}, "inputs":{}, "outputs":{"iron_ore":1}},
+            {"id":"far", "kind":"vein", "planetId":"home", "resourceId":"iron_ore", "position":{"x":3000,"y":3000}, "inputs":{}, "outputs":{"iron_ore":1}}
+        ]);
+        let belts = json!([
+            {"id":pinned_belt_id,"planetId":"home","source":"far","target":"far","itemId":"iron_ore","lanes":1,"tier":1,"priority":1},
+            {"id":"incident-to-selection","planetId":"home","source":pinned_entity_id,"target":"far","itemId":"iron_ore","lanes":1,"tier":1,"priority":1}
+        ]);
+        let records = fixture_records_with_raw_entities_and_belts(
+            &entities.to_string(),
+            3,
+            &belts.to_string(),
+            2,
+        );
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let projection = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &[pinned_entity_id.to_owned()],
+                &[pinned_belt_id.to_owned()],
+            )
+            .unwrap();
+
+        // Returned arrays are always persisted-row ordered, even when the
+        // pinned record precedes the ordinary visible page.
+        assert_eq!(projection["entities"][0]["id"], pinned_entity_id);
+        assert_eq!(projection["entities"][1]["id"], "visible");
+        assert_eq!(projection["belts"][0]["id"], pinned_belt_id);
+        assert_eq!(projection["belts"][1]["id"], "incident-to-selection");
+        assert_eq!(projection["pinnedEntityIds"], json!([pinned_entity_id]));
+        assert_eq!(projection["pinnedBeltIds"], json!([pinned_belt_id]));
+        assert_eq!(projection["viewportTotals"]["entities"], 1);
+        assert_eq!(projection["viewportTotals"]["belts"], 1);
+        assert_eq!(projection["worldBounds"]["minX"], 0.0);
+        assert_eq!(projection["worldBounds"]["maxX"], 3000.0);
+    }
+
+    #[test]
+    fn viewport_v2_entity_presentation_is_opt_in_ordered_and_hash_neutral() {
+        const BUILTIN_REGISTRY: &str = "7df8cf3a";
+        let entities = json!([
+            {
+                "id":"near", "kind":"vein", "planetId":"home",
+                "position":{"x":0,"y":0}, "resourceId":"iron_ore",
+                "extractorBuildingId":"mining_machine", "minerCount":2,
+                "powerFactor":0.5, "resourceRemaining":25, "resourceCapacity":100,
+                "resourceDepletionRemainder":0, "inputs":{}, "outputs":{"iron_ore":3},
+                "progress":0, "utilization":0.5, "productionRate":120
+            },
+            {
+                "id":"pinned", "kind":"vein", "planetId":"home",
+                "position":{"x":2000,"y":2000}, "resourceId":"iron_ore",
+                "extractorBuildingId":"mining_machine", "minerCount":1,
+                "powerFactor":1, "resourceRemaining":10, "resourceCapacity":10,
+                "resourceDepletionRemainder":0, "inputs":{}, "outputs":{"iron_ore":0},
+                "progress":0, "utilization":1, "productionRate":60
+            }
+        ]);
+        let mut records = fixture_records_with_entity_json(&entities.to_string(), 2);
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let mut catalog_snapshot = fixture_catalog().snapshot;
+        catalog_snapshot.registry_fingerprint = BUILTIN_REGISTRY.to_owned();
+        let catalog = RuntimeCatalog::validate(catalog_snapshot, BUILTIN_REGISTRY).unwrap();
+        let mut identity = fixture_identity(7);
+        identity.registry_fingerprint = BUILTIN_REGISTRY.to_owned();
+        let mut state = CoreState::from_internal_records(identity, &records, catalog).unwrap();
+        state.base_value_mut().insert(
+            "settings".to_owned(),
+            json!({
+                "resourceMode":"finite",
+                "productionBufferLimit":1_000,
+                "logisticsBufferLimit":1_000
+            }),
+        );
+        state.base_value_mut().insert(
+            "endgame".to_owned(),
+            json!({"infiniteResearch":{"vein_utilization":{"level":0}}}),
+        );
+        state.base_value_mut().insert(
+            "galaxy".to_owned(),
+            json!({"profiles":{"home":{"oceanType":"none"}}}),
+        );
+
+        let legacy = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &["pinned".to_owned()],
+                &[],
+            )
+            .unwrap();
+        let explicit_none = state
+            .viewport_projection_v2_with_entity_presentation(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &["pinned".to_owned()],
+                &[],
+                None,
+            )
+            .unwrap();
+        assert_eq!(legacy, explicit_none);
+        assert!(legacy.get("entityPresentationVersion").is_none());
+        assert!(legacy.get("entityPresentation").is_none());
+
+        let hash_before = state.canonical_sha256().unwrap();
+        let projected = state
+            .viewport_projection_v2_with_entity_presentation(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &["pinned".to_owned()],
+                &[],
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(projected["entityPresentationVersion"], 1);
+        let entity_ids = projected["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entity| entity["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let presentation_ids = projected["entityPresentation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entity| entity["entityId"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(entity_ids, ["near", "pinned"]);
+        assert_eq!(presentation_ids, entity_ids);
+        assert!(
+            projected["entityPresentation"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["supported"] == true)
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), hash_before);
+        assert!(serde_json::to_vec(&projected).unwrap().len() <= MAX_PROJECTION_BYTES);
+
+        let error = state
+            .viewport_projection_v2_with_entity_presentation(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &[],
+                &[],
+                Some(2),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native viewport v2 entity presentation version is unsupported"
+        );
+    }
+
+    #[test]
+    fn viewport_v2_entity_presentation_fails_closed_for_mod_registry() {
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let projected = state
+            .viewport_projection_v2_with_entity_presentation(
+                &[],
+                "home",
+                -1.0,
+                -1.0,
+                1.0,
+                1.0,
+                0,
+                1,
+                0,
+                1,
+                &[],
+                &[],
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(
+            projected["entityPresentation"],
+            json!([{ "entityId": "vein", "supported": false }])
+        );
+    }
+
+    #[test]
+    fn viewport_v2_out_of_compact_cell_range_falls_back_without_omitting_rows() {
+        let outside_compact_grid = (f64::from(i32::MAX) + 4.0) * VIEWPORT_SPATIAL_CELL_SIZE;
+        let entities = json!([
+            {"id":"origin","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":0,"y":0},"inputs":{},"outputs":{}},
+            {"id":"far-mod-row","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":outside_compact_grid,"y":outside_compact_grid},"inputs":{},"outputs":{}}
+        ]);
+        let records =
+            fixture_records_with_raw_entities_and_belts(&entities.to_string(), 2, "[]", 0);
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let spatial = &state.factory_topology.planet_viewport_indexes[0];
+        assert!(spatial.broad_fallback_only);
+        assert!(spatial.cell_keys.is_empty());
+        assert!(spatial.cell_offsets.is_empty());
+        assert!(spatial.entity_indices.is_empty());
+
+        let projection = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                outside_compact_grid - 1.0,
+                outside_compact_grid - 1.0,
+                outside_compact_grid + 1.0,
+                outside_compact_grid + 1.0,
+                0,
+                2,
+                0,
+                1,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(projection["broadQueryFallback"], true);
+        assert_eq!(projection["planetTotals"]["entities"], 2);
+        assert_eq!(projection["entities"].as_array().unwrap().len(), 1);
+        assert_eq!(projection["entities"][0]["id"], "far-mod-row");
+        assert_eq!(projection["worldBounds"]["minX"], 0.0);
+        assert_eq!(
+            projection["worldBounds"]["maxX"].as_f64(),
+            Some(outside_compact_grid)
+        );
+    }
+
+    #[test]
+    fn viewport_v2_rejects_invalid_bounds_cursors_limits_and_selectors() {
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let project = |min_x,
+                       max_x,
+                       entity_cursor,
+                       entity_limit,
+                       belt_cursor,
+                       belt_limit,
+                       pinned_entity_ids: &[String]| {
+            state.viewport_projection_v2(
+                &[],
+                "home",
+                min_x,
+                -1.0,
+                max_x,
+                1.0,
+                entity_cursor,
+                entity_limit,
+                belt_cursor,
+                belt_limit,
+                pinned_entity_ids,
+                &[],
+            )
+        };
+        assert!(project(f64::NAN, 1.0, 0, 1, 0, 1, &[]).is_err());
+        assert!(project(2.0, 1.0, 0, 1, 0, 1, &[]).is_err());
+        assert!(project(-1.0, 1.0, 0, 0, 0, 1, &[]).is_err());
+        assert!(project(-1.0, 1.0, 0, 1, 0, 0, &[]).is_err());
+        assert!(project(-1.0, 1.0, 2, 1, 0, 1, &[]).is_err());
+        assert!(project(-1.0, 1.0, 0, 1, 2, 1, &[]).is_err());
+        assert!(
+            project(
+                -1.0,
+                1.0,
+                0,
+                1,
+                0,
+                1,
+                &vec!["opaque".to_owned(); MAX_VIEWPORT_PINNED_ENTITIES + 1],
+            )
+            .is_err()
+        );
+        assert!(
+            project(
+                -1.0,
+                1.0,
+                0,
+                1,
+                0,
+                1,
+                &["x".repeat(MAX_VIEWPORT_OPAQUE_ID_BYTES + 1)],
+            )
+            .is_err()
+        );
+        assert!(
+            state
+                .viewport_projection_v2(
+                    &[],
+                    "missing/mod-planet",
+                    -1.0,
+                    -1.0,
+                    1.0,
+                    1.0,
+                    0,
+                    1,
+                    0,
+                    1,
+                    &[],
+                    &[],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn viewport_v2_enforces_the_one_mib_serialized_boundary() {
+        let records = fixture_records_with_entity_json(
+            &json!([{
+                "id":"large",
+                "kind":"vein",
+                "planetId":"home",
+                "resourceId":"iron_ore",
+                "position":{"x":0,"y":0},
+                "inputs":{},
+                "outputs":{"iron_ore":1},
+                "opaqueModPayload":"x".repeat(MAX_PROJECTION_BYTES)
+            }])
+            .to_string(),
+            1,
+        );
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let error = state
+            .viewport_projection_v2(&[], "home", -1.0, -1.0, 1.0, 1.0, 0, 1, 0, 1, &[], &[])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native viewport v2 projection exceeds the byte limit"
+        );
+    }
+
+    #[test]
     fn core_state_is_send_sync_and_summary_cache_is_concurrent() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<CoreState>();
@@ -4412,6 +8831,86 @@ mod tests {
     }
 
     #[test]
+    fn technology_projection_is_bounded_read_only_and_aggregates_matrix_stock() {
+        let records = fixture_records_with_entity_json(
+            r#"[{"id":"lab","kind":"machine","planetId":"home","inputs":{"electromagnetic_matrix":2.6},"outputs":{"electromagnetic_matrix":1.6,"energy_matrix":5}}]"#,
+            1,
+        );
+        let mut state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        state.base.insert(
+            "research".into(),
+            json!({
+                "selectedTechId":"electromagnetism",
+                "pausedTechId":null,
+                "completedTechIds":["electromagnetic_matrix"],
+                "queuedTechIds":["energy_matrix"],
+                "progressByTech":{
+                    "electromagnetism":{"electromagnetic_matrix":7}
+                }
+            }),
+        );
+        state.base.insert(
+            "endgame".into(),
+            json!({
+                "activeInfiniteResearchId":null,
+                "autoResearch":false,
+                "infiniteResearch":{
+                    "matrix_compression":{"level":2,"progress":"17"},
+                    "vein_utilization":{"level":0,"progress":"0"},
+                    "galactic_logistics":{"level":0,"progress":"0"},
+                    "stellar_harnessing":{"level":0,"progress":"0"},
+                    "continuum_simulation":{"level":0,"progress":"0"}
+                }
+            }),
+        );
+        state.base.insert(
+            "settings".into(),
+            json!({"technologyLayout":"compact","fontScale":1.25,"difficulty":"hard"}),
+        );
+        state
+            .base
+            .insert("tray".into(), json!({"electromagnetic_matrix":3.2}));
+        state.base.insert(
+            "planetTrays".into(),
+            json!({"home":{"electromagnetic_matrix":99}}),
+        );
+        state.base.insert(
+            "cargo".into(),
+            json!({"itemId":"electromagnetic_matrix","amount":4.7}),
+        );
+
+        let canonical_before = state.canonical_sha256().unwrap();
+        let projection = state.technology_projection().unwrap();
+        assert_eq!(projection["projectionType"], "technology-v1");
+        assert_eq!(projection["revision"], 7);
+        assert_eq!(projection["truncated"], false);
+        assert_eq!(projection["counts"]["completedTechIds"], 1);
+        assert_eq!(projection["progressByTech"][0]["totalCount"], 1);
+        assert_eq!(projection["matrixStock"]["electromagnetic_matrix"], 12.0);
+        assert_eq!(projection["matrixStock"]["energy_matrix"], 5.0);
+        assert_eq!(projection["settings"]["technologyLayout"], "compact");
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
+
+        state.base["research"]["completedTechIds"] = Value::Array(
+            (0..=MAX_TECHNOLOGY_PROJECTION_TECH_ROWS)
+                .map(|index| Value::String(format!("tech-{index}")))
+                .collect(),
+        );
+        let truncated = state.technology_projection().unwrap();
+        assert_eq!(truncated["truncated"], true);
+        assert_eq!(
+            truncated["completedTechIds"].as_array().unwrap().len(),
+            MAX_TECHNOLOGY_PROJECTION_TECH_ROWS
+        );
+        assert_eq!(
+            truncated["counts"]["completedTechIds"],
+            MAX_TECHNOLOGY_PROJECTION_TECH_ROWS + 1
+        );
+    }
+
+    #[test]
     fn statistics_projection_filters_the_compact_history_without_factory_records() {
         let mut state = CoreState::from_internal_records(
             CoreCheckpointIdentity {
@@ -4436,6 +8935,12 @@ mod tests {
                 {"elapsedSeconds":3,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":180},"consumptionPerMinute":{},"inventory":{"iron_ore":8},"planetProductionPerMinute":{"home":{"iron_ore":180}},"planetConsumptionPerMinute":{"home":{}}}
             ]),
         );
+        let canonical_before_private_refresh = state.canonical_sha256().unwrap();
+        state.refresh_production_history_tiers();
+        assert_eq!(
+            state.canonical_sha256().unwrap(),
+            canonical_before_private_refresh
+        );
         let first = state
             .statistics_projection(1.0, 3.0, 0, 2, Some("home"), Some("iron_ore"))
             .unwrap();
@@ -4454,6 +8959,178 @@ mod tests {
         assert!(second["nextCursor"].is_null());
         assert_eq!(state.entity_raw.len(), 1);
         assert_eq!(state.belt_raw.len(), 1);
+    }
+
+    fn state_with_restored_cold_history() -> CoreState {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state
+            .base
+            .insert("elapsedSeconds".to_owned(), Value::from(102));
+        state
+            .base
+            .insert("historyRecordedAt".to_owned(), Value::from(102));
+        state.base.insert(
+            "productionHistory".to_owned(),
+            json!([
+                {"elapsedSeconds":101,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":60}},
+                {"elapsedSeconds":102,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":70}}
+            ]),
+        );
+        state.rebuild_production_history_tiers();
+        state
+            .restore_production_history_sidecar(json!({
+                "formatVersion": 1,
+                "source": {
+                    "publicLen": 2,
+                    "historyRecordedAtBits": 102.0_f64.to_bits(),
+                    "latestElapsedBits": 102.0_f64.to_bits(),
+                    "latestDurationBits": 1.0_f64.to_bits()
+                },
+                "coldSamples": [{
+                    "elapsedSeconds": 100,
+                    "sampleDurationSeconds": 100,
+                    "productionPerMinute": {"iron_ore": 12}
+                }]
+            }))
+            .unwrap();
+        state
+    }
+
+    fn top_level_command(revision: u64, key: &str, value: Value) -> SimulationCommandPatch {
+        SimulationCommandPatch {
+            protocol_version: crate::CORE_PROTOCOL_VERSION,
+            base_revision: revision,
+            top_level_changes: vec![ValuePatch {
+                path: vec![PathSegment::Key(key.to_owned())],
+                operation: "set".to_owned(),
+                value: Some(value),
+            }],
+            changed_entities: Vec::new(),
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unrelated_command_preserves_cold_history_but_source_or_unknown_patch_rebuilds() {
+        let mut paused = state_with_restored_cold_history();
+        let sidecar_before = paused.production_history_sidecar().unwrap();
+        paused
+            .apply_command(&top_level_command(7, "paused", Value::from(true)))
+            .unwrap();
+        assert_eq!(paused.production_history_sidecar().unwrap(), sidecar_before);
+        let projection = paused
+            .statistics_projection(0.0, 100.0, 0, 10, None, None)
+            .unwrap();
+        assert_eq!(projection["samples"].as_array().unwrap().len(), 1);
+        assert_eq!(projection["samples"][0]["elapsedSeconds"], 100);
+
+        for (key, value) in [
+            (
+                "productionHistory",
+                json!([
+                    {"elapsedSeconds":101,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":60}},
+                    {"elapsedSeconds":102,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":70}}
+                ]),
+            ),
+            ("historyRecordedAt", Value::from(102)),
+            ("elapsedSeconds", Value::from(102)),
+            ("futureUnknownField", Value::from(true)),
+        ] {
+            let mut state = state_with_restored_cold_history();
+            state
+                .apply_command(&top_level_command(7, key, value))
+                .unwrap();
+            assert!(
+                state.production_history_sidecar().is_none(),
+                "{key} must rebuild rather than retain an unproved cold cache"
+            );
+            let projection = state
+                .statistics_projection(0.0, 100.0, 0, 10, None, None)
+                .unwrap();
+            assert_eq!(projection["samples"], Value::Array(Vec::new()));
+        }
+    }
+
+    #[test]
+    fn statistics_projection_refreshes_after_command_rewrites_or_clears_public_history() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state.base.insert(
+            "productionHistory".into(),
+            json!([
+                {"elapsedSeconds":1,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":60},"consumptionPerMinute":{},"inventory":{"iron_ore":1}},
+                {"elapsedSeconds":2,"sampleDurationSeconds":1,"productionPerMinute":{"iron_ore":70},"consumptionPerMinute":{},"inventory":{"iron_ore":2}}
+            ]),
+        );
+        state
+            .base
+            .insert("historyRecordedAt".into(), Value::from(2));
+        state.rebuild_production_history_tiers();
+
+        state
+            .apply_command(&SimulationCommandPatch {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                base_revision: 7,
+                top_level_changes: vec![ValuePatch {
+                    path: vec![
+                        PathSegment::Key("productionHistory".into()),
+                        PathSegment::Index(0),
+                        PathSegment::Key("productionPerMinute".into()),
+                        PathSegment::Key("iron_ore".into()),
+                    ],
+                    operation: "set".into(),
+                    value: Some(Value::from(777)),
+                }],
+                changed_entities: Vec::new(),
+                added_entities: Vec::new(),
+                removed_entity_ids: Vec::new(),
+                changed_belts: Vec::new(),
+                added_belts: Vec::new(),
+                removed_belt_ids: Vec::new(),
+            })
+            .unwrap();
+        let projection = state
+            .statistics_projection(1.0, 2.0, 0, 10, None, Some("iron_ore"))
+            .unwrap();
+        assert_eq!(
+            projection["samples"][0]["productionPerMinute"]["iron_ore"],
+            777
+        );
+
+        state
+            .apply_command(&SimulationCommandPatch {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                base_revision: 8,
+                top_level_changes: vec![ValuePatch {
+                    path: vec![PathSegment::Key("productionHistory".into())],
+                    operation: "set".into(),
+                    value: Some(Value::Array(Vec::new())),
+                }],
+                changed_entities: Vec::new(),
+                added_entities: Vec::new(),
+                removed_entity_ids: Vec::new(),
+                changed_belts: Vec::new(),
+                added_belts: Vec::new(),
+                removed_belt_ids: Vec::new(),
+            })
+            .unwrap();
+        let projection = state
+            .statistics_projection(0.0, 2.0, 0, 10, None, Some("iron_ore"))
+            .unwrap();
+        assert_eq!(projection["samples"], Value::Array(Vec::new()));
     }
 
     #[test]
@@ -4493,6 +9170,143 @@ mod tests {
         let manifest: Value = serde_json::from_slice(&streamed[manifest_key]).unwrap();
         assert_eq!(manifest["savedAt"], 42);
         assert_eq!(manifest["basePrimaryChecksum"], "12345678");
+    }
+
+    #[test]
+    fn v2_domain_checkpoint_preserves_mod_data_and_reuses_content_until_durable_ack() {
+        let identity = fixture_identity(7);
+        let mut legacy = CoreState::from_internal_records(
+            identity.clone(),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        legacy.base_value_mut().insert(
+            "quantumLogisticsNetwork".to_owned(),
+            json!({"inventory":{"iron_ore":"123"},"modSlot":{"keep":true}}),
+        );
+        legacy.base_value_mut().insert(
+            "dysonSphere".to_owned(),
+            json!({"structurePoints":7,"modShell":{"keep":[1,2,3]}}),
+        );
+        legacy
+            .base_value_mut()
+            .insert("totalProduced".to_owned(), json!({"iron_ore":11}));
+        legacy.base_value_mut().insert(
+            "mod:opaque-domain".to_owned(),
+            json!({"signedZero":-0.0,"nested":{"keep":[1,null,"three"]}}),
+        );
+        let expected = legacy.materialize().unwrap();
+
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        legacy
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+        assert_eq!(
+            manifest["formatVersion"],
+            DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION
+        );
+        let kinds = manifest["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chunk| chunk["kind"].as_str().unwrap())
+            .collect::<HashSet<_>>();
+        for domain in BASE_CHECKPOINT_DOMAINS {
+            assert!(kinds.contains(domain.kind()));
+        }
+        assert!(manifest["chunks"].as_array().unwrap().iter().all(|chunk| {
+            chunk["sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64)
+        }));
+
+        let mut state =
+            CoreState::from_internal_records(identity.clone(), &records, fixture_catalog())
+                .unwrap();
+        assert!(json_bitwise_eq(&state.materialize().unwrap(), &expected));
+        assert_eq!(
+            state.base["mod:opaque-domain"]["signedZero"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+
+        state
+            .base_value_mut()
+            .insert("elapsedSeconds".to_owned(), Value::from(1));
+        let mut first_delta = BTreeMap::new();
+        let first = state
+            .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                first_delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(first.encoded_records, 2);
+        assert_eq!(first.reused_records, 6);
+        assert!(
+            first_delta
+                .keys()
+                .any(|key| key.ends_with("chunk.base%3Acore"))
+        );
+        assert!(first_delta.keys().any(|key| key.ends_with("manifest")));
+        assert_eq!(first_delta.len(), 2);
+
+        // Aborting the filesystem transaction must leave the changed domain
+        // pending. The exact same domain is emitted again on retry.
+        state.abort_checkpoint_visit();
+        let mut retry_delta = BTreeMap::new();
+        let retry = state
+            .visit_dirty_internal_checkpoint_records(44, |key, value| {
+                retry_delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(retry.encoded_records, 2);
+        assert_eq!(retry.reused_records, 6);
+        apply_checkpoint_delta(&mut records, &retry, retry_delta);
+        state.install_checkpoint_identity(2, "b".repeat(64));
+
+        let clean = state
+            .visit_dirty_internal_checkpoint_records(45, |_key, _value| Ok(()))
+            .unwrap();
+        assert_eq!(clean.encoded_records, 1);
+        assert_eq!(clean.reused_records, 7);
+        state.abort_checkpoint_visit();
+
+        // Debug/test builds audit every supposedly clean domain. A future
+        // writer that bypasses the centralized dirty API fails closed instead
+        // of silently publishing stale metadata.
+        state
+            .base
+            .insert("dysonSphere".to_owned(), json!({"structurePoints":8}));
+        let error = state
+            .visit_dirty_internal_checkpoint_records(46, |_key, _value| Ok(()))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("unmarked writer"));
+        state.abort_checkpoint_visit();
+
+        let restored = CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                generation: 2,
+                root_hash: "b".repeat(64),
+                ..identity
+            },
+            &records,
+            fixture_catalog(),
+        )
+        .unwrap();
+        assert_eq!(restored.base["elapsedSeconds"], 1);
+        assert_eq!(
+            restored.base["mod:opaque-domain"]["nested"]["keep"][2],
+            "three"
+        );
     }
 
     #[test]
@@ -4555,10 +9369,36 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(first.encoded_records, 1);
-        assert_eq!(first.reused_records, 3);
-        assert_eq!(first_delta.len(), 1);
-        assert!(first_delta.keys().all(|key| key.ends_with("manifest")));
+        // A legacy v1 checkpoint cannot lend its SHA-less entity/belt pages to
+        // a v2 manifest. The first upgrade therefore rewrites all seven data
+        // chunks and publishes the v2 manifest last.
+        assert_eq!(first.encoded_records, 8);
+        assert_eq!(first.reused_records, 0);
+        assert_eq!(first_delta.len(), 8);
+        let first_manifest: Value = serde_json::from_slice(
+            &first_delta["dsp-idle-network.internal.v1.chunked.v1.normal.manifest"],
+        )
+        .unwrap();
+        assert_eq!(
+            first_manifest["formatVersion"],
+            DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION
+        );
+        assert!(
+            first_delta
+                .keys()
+                .any(|key| key.ends_with("chunk.base%3Aunknown-mod"))
+        );
+        assert!(
+            first_manifest["chunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|chunk| {
+                    chunk["sha256"]
+                        .as_str()
+                        .is_some_and(|hash| hash.len() == 64)
+                })
+        );
 
         // A failed filesystem transaction must not acknowledge a later dirty
         // base/page. The next attempt has to emit them again.
@@ -4584,9 +9424,13 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(retry.encoded_records, 3);
-        assert_eq!(retry.reused_records, 1);
-        assert!(retry_delta.keys().any(|key| key.ends_with("chunk.base")));
+        assert_eq!(retry.encoded_records, 8);
+        assert_eq!(retry.reused_records, 0);
+        assert!(
+            retry_delta
+                .keys()
+                .any(|key| key.ends_with("chunk.base%3Acore"))
+        );
         assert!(
             retry_delta
                 .keys()
@@ -4598,7 +9442,7 @@ mod tests {
             .visit_dirty_internal_checkpoint_records(45, |_key, _value| Ok(()))
             .unwrap();
         assert_eq!(clean.encoded_records, 1);
-        assert_eq!(clean.reused_records, 3);
+        assert_eq!(clean.reused_records, 7);
     }
 
     #[test]
@@ -4670,6 +9514,18 @@ mod tests {
         let mut state =
             CoreState::from_internal_records(identity.clone(), &records, fixture_catalog())
                 .unwrap();
+        let mut upgrade_delta = BTreeMap::new();
+        let upgrade = state
+            .visit_dirty_internal_checkpoint_records(1, |key, value| {
+                upgrade_delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(upgrade.encoded_records, 9);
+        assert_eq!(upgrade.reused_records, 0);
+        apply_checkpoint_delta(&mut records, &upgrade, upgrade_delta);
+        state.install_checkpoint_identity(2, "b".repeat(64));
+
         let mut changed = state.parse_entity(1_024).unwrap();
         changed["outputs"]["iron_ore"] = Value::from(9);
         state.replace_entity_raw(
@@ -4684,7 +9540,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(visit.encoded_records, 2);
-        assert_eq!(visit.reused_records, 3);
+        assert_eq!(visit.reused_records, 7);
         assert!(
             delta
                 .keys()
@@ -4696,7 +9552,7 @@ mod tests {
                 .any(|key| key.ends_with("chunk.entities%3A00000000"))
         );
 
-        records.extend(delta);
+        apply_checkpoint_delta(&mut records, &visit, delta);
         let restored =
             CoreState::from_internal_records(identity, &records, fixture_catalog()).unwrap();
         assert_eq!(
@@ -5348,6 +10204,9 @@ mod tests {
             .commit_simulated_state(state.base_value().clone(), entities, belt_commit, 8, true)
             .unwrap();
 
+        if !sync_record_drop_enabled() {
+            assert_eq!(state.parsed_entity_runtime_rows_for_test(), 1);
+        }
         assert!(!Arc::ptr_eq(&state.entity_dynamics.0, &original_columns));
         assert_eq!(
             state
@@ -5429,6 +10288,35 @@ mod tests {
                 changed_rows: 0,
             }
         );
+    }
+
+    #[test]
+    fn parsed_entity_runtime_is_one_shot_counted_and_invalidated_by_raw_changes() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let values = state.parse_entities_parallel().unwrap();
+        let expected = values.clone();
+        let moved_pointer = values.as_ptr();
+        state.install_parsed_entity_runtime(values);
+        let memory_with_cache = state.memory_estimate().estimated_runtime_bytes;
+
+        let moved = state.take_entities_for_simulation().unwrap();
+        assert_eq!(moved.as_ptr(), moved_pointer);
+        assert_eq!(moved, expected);
+        assert_eq!(state.parsed_entity_runtime_rows_for_test(), 0);
+        assert!(state.memory_estimate().estimated_runtime_bytes < memory_with_cache);
+
+        state.install_parsed_entity_runtime(moved);
+        let mut transactional_clone = state.clone();
+        let original_raw = state.entity_raw[0].clone();
+        transactional_clone.replace_entity_raw(0, original_raw.clone());
+        assert_eq!(state.parsed_entity_runtime_rows_for_test(), 0);
+        assert_eq!(transactional_clone.parsed_entity_runtime_rows_for_test(), 0);
+        assert!(Arc::ptr_eq(&state.entity_raw[0], &original_raw));
     }
 
     #[test]
@@ -5707,6 +10595,376 @@ mod tests {
     }
 
     #[test]
+    fn sparse_touched_belt_writeback_checks_only_evidence_and_preserves_raw_semantics() {
+        let belts = (0..300)
+            .map(|index| {
+                json!({
+                    "id":format!("belt-{index}"),
+                    "planetId":"home",
+                    "source":"vein",
+                    "target":"sink",
+                    "itemId":"iron_ore",
+                    "lanes":1,
+                    "tier":1,
+                    "priority":1,
+                    "progress":if index == 17 { -0.0 } else { 0.0 },
+                    "totalTransferred":index,
+                    "congestion":0,
+                    "lastFlow":if index == 17 { -0.0 } else { index as f64 / 10.0 },
+                    "modPayload":{"opaque":format!("模组-{index}"),"raw":[index,255,256]}
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = fixture_records_with_belts(belts);
+        let state =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let untouched_raw = state.belt_raw[17].clone();
+
+        let skipped = crate::belts::BeltRuntime::from_dynamics_for_test(
+            &state,
+            state.belt_dynamics.0.as_ref().clone(),
+        )
+        .unwrap();
+        let (skipped_batch, skipped_flow, skipped_diagnostics) = skipped
+            .into_patches(&state, crate::belts::BeltFlowRequirement::NotRequired)
+            .unwrap();
+        assert_eq!(skipped_batch.patch_count(), 0);
+        assert!(matches!(
+            skipped_flow,
+            crate::belts::PreparedBeltFlow::NotRequired
+        ));
+        assert_eq!(skipped_diagnostics.write_back_flow_checks, 0);
+        assert_eq!(skipped_diagnostics.write_back_evidence_checks, 0);
+
+        let unchanged = crate::belts::BeltRuntime::from_dynamics_for_test(
+            &state,
+            state.belt_dynamics.0.as_ref().clone(),
+        )
+        .unwrap();
+        let (unchanged_batch, unchanged_flow, unchanged_diagnostics) = unchanged
+            .into_patches(
+                &state,
+                crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+            )
+            .unwrap();
+        assert_eq!(unchanged_batch.patch_count(), 0);
+        assert_eq!(unchanged_diagnostics.write_back_flow_checks, 300);
+        assert_eq!(unchanged_diagnostics.write_back_evidence_checks, 0);
+        let expected_unchanged_flow = state
+            .belt_dynamics
+            .last_flow
+            .iter()
+            .fold(0.0, |sum, value| sum + value.max(0.0));
+        let crate::belts::PreparedBeltFlow::Exact(unchanged_flow) = unchanged_flow else {
+            panic!("exact belt flow was not prepared");
+        };
+        assert_eq!(
+            unchanged_flow.flow.to_bits(),
+            expected_unchanged_flow.to_bits()
+        );
+
+        let mut dynamics = state.belt_dynamics.0.as_ref().clone();
+        dynamics.congestion[1] = 0.5;
+        dynamics.progress[255] = -0.0;
+        dynamics.progress[256] = 12.5;
+        dynamics.total_transferred[256] += 7.0;
+        dynamics.last_flow[256] = 42.25;
+        let expected_flow = dynamics
+            .last_flow
+            .iter()
+            .fold(0.0, |sum, value| sum + value.max(0.0));
+        let runtime = crate::belts::BeltRuntime::from_dynamics_for_test(&state, dynamics).unwrap();
+        let (batch, aggregate, diagnostics) = runtime
+            .into_patches(
+                &state,
+                crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+            )
+            .unwrap();
+        assert_eq!(batch.patch_indices(), [1, 255, 256]);
+        assert_eq!(diagnostics.changed_belt_records, 3);
+        assert_eq!(diagnostics.write_back_patch_records, 3);
+        assert_eq!(diagnostics.write_back_flow_checks, 300);
+        assert_eq!(diagnostics.write_back_evidence_checks, 3);
+        let crate::belts::PreparedBeltFlow::Exact(aggregate) = aggregate else {
+            panic!("exact belt flow was not prepared");
+        };
+        assert_eq!(aggregate.flow.to_bits(), expected_flow.to_bits());
+
+        let mut committed = state.clone();
+        committed
+            .commit_simulated_state(
+                committed.base_value().clone(),
+                committed.parse_entities_parallel().unwrap(),
+                batch,
+                8,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            committed.parse_belt(255).unwrap()["progress"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            committed.parse_belt(256).unwrap()["totalTransferred"],
+            263.0
+        );
+        assert_eq!(
+            committed.parse_belt(256).unwrap()["modPayload"]["opaque"],
+            "模组-256"
+        );
+        assert!(Arc::ptr_eq(&committed.belt_raw[17], &untouched_raw));
+        assert_eq!(
+            committed.parse_belt(17).unwrap()["progress"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            committed.parse_belt(17).unwrap()["lastFlow"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+    }
+
+    #[test]
+    fn sparse_belt_revision_clones_and_validates_only_bounded_pages_at_every_worker_limit() {
+        let belt_count = 4_097;
+        let belts = (0..belt_count)
+            .map(|index| {
+                json!({
+                    "id":format!("belt-{index}"),
+                    "planetId":"home",
+                    "source":"vein",
+                    "target":"sink",
+                    "itemId":"iron_ore",
+                    "lanes":1,
+                    "tier":1,
+                    "priority":1,
+                    "progress":if index == 7 { -0.0 } else { 0.0 },
+                    "totalTransferred":index,
+                    "congestion":0,
+                    "lastFlow":0,
+                    "modPayload":{"kept":index}
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = fixture_records_with_belts(belts);
+        let source =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let source_hash = source.canonical_sha256().unwrap();
+        let source_raw = source.belt_raw[3_000].clone();
+        let mut expected = None::<(String, Vec<u8>)>;
+
+        for workers in [1, 2, 4, 8] {
+            let mut dynamics = source.belt_dynamics.0.as_ref().clone();
+            dynamics.progress[7] = 12.5;
+            dynamics.congestion[8] = 0.75;
+            dynamics.total_transferred[9] += 3.0;
+            dynamics.last_flow[9] = 3.0;
+
+            // All three changed rows reside in one 1,024-row page. No column
+            // may copy a factory-sized Vec, and untouched pages stay shared.
+            assert_eq!(
+                dynamics
+                    .progress
+                    .changed_page_count_from(&source.belt_dynamics.progress),
+                1
+            );
+            assert_eq!(
+                dynamics
+                    .congestion
+                    .changed_page_count_from(&source.belt_dynamics.congestion),
+                1
+            );
+            assert_eq!(
+                dynamics
+                    .total_transferred
+                    .changed_page_count_from(&source.belt_dynamics.total_transferred),
+                1
+            );
+            assert_eq!(
+                dynamics
+                    .last_flow
+                    .changed_page_count_from(&source.belt_dynamics.last_flow),
+                1
+            );
+
+            let runtime =
+                crate::belts::BeltRuntime::from_dynamics_for_test(&source, dynamics).unwrap();
+            let (batch, flow, diagnostics) = runtime
+                .into_patches_with_worker_count_for_test(
+                    &source,
+                    workers,
+                    crate::belts::BeltFlowRequirement::NotRequired,
+                )
+                .unwrap();
+            assert!(matches!(flow, crate::belts::PreparedBeltFlow::NotRequired));
+            assert_eq!(batch.patch_indices(), [7, 8, 9]);
+            assert_eq!(diagnostics.write_back_evidence_checks, 3);
+            assert_eq!(diagnostics.dynamic_cow_pages, 4);
+            assert_eq!(diagnostics.mask_cow_pages, 1);
+            assert_eq!(diagnostics.dirty_validation_rows, BELT_DYNAMIC_PAGE_ROWS);
+            assert!(diagnostics.dirty_validation_rows < belt_count);
+
+            let mut committed = source.clone();
+            committed
+                .commit_simulated_state(
+                    committed.base_value().clone(),
+                    committed.parse_entities_parallel().unwrap(),
+                    batch,
+                    8,
+                    true,
+                )
+                .unwrap();
+            assert!(Arc::ptr_eq(&committed.belt_raw[3_000], &source_raw));
+            let hash = committed.canonical_sha256().unwrap();
+            let mut bytes = Vec::new();
+            committed.write_v47_envelope(123, &mut bytes).unwrap();
+            if let Some((expected_hash, expected_bytes)) = &expected {
+                assert_eq!(&hash, expected_hash, "worker limit {workers}");
+                assert_eq!(&bytes, expected_bytes, "worker limit {workers}");
+            } else {
+                expected = Some((hash, bytes));
+            }
+            assert_eq!(source.canonical_sha256().unwrap(), source_hash);
+            assert!(Arc::ptr_eq(&source.belt_raw[3_000], &source_raw));
+        }
+    }
+
+    #[test]
+    fn dense_touched_writeback_is_bitwise_equal_at_one_two_four_and_eight_workers() {
+        let belt_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let belts = (0..belt_count)
+            .map(|index| {
+                json!({
+                    "id":format!("belt-{index}"),
+                    "planetId":"home",
+                    "source":"vein",
+                    "target":"sink",
+                    "itemId":"iron_ore",
+                    "lanes":1,
+                    "tier":1,
+                    "priority":1,
+                    "progress":0,
+                    "totalTransferred":index,
+                    "congestion":0,
+                    "lastFlow":0,
+                    "modPayload":{"row":index}
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = fixture_records_with_belts(belts);
+        let source =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        let changed_count = belt_count / 3 + 1;
+        let run = |workers, flow_requirement| {
+            let mut state = source.clone();
+            let mut dynamics = state.belt_dynamics.0.as_ref().clone();
+            for index in 0..changed_count {
+                dynamics.progress[index] = index as f64 + 0.25;
+                if index % 3 == 0 {
+                    dynamics.total_transferred[index] += 1.0;
+                }
+            }
+            let runtime =
+                crate::belts::BeltRuntime::from_dynamics_for_test(&state, dynamics).unwrap();
+            let (batch, aggregate, diagnostics) = runtime
+                .into_patches_with_worker_count_for_test(&state, workers, flow_requirement)
+                .unwrap();
+            assert_eq!(batch.patch_count(), belt_count);
+            assert_eq!(diagnostics.changed_belt_records, changed_count);
+            assert_eq!(diagnostics.write_back_evidence_checks, changed_count);
+            state
+                .commit_simulated_state(
+                    state.base_value().clone(),
+                    state.parse_entities_parallel().unwrap(),
+                    batch,
+                    8,
+                    true,
+                )
+                .unwrap();
+            let aggregate_bits = match aggregate {
+                crate::belts::PreparedBeltFlow::Exact(aggregate) => {
+                    Some((aggregate.capacity.to_bits(), aggregate.flow.to_bits()))
+                }
+                crate::belts::PreparedBeltFlow::NotRequired => None,
+            };
+            (
+                state.canonical_sha256().unwrap(),
+                aggregate_bits,
+                diagnostics.write_back_workers,
+                diagnostics.write_back_flow_checks,
+            )
+        };
+        let expected = run(1, crate::belts::BeltFlowRequirement::ExactOriginalOrder);
+        assert_eq!(expected.2, 1);
+        assert!(expected.1.is_some());
+        assert_eq!(expected.3, belt_count);
+        for workers in [2, 4, 8] {
+            let actual = run(
+                workers,
+                crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+            );
+            assert_eq!(actual.0, expected.0, "workers={workers}");
+            assert_eq!(actual.1, expected.1, "workers={workers}");
+            assert_eq!(actual.2, workers, "workers={workers}");
+            assert_eq!(actual.3, belt_count, "workers={workers}");
+        }
+
+        let skipped = run(1, crate::belts::BeltFlowRequirement::NotRequired);
+        assert_eq!(skipped.0, expected.0);
+        assert_eq!(skipped.1, None);
+        assert_eq!(skipped.3, 0);
+        for workers in [2, 4, 8] {
+            let actual = run(workers, crate::belts::BeltFlowRequirement::NotRequired);
+            assert_eq!(actual.0, skipped.0, "skipped workers={workers}");
+            assert_eq!(actual.1, None, "skipped workers={workers}");
+            assert_eq!(actual.2, workers, "skipped workers={workers}");
+            assert_eq!(actual.3, 0, "skipped workers={workers}");
+        }
+    }
+
+    #[test]
+    fn required_history_boundary_rejects_an_explicitly_skipped_belt_flow_atomically() {
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let state_hash = state.canonical_sha256().unwrap();
+        let mut base = state.base_value().clone();
+        base.insert("elapsedSeconds".to_owned(), Value::from(10.0));
+        base.insert("historyRecordedAt".to_owned(), Value::from(9.0));
+        base.insert(
+            "productionHistory".to_owned(),
+            Value::Array(vec![json!({"elapsedSeconds":9})]),
+        );
+        let base_before = serde_json::to_vec(&base).unwrap();
+        let entities = state.parse_entities_parallel().unwrap();
+
+        let error = state
+            .record_production_history_with_records(
+                &mut base,
+                &entities,
+                Some(crate::belts::PreparedBeltFlow::NotRequired),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("belt flow was skipped"));
+        assert_eq!(serde_json::to_vec(&base).unwrap(), base_before);
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+    }
+
+    #[test]
     fn belt_runtime_and_commit_seals_reject_stale_sources_and_unmarked_totals() {
         let mut state = CoreState::from_internal_records(
             fixture_identity(7),
@@ -5720,7 +10978,14 @@ mod tests {
         )
         .unwrap();
         state.belt_raw = state.belt_raw.0.as_ref().clone().into();
-        assert!(runtime.into_patches(&state).is_err());
+        assert!(
+            runtime
+                .into_patches(
+                    &state,
+                    crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+                )
+                .is_err()
+        );
 
         let belt_commit = crate::belts::BeltCommitBatch::unchanged_for_test(&state);
         state.belts = state.belts.0.as_ref().clone().into();
@@ -5754,7 +11019,14 @@ mod tests {
         runtime.clear_total_dirty_for_test(0);
         let hash_before = state.canonical_sha256().unwrap();
         let dirty_before = format!("{:?}", state.save_dirty);
-        assert!(runtime.into_patches(&state).is_err());
+        assert!(
+            runtime
+                .into_patches(
+                    &state,
+                    crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+                )
+                .is_err()
+        );
         assert_eq!(state.revision, 7);
         assert_eq!(state.canonical_sha256().unwrap(), hash_before);
         assert_eq!(format!("{:?}", state.save_dirty), dirty_before);
@@ -5802,6 +11074,8 @@ mod tests {
             fixture_catalog(),
         )
         .unwrap();
+        let source_hash = state.canonical_sha256().unwrap();
+        let source_dirty = format!("{:?}", state.save_dirty);
         for column in [
             "progress",
             "totalTransferred",
@@ -5815,9 +11089,34 @@ mod tests {
             )
             .unwrap();
             runtime.truncate_column_for_test(column);
-            let error = runtime.into_patches(&state).unwrap_err();
+            let error = runtime
+                .into_patches(
+                    &state,
+                    crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+                )
+                .unwrap_err();
             assert!(error.to_string().contains("topology"), "column={column}");
+            assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+            assert_eq!(format!("{:?}", state.save_dirty), source_dirty);
         }
+
+        let mut runtime = crate::belts::BeltRuntime::from_dynamics_for_test(
+            &state,
+            state.belt_dynamics.0.as_ref().clone(),
+        )
+        .unwrap();
+        runtime
+            .record_touched_for_test(state.belt_raw.len())
+            .unwrap();
+        let error = runtime
+            .into_patches(
+                &state,
+                crate::belts::BeltFlowRequirement::ExactOriginalOrder,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("outside"));
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(format!("{:?}", state.save_dirty), source_dirty);
     }
 
     #[test]
@@ -6088,6 +11387,93 @@ mod tests {
     }
 
     #[test]
+    fn private_macro_v10_credit_roundtrips_without_changing_public_v47() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let canonical_before = state.canonical_sha256().unwrap();
+        state
+            .install_pure_idle_macro_session_progress(20.0)
+            .unwrap();
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 20.0);
+        assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+
+        let mut streamed = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                streamed.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let manifest: Value = serde_json::from_slice(&streamed[manifest_key]).unwrap();
+        assert!(manifest.get("pureIdleSession").is_none());
+        assert_eq!(manifest["pureIdleMacroSession"]["formatVersion"], 1);
+        assert_eq!(manifest["pureIdleMacroSession"]["macroV10"], true);
+
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &streamed, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_macro_exact_seconds_used(), 20.0);
+        assert_eq!(restored.pure_idle_exact_seconds_used(), 0.0);
+        assert_eq!(restored.canonical_sha256().unwrap(), canonical_before);
+
+        let mut public = Vec::new();
+        restored.write_v47_envelope(42, &mut public).unwrap();
+        let envelope: Value = serde_json::from_slice(&public).unwrap();
+        assert!(envelope["state"].get("pureIdleSession").is_none());
+    }
+
+    #[test]
+    fn conservative_and_macro_v10_sessions_never_inherit_each_others_credit() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        state.install_pure_idle_session_progress(30.0).unwrap();
+        assert_eq!(state.pure_idle_exact_seconds_used(), 30.0);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 0.0);
+
+        let pending_credits = BTreeMap::from([("iron_ore".to_owned(), 1)]);
+        state
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                10.0,
+                0,
+                1,
+                pending_credits.clone(),
+            )
+            .unwrap();
+        assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 10.0);
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            1
+        );
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_pending_credits(),
+            pending_credits
+        );
+
+        state.install_pure_idle_session_progress(5.0).unwrap();
+        assert_eq!(state.pure_idle_exact_seconds_used(), 5.0);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 0.0);
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        assert!(
+            state
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn private_pure_idle_session_survives_incremental_checkpoint_reload() {
         let mut state = CoreState::from_internal_records(
             fixture_identity(7),
@@ -6098,12 +11484,14 @@ mod tests {
         state.install_pure_idle_session_progress(18.0).unwrap();
 
         let mut records = fixture_records();
-        state
+        let mut delta = BTreeMap::new();
+        let visit = state
             .visit_dirty_internal_checkpoint_records(43, |key, value| {
-                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                delta.insert(key.to_owned(), value.as_bytes().to_vec());
                 Ok(())
             })
             .unwrap();
+        apply_checkpoint_delta(&mut records, &visit, delta);
         state.abort_checkpoint_visit();
         assert_eq!(state.pure_idle_exact_seconds_used(), 18.0);
 
@@ -6139,6 +11527,505 @@ mod tests {
     }
 
     #[test]
+    fn macro_construction_cursor_requires_a_current_bounded_value() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let macro_session = json!({
+            "formatVersion": 1,
+            "exactSimulationSecondsUsed": 30,
+            "lastCommittedRevision": 7,
+            "macroV10": true
+        });
+
+        for invalid_cursor in [json!(30), json!(-1), json!("1")] {
+            let mut records = fixture_records();
+            let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+            manifest["pureIdleMacroSession"] = macro_session.clone();
+            manifest["pureIdleMacroConstructionCarrySeconds"] = invalid_cursor;
+            records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+            assert!(
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .is_err()
+            );
+        }
+
+        let mut orphaned = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&orphaned[manifest_key]).unwrap();
+        manifest["pureIdleMacroConstructionCarrySeconds"] = json!(1);
+        orphaned.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        assert!(
+            CoreState::from_internal_records(fixture_identity(7), &orphaned, fixture_catalog())
+                .is_err()
+        );
+
+        let mut valid = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&valid[manifest_key]).unwrap();
+        manifest["pureIdleMacroSession"] = macro_session;
+        manifest["pureIdleMacroConstructionCarrySeconds"] = json!(29);
+        valid.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &valid, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_macro_construction_carry_seconds(), 29);
+    }
+
+    #[test]
+    fn macro_construction_quantum_replay_cursor_is_strict_and_legacy_defaults_to_full_credit() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let macro_session = json!({
+            "formatVersion": 1,
+            "exactSimulationSecondsUsed": 30,
+            "lastCommittedRevision": 7,
+            "macroV10": true
+        });
+        let cursor_key = "pureIdleMacroConstructionQuantumReplayRemainingSeconds";
+
+        for invalid_cursor in [json!(31), json!(-1), json!("1"), Value::Null] {
+            let mut records = fixture_records();
+            let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+            manifest["pureIdleMacroSession"] = macro_session.clone();
+            manifest[cursor_key] = invalid_cursor;
+            records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+            assert!(
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .is_err()
+            );
+        }
+
+        let mut orphaned = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&orphaned[manifest_key]).unwrap();
+        manifest[cursor_key] = json!(1);
+        orphaned.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        assert!(
+            CoreState::from_internal_records(fixture_identity(7), &orphaned, fixture_catalog())
+                .is_err()
+        );
+
+        let mut legacy = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&legacy[manifest_key]).unwrap();
+        manifest["pureIdleMacroSession"] = macro_session;
+        assert!(manifest.get(cursor_key).is_none());
+        legacy.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &legacy, fixture_catalog())
+                .unwrap();
+        assert_eq!(
+            restored.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        assert!(
+            restored
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+
+        let mut state = restored;
+        assert!(
+            state
+                .install_pure_idle_macro_session_progress_with_construction_state(
+                    30.0,
+                    0,
+                    31,
+                    BTreeMap::new(),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn macro_construction_quantum_pending_credits_are_strict_and_legacy_defaults_empty() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let credits_key = "pureIdleMacroConstructionQuantumPendingCredits";
+        let macro_session = json!({
+            "formatVersion": 1,
+            "exactSimulationSecondsUsed": 30,
+            "lastCommittedRevision": 7,
+            "macroV10": true
+        });
+
+        for orphaned_credits in [json!({}), json!({"iron_ore": 1})] {
+            let mut records = fixture_records();
+            let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+            manifest[credits_key] = orphaned_credits;
+            records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+            assert!(
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .is_err()
+            );
+        }
+
+        let mut conservative = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&conservative[manifest_key]).unwrap();
+        manifest["pureIdleSession"] = json!({
+            "formatVersion": 1,
+            "exactSimulationSecondsUsed": 30,
+            "lastCommittedRevision": 7
+        });
+        manifest[credits_key] = json!({"iron_ore": 1});
+        conservative.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        assert!(
+            CoreState::from_internal_records(fixture_identity(7), &conservative, fixture_catalog())
+                .is_err()
+        );
+
+        let mut exhausted = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&exhausted[manifest_key]).unwrap();
+        manifest["pureIdleMacroSession"] = macro_session.clone();
+        manifest["pureIdleMacroConstructionQuantumReplayRemainingSeconds"] = json!(0);
+        manifest[credits_key] = json!({"iron_ore": 1});
+        exhausted.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        assert!(
+            CoreState::from_internal_records(fixture_identity(7), &exhausted, fixture_catalog())
+                .is_err()
+        );
+
+        for invalid_credits in [
+            json!({"": 1}),
+            json!({"iron_ore": MAX_JS_SAFE_INTEGER_U64 + 1}),
+            json!({"iron_ore": -1}),
+            json!({"iron_ore": "1"}),
+            Value::Null,
+        ] {
+            let mut records = fixture_records();
+            let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+            manifest["pureIdleMacroSession"] = macro_session.clone();
+            manifest[credits_key] = invalid_credits;
+            records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+            assert!(
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .is_err()
+            );
+        }
+
+        let mut legacy = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&legacy[manifest_key]).unwrap();
+        manifest["pureIdleMacroSession"] = macro_session;
+        assert!(manifest.get(credits_key).is_none());
+        legacy.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        let mut restored =
+            CoreState::from_internal_records(fixture_identity(7), &legacy, fixture_catalog())
+                .unwrap();
+        assert!(
+            restored
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+
+        for invalid_credits in [
+            BTreeMap::from([("".to_owned(), 1)]),
+            BTreeMap::from([("iron_ore".to_owned(), MAX_JS_SAFE_INTEGER_U64 + 1)]),
+        ] {
+            assert!(
+                restored
+                    .install_pure_idle_macro_session_progress_with_construction_state(
+                        30.0,
+                        0,
+                        1,
+                        invalid_credits,
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            restored
+                .install_pure_idle_macro_session_progress_with_construction_state(
+                    30.0,
+                    0,
+                    0,
+                    BTreeMap::from([("iron_ore".to_owned(), 1)]),
+                )
+                .is_err()
+        );
+        assert!(
+            restored
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn macro_construction_cursor_roundtrips_incrementally_but_not_in_public_v47() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let canonical_before = state.canonical_sha256().unwrap();
+        state
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                30.0,
+                17,
+                PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
+
+        let mut records = fixture_records();
+        let mut delta = BTreeMap::new();
+        let visit = state
+            .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        apply_checkpoint_delta(&mut records, &visit, delta);
+        state.abort_checkpoint_visit();
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_macro_construction_carry_seconds(), 17);
+        assert_eq!(restored.canonical_sha256().unwrap(), canonical_before);
+
+        let mut public = Vec::new();
+        restored.write_v47_envelope(43, &mut public).unwrap();
+        let envelope: Value = serde_json::from_slice(&public).unwrap();
+        assert!(
+            envelope
+                .get("pureIdleMacroConstructionCarrySeconds")
+                .is_none()
+        );
+        assert!(
+            envelope["state"]
+                .get("pureIdleMacroConstructionCarrySeconds")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn macro_construction_quantum_replay_cursor_roundtrips_full_and_incremental_privately() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let cursor_key = "pureIdleMacroConstructionQuantumReplayRemainingSeconds";
+
+        for remaining in [0, 1, PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS] {
+            let mut state = CoreState::from_internal_records(
+                fixture_identity(7),
+                &fixture_records(),
+                fixture_catalog(),
+            )
+            .unwrap();
+            let canonical_before = state.canonical_sha256().unwrap();
+            let public_v47_before = state.materialize().unwrap();
+            state
+                .install_pure_idle_macro_session_progress_with_construction_state(
+                    30.0,
+                    17,
+                    remaining,
+                    BTreeMap::new(),
+                )
+                .unwrap();
+            assert_eq!(
+                state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+                remaining
+            );
+            assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
+            assert_eq!(state.materialize().unwrap(), public_v47_before);
+
+            let mut full = BTreeMap::<String, Vec<u8>>::new();
+            state
+                .visit_internal_checkpoint_records(42, |key, value| {
+                    full.insert(key.to_owned(), value.as_bytes().to_vec());
+                    Ok(())
+                })
+                .unwrap();
+            let full_manifest: Value = serde_json::from_slice(&full[manifest_key]).unwrap();
+            if remaining == PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS {
+                assert!(full_manifest.get(cursor_key).is_none());
+            } else {
+                assert_eq!(full_manifest[cursor_key], remaining);
+            }
+            let restored_full =
+                CoreState::from_internal_records(fixture_identity(7), &full, fixture_catalog())
+                    .unwrap();
+            assert_eq!(
+                restored_full.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+                remaining
+            );
+            assert_eq!(restored_full.canonical_sha256().unwrap(), canonical_before);
+
+            let mut incremental = fixture_records();
+            let mut delta = BTreeMap::new();
+            let visit = state
+                .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                    delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                    Ok(())
+                })
+                .unwrap();
+            apply_checkpoint_delta(&mut incremental, &visit, delta);
+            state.abort_checkpoint_visit();
+            let incremental_manifest: Value =
+                serde_json::from_slice(&incremental[manifest_key]).unwrap();
+            if remaining == PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS {
+                assert!(incremental_manifest.get(cursor_key).is_none());
+            } else {
+                assert_eq!(incremental_manifest[cursor_key], remaining);
+            }
+            let restored_incremental = CoreState::from_internal_records(
+                fixture_identity(7),
+                &incremental,
+                fixture_catalog(),
+            )
+            .unwrap();
+            assert_eq!(
+                restored_incremental
+                    .pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+                remaining
+            );
+            assert_eq!(
+                restored_incremental.canonical_sha256().unwrap(),
+                canonical_before
+            );
+
+            let public_v47 = restored_incremental.materialize().unwrap();
+            assert!(public_v47.get(cursor_key).is_none());
+            let mut public_envelope = Vec::new();
+            restored_incremental
+                .write_v47_envelope(43, &mut public_envelope)
+                .unwrap();
+            let envelope: Value = serde_json::from_slice(&public_envelope).unwrap();
+            assert!(envelope.get(cursor_key).is_none());
+            assert!(envelope["state"].get(cursor_key).is_none());
+        }
+    }
+
+    #[test]
+    fn macro_construction_quantum_pending_credits_roundtrip_privately() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let credits_key = "pureIdleMacroConstructionQuantumPendingCredits";
+        let credits = BTreeMap::from([
+            ("iron_ore".to_owned(), 1),
+            ("mod:量子材料".to_owned(), MAX_JS_SAFE_INTEGER_U64),
+        ]);
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let canonical_before = state.canonical_sha256().unwrap();
+        let public_v47_before = state.materialize().unwrap();
+        state
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                30.0,
+                17,
+                1,
+                credits.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_pending_credits(),
+            credits
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
+        assert_eq!(state.materialize().unwrap(), public_v47_before);
+
+        let mut full = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                full.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let full_manifest: Value = serde_json::from_slice(&full[manifest_key]).unwrap();
+        assert_eq!(full_manifest[credits_key]["iron_ore"], 1);
+        assert_eq!(
+            full_manifest[credits_key]["mod:量子材料"],
+            MAX_JS_SAFE_INTEGER_U64
+        );
+        let restored_full =
+            CoreState::from_internal_records(fixture_identity(7), &full, fixture_catalog())
+                .unwrap();
+        assert_eq!(
+            restored_full.pure_idle_macro_construction_quantum_pending_credits(),
+            credits
+        );
+        assert_eq!(restored_full.canonical_sha256().unwrap(), canonical_before);
+
+        let mut incremental = fixture_records();
+        let mut delta = BTreeMap::new();
+        let visit = state
+            .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        apply_checkpoint_delta(&mut incremental, &visit, delta);
+        state.abort_checkpoint_visit();
+        let incremental_manifest: Value =
+            serde_json::from_slice(&incremental[manifest_key]).unwrap();
+        assert_eq!(
+            incremental_manifest[credits_key],
+            full_manifest[credits_key]
+        );
+        let restored_incremental =
+            CoreState::from_internal_records(fixture_identity(7), &incremental, fixture_catalog())
+                .unwrap();
+        assert_eq!(
+            restored_incremental.pure_idle_macro_construction_quantum_pending_credits(),
+            credits
+        );
+        assert_eq!(
+            restored_incremental.canonical_sha256().unwrap(),
+            canonical_before
+        );
+
+        let public_v47 = restored_incremental.materialize().unwrap();
+        assert!(public_v47.get(credits_key).is_none());
+        let mut public_envelope = Vec::new();
+        restored_incremental
+            .write_v47_envelope(43, &mut public_envelope)
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&public_envelope).unwrap();
+        assert!(envelope.get(credits_key).is_none());
+        assert!(envelope["state"].get(credits_key).is_none());
+    }
+
+    #[test]
+    fn public_v47_constructor_starts_with_full_construction_quantum_replay_credit() {
+        let source = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records_with_belts(Vec::new()),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let Value::Object(mut base) = source.materialize().unwrap() else {
+            panic!("fixture v47 state must be an object");
+        };
+        let entities = base
+            .remove("entities")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|value| serde_json::to_string(&value).unwrap())
+            .collect();
+        let belts = base
+            .remove("belts")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|value| serde_json::to_string(&value).unwrap())
+            .collect();
+
+        let restored = CoreState::from_public_v47_parts(
+            fixture_identity(7),
+            base,
+            entities,
+            belts,
+            fixture_catalog(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        assert!(
+            restored
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn committed_non_idle_revision_lazily_resets_pure_idle_credit() {
         let mut state = CoreState::from_internal_records(
             fixture_identity(7),
@@ -6153,6 +12040,120 @@ mod tests {
         // revision without updating this private pure-idle marker.
         state.revision += 1;
         assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+
+        state
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                30.0,
+                17,
+                PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(state.pure_idle_macro_construction_carry_seconds(), 17);
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        let pending_credits = BTreeMap::from([("iron_ore".to_owned(), 1)]);
+        state
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                30.0,
+                17,
+                1,
+                pending_credits.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            1
+        );
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_pending_credits(),
+            pending_credits
+        );
+        state.revision += 1;
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 0.0);
+        assert_eq!(state.pure_idle_macro_construction_carry_seconds(), 0);
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        assert!(
+            state
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn invalidating_quantum_logistics_directory_preserves_other_prepared_caches() {
+        fn same_arc<T>(before: &Option<Arc<T>>, after: &Option<Arc<T>>) -> bool {
+            match (before, after) {
+                (Some(before), Some(after)) => Arc::ptr_eq(before, after),
+                (None, None) => true,
+                _ => false,
+            }
+        }
+
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records_with_belts(Vec::new()),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let parsed = state.parse_entities_parallel().unwrap();
+        state.install_prepared_quantum_logistics_directory(Arc::new(
+            crate::quantum_logistics::QuantumLogisticsDirectory::build(&state, &parsed),
+        ));
+
+        let belt_routes = state.prepared_belt_routes.clone();
+        let belt_activity = state.prepared_belt_activity.clone();
+        let local_peers = state.prepared_local_peer_directory.clone();
+        let quantum_directory = state.prepared_quantum_logistics_directory.clone().unwrap();
+        let construction = state.prepared_construction_runtime.clone();
+        let planet_metrics = state.prepared_planet_metrics_runtime.clone();
+        let station_transition = state.prepared_station_mode_transition_runtime.clone();
+        let quantum_transition = state.prepared_quantum_transition_runtime.clone();
+        let interstellar_peers = state.prepared_interstellar_peer_directory.clone();
+        let interstellar_activity = state.prepared_interstellar_route_activity.clone();
+        let parsed_entities = Arc::clone(&state.parsed_entity_runtime);
+        let factory_topology = Arc::clone(&state.factory_topology);
+        let canonical_before = state.canonical_sha256().unwrap();
+
+        state.invalidate_prepared_quantum_logistics_directory();
+
+        assert!(state.prepared_quantum_logistics_directory.is_none());
+        assert_eq!(Arc::strong_count(&quantum_directory), 1);
+        assert!(same_arc(&belt_routes, &state.prepared_belt_routes));
+        assert!(same_arc(&belt_activity, &state.prepared_belt_activity));
+        assert!(same_arc(&local_peers, &state.prepared_local_peer_directory));
+        assert!(same_arc(
+            &construction,
+            &state.prepared_construction_runtime
+        ));
+        assert!(same_arc(
+            &planet_metrics,
+            &state.prepared_planet_metrics_runtime
+        ));
+        assert!(same_arc(
+            &station_transition,
+            &state.prepared_station_mode_transition_runtime
+        ));
+        assert!(same_arc(
+            &quantum_transition,
+            &state.prepared_quantum_transition_runtime
+        ));
+        assert!(same_arc(
+            &interstellar_peers,
+            &state.prepared_interstellar_peer_directory
+        ));
+        assert!(same_arc(
+            &interstellar_activity,
+            &state.prepared_interstellar_route_activity
+        ));
+        assert!(Arc::ptr_eq(&state.parsed_entity_runtime, &parsed_entities));
+        assert!(Arc::ptr_eq(&state.factory_topology, &factory_topology));
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
     }
 
     #[test]
@@ -6202,12 +12203,14 @@ mod tests {
         assert_eq!(restored.pure_idle_exact_seconds_used(), 0.0);
 
         let mut incremental = fixture_records();
-        state
+        let mut delta = BTreeMap::new();
+        let visit = state
             .visit_dirty_internal_checkpoint_records(44, |key, value| {
-                incremental.insert(key.to_owned(), value.as_bytes().to_vec());
+                delta.insert(key.to_owned(), value.as_bytes().to_vec());
                 Ok(())
             })
             .unwrap();
+        apply_checkpoint_delta(&mut incremental, &visit, delta);
         let restored =
             CoreState::from_internal_records(fixture_identity(8), &incremental, fixture_catalog())
                 .unwrap();

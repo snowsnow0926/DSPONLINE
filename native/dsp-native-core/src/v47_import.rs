@@ -6,7 +6,7 @@ use anyhow::{Context, bail};
 use serde::de::{DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::catalog::RuntimeCatalog;
@@ -629,6 +629,21 @@ pub fn parse_v47_envelope<R: Read>(
     if expected_byte_length == 0 || expected_byte_length > MAX_V47_IMPORT_BYTES {
         bail!("native v47 import file size is invalid");
     }
+    parse_v47_envelope_with_length(reader, Some(expected_byte_length))
+}
+
+/// Parses a decoded v47 JSON stream whose final byte length is not known in
+/// advance. This is used for compressed file containers; the proof still
+/// hashes and counts the decoded JSON bytes, and `BoundedHashReader` enforces
+/// the same 256 MiB ceiling as an uncompressed import.
+pub fn parse_v47_envelope_stream<R: Read>(reader: R) -> anyhow::Result<ParsedV47Envelope> {
+    parse_v47_envelope_with_length(reader, None)
+}
+
+fn parse_v47_envelope_with_length<R: Read>(
+    reader: R,
+    expected_byte_length: Option<u64>,
+) -> anyhow::Result<ParsedV47Envelope> {
     let mut reader = BoundedHashReader::new(reader);
     let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
     let envelope_result = Envelope::deserialize(&mut deserializer);
@@ -646,7 +661,10 @@ pub fn parse_v47_envelope<R: Read>(
         result.context("native v47 envelope contains trailing data")?;
     }
     let (source_byte_length, source_sha256) = reader.finish();
-    if source_byte_length != expected_byte_length {
+    if source_byte_length == 0 {
+        bail!("native v47 import decoded stream is empty");
+    }
+    if expected_byte_length.is_some_and(|expected| source_byte_length != expected) {
         bail!("native v47 import file identity changed while reading");
     }
     let _ = envelope.reason;
@@ -668,10 +686,15 @@ pub fn parse_v47_envelope<R: Read>(
         Value::Number(value) if matches!(value.as_u64(), Some(1..=3)) => value.to_string(),
         _ => bail!("native v47 import envelope slot is invalid"),
     };
-    if envelope.state.base.get("version").and_then(Value::as_u64) != Some(47)
+    let source_state_version = envelope.state.base.get("version").and_then(Value::as_u64);
+    if !matches!(source_state_version, Some(46 | 47))
         || envelope.state.base.get("mode").and_then(Value::as_str) != Some(envelope.mode.as_str())
     {
         bail!("native v47 import state version or mode is invalid");
+    }
+    let mut base = envelope.state.base;
+    if source_state_version == Some(46) {
+        adapt_v46_base_to_v47(&mut base, &envelope.mode, envelope.saved_at)?;
     }
     let proof = V47ImportProof {
         format_version: 2,
@@ -688,10 +711,93 @@ pub fn parse_v47_envelope<R: Read>(
     };
     Ok(ParsedV47Envelope {
         proof,
-        base: envelope.state.base,
+        base,
         entities: envelope.state.entities,
         belts: envelope.state.belts,
     })
+}
+
+/// The v46 -> v47 persistence change was additive: v47 introduced the
+/// orbital-station namespace. Keep this adapter deliberately narrow and
+/// deterministic. It validates the v46 envelope/checksum first, discards any
+/// forged pre-v47 station field, and derives the new empty board from the
+/// envelope timestamp rather than wall-clock time. All other opaque fields
+/// remain byte-semantically represented by the parsed JSON values.
+fn adapt_v46_base_to_v47(
+    base: &mut Map<String, Value>,
+    mode: &str,
+    saved_at_ms: u64,
+) -> anyhow::Result<()> {
+    if base.get("version").and_then(Value::as_u64) != Some(46) {
+        bail!("native v46 compatibility adapter received the wrong state version");
+    }
+    let universe_matrix_produced = base
+        .get("totalProduced")
+        .and_then(Value::as_object)
+        .and_then(|totals| totals.get("universe_matrix"))
+        .and_then(Value::as_f64)
+        .is_some_and(|amount| amount.is_finite() && amount >= 1.0);
+    let eligible = mode == "normal" && universe_matrix_produced;
+    let task_day = saved_at_ms.saturating_add(8 * 60 * 60 * 1_000) / (24 * 60 * 60 * 1_000);
+    base.insert("version".to_owned(), Value::from(47));
+    base.insert(
+        "orbitalStation".to_owned(),
+        json!({
+            "stateVersion": 1,
+            "status": if eligible { "eligible" } else { "locked" },
+            "construction": {
+                "costRevision": 1,
+                "stageRequirements": [
+                    {
+                        "stageId": "core",
+                        "costs": [
+                            {"itemId":"titanium_alloy","amount":"200000"},
+                            {"itemId":"frame_material","amount":"100000"},
+                            {"itemId":"processor","amount":"200000"},
+                            {"itemId":"universe_matrix","amount":"20000"}
+                        ],
+                        "fleetCosts": {}, "delivered": {}, "deliveredFleet": {}
+                    },
+                    {
+                        "stageId": "dock",
+                        "costs": [
+                            {"itemId":"quantum_chip","amount":"100000"},
+                            {"itemId":"particle_container","amount":"200000"},
+                            {"itemId":"space_warper","amount":"20000"}
+                        ],
+                        "fleetCosts": {"logistics_vessel":200}, "delivered": {}, "deliveredFleet": {}
+                    },
+                    {
+                        "stageId": "showcase",
+                        "costs": [
+                            {"itemId":"titanium_glass","amount":"300000"},
+                            {"itemId":"particle_broadband","amount":"200000"},
+                            {"itemId":"plastic","amount":"500000"},
+                            {"itemId":"universe_matrix","amount":"50000"}
+                        ],
+                        "fleetCosts": {}, "delivered": {}, "deliveredFleet": {}
+                    }
+                ]
+            },
+            "viewport": {"x":0,"y":0,"zoom":0.72},
+            "contractBoard": {
+                "rulesVersion":1,
+                "taskDay":task_day,
+                "lastConfirmedWallClockMs":saved_at_ms,
+                "offers":[], "accepted":[], "history":[], "settledIds":[],
+                "featuredContractId":null
+            },
+            "economy": {"orbitalMarks":"0","stationReputation":"0","unlockedDecorationIds":[]},
+            "layout": {"themeId":"orbital_teal","placements":[],"featuredAchievementIds":[]},
+            "profile": {
+                "title":"我的轨道空间站",
+                "motto":"让每一条生产线通向群星。",
+                "featuredMetricKeys":["total-generation","peak-throughput","dyson-power"]
+            },
+            "totals": {"completedContracts":0,"exportedByItem":{}}
+        }),
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -759,6 +865,55 @@ mod tests {
             parsed.proof().source_sha256,
             hex::encode(Sha256::digest(&bytes))
         );
+    }
+
+    #[test]
+    fn parses_a_bounded_stream_without_a_predeclared_length() {
+        let bytes = fixture(true);
+        let parsed = parse_v47_envelope_stream(bytes.as_slice()).unwrap();
+        assert_eq!(parsed.proof().source_byte_length, bytes.len() as u64);
+        assert_eq!(
+            parsed.proof().source_sha256,
+            hex::encode(Sha256::digest(&bytes))
+        );
+    }
+
+    #[test]
+    fn migrates_a_v46_envelope_with_only_the_additive_station_namespace() {
+        let state = r#"{"version":46,"mode":"normal","activePlanetId":"home","elapsedSeconds":0,"paused":false,"totalProduced":{"universe_matrix":1},"orbitalStation":{"forged":true},"entities":[],"belts":[]}"#;
+        let state_value = serde_json::from_str::<Value>(state).unwrap();
+        let serialized_state = serde_json::to_string(&state_value).unwrap();
+        let bytes = serde_json::to_vec(&json!({
+            "formatVersion": 2,
+            "kind": "primary",
+            "savedAt": 86_400_000,
+            "mode": "normal",
+            "slot": "main",
+            "state": state_value,
+            "checksum": checksum(&serialized_state),
+        }))
+        .unwrap();
+
+        let parsed = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap();
+
+        assert_eq!(parsed.proof.state_version, 47);
+        assert_eq!(parsed.base["version"], 47);
+        assert_eq!(parsed.base["orbitalStation"]["stateVersion"], 1);
+        assert_eq!(parsed.base["orbitalStation"]["status"], "eligible");
+        assert_eq!(parsed.base["orbitalStation"]["contractBoard"]["taskDay"], 1);
+        assert!(parsed.base["orbitalStation"].get("forged").is_none());
+    }
+
+    #[test]
+    fn decoded_stream_reader_rejects_the_byte_after_the_256_mib_limit() {
+        let mut reader = BoundedHashReader {
+            inner: b"ab".as_slice(),
+            digest: Sha256::new(),
+            bytes_read: MAX_V47_IMPORT_BYTES - 1,
+            utf16_compatibility: JavascriptUtf16CompatibilityScanner::default(),
+        };
+        let error = reader.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(error.to_string().contains("bounded file limit"));
     }
 
     #[test]

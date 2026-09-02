@@ -5,11 +5,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import { advanceSimulationBudget, createSimulationLookupContext, createSimulationProfiler, getEntityOperatingStatus } from "./engine";
+import {
+  advanceExactSimulationForConservationDiagnostic,
+  captureAggregateConservationBaseline,
+} from "./offlineApproximation";
 import { migrateGame } from "./storage";
 import type { GameState } from "./types";
 
@@ -23,6 +27,30 @@ const { NativeHostClient, NativeSaveSessionRegistry } = require("../../desktop/n
   NativeHostClient: new (options: { binaryPath: string; rootPath: string; requestTimeoutMs: number }) => {
     child?: { pid?: number };
     stderrTail?: string;
+    requestWithStructuredProfileEvidence(
+      request: Record<string, unknown>,
+      options?: { requestTimeoutMs?: number },
+    ): Promise<{
+      value: any;
+      operationDurationNs: number | null;
+      profileChannel: {
+        responseBound: boolean;
+        dropped: boolean;
+        malformedCount: number;
+        incomplete: boolean;
+        quiescent: boolean;
+        timedOut: boolean;
+        records: Array<{ sequence: number; record: unknown }>;
+      };
+      operationBinding: {
+        protocol: string;
+        requestId: number;
+        sessionIdSha256: string;
+        baseRevision: number;
+        measuredRevision: number | null;
+        profilePurpose: string;
+      };
+    }>;
     start(version: string): Promise<{ capabilities: string[] }>;
     request(request: Record<string, unknown>): Promise<any>;
     stop(): Promise<void>;
@@ -73,6 +101,41 @@ function stableCanonicalSha256(value: unknown): string {
   return hash.digest("hex");
 }
 
+function aggregateConservationSummary(state: GameState) {
+  const captured = captureAggregateConservationBaseline(state);
+  const orderedEntries = (values: Map<string, bigint>) => [...values.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([itemId, amount]) => [itemId, amount.toString()]);
+  const material = {
+    totals: orderedEntries(captured.totals),
+    totalProduced: orderedEntries(captured.totalProduced),
+    knownConsumed: orderedEntries(captured.knownConsumed),
+    knownGranted: orderedEntries(captured.knownGranted),
+    constructionOutputs: orderedEntries(captured.constructionOutputs),
+    constructionCrafted: captured.constructionCrafted.toString(),
+    failure: captured.failure ?? null,
+  };
+  return {
+    sha256: stableCanonicalSha256(material),
+    captureFailure: captured.failure ?? null,
+    itemCounts: {
+      totals: captured.totals.size,
+      totalProduced: captured.totalProduced.size,
+      knownConsumed: captured.knownConsumed.size,
+      knownGranted: captured.knownGranted.size,
+      constructionOutputs: captured.constructionOutputs.size,
+    },
+  };
+}
+
+function lastNativeProfileValue(stderr: string | undefined, label: string): number | null {
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const values = [...String(stderr ?? "").matchAll(
+    new RegExp(`DSP_NATIVE_CORE_PROFILE\\t${escapedLabel}\\t([^\\r\\n]+)`, "g"),
+  )].map((match) => Number(match[1].trim())).filter(Number.isFinite);
+  return values.length > 0 ? values[values.length - 1] : null;
+}
+
 function privateBytes(pid: number | undefined): number | null {
   if (!Number.isSafeInteger(pid) || !pid) return null;
   try {
@@ -82,6 +145,165 @@ function privateBytes(pid: number | undefined): number | null {
   } catch {
     return null;
   }
+}
+
+interface FixedAffinityProcessSnapshot {
+  Id: number;
+  PriorityClass: string;
+  ProcessorAffinity: string;
+}
+
+interface FixedAffinityProcessPolicyRequest {
+  affinity: string;
+  nodePriority: string;
+  nativePriority: string;
+}
+
+const fixedAffinityPriorityClasses = new Set([
+  "Idle", "BelowNormal", "Normal", "AboveNormal", "High", "RealTime",
+]);
+
+function normalizeFixedAffinityMask(value: unknown): string {
+  const normalized = String(value ?? "").trim().replace(/^0x/i, "").toUpperCase();
+  if (!/^[0-9A-F]{1,16}$/.test(normalized)) {
+    throw new Error("fixed-affinity benchmark mask must be 1 to 16 hexadecimal digits");
+  }
+  const selected = normalized.replace(/^0+/, "");
+  if (!selected) throw new Error("fixed-affinity benchmark mask must select at least one processor");
+  return `0X${selected}`;
+}
+
+function readFixedAffinityProcessPolicyRequest(
+  environment: NodeJS.ProcessEnv = process.env,
+): FixedAffinityProcessPolicyRequest | null {
+  const affinity = environment.DSP_NATIVE_CORE_BENCHMARK_AFFINITY?.trim();
+  const nodePriority = environment.DSP_NATIVE_CORE_BENCHMARK_NODE_PRIORITY?.trim();
+  const nativePriority = environment.DSP_NATIVE_CORE_BENCHMARK_NATIVE_PRIORITY?.trim();
+  if (!affinity && !nodePriority && !nativePriority) return null;
+  if (!affinity || !nodePriority || !nativePriority) {
+    throw new Error("fixed-affinity benchmark process policy is incomplete");
+  }
+  if (!fixedAffinityPriorityClasses.has(nodePriority) || !fixedAffinityPriorityClasses.has(nativePriority)) {
+    throw new Error("fixed-affinity benchmark process priority is unsupported");
+  }
+  return { affinity: normalizeFixedAffinityMask(affinity), nodePriority, nativePriority };
+}
+
+function buildWindowsProcessPolicyScript({
+  pid,
+  priority,
+  affinity,
+  apply,
+}: {
+  pid: number;
+  priority: string;
+  affinity: string;
+  apply: boolean;
+}): string {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("fixed-affinity process PID is invalid");
+  if (!fixedAffinityPriorityClasses.has(priority)) throw new Error("fixed-affinity process priority is unsupported");
+  const affinityHex = normalizeFixedAffinityMask(affinity).slice(2);
+  return [
+    "$ErrorActionPreference='Stop'",
+    "$ProgressPreference='SilentlyContinue'",
+    `$p=[System.Diagnostics.Process]::GetProcessById(${pid})`,
+    ...(apply ? [
+      `$requestedUnsigned=[Convert]::ToUInt64('${affinityHex}',16)`,
+      "$requestedSigned=[BitConverter]::ToInt64([BitConverter]::GetBytes([uint64]$requestedUnsigned),0)",
+      "$p.ProcessorAffinity=[IntPtr]$requestedSigned",
+      `$p.PriorityClass=[System.Diagnostics.ProcessPriorityClass]::${priority}`,
+    ] : []),
+    "$p.Refresh()",
+    "$signedAffinity=$p.ProcessorAffinity.ToInt64()",
+    "$unsignedAffinity=[BitConverter]::ToUInt64([BitConverter]::GetBytes([long]$signedAffinity),0)",
+    "[pscustomobject]@{Id=[int]$p.Id; PriorityClass=[string]$p.PriorityClass; " +
+      "ProcessorAffinity=('0x{0:X}' -f $unsignedAffinity)} | ConvertTo-Json -Compress",
+  ].join("; ");
+}
+
+function assertFixedAffinityProcessSnapshot(
+  value: unknown,
+  pid: number,
+  priority: string,
+  affinity: string,
+): FixedAffinityProcessSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("fixed-affinity process snapshot is invalid");
+  }
+  const snapshot = value as Partial<FixedAffinityProcessSnapshot>;
+  if (snapshot.Id !== pid || snapshot.PriorityClass !== priority ||
+      normalizeFixedAffinityMask(snapshot.ProcessorAffinity) !== normalizeFixedAffinityMask(affinity)) {
+    throw new Error("fixed-affinity process policy did not match the requested PID, priority, and affinity");
+  }
+  return snapshot as FixedAffinityProcessSnapshot;
+}
+
+function applyOrCaptureFixedAffinityProcessPolicy({
+  pid,
+  priority,
+  affinity,
+  apply,
+  platform = process.platform,
+  execute = execFileSync,
+}: {
+  pid: number | undefined;
+  priority: string;
+  affinity: string;
+  apply: boolean;
+  platform?: NodeJS.Platform;
+  execute?: typeof execFileSync;
+}): FixedAffinityProcessSnapshot {
+  if (platform !== "win32") throw new Error("fixed-affinity process policy requires Windows");
+  if (!Number.isSafeInteger(pid) || !pid) throw new Error("fixed-affinity process PID is unavailable");
+  const script = buildWindowsProcessPolicyScript({ pid, priority, affinity, apply });
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  const output = execute("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded,
+  ], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error("fixed-affinity process policy did not return a JSON snapshot");
+  }
+  return assertFixedAffinityProcessSnapshot(parsed, pid, priority, affinity);
+}
+
+function fixedAffinityProcessSnapshot(pid: number | undefined): FixedAffinityProcessSnapshot | null {
+  if (process.platform !== "win32" || !Number.isSafeInteger(pid) || !pid) return null;
+  try {
+    const command = `$p=Get-Process -Id ${pid}; [pscustomobject]@{` +
+      "Id=$p.Id; PriorityClass=[string]$p.PriorityClass; " +
+      "ProcessorAffinity=('0x{0:X}' -f [uint64]$p.ProcessorAffinity.ToInt64())" +
+      "} | ConvertTo-Json -Compress";
+    return JSON.parse(execFileSync("powershell.exe", [
+      "-NoProfile", "-NonInteractive", "-Command", command,
+    ], { encoding: "utf8" }).trim());
+  } catch {
+    return null;
+  }
+}
+
+let nativeBenchmarkScratchRootCreations = 0;
+
+function createNativeBenchmarkScratchRoot(configuredScratchRoot: string | undefined): string {
+  const scratchParent = configuredScratchRoot?.trim()
+    ? path.resolve(configuredScratchRoot.trim())
+    : os.tmpdir();
+  if (configuredScratchRoot?.trim()) {
+    const scratchStat = fs.lstatSync(scratchParent);
+    if (scratchStat.isSymbolicLink() || !scratchStat.isDirectory()) {
+      throw new Error("fixed-affinity benchmark scratch root must be a non-symbolic-link directory");
+    }
+  }
+  // Always use a newly created empty child. A prior hard-killed sample may
+  // have left siblings behind, but a later sample never opens or reuses them.
+  const created = fs.mkdtempSync(path.join(scratchParent, "native-core-benchmark-"));
+  nativeBenchmarkScratchRootCreations += 1;
+  if (fs.readdirSync(created).length !== 0) {
+    throw new Error("new native benchmark scratch directory is not empty");
+  }
+  return created;
 }
 
 interface PrivatePeakSample {
@@ -326,18 +548,227 @@ function logBenchmarkRecord(label: string, value: Record<string, unknown>): void
   console.log(`DSP_NATIVE_CORE_BENCHMARK\t${label}\t${JSON.stringify(value)}`);
 }
 
+describe("fixed-affinity benchmark process-policy contract", () => {
+  it.skipIf(runBenchmark)("does not allocate real-save scratch while the benchmark suite is skipped", () => {
+    expect(nativeBenchmarkScratchRootCreations).toBe(0);
+  });
+
+  it("creates a fresh empty scratch child without reopening a prior killed sample", () => {
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), "native-benchmark-scratch-parent-"));
+    const prior = path.join(parent, "native-core-benchmark-prior-killed");
+    fs.mkdirSync(prior);
+    fs.writeFileSync(path.join(prior, "do-not-read.txt"), "SENSITIVE_PRIOR_SAMPLE");
+    let created: string | null = null;
+    try {
+      created = createNativeBenchmarkScratchRoot(parent);
+      expect(created).not.toBe(prior);
+      expect(fs.readdirSync(created)).toEqual([]);
+      expect(fs.readFileSync(path.join(prior, "do-not-read.txt"), "utf8")).toBe("SENSITIVE_PRIOR_SAMPLE");
+    } finally {
+      if (created) fs.rmSync(created, { recursive: true, force: true });
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("generates an exact-PID Windows setter for both affinity and priority", () => {
+    const script = buildWindowsProcessPolicyScript({
+      pid: 1234,
+      priority: "High",
+      affinity: "0000ffff",
+      apply: true,
+    });
+    expect(script).toContain("GetProcessById(1234)");
+    expect(script).toContain("ToUInt64('FFFF',16)");
+    expect(script).toContain("$p.ProcessorAffinity=[IntPtr]$requestedSigned");
+    expect(script).toContain("$p.PriorityClass=[System.Diagnostics.ProcessPriorityClass]::High");
+    expect(script).toContain("ConvertTo-Json -Compress");
+  });
+
+  it("captures both before and after snapshots and rejects either endpoint drifting", () => {
+    const invocations: string[] = [];
+    const snapshots = [
+      { Id: 1234, PriorityClass: "High", ProcessorAffinity: "0xFFFF" },
+      { Id: 1234, PriorityClass: "High", ProcessorAffinity: "0xFFFF" },
+    ];
+    const execute = ((executable: string, args: readonly string[]) => {
+      expect(executable).toBe("powershell.exe");
+      const encodedIndex = args.indexOf("-EncodedCommand");
+      const script = Buffer.from(args[encodedIndex + 1], "base64").toString("utf16le");
+      invocations.push(script);
+      return JSON.stringify(snapshots.shift());
+    }) as typeof execFileSync;
+    const before = applyOrCaptureFixedAffinityProcessPolicy({
+      pid: 1234,
+      priority: "High",
+      affinity: "FFFF",
+      apply: false,
+      platform: "win32",
+      execute,
+    });
+    const after = applyOrCaptureFixedAffinityProcessPolicy({
+      pid: 1234,
+      priority: "High",
+      affinity: "FFFF",
+      apply: false,
+      platform: "win32",
+      execute,
+    });
+    expect(before).toEqual(after);
+    expect(invocations).toHaveLength(2);
+    expect(invocations.every((script) => !script.includes("$p.ProcessorAffinity="))).toBe(true);
+
+    const drifted = (() => JSON.stringify({
+      Id: 1234,
+      PriorityClass: "Normal",
+      ProcessorAffinity: "0xFFFF",
+    })) as unknown as typeof execFileSync;
+    expect(() => applyOrCaptureFixedAffinityProcessPolicy({
+      pid: 1234,
+      priority: "High",
+      affinity: "FFFF",
+      apply: false,
+      platform: "win32",
+      execute: drifted,
+    })).toThrow(/did not match/);
+  });
+
+  it.skipIf(process.platform !== "win32")(
+    "applies the default Node High / Host Normal policy on a real disposable command chain",
+    { timeout: 20_000 },
+    async () => {
+      const launcher = spawn(process.execPath, ["-e", [
+        "const { spawn } = require('node:child_process');",
+        "let host = null;",
+        "process.send({ type: 'ready' });",
+        "process.on('message', (message) => {",
+        "  if (message === 'spawn-host') {",
+        "    host = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });",
+        "    host.once('spawn', () => process.send({ type: 'host', pid: host.pid }));",
+        "  } else if (message === 'stop') {",
+        "    if (host && host.exitCode === null) host.kill();",
+        "    process.exit(0);",
+        "  }",
+        "});",
+        "setInterval(() => {}, 1000);",
+      ].join("\n")], {
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        windowsHide: true,
+      });
+      let hostPid: number | null = null;
+      const waitForMessage = (type: "ready" | "host") => new Promise<number | null>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          launcher.off("message", onMessage);
+          reject(new Error(`disposable process chain did not emit ${type}`));
+        }, 5_000);
+        const onMessage = (message: unknown) => {
+          if (!message || typeof message !== "object" || (message as { type?: unknown }).type !== type) return;
+          clearTimeout(timeout);
+          launcher.off("message", onMessage);
+          const pid = (message as { pid?: unknown }).pid;
+          resolve(Number.isSafeInteger(pid) && Number(pid) > 0 ? Number(pid) : null);
+        };
+        launcher.on("message", onMessage);
+      });
+      try {
+        const ready = waitForMessage("ready");
+        await new Promise<void>((resolve, reject) => {
+          launcher.once("spawn", resolve);
+          launcher.once("error", reject);
+        });
+        await ready;
+        const nodeInitial = fixedAffinityProcessSnapshot(launcher.pid);
+        expect(nodeInitial).not.toBeNull();
+        const nodeHigh = applyOrCaptureFixedAffinityProcessPolicy({
+          pid: launcher.pid,
+          priority: "High",
+          affinity: nodeInitial!.ProcessorAffinity,
+          apply: true,
+        });
+        expect(nodeHigh.PriorityClass).toBe("High");
+
+        const hostMessage = waitForMessage("host");
+        launcher.send("spawn-host");
+        hostPid = await hostMessage;
+        expect(hostPid).not.toBeNull();
+        const hostInitial = fixedAffinityProcessSnapshot(hostPid!);
+        expect(hostInitial).not.toBeNull();
+        applyOrCaptureFixedAffinityProcessPolicy({
+          pid: hostPid!,
+          priority: "High",
+          affinity: hostInitial!.ProcessorAffinity,
+          apply: true,
+        });
+        const hostNormal = applyOrCaptureFixedAffinityProcessPolicy({
+          pid: hostPid!,
+          priority: "Normal",
+          affinity: hostInitial!.ProcessorAffinity,
+          apply: true,
+        });
+        expect(hostNormal.PriorityClass).toBe("Normal");
+        expect(applyOrCaptureFixedAffinityProcessPolicy({
+          pid: launcher.pid,
+          priority: "High",
+          affinity: nodeInitial!.ProcessorAffinity,
+          apply: false,
+        }).PriorityClass).toBe("High");
+        expect(applyOrCaptureFixedAffinityProcessPolicy({
+          pid: hostPid!,
+          priority: "Normal",
+          affinity: hostInitial!.ProcessorAffinity,
+          apply: false,
+        }).PriorityClass).toBe("Normal");
+      } finally {
+        if (hostPid) {
+          try { process.kill(hostPid); } catch { /* already stopped */ }
+        }
+        if (launcher.connected) launcher.send("stop");
+        if (launcher.exitCode === null && !launcher.killed) launcher.kill();
+        if (launcher.exitCode === null) {
+          await new Promise<void>((resolve) => {
+            const timeout = setTimeout(resolve, 2_000);
+            launcher.once("close", () => {
+              clearTimeout(timeout);
+              resolve();
+            });
+          });
+        }
+      }
+    },
+  );
+});
+
 describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-core-benchmark-"));
   const binaryPath = process.env.DSP_NATIVE_CORE_HOST_BINARY
     ? path.resolve(process.env.DSP_NATIVE_CORE_HOST_BINARY)
     : path.resolve("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host");
-  const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 300_000 });
+  let benchmarkRoot: string | null = null;
+  let client: InstanceType<typeof NativeHostClient> | null = null;
+
+  beforeAll(() => {
+    benchmarkRoot = createNativeBenchmarkScratchRoot(process.env.DSP_NATIVE_CORE_BENCHMARK_SCRATCH_ROOT);
+    client = new NativeHostClient({ binaryPath, rootPath: benchmarkRoot, requestTimeoutMs: 300_000 });
+  });
+
   afterAll(async () => {
-    await client.stop();
-    fs.rmSync(root, { recursive: true, force: true });
+    try {
+      await client?.stop();
+    } finally {
+      if (benchmarkRoot) {
+        fs.rmSync(benchmarkRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      }
+    }
   });
 
   it("loads the 80k entity / 155k belt fixture with exact v47 hash and bounded native memory", { timeout: 300_000 }, async () => {
+    const fixedAffinityProcessPolicy = readFixedAffinityProcessPolicyRequest();
+    if (fixedAffinityProcessPolicy) {
+      applyOrCaptureFixedAffinityProcessPolicy({
+        pid: process.pid,
+        priority: fixedAffinityProcessPolicy.nodePriority,
+        affinity: fixedAffinityProcessPolicy.affinity,
+        apply: true,
+      });
+    }
     expect(fs.existsSync(fixturePath)).toBe(true);
     expect(fs.existsSync(binaryPath)).toBe(true);
     const hostBinaryBytes = (require("node:fs") as { readFileSync(path: string): Uint8Array })
@@ -346,8 +777,13 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       .createHash("sha256")
       .update(hostBinaryBytes)
       .digest("hex");
-    const sourceBytes = fs.statSync(fixturePath).size;
-    const envelope = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as Envelope;
+    const fixtureBytes = Buffer.from((require("node:fs") as { readFileSync(path: string): Uint8Array })
+      .readFileSync(fixturePath));
+    const sourceBytes = fixtureBytes.length;
+    const fixtureSha256 = crypto.createHash("sha256").update(fixtureBytes).digest("hex");
+    const expectedFixtureSha256 = process.env.DSP_NATIVE_CORE_EXPECTED_FIXTURE_SHA256;
+    if (expectedFixtureSha256) expect(fixtureSha256).toBe(expectedFixtureSha256);
+    const envelope = JSON.parse(fixtureBytes.toString("utf8")) as Envelope;
     expect(envelope.formatVersion).toBe(2);
     expect(envelope.state.version).toBe(47);
     const registry = createContentPackRegistry();
@@ -368,7 +804,16 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       ...[...journal.chunks.entries()].map(([id, value]) => ({ key: `${prefix}chunk.${encodeURIComponent(id)}`, value })),
       { key: `${prefix}manifest`, value: JSON.stringify(journal.manifest) },
     ];
+    if (!client) throw new Error("native benchmark client was not initialized");
     const hello = await client.start("native-core-benchmark");
+    if (fixedAffinityProcessPolicy) {
+      applyOrCaptureFixedAffinityProcessPolicy({
+        pid: client.child?.pid,
+        priority: fixedAffinityProcessPolicy.nativePriority,
+        affinity: fixedAffinityProcessPolicy.affinity,
+        apply: true,
+      });
+    }
     expect(hello.capabilities).toContain("native-core-shadow-v1");
     const saves = new NativeSaveSessionRegistry(client);
     const transaction = await saves.begin(1, {
@@ -392,17 +837,18 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     const openStartedAt = performance.now();
     let openFinishedAt = openStartedAt;
     let opened: any;
+    const coreOpenRequest = {
+      operation: "coreOpen",
+      slot: envelope.mode === "speedrun" ? "speedrun-main" : "normal-main",
+      generation: commit.generation,
+      rootHash: commit.rootHash,
+      revision: commit.revision,
+      registryFingerprint: runtime.fingerprint,
+      catalog: createNativeCoreCatalog(runtime),
+    };
     let openPeakSample: PrivatePeakSample;
     try {
-      opened = await client.request({
-        operation: "coreOpen",
-        slot: envelope.mode === "speedrun" ? "speedrun-main" : "normal-main",
-        generation: commit.generation,
-        rootHash: commit.rootHash,
-        revision: commit.revision,
-        registryFingerprint: runtime.fingerprint,
-        catalog: createNativeCoreCatalog(runtime),
-      });
+      opened = await client.request(coreOpenRequest);
       openFinishedAt = performance.now();
     } finally {
       openPeakSample = await openPeakSampler.stop();
@@ -444,6 +890,13 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         privatePeakSampler: openPeakSample,
       },
     });
+    // A memory-gate failure happens before the later exact-advance diagnostics.
+    // Preserve the bounded native profile tail here so the failed report still
+    // names the resident indexes responsible for the excess instead of forcing
+    // developers to weaken or bypass the memory assertion to diagnose it.
+    if (process.env.DSP_NATIVE_CORE_PROFILE === "1" && client.stderrTail?.trim()) {
+      console.log(client.stderrTail.trim());
+    }
     // Emit the complete immutable open evidence before enforcing the memory
     // budget so a regression report retains the component breakdown needed to
     // diagnose the excess without weakening the fail-closed gate.
@@ -456,26 +909,51 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     }
     const commandPrivateBytesBefore = privateBytes(client.child?.pid);
     const commandStartedAt = performance.now();
+    const unpauseCommand = {
+      protocolVersion: 1,
+      baseRevision: commit.revision,
+      topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
+      changedEntities: [], addedEntities: [], removedEntityIds: [],
+      changedBelts: [], addedBelts: [], removedBeltIds: [],
+    };
     const resumed = await client.request({
       operation: "coreApplyCommand",
       sessionId: opened.sessionId,
-      command: {
-        protocolVersion: 1,
-        baseRevision: commit.revision,
-        topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
-        changedEntities: [], addedEntities: [], removedEntityIds: [],
-        changedBelts: [], addedBelts: [], removedBeltIds: [],
-      },
+      command: unpauseCommand,
     });
     const commandDurationMs = performance.now() - commandStartedAt;
     const commandPrivateBytesAfter = privateBytes(client.child?.pid);
+    const preStepSummary = await client.request({
+      operation: "coreStatus",
+      sessionId: opened.sessionId,
+    });
+    const fixedAffinityProcessesBefore = fixedAffinityProcessPolicy ? {
+      node: applyOrCaptureFixedAffinityProcessPolicy({
+        pid: process.pid,
+        priority: fixedAffinityProcessPolicy.nodePriority,
+        affinity: fixedAffinityProcessPolicy.affinity,
+        apply: false,
+      }),
+      nativeHost: applyOrCaptureFixedAffinityProcessPolicy({
+        pid: client.child?.pid,
+        priority: fixedAffinityProcessPolicy.nativePriority,
+        affinity: fixedAffinityProcessPolicy.affinity,
+        apply: false,
+      }),
+    } : {
+      node: fixedAffinityProcessSnapshot(process.pid),
+      nativeHost: fixedAffinityProcessSnapshot(client.child?.pid),
+    };
+    let fixedAffinityProcessesAfter = fixedAffinityProcessesBefore;
+    const fixedProfileEvidenceEnabled = fixedAffinityProcessPolicy !== null &&
+      process.env.DSP_NATIVE_CORE_PROFILE === "1";
     const exactPeakSampler = await startPrivatePeakSampler(client.child?.pid, "exact-advance");
-    const coreAdvanceStartedAt = performance.now();
-    let coreAdvanceFinishedAt = coreAdvanceStartedAt;
+    let coreAdvanceDurationNs: number | null = null;
+    let timingProfileOperation: Awaited<ReturnType<InstanceType<typeof NativeHostClient>["requestWithStructuredProfileEvidence"]>> | null = null;
     let admission: any;
     let exactPeakSample: PrivatePeakSample;
     try {
-      admission = await client.request({
+      const advanceRequest = {
         operation: "coreAdvance",
         sessionId: opened.sessionId,
         request: {
@@ -484,12 +962,46 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           wallSeconds: 1,
           includeDiagnostics: false,
         },
-      });
-      coreAdvanceFinishedAt = performance.now();
+      };
+      if (fixedProfileEvidenceEnabled) {
+        timingProfileOperation = await client.requestWithStructuredProfileEvidence({
+          ...advanceRequest,
+          profilePurpose: "local-dispatch-timing-v1",
+        });
+        admission = timingProfileOperation.value;
+        coreAdvanceDurationNs = timingProfileOperation.operationDurationNs;
+      } else {
+        const startedAtNs = process.hrtime.bigint();
+        admission = await client.request(advanceRequest);
+        const duration = process.hrtime.bigint() - startedAtNs;
+        coreAdvanceDurationNs = duration > 0n && duration <= BigInt(Number.MAX_SAFE_INTEGER)
+          ? Number(duration)
+          : null;
+      }
     } finally {
-      exactPeakSample = await exactPeakSampler.stop();
+      try {
+        fixedAffinityProcessesAfter = fixedAffinityProcessPolicy ? {
+          node: applyOrCaptureFixedAffinityProcessPolicy({
+            pid: process.pid,
+            priority: fixedAffinityProcessPolicy.nodePriority,
+            affinity: fixedAffinityProcessPolicy.affinity,
+            apply: false,
+          }),
+          nativeHost: applyOrCaptureFixedAffinityProcessPolicy({
+            pid: client.child?.pid,
+            priority: fixedAffinityProcessPolicy.nativePriority,
+            affinity: fixedAffinityProcessPolicy.affinity,
+            apply: false,
+          }),
+        } : {
+          node: fixedAffinityProcessSnapshot(process.pid),
+          nativeHost: fixedAffinityProcessSnapshot(client.child?.pid),
+        };
+      } finally {
+        exactPeakSample = await exactPeakSampler.stop();
+      }
     }
-    const coreAdvanceDurationMs = coreAdvanceFinishedAt - coreAdvanceStartedAt;
+    const coreAdvanceDurationMs = coreAdvanceDurationNs === null ? Number.NaN : coreAdvanceDurationNs / 1_000_000;
     const diagnosticsStartedAt = performance.now();
     const advancedSummary = await client.request({
       operation: "coreStatus",
@@ -503,6 +1015,40 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     });
     const cachedDiagnosticsDurationMs = performance.now() - cachedDiagnosticsStartedAt;
     expect(cachedAdvancedSummary).toEqual(advancedSummary);
+    let shapeProfileOperation: Awaited<ReturnType<InstanceType<typeof NativeHostClient>["requestWithStructuredProfileEvidence"]>> | null = null;
+    let shapeAdvancedSummary: any = null;
+    if (admission.supported && fixedProfileEvidenceEnabled) {
+      const shapeOpened = await client.request(coreOpenRequest);
+      try {
+        const shapeResumed = await client.request({
+          operation: "coreApplyCommand",
+          sessionId: shapeOpened.sessionId,
+          command: unpauseCommand,
+        });
+        expect(shapeResumed.revision).toBe(resumed.revision);
+        shapeProfileOperation = await client.requestWithStructuredProfileEvidence({
+          operation: "coreAdvance",
+          profilePurpose: "local-dispatch-shape-v1",
+          sessionId: shapeOpened.sessionId,
+          request: {
+            baseRevision: shapeResumed.revision,
+            simulationSeconds: 1,
+            wallSeconds: 1,
+            includeDiagnostics: false,
+          },
+        });
+        expect(shapeProfileOperation.value.supported).toBe(true);
+        shapeAdvancedSummary = await client.request({
+          operation: "coreStatus",
+          sessionId: shapeOpened.sessionId,
+        });
+      } finally {
+        await client.request({ operation: "coreClose", sessionId: shapeOpened.sessionId });
+      }
+      expect(shapeAdvancedSummary.canonicalSha256).toBe(advancedSummary.canonicalSha256);
+      expect(shapeAdvancedSummary.domainSha256).toBe(advancedSummary.domainSha256);
+      expect(shapeAdvancedSummary.revision).toBe(advancedSummary.revision);
+    }
     logBenchmarkRecord("admission", {
       nativeCoreAdmission: {
         supported: admission.supported,
@@ -518,9 +1064,14 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       const expectedInitial = structuredClone(migratedState);
       expectedInitial.paused = false;
       const jsProfiler = createSimulationProfiler();
-      const jsAdvanceStartedAt = performance.now();
-      const expected = advanceSimulationBudget(expectedInitial, 1, 1, jsProfiler);
-      const jsAdvanceDurationMs = performance.now() - jsAdvanceStartedAt;
+      const jsDiagnosticStartedAt = performance.now();
+      const {
+        state: expected,
+        conservationFailure: conservationValidationFailure,
+        exactAdvanceDurationMs: jsAdvanceDurationMs,
+      } = advanceExactSimulationForConservationDiagnostic(expectedInitial, 1, 1, jsProfiler);
+      const jsAdvanceAndConservationDurationMs = performance.now() - jsDiagnosticStartedAt;
+      const conservationSummary = aggregateConservationSummary(expected);
       const expectedFields = Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(expected)) as Record<string, unknown>)
         .map(([key, value]) => [key, stableCanonicalSha256(value)]));
       const fieldMismatches = Object.keys(expectedFields).filter((key) =>
@@ -559,14 +1110,26 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       logBenchmarkRecord("exact", {
         nativeCoreExactRealSaveAdvance: {
           exactState: advancedSummary.canonicalSha256 === stableCanonicalSha256(expected),
+          revision: advancedSummary.revision,
+          expectedRevision: resumed.revision + 1,
           canonicalSha256: advancedSummary.canonicalSha256,
           expectedCanonicalSha256: stableCanonicalSha256(expected),
+          domainSha256: advancedSummary.domainSha256,
           canonicalComponents: advancedSummary.canonicalComponents,
+          conservationSummarySha256: conservationSummary.sha256,
+          conservationCaptureFailure: conservationSummary.captureFailure,
+          conservationValidationFailure,
+          conservationItemCounts: conservationSummary.itemCounts,
+          requestedThreadSetting: process.env.DSP_NATIVE_CORE_THREADS ?? null,
+          effectiveWorkerLimit: lastNativeProfileValue(client.stderrTail, "runtime-worker-limit"),
+          observedWorkerCount: lastNativeProfileValue(client.stderrTail, "runtime-observed-workers"),
           fieldMismatches,
           mismatchDetails,
           blockedMachineGroups,
           nativeAdvanceDurationMs: Number(coreAdvanceDurationMs.toFixed(2)),
+          nativeAdvanceDurationNs: coreAdvanceDurationNs,
           jsAdvanceDurationMs: Number(jsAdvanceDurationMs.toFixed(2)),
+          jsAdvanceAndConservationDurationMs: Number(jsAdvanceAndConservationDurationMs.toFixed(2)),
           nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),
           processPrivateBytesPeakDuringAdvance: exactPeakSample.peakBytes,
           processPrivateBytesPeakDeltaDuringAdvance: exactPeakSample.peakBytes !== null && exactPeakSample.baselineBytes !== null
@@ -576,6 +1139,41 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           deferredDiagnosticsDurationMs: Number(diagnosticsDurationMs.toFixed(2)),
           cachedDiagnosticsDurationMs: Number(cachedDiagnosticsDurationMs.toFixed(2)),
           nativeBeltScheduler: admission.beltScheduler ?? null,
+          fixedAffinityEvidence: {
+            fixtureSha256,
+            openCanonicalSha256: opened.summary.canonicalSha256,
+            preStepCanonicalSha256: preStepSummary.canonicalSha256,
+            preStepDomainSha256: preStepSummary.domainSha256,
+            measuredCanonicalSha256: advancedSummary.canonicalSha256,
+            measuredDomainSha256: advancedSummary.domainSha256,
+            nodePriority: fixedAffinityProcessesBefore.node?.PriorityClass ?? null,
+            nodeAffinity: fixedAffinityProcessesBefore.node?.ProcessorAffinity ?? null,
+            nativePriority: fixedAffinityProcessesBefore.nativeHost?.PriorityClass ?? null,
+            nativeAffinity: fixedAffinityProcessesBefore.nativeHost?.ProcessorAffinity ?? null,
+            processPolicy: fixedAffinityProcessPolicy ? {
+              requested: fixedAffinityProcessPolicy,
+              before: fixedAffinityProcessesBefore,
+              after: fixedAffinityProcessesAfter,
+            } : null,
+            requestedThreads: process.env.DSP_NATIVE_CORE_THREADS ?? null,
+            profileEnabled: process.env.DSP_NATIVE_CORE_PROFILE === "1",
+            effectiveWorkerLimit: lastNativeProfileValue(client.stderrTail, "runtime-worker-limit"),
+            observedWorkerCount: lastNativeProfileValue(client.stderrTail, "runtime-observed-workers"),
+            writeBackWorkers: admission.beltScheduler?.writeBackWorkers ?? null,
+            fullAdvanceDurationNs: coreAdvanceDurationNs,
+            shapeMeasuredCanonicalSha256: shapeAdvancedSummary?.canonicalSha256 ?? null,
+            shapeMeasuredDomainSha256: shapeAdvancedSummary?.domainSha256 ?? null,
+            localDispatchProfileOperations: {
+              timing: timingProfileOperation ? {
+                profileChannel: timingProfileOperation.profileChannel,
+                operationBinding: timingProfileOperation.operationBinding,
+              } : null,
+              shape: shapeProfileOperation ? {
+                profileChannel: shapeProfileOperation.profileChannel,
+                operationBinding: shapeProfileOperation.operationBinding,
+              } : null,
+            },
+          },
           javascriptBeltScheduler: {
             routeChecks: jsProfiler.beltRouteChecks,
             stableRoutesSkipped: jsProfiler.beltStableRoutesSkipped,
@@ -584,6 +1182,9 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       });
       if (client.stderrTail?.trim()) console.log(client.stderrTail.trim());
       expect(advancedSummary.canonicalFields).toEqual(expectedFields);
+      expect(advancedSummary.revision).toBe(resumed.revision + 1);
+      expect(conservationSummary.captureFailure).toBeNull();
+      expect(conservationValidationFailure).toBeNull();
       expect(advancedSummary.canonicalSha256).toBe(stableCanonicalSha256(expected));
       if (benchmarkExactOnly) {
         await client.request({ operation: "coreClose", sessionId: opened.sessionId });
@@ -790,7 +1391,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       });
       let reportedProfile = "";
       const profileTimer = setInterval(() => {
-        const current = client.stderrTail?.trim() ?? "";
+        const current = client?.stderrTail?.trim() ?? "";
         if (current && current !== reportedProfile) {
           reportedProfile = current;
           console.log(current);

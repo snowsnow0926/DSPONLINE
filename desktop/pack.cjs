@@ -27,10 +27,13 @@ const desktopIdentity = resolveDesktopEditionIdentity(
   process.env.DSP_DESKTOP_EDITION || "stable",
 );
 const outputDirectory = resolveDesktopEditionOutputDirectory(repositoryRoot, desktopIdentity);
-const releaseChannel = resolveReleaseChannel(process.env.DSP_RELEASE_CHANNEL);
+const buildMode = mode === "release" ? "dist" : mode;
+const releaseChannel = resolveReleaseChannel(
+  process.env.DSP_RELEASE_CHANNEL || packageMetadata.releaseChannel,
+);
 const updateBaseUrl = optionalHttpsUrl(process.env.DSP_UPDATE_BASE_URL, "Desktop update base URL");
 const cloudApiBaseUrl = optionalHttpsUrl(process.env.DSP_DESKTOP_API_BASE_URL, "Desktop cloud API base URL");
-if (mode === "dist" && (!updateBaseUrl || !cloudApiBaseUrl)) {
+if (buildMode === "dist" && (!updateBaseUrl || !cloudApiBaseUrl)) {
   throw new Error("正式桌面安装包必须同时配置 DSP_UPDATE_BASE_URL 和 DSP_DESKTOP_API_BASE_URL");
 }
 const channels = createReleaseChannels({
@@ -54,6 +57,52 @@ function runBuilder(args) {
   });
 }
 
+function runCommand(command, args) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      stdio: "inherit",
+      env: process.env,
+      windowsHide: true,
+    });
+    child.on("error", () => resolve(1));
+    child.on("exit", (code) => resolve(code ?? 1));
+  });
+}
+
+function createDesktopUpdateFeedArguments(sourceDirectory, {
+  repositoryRoot: root = repositoryRoot,
+  releaseChannel: channel = releaseChannel,
+  updateBaseUrl: baseUrl = updateBaseUrl,
+} = {}) {
+  const standardOutput = resolvePerformanceEditionOutputDirectory(root);
+  const fallbackOutput = path.resolve(`${standardOutput}-fallback`);
+  const resolvedSource = path.resolve(sourceDirectory);
+  if (![standardOutput, fallbackOutput].includes(resolvedSource)) {
+    throw new Error("Windows 性能开发版更新 feed 输出目录无效");
+  }
+  if (!baseUrl) throw new Error("Windows 性能开发版更新 feed 缺少 HTTPS 基址");
+  return [
+    path.join(root, "scripts", "create-native-update-manifests.mjs"),
+    "--channel", channel,
+    "--base-url", baseUrl,
+    "--desktop-source", resolvedSource,
+    "--output", path.join(resolvedSource, "update-feed"),
+  ];
+}
+
+async function finalizePackagedOutput(sourceDirectory, {
+  verify = verifyPackagedOutput,
+  releaseMode = mode === "release",
+  createUpdateFeed = (directory) => runCommand(
+    process.execPath,
+    createDesktopUpdateFeedArguments(directory),
+  ),
+} = {}) {
+  verify(sourceDirectory);
+  if (!releaseMode) return 0;
+  return createUpdateFeed(sourceDirectory);
+}
+
 function verifyPackagedOutput(outputDirectory) {
   const unpackedDirectory = path.join(outputDirectory, "win-unpacked");
   const asarPath = path.join(unpackedDirectory, "resources", "app.asar");
@@ -63,7 +112,7 @@ function verifyPackagedOutput(outputDirectory) {
     unpackedDirectory,
     extractAsarFile: extractFile,
   });
-  if (mode !== "dist") return;
+  if (buildMode !== "dist") return;
   const metadata = JSON.parse(extractFile(asarPath, "package.json").toString("utf8"));
   if (metadata.cloudApiBaseUrl !== cloudApiBaseUrl || metadata.updateBaseUrl !== updateBaseUrl) {
     throw new Error("桌面安装包元数据中的云 API 或更新地址与发布配置不一致");
@@ -93,7 +142,7 @@ function identityBuilderArgs(identity, targetOutputDirectory) {
 }
 
 async function main() {
-  if (!["pack", "dist"].includes(mode)) throw new Error(`Unsupported desktop build mode: ${mode}`);
+  if (!["pack", "dist", "release"].includes(mode)) throw new Error(`Unsupported desktop build mode: ${mode}`);
   const builderArgs = [
     ...(mode === "pack" ? ["--dir"] : []),
     ...identityBuilderArgs(desktopIdentity, outputDirectory),
@@ -103,7 +152,8 @@ async function main() {
   ];
   const standardResult = await runBuilder(builderArgs);
   if (standardResult === 0) {
-    verifyPackagedOutput(outputDirectory);
+    const finalizeResult = await finalizePackagedOutput(outputDirectory);
+    if (finalizeResult !== 0) process.exitCode = finalizeResult;
     return;
   }
 
@@ -123,8 +173,14 @@ async function main() {
     ...(cloudApiBaseUrl ? [`--config.extraMetadata.cloudApiBaseUrl=${cloudApiBaseUrl}`] : []),
     `--config.electronDist=${temporaryDist}`,
   ]);
-  if (fallbackResult === 0) verifyPackagedOutput(fallbackOutput);
-  process.exit(fallbackResult);
+  if (fallbackResult !== 0) {
+    process.exitCode = fallbackResult;
+    return;
+  }
+  const finalizeResult = await finalizePackagedOutput(fallbackOutput);
+  if (finalizeResult !== 0) process.exitCode = finalizeResult;
 }
 
-void main();
+if (require.main === module) void main();
+
+module.exports = { createDesktopUpdateFeedArguments, finalizePackagedOutput };

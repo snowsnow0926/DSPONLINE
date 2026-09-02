@@ -1,0 +1,306 @@
+import type { NativeConstructionCenterWorkspaceFrame } from "./nativeConstructionCenterWorkspace";
+
+export type NativeConstructionCenterIntentKind =
+  | "enabled"
+  | "quantumSupplyEnabled"
+  | "targetStock"
+  | "batchBuildingTargetStock"
+  | "otherNativeCommand";
+
+export interface NativeConstructionCenterFrameIdentity {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly activePlanetId: string;
+}
+
+export interface NativeConstructionCenterPendingIdentity extends NativeConstructionCenterFrameIdentity {
+  readonly kind: NativeConstructionCenterIntentKind;
+  readonly targetId: string | null;
+  /** Null until the durable ACK is known; then the projection revision to await. */
+  readonly expectedRevision: number | null;
+}
+
+export interface NativeConstructionCenterTargetStockSubmission extends NativeConstructionCenterFrameIdentity {
+  readonly targetId: string;
+  readonly target: number;
+  /** Required only for a decrease and bound to the same projected target. */
+  readonly confirmedDecreaseFrom: number | null;
+}
+
+export interface NativeConstructionCenterTargetStockConfirmation {
+  readonly identity: NativeConstructionCenterFrameIdentity;
+  readonly targetId: string;
+  readonly targetName: string;
+  readonly previousTarget: number;
+  readonly target: number;
+  readonly currentStock: number;
+  readonly cancelsJobsAndRefunds: boolean;
+}
+
+export interface NativeConstructionCenterBatchBuildingTargetStockSubmission
+  extends NativeConstructionCenterFrameIdentity {
+  readonly target: number;
+  readonly confirmedAffectedCount: number;
+  readonly confirmedChangedCount: number;
+  readonly confirmedLoweredCount: number;
+}
+
+export interface NativeConstructionCenterBatchBuildingTargetStockConfirmation {
+  readonly identity: NativeConstructionCenterFrameIdentity;
+  readonly target: number;
+  /** All unlocked building rows represented by this complete Rust projection. */
+  readonly affectedCount: number;
+  /** Rows whose policy will actually change. */
+  readonly changedCount: number;
+  /** Changed rows whose target policy will be lowered. */
+  readonly loweredCount: number;
+  /** Batch policy updates deliberately preserve jobs, WIP and reservations. */
+  readonly cancelsJobsAndRefunds: false;
+}
+
+export type NativeConstructionCenterTargetStockEvaluation =
+  | { readonly status: "rejected"; readonly message: string }
+  | { readonly status: "ready"; readonly submission: NativeConstructionCenterTargetStockSubmission }
+  | { readonly status: "confirmation-required"; readonly confirmation: NativeConstructionCenterTargetStockConfirmation };
+
+export type NativeConstructionCenterBatchBuildingTargetStockEvaluation =
+  | { readonly status: "rejected"; readonly message: string }
+  | {
+    readonly status: "confirmation-required";
+    readonly confirmation: NativeConstructionCenterBatchBuildingTargetStockConfirmation;
+  };
+
+export type NativeConstructionCenterTargetDraftResult =
+  | { readonly ok: true; readonly value: number }
+  | { readonly ok: false; readonly message: string };
+
+const TARGET_PRESETS = [0, 100, 500, 2_000, 10_000, 100_000, 100_000_000] as const;
+const MAX_CONSTRUCTION_AUTOMATION_TARGET = 100_000_000;
+
+export function nativeConstructionCenterFrameIdentity(
+  frame: NativeConstructionCenterWorkspaceFrame,
+): NativeConstructionCenterFrameIdentity {
+  return Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    revision: frame.revision,
+    activePlanetId: frame.activePlanetId,
+  });
+}
+
+export function nativeConstructionCenterIdentityMatchesFrame(
+  identity: NativeConstructionCenterFrameIdentity,
+  frame: NativeConstructionCenterWorkspaceFrame | null,
+): boolean {
+  return Boolean(frame) && identity.sessionId === frame!.sessionId && identity.runId === frame!.runId &&
+    identity.revision === frame!.revision && identity.activePlanetId === frame!.activePlanetId;
+}
+
+export function nativeConstructionCenterIdentityKey(
+  identity: NativeConstructionCenterFrameIdentity | null,
+): string {
+  return identity
+    ? JSON.stringify([identity.sessionId, identity.runId, identity.revision, identity.activePlanetId])
+    : "unavailable";
+}
+
+export function nativeConstructionCenterPendingKey(
+  pending: NativeConstructionCenterPendingIdentity | null,
+): string {
+  return pending
+    ? JSON.stringify([
+      pending.sessionId,
+      pending.runId,
+      pending.revision,
+      pending.activePlanetId,
+      pending.kind,
+      pending.targetId,
+      pending.expectedRevision,
+    ])
+    : "idle";
+}
+
+export function nativeConstructionCenterTargetPresets(stockLimit: number): readonly number[] {
+  if (!Number.isSafeInteger(stockLimit) || stockLimit < 1) return Object.freeze([]);
+  return Object.freeze([...new Set([
+    ...TARGET_PRESETS.filter((value) => value <= stockLimit),
+    stockLimit,
+  ])].sort((left, right) => left - right));
+}
+
+export function parseNativeConstructionCenterTargetDraft(
+  draft: string,
+  stockLimit: number,
+): NativeConstructionCenterTargetDraftResult {
+  const normalized = draft.trim();
+  if (!/^(?:0|[1-9]\d*)$/.test(normalized)) {
+    return { ok: false, message: "请输入不带符号、小数或前导零的十进制整数" };
+  }
+  const value = Number(normalized);
+  if (!Number.isSafeInteger(value)) {
+    return { ok: false, message: "目标数量超出安全整数范围" };
+  }
+  if (!Number.isSafeInteger(stockLimit) || stockLimit < 1 || value > stockLimit) {
+    return { ok: false, message: `当前投影库存上限为 ${stockLimit.toLocaleString("zh-CN")}` };
+  }
+  return { ok: true, value };
+}
+
+export function evaluateNativeConstructionCenterTargetStock(
+  frame: NativeConstructionCenterWorkspaceFrame | null,
+  pending: NativeConstructionCenterPendingIdentity | null,
+  targetId: string,
+  target: number,
+): NativeConstructionCenterTargetStockEvaluation {
+  if (!frame || frame.workspace.writeAvailable !== true || pending) {
+    return { status: "rejected", message: "原生权威投影不可用或已有命令待确认" };
+  }
+  const row = frame.workspace.targets.rows.find((candidate) => candidate.targetId === targetId);
+  if (!row || !row.unlocked) {
+    return { status: "rejected", message: "目标不在同 revision 的已解锁 Rust 目录中" };
+  }
+  if (!Number.isSafeInteger(target) || target < 0 || target > frame.workspace.stockLimit) {
+    return { status: "rejected", message: "目标超出同 revision 库存上限" };
+  }
+  if (target === row.target) {
+    return { status: "rejected", message: "目标库存没有变化" };
+  }
+  const identity = nativeConstructionCenterFrameIdentity(frame);
+  if (target < row.target) {
+    return {
+      status: "confirmation-required",
+      confirmation: Object.freeze({
+        identity,
+        targetId: row.targetId,
+        targetName: row.name,
+        previousTarget: row.target,
+        target,
+        currentStock: row.currentStock,
+        cancelsJobsAndRefunds: target <= row.currentStock,
+      }),
+    };
+  }
+  return {
+    status: "ready",
+    submission: Object.freeze({
+      ...identity,
+      targetId: row.targetId,
+      target,
+      confirmedDecreaseFrom: null,
+    }),
+  };
+}
+
+export function confirmNativeConstructionCenterTargetStock(
+  frame: NativeConstructionCenterWorkspaceFrame | null,
+  pending: NativeConstructionCenterPendingIdentity | null,
+  confirmation: NativeConstructionCenterTargetStockConfirmation,
+): NativeConstructionCenterTargetStockSubmission | null {
+  if (!nativeConstructionCenterIdentityMatchesFrame(confirmation.identity, frame) || !frame ||
+      frame.workspace.writeAvailable !== true || pending) return null;
+  const row = frame.workspace.targets.rows.find((candidate) => candidate.targetId === confirmation.targetId);
+  if (!row || !row.unlocked || row.target !== confirmation.previousTarget ||
+    confirmation.target < 0 || confirmation.target >= row.target ||
+    confirmation.target > frame.workspace.stockLimit) return null;
+  return Object.freeze({
+    ...confirmation.identity,
+    targetId: confirmation.targetId,
+    target: confirmation.target,
+    confirmedDecreaseFrom: confirmation.previousTarget,
+  });
+}
+
+type NativeConstructionCenterBatchBuildingSummary = Readonly<{
+  affectedCount: number;
+  changedCount: number;
+  loweredCount: number;
+}>;
+
+function nativeConstructionCenterBatchBuildingSummary(
+  frame: NativeConstructionCenterWorkspaceFrame,
+  target: number,
+): NativeConstructionCenterBatchBuildingSummary | null {
+  if (!Number.isSafeInteger(frame.workspace.stockLimit) || frame.workspace.stockLimit < 1 ||
+      !Number.isSafeInteger(target) || target < 1 || target > frame.workspace.stockLimit ||
+      target > MAX_CONSTRUCTION_AUTOMATION_TARGET ||
+      frame.workspace.targets.truncated ||
+      frame.workspace.targets.totalCount !== frame.workspace.targets.rows.length) return null;
+
+  const seenTargetIds = new Set<string>();
+  let affectedCount = 0;
+  let changedCount = 0;
+  let loweredCount = 0;
+  for (const row of frame.workspace.targets.rows) {
+    if (row.kind !== "building" || !row.unlocked) continue;
+    if (typeof row.targetId !== "string" || row.targetId.length === 0 ||
+        seenTargetIds.has(row.targetId) || !Number.isSafeInteger(row.target) || row.target < 0) return null;
+    seenTargetIds.add(row.targetId);
+    affectedCount += 1;
+    if (row.target === target) continue;
+    changedCount += 1;
+    if (row.target > target) loweredCount += 1;
+  }
+  if (affectedCount === 0 || changedCount === 0) return null;
+  return Object.freeze({ affectedCount, changedCount, loweredCount });
+}
+
+/**
+ * Prepares one explicit confirmation for a batch policy update. The complete
+ * target projection and frame identity are fenced here, while Rust remains the
+ * authority that derives the affected built-in target IDs at commit time.
+ */
+export function evaluateNativeConstructionCenterBatchBuildingTargetStock(
+  frame: NativeConstructionCenterWorkspaceFrame | null,
+  pending: NativeConstructionCenterPendingIdentity | null,
+  target: number,
+): NativeConstructionCenterBatchBuildingTargetStockEvaluation {
+  if (!frame || frame.workspace.writeAvailable !== true || pending) {
+    return { status: "rejected", message: "原生权威投影不可用或已有命令待确认" };
+  }
+  const summary = nativeConstructionCenterBatchBuildingSummary(frame, target);
+  if (!summary) {
+    return {
+      status: "rejected",
+      message: frame.workspace.targets.truncated ||
+        frame.workspace.targets.totalCount !== frame.workspace.targets.rows.length
+        ? "建筑目标投影不完整，不能确认批量修改"
+        : "批量目标无效、没有已解锁建筑或目标策略没有变化",
+    };
+  }
+  return {
+    status: "confirmation-required",
+    confirmation: Object.freeze({
+      identity: nativeConstructionCenterFrameIdentity(frame),
+      target,
+      ...summary,
+      cancelsJobsAndRefunds: false as const,
+    }),
+  };
+}
+
+/**
+ * Revalidates the exact frame and counts before returning the retry-stable,
+ * ID-free submission. A changed revision, row set or concurrent command makes
+ * the old confirmation unusable.
+ */
+export function confirmNativeConstructionCenterBatchBuildingTargetStock(
+  frame: NativeConstructionCenterWorkspaceFrame | null,
+  pending: NativeConstructionCenterPendingIdentity | null,
+  confirmation: NativeConstructionCenterBatchBuildingTargetStockConfirmation,
+): NativeConstructionCenterBatchBuildingTargetStockSubmission | null {
+  if (!nativeConstructionCenterIdentityMatchesFrame(confirmation.identity, frame) || !frame ||
+      frame.workspace.writeAvailable !== true || pending ||
+      confirmation.cancelsJobsAndRefunds !== false) return null;
+  const summary = nativeConstructionCenterBatchBuildingSummary(frame, confirmation.target);
+  if (!summary || summary.affectedCount !== confirmation.affectedCount ||
+      summary.changedCount !== confirmation.changedCount ||
+      summary.loweredCount !== confirmation.loweredCount) return null;
+  return Object.freeze({
+    ...confirmation.identity,
+    target: confirmation.target,
+    confirmedAffectedCount: summary.affectedCount,
+    confirmedChangedCount: summary.changedCount,
+    confirmedLoweredCount: summary.loweredCount,
+  });
+}

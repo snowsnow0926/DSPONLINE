@@ -95,7 +95,9 @@ test("capable lease bridge forwards the normalized operation without filesystem 
 test("exact commit bridge is capability-gated, identity-only, and absent from renderer IPC", async () => {
   const capableClient = client();
   const registry = new NativeCoreSessionRegistry(capableClient);
-  registry.sessions.set("core-1", { ownerId: "main-owner", slot: "normal-main" });
+  registry.sessions.set("core-1", {
+    ownerId: "main-owner", slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
   await registry.commitOperationExactRealtime("main-owner", {
     sessionId: "core-1",
     runId: "run-1",
@@ -118,7 +120,9 @@ test("exact commit bridge is capability-gated, identity-only, and absent from re
 
   const oldClient = client([NATIVE_EXACT_REALTIME_LEASE_CAPABILITY]);
   const oldRegistry = new NativeCoreSessionRegistry(oldClient);
-  oldRegistry.sessions.set("core-1", { ownerId: "main-owner", slot: "normal-main" });
+  oldRegistry.sessions.set("core-1", {
+    ownerId: "main-owner", slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
   assert.throws(() => oldRegistry.commitOperationExactRealtime("main-owner", {
     sessionId: "core-1",
     runId: "run-1",
@@ -132,13 +136,19 @@ test("exact commit bridge is capability-gated, identity-only, and absent from re
   for (const file of ["main.cjs", "preload.cjs"]) {
     const source = fs.readFileSync(path.join(__dirname, file), "utf8");
     assert.doesNotMatch(source, /coreCommitOperationExactRealtime|commitOperationExactRealtime/);
+    assert.doesNotMatch(
+      source,
+      /corePreparePlayerAuthority|preparePlayerAuthority|coreActivatePlayerAuthority|activatePlayerAuthority|coreCommitPlayerAuthorityTick|commitPlayerAuthorityTick/,
+    );
   }
 });
 
 test("core checkpoint ACK bridge exposes no caller-supplied proof or checkpoint", async () => {
   const capableClient = client();
   const registry = new NativeCoreSessionRegistry(capableClient);
-  registry.sessions.set("core-1", { ownerId: "main-owner", slot: "normal-main" });
+  registry.sessions.set("core-1", {
+    ownerId: "main-owner", slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
   await registry.checkpointAndAcknowledgeExactRealtime("main-owner", {
     sessionId: "core-1",
     runId: "run-1",

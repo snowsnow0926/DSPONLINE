@@ -1,8 +1,8 @@
-export const LEADERBOARD_INTEGRITY_VERSION = "leaderboard-integrity-v2";
+export const LEADERBOARD_INTEGRITY_VERSION = "leaderboard-integrity-v3";
 export const LEADERBOARD_INTEGRITY_COMPATIBLE_GAME_STATE_VERSIONS = Object.freeze([46, 47]);
 
 const COMPATIBLE_GAME_STATE_VERSIONS = new Set(LEADERBOARD_INTEGRITY_COMPATIBLE_GAME_STATE_VERSIONS);
-const MATERIAL_SNAPSHOT_VERSION = 1;
+const MATERIAL_SNAPSHOT_VERSION = 2;
 const ROCKET = "small_carrier_rocket";
 const SAIL = "solar_sail";
 const MATERIAL_IDS = [ROCKET, SAIL];
@@ -119,12 +119,9 @@ function materialStockSnapshot(state, issues) {
     addCriticalStore(stock, station?.inventory, `systemSpaceStations.${systemId}.inventory`, issues, seen);
     addCriticalStore(stock, station?.constructionBuffer, `systemSpaceStations.${systemId}.constructionBuffer`, issues, seen);
   }
-  for (const [batchId, batch] of Object.entries(state?.endgame?.constructionActivity?.pendingBatches ?? {})) {
-    if (!MATERIAL_IDS.includes(batch?.itemId)) continue;
-    const amount = exactNonNegativeInteger(batch.amount);
-    if (amount === null) issues.push(`constructionActivity.pendingBatches.${batchId}.amount`);
-    else addAmount(stock, batch.itemId, amount);
-  }
+  // Activity pending batches are an upload/outbox mirror of material already
+  // consumed by the corresponding Galactic export project. They are neither
+  // recoverable inventory nor an additional material source.
   return stock;
 }
 
@@ -144,8 +141,10 @@ function knownConsumptionSnapshot(state, issues) {
       consumed[itemId] += criticalCounter(stage?.delivered?.[itemId],
         `orbitalStation.construction.${stage?.stageId ?? "?"}.delivered.${itemId}`, issues);
     }
-    consumed[itemId] += criticalCounter(state?.endgame?.constructionActivity?.personalDelivered?.[itemId],
-      `endgame.constructionActivity.personalDelivered.${itemId}`, issues);
+    // constructionActivity.personalDelivered is the player-facing mirror of
+    // exportProjects.*.totalDelivered, which is already counted above as the
+    // single physical Galactic-export sink. Counting both would charge one
+    // shipment twice.
     consumed[itemId] += criticalCounter(state?.constructionAutomation?.destroyedByproducts?.[itemId],
       `constructionAutomation.destroyedByproducts.${itemId}`, issues);
   }

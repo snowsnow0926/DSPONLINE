@@ -14,6 +14,18 @@ pub enum CoreAdvanceMode {
     Exact,
     #[serde(rename = "pure-idle-conservative-v2")]
     PureIdleConservativeV2,
+    /// Deterministic three-window calibration mode. Its current v1 closed
+    /// scope deliberately freezes the unproved tail; the distinct wire value
+    /// prevents WAL replay from silently substituting the legacy one-shot
+    /// conservative calibration semantics.
+    #[serde(rename = "pure-idle-macro-v10")]
+    PureIdleMacroV10,
+    /// One-shot desktop offline settlement. This deliberately has a distinct
+    /// wire identity from powered time warp so durable replay can never
+    /// borrow a multiplier, power grant, or private calibration credit from a
+    /// live PureIdleMacroV10 session.
+    #[serde(rename = "offline-macro-v1")]
+    OfflineMacroV1,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +107,81 @@ fn bool_at(value: Option<&Value>, keys: &[&str]) -> bool {
             .and_then(|object| object.get(*key));
     }
     current.and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn should_replay_exact_public_seconds(base: &Map<String, Value>, total: f64) -> bool {
+    let elapsed = base
+        .get("elapsedSeconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let recorded = base
+        .get("historyRecordedAt")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    total > EPSILON
+        && total <= 8.0 * 60.0 * 60.0
+        && (total - total.round()).abs() <= EPSILON
+        && (elapsed - recorded).abs() <= EPSILON
+}
+
+fn advance_quiescent_clock_boundary(
+    base: &mut Map<String, Value>,
+    simulation_seconds: f64,
+) -> anyhow::Result<()> {
+    let elapsed_before = base
+        .get("elapsedSeconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let elapsed_after = rounded(elapsed_before + simulation_seconds, 4);
+    base.insert("elapsedSeconds".to_owned(), Value::from(elapsed_after));
+
+    if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {
+        let mut started = endgame
+            .get("exportWindowStartedAt")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if started <= 0.0 {
+            started = elapsed_before;
+            endgame.insert("exportWindowStartedAt".to_owned(), Value::from(started));
+        }
+        let window = elapsed_after - started;
+        if window >= 10.0 - EPSILON {
+            let amount = endgame
+                .get("exportWindowAmount")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            endgame.insert(
+                "exportedLastMinute".to_owned(),
+                Value::from(rounded(amount * 60.0 / window, 2)),
+            );
+            endgame.insert("exportWindowAmount".to_owned(), Value::from(0));
+            let step_size: f64 = if simulation_seconds >= 24.0 * 60.0 * 60.0 {
+                30.0
+            } else if simulation_seconds > 8.0 * 60.0 * 60.0 {
+                10.0
+            } else {
+                1.0
+            };
+            endgame.insert(
+                "exportWindowStartedAt".to_owned(),
+                Value::from((elapsed_after - step_size.min(simulation_seconds)).max(0.0)),
+            );
+        }
+    }
+    let active_planet = base
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("native core active planet is missing"))?;
+    if let Some(metrics) = base
+        .get("planetMetrics")
+        .and_then(Value::as_object)
+        .and_then(|metrics| metrics.get(&active_planet))
+        .cloned()
+    {
+        base.insert("metrics".to_owned(), metrics);
+    }
+    Ok(())
 }
 
 fn clock_only_reason(state: &CoreState) -> Option<&'static str> {
@@ -214,8 +301,17 @@ fn clock_only_reason(state: &CoreState) -> Option<&'static str> {
 
 impl CoreState {
     pub fn advance(&mut self, request: &CoreAdvanceRequest) -> anyhow::Result<CoreAdvanceResult> {
-        if request.advance_mode == CoreAdvanceMode::PureIdleConservativeV2 {
-            return crate::pure_idle::advance(self, request);
+        match request.advance_mode {
+            CoreAdvanceMode::PureIdleConservativeV2 => {
+                return crate::pure_idle::advance(self, request);
+            }
+            CoreAdvanceMode::PureIdleMacroV10 => {
+                return crate::pure_idle::advance_macro_v10(self, request);
+            }
+            CoreAdvanceMode::OfflineMacroV1 => {
+                return crate::pure_idle::advance_offline_macro_v1(self, request);
+            }
+            CoreAdvanceMode::Exact => {}
         }
         self.advance_exact(request)
     }
@@ -223,6 +319,25 @@ impl CoreState {
     pub(crate) fn advance_exact(
         &mut self,
         request: &CoreAdvanceRequest,
+    ) -> anyhow::Result<CoreAdvanceResult> {
+        self.advance_exact_with_construction_policy(request, false)
+    }
+
+    /// Internal calibration path that retains construction-center demand in
+    /// the ordinary power plan while leaving the construction domain itself
+    /// untouched. Public exact advances deliberately keep the historical
+    /// player-facing behavior above.
+    pub(crate) fn advance_exact_isolating_construction(
+        &mut self,
+        request: &CoreAdvanceRequest,
+    ) -> anyhow::Result<CoreAdvanceResult> {
+        self.advance_exact_with_construction_policy(request, true)
+    }
+
+    fn advance_exact_with_construction_policy(
+        &mut self,
+        request: &CoreAdvanceRequest,
+        isolate_construction_automation: bool,
     ) -> anyhow::Result<CoreAdvanceResult> {
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
@@ -326,35 +441,94 @@ impl CoreState {
         }
 
         if simple_factory_reason.is_none() {
-            let mut prepared =
-                crate::simple_factory::prepare_advance(self, simulation_seconds, wall_seconds)?;
+            let mut prepared = crate::simple_factory::prepare_advance(
+                self,
+                simulation_seconds,
+                wall_seconds,
+                isolate_construction_automation,
+            )?;
             let belt_routes = prepared.belt_routes.clone();
+            let belt_activity = prepared.belt_activity.clone();
+            let logistics_buffer_runtime = prepared.logistics_buffer_runtime.clone();
+            let material_delivery_runtime = prepared.material_delivery_runtime.clone();
+            let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
+            let planet_metrics_runtime = prepared.planet_metrics_runtime.clone();
+            let power_probe_runtime = prepared.power_probe_runtime.clone();
             let local_peer_directory = prepared.local_peer_directory.clone();
+            let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
+            let construction_runtime = prepared.construction_runtime.clone();
+            let station_mode_transition_runtime = prepared.station_mode_transition_runtime.clone();
+            let quantum_transition_runtime = prepared.quantum_transition_runtime.clone();
+            let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
+            let interstellar_route_activity = prepared.interstellar_route_activity.clone();
+            let factory_execution_diagnostics = prepared.factory_execution_diagnostics.clone();
             profile_mark!("simulate");
-            self.record_production_history_with_records(
+            let next_revision = previous_revision
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("native core revision exhausted"))?;
+            let campaign_metric_writer_indices = prepared.campaign_metric_writer_indices.take();
+            let campaign_projection_update =
+                self.campaign_projection_runtime.prepare_simulation_update(
+                    self,
+                    &prepared.entities,
+                    campaign_metric_writer_indices.as_deref(),
+                    next_revision,
+                );
+            let cached_campaign_factory_metrics =
+                if crate::campaign::factory_metrics_needed(&prepared.base) {
+                    campaign_projection_update.factory_metrics(self)
+                } else {
+                    None
+                };
+            let sampled_campaign_factory_metrics = self
+                .record_production_history_with_campaign_metrics(
+                    &mut prepared.base,
+                    &prepared.entities,
+                    Some(prepared.belt_flow),
+                    cached_campaign_factory_metrics.as_ref(),
+                    Some(&prepared.writer_events),
+                )?;
+            if let Some(production_history_tiers) = prepared.production_history_tiers.as_mut() {
+                production_history_tiers.refresh_after_internal_sample(&prepared.base);
+            }
+            profile_mark!("production-history");
+            crate::campaign::synchronize_with_factory_metrics(
+                self,
                 &mut prepared.base,
                 &prepared.entities,
-                Some(prepared.belt_flow),
+                cached_campaign_factory_metrics.or(sampled_campaign_factory_metrics),
             )?;
-            profile_mark!("production-history");
-            crate::campaign::synchronize(self, &mut prepared.base, &prepared.entities)?;
             crate::campaign::synchronize_orbital_station_eligibility(&mut prepared.base)?;
             profile_mark!("campaign");
             crate::speedrun::evaluate(self, &mut prepared.base)?;
             profile_mark!("speedrun");
             let belt_scheduler = prepared.belt_scheduler.clone();
-            let next_revision = previous_revision
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("native core revision exhausted"))?;
-            let summary = self.commit_simulated_state(
+            let summary = self.commit_simulated_state_with_campaign_projection_update_and_history(
                 prepared.base,
                 prepared.entities,
                 prepared.belt_commit,
                 next_revision,
                 request.include_diagnostics,
+                crate::state::PreparedSimulationRuntimeUpdates {
+                    campaign_projection: campaign_projection_update,
+                    production_history_tiers: prepared.production_history_tiers,
+                },
             )?;
             self.install_prepared_belt_routes(belt_routes);
+            self.install_prepared_belt_activity(belt_activity);
+            self.install_prepared_logistics_buffer_runtime(logistics_buffer_runtime);
+            self.install_prepared_material_delivery_runtime(material_delivery_runtime);
+            self.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
+            self.install_prepared_planet_metrics_runtime(planet_metrics_runtime);
+            self.install_prepared_power_probe_runtime(power_probe_runtime);
             self.install_prepared_local_peer_directory(local_peer_directory);
+            self.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
+            self.install_prepared_construction_runtime(construction_runtime);
+            self.install_prepared_station_mode_transition_runtime(station_mode_transition_runtime);
+            self.install_prepared_quantum_transition_runtime(quantum_transition_runtime);
+            self.install_prepared_interstellar_peer_directory(interstellar_peer_directory);
+            self.install_prepared_interstellar_route_activity(interstellar_route_activity);
+            self.install_factory_execution_diagnostics(factory_execution_diagnostics)?;
             profile_mark!("commit-state");
             if request.include_diagnostics {
                 profile_last!("summary");
@@ -377,67 +551,26 @@ impl CoreState {
         let mut next = self.clone();
         profile_last!("clone-state");
 
-        // The predicate above is deliberately stricter than the JS fast path.
-        // Once admitted, only global clock/diagnostic fields can change and
-        // this implementation mirrors fastForwardQuiescentState exactly.
-        let base = next.base_value_mut();
-        let elapsed_before = base
-            .get("elapsedSeconds")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        let elapsed_after = rounded(elapsed_before + simulation_seconds, 4);
-        base.insert("elapsedSeconds".to_owned(), Value::from(elapsed_after));
-
-        if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {
-            let mut started = endgame
-                .get("exportWindowStartedAt")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            if started <= 0.0 {
-                started = elapsed_before;
-                endgame.insert("exportWindowStartedAt".to_owned(), Value::from(started));
+        // A compressed player-authority Exact batch must preserve every
+        // public one-second boundary, including diagnostics. Quiescent states
+        // skip the factory loop, so replay those cheap clock/history
+        // boundaries here instead of collapsing the whole batch to one
+        // observation. Fractional, unaligned and >8h legacy requests retain
+        // their established one-call shape.
+        if should_replay_exact_public_seconds(next.base_value(), simulation_seconds) {
+            for _ in 0..simulation_seconds.round() as u64 {
+                advance_quiescent_clock_boundary(next.base_value_mut(), 1.0)?;
+                next.record_production_history()?;
+                next.refresh_production_history_tiers();
             }
-            let window = elapsed_after - started;
-            if window >= 10.0 - EPSILON {
-                let amount = endgame
-                    .get("exportWindowAmount")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0);
-                endgame.insert(
-                    "exportedLastMinute".to_owned(),
-                    Value::from(rounded(amount * 60.0 / window, 2)),
-                );
-                endgame.insert("exportWindowAmount".to_owned(), Value::from(0));
-                let step_size: f64 = if simulation_seconds >= 24.0 * 60.0 * 60.0 {
-                    30.0
-                } else if simulation_seconds > 8.0 * 60.0 * 60.0 {
-                    10.0
-                } else {
-                    1.0
-                };
-                endgame.insert(
-                    "exportWindowStartedAt".to_owned(),
-                    Value::from((elapsed_after - step_size.min(simulation_seconds)).max(0.0)),
-                );
-            }
-        }
-        let active_planet = base
-            .get("activePlanetId")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| anyhow!("native core active planet is missing"))?;
-        if let Some(metrics) = base
-            .get("planetMetrics")
-            .and_then(Value::as_object)
-            .and_then(|metrics| metrics.get(&active_planet))
-            .cloned()
-        {
-            base.insert("metrics".to_owned(), metrics);
+        } else {
+            advance_quiescent_clock_boundary(next.base_value_mut(), simulation_seconds)?;
+            next.record_production_history()?;
+            next.refresh_production_history_tiers();
         }
         // Normal-mode quiescent state has no speedrun wall clock. The budget
         // is accepted solely to prove segmentation equivalence.
         let _ = wall_seconds;
-        next.record_production_history()?;
         next.revision += 1;
         let summary = request
             .include_diagnostics

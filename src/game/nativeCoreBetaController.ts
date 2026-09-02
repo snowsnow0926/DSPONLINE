@@ -1,21 +1,41 @@
-import type {
-  DesktopNativeCoreCommitOperationResult,
-  DesktopNativeCoreProjectionResult,
-  DesktopNativeCoreSummary,
-  DesktopNativeSaveCommitResult,
-  DesktopNativeCoreExportResult,
+import {
+  getDesktopBridge,
+  type DesktopNativeCoreCommitOperationResult,
+  type DesktopNativeCoreFactoryReadModelRequest,
+  type DesktopNativeCoreFactoryReadModelResult,
+  type DesktopNativeCoreProjectionResult,
+  type DesktopNativeCoreStatisticsProjectionRequest,
+  type DesktopNativeCoreStatisticsProjectionResult,
+  type DesktopNativeCoreStarMapOverviewProjectionRequest,
+  type DesktopNativeCoreStarMapOverviewProjectionResult,
+  type DesktopNativeCoreStellarIndustryProjectionRequest,
+  type DesktopNativeCoreStellarIndustryProjectionResult,
+  type DesktopNativeCoreStellarIndustryV2ProjectionRequest,
+  type DesktopNativeCoreStellarIndustryV2ProjectionResult,
+  type DesktopNativeCoreTechnologyProjectionRequest,
+  type DesktopNativeCoreTechnologyProjectionResult,
+  type DesktopNativeCoreViewportProjectionV2Request,
+  type DesktopNativeCoreViewportProjectionV2Result,
+  type DesktopNativeCoreSummary,
+  type DesktopNativeSaveCommitResult,
+  type DesktopNativeCoreExportResult,
+  type DesktopNativePlayerAuthorityArtifactIdentity,
+  type DesktopNativePlayerAuthorityCheckpointResult,
+  type DesktopNativePlayerAuthorityExportResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
 import {
+  attachWindowsNativeCoreMainOwnedAuthority,
   openWindowsNativeCoreShadow,
+  type NativeCoreAdvanceMode,
   type WindowsNativeCoreShadow,
 } from "./nativeCore";
 import {
   beginNativeCoreShadow,
+  bindMainOwnedNativeCoreAuthority,
   createNativeCoreAuthorityState,
   fallbackNativeCoreToJavaScript,
   handleNativeCoreExit,
-  promoteNativeCoreAuthority,
   recordNativeCoreAuthorityCheckpoint,
   recordNativeCoreAuthorityProgress,
   recordNativeCoreGateEvidence,
@@ -68,6 +88,28 @@ export interface NativeCoreAuthoritativeOperationResult {
   state: NativeCoreAuthorityState;
 }
 
+export interface NativeCoreDurableArtifactIdentity {
+  sessionId: string;
+  runId: string | null;
+  revision: number;
+}
+
+export interface NativeCoreAuthorityCheckpointReceipt {
+  artifact: {
+    identity: NativeCoreDurableArtifactIdentity;
+    checkpoint: DesktopNativePlayerAuthorityCheckpointResult["checkpoint"];
+    summary: DesktopNativeCoreSummary;
+  };
+  snapshot: NativeCoreBetaControllerSnapshot;
+}
+
+export interface NativeCoreAuthorityExportReceipt {
+  artifact: {
+    identity: NativeCoreDurableArtifactIdentity;
+    export: DesktopNativeCoreExportResult;
+  };
+}
+
 export class NativeCoreAuthorityPausedError extends Error {
   readonly authorityState: NativeCoreAuthorityState;
 
@@ -83,6 +125,16 @@ type NativeCoreShadowOpener = (
   checkpoint: DesktopNativeSaveCommitResult,
   runtime: ContentPackRuntimeSnapshot,
 ) => Promise<WindowsNativeCoreShadow | null>;
+
+interface VerifiedNativeShadowReadIdentity {
+  session: WindowsNativeCoreShadow;
+  sessionId: string;
+  revision: number;
+  registryFingerprint: string;
+  rootHash: string;
+  canonicalSha256: string;
+  domainSha256: string;
+}
 
 function cloneProof(proof: NativeCoreRevisionProof | null): NativeCoreRevisionProof | null {
   return proof ? { ...proof } : null;
@@ -136,6 +188,32 @@ function validateCommandId(commandId: string): void {
   if (!COMMAND_ID_PATTERN.test(commandId)) throw new RangeError("原生权威命令 ID 非法");
 }
 
+function sameMainOwnedArtifactIdentity(
+  expected: { sessionId: string; runId: string },
+  actual: DesktopNativePlayerAuthorityArtifactIdentity,
+  revision: number,
+): boolean {
+  return actual.sessionId === expected.sessionId && actual.runId === expected.runId &&
+    actual.revision === revision;
+}
+
+function playerAuthorityArtifactIdentity(value: unknown): DesktopNativePlayerAuthorityArtifactIdentity | null {
+  if (!value || typeof value !== "object" || !("authority" in value)) return null;
+  const authority = value.authority;
+  return authority && typeof authority === "object" &&
+    "sessionId" in authority && typeof authority.sessionId === "string" &&
+    "runId" in authority && typeof authority.runId === "string" &&
+    "revision" in authority && Number.isSafeInteger(authority.revision)
+    ? authority as DesktopNativePlayerAuthorityArtifactIdentity
+    : null;
+}
+
+function nativeErrorCode(error: unknown): string | null {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code
+    : null;
+}
+
 /**
  * Owns the invitation-Beta transition without changing the public v47 save
  * contract. JavaScript remains authoritative during shadow mode. Once native
@@ -148,6 +226,7 @@ export class WindowsNativeCoreBetaController {
   private lastSummary: DesktopNativeCoreSummary | null = null;
   private recoveryRootHash: string | null = null;
   private operationInFlight = false;
+  private mainOwnedPlayerAuthority: { sessionId: string; runId: string } | null = null;
 
   constructor(
     private readonly opener: NativeCoreShadowOpener = openWindowsNativeCoreShadow,
@@ -230,6 +309,7 @@ export class WindowsNativeCoreBetaController {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: NativeCoreAdvanceMode;
   }): Promise<NativeCoreMirroredOperationResult> {
     validateCommandId(input.commandId);
     if (this.authorityState.authority !== "javascript" ||
@@ -299,6 +379,7 @@ export class WindowsNativeCoreBetaController {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: NativeCoreAdvanceMode;
     javascriptProof: NativeCoreRevisionProof;
     compatibleFallback?: NativeCoreRevisionProof;
   }): Promise<NativeCoreMirroredOperationResult> {
@@ -358,7 +439,76 @@ export class WindowsNativeCoreBetaController {
 
   promoteToAuthority(exactCompatibleCheckpoint: NativeCoreRevisionProof, userOptIn: boolean): NativeCoreBetaControllerSnapshot {
     if (!userOptIn) throw new Error("原生权威必须由邀请 Beta 玩家明确选择");
-    this.authorityState = promoteNativeCoreAuthority(this.authorityState, exactCompatibleCheckpoint);
+    // This controller lives in the renderer and can prove only shadow
+    // equality. It must never manufacture a player-authority transition from
+    // a caller-provided checkpoint: the durable Rust lease, its bound host
+    // session and the first acknowledged native commit are main-process-only
+    // facts. Until that coordinator hands ownership over atomically, keep the
+    // JavaScript factory running and fail closed without changing state.
+    void exactCompatibleCheckpoint;
+    throw new Error("原生权威尚未获得主进程 Rust 持久租约，已保持 JavaScript 权威");
+  }
+
+  /**
+   * Completes only the renderer-side binding after a trusted main challenge
+   * proves that Rust is already the active owner. Calling this method cannot
+   * prepare/activate a lease or transfer a host session.
+   */
+  bindMainOwnedPlayerAuthority(input: {
+    sessionId: string;
+    runId: string;
+    checkpoint: { generation: number; rootHash: string; revision: number };
+    summary: DesktopNativeCoreSummary;
+    source: "handoff" | "startup-recovery";
+  }): NativeCoreBetaControllerSnapshot {
+    if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(input.runId) ||
+      input.summary.stateVersion !== 47 || input.summary.mode !== "normal" ||
+      (input.source === "handoff" ? input.summary.paused !== false :
+        typeof input.summary.paused !== "boolean") ||
+      input.summary.coverage.authorityEligible !== true ||
+      input.summary.revision !== input.checkpoint.revision) {
+      throw new Error("主进程原生权威完成回执无效");
+    }
+    if (input.source === "startup-recovery" && this.session &&
+      (!this.mainOwnedPlayerAuthority || this.session.sessionId !== input.sessionId)) {
+      throw new Error("启动恢复不能替换已有原生影子会话");
+    }
+    if (input.source === "handoff" && (!this.session || this.session.sessionId !== input.sessionId)) {
+      throw new Error("原生权威完成回执不属于当前影子会话");
+    }
+    const proof = proofFromSummary(input.summary, input.checkpoint.rootHash);
+    if (this.mainOwnedPlayerAuthority) {
+      if (this.mainOwnedPlayerAuthority.sessionId !== input.sessionId ||
+        this.mainOwnedPlayerAuthority.runId !== input.runId ||
+        !this.session || this.session.sessionId !== input.sessionId ||
+        this.authorityState.phase !== "native-authoritative" ||
+        this.authorityState.authority !== "native" ||
+        !this.authorityState.latestVerifiedProof ||
+        proof.revision < this.authorityState.latestVerifiedProof.revision ||
+        proof.registryFingerprint !== this.authorityState.latestVerifiedProof.registryFingerprint) {
+        throw new Error("重复的主进程原生权威完成回执发生 lineage 回退或替换");
+      }
+      this.authorityState = recordNativeCoreAuthorityProgress(this.authorityState, proof);
+      this.recoveryRootHash = input.checkpoint.rootHash;
+      this.lastSummary = input.summary;
+      return this.snapshot();
+    }
+    const nextAuthorityState = bindMainOwnedNativeCoreAuthority(this.authorityState, {
+      sessionId: input.sessionId,
+      proof,
+      authorityEligibleCoverage: true,
+      source: input.source,
+    });
+    if (input.source === "startup-recovery") {
+      this.session = attachWindowsNativeCoreMainOwnedAuthority(input.sessionId, input.checkpoint);
+    }
+    this.authorityState = nextAuthorityState;
+    this.recoveryRootHash = input.checkpoint.rootHash;
+    this.lastSummary = input.summary;
+    this.mainOwnedPlayerAuthority = Object.freeze({
+      sessionId: input.sessionId,
+      runId: input.runId,
+    });
     return this.snapshot();
   }
 
@@ -368,6 +518,7 @@ export class WindowsNativeCoreBetaController {
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: NativeCoreAdvanceMode;
     projection?: NativeCoreProjectionSelection;
   }): Promise<NativeCoreAuthoritativeOperationResult> {
     validateCommandId(input.commandId);
@@ -406,22 +557,57 @@ export class WindowsNativeCoreBetaController {
   async createAuthorityCheckpoint(
     exactCompatibleCheckpoint?: NativeCoreRevisionProof,
     savedAtMs = this.now(),
-  ): Promise<NativeCoreBetaControllerSnapshot> {
+  ): Promise<NativeCoreAuthorityCheckpointReceipt> {
     if (this.authorityState.phase !== "native-authoritative" ||
       this.authorityState.authority !== "native" || !this.session) {
       throw new Error("只有原生权威可以创建检查点");
     }
     try {
-      const result = await this.session.createCheckpoint(savedAtMs);
+      const mainOwnedIdentity = this.mainOwnedPlayerAuthority;
+      const result: DesktopNativePlayerAuthorityCheckpointResult |
+        Awaited<ReturnType<WindowsNativeCoreShadow["createCheckpoint"]>> = mainOwnedIdentity
+          ? await (() => {
+            const desktop = getDesktopBridge();
+            if (!desktop?.checkpointNativePlayerAuthority) {
+              throw new Error("主进程原生权威检查点桥接不可用");
+            }
+            return desktop.checkpointNativePlayerAuthority();
+          })()
+          : await this.session.createCheckpoint(savedAtMs);
+      const resultAuthority = playerAuthorityArtifactIdentity(result);
+      if (result.checkpoint.revision !== result.summary.revision ||
+        mainOwnedIdentity && (!resultAuthority ||
+        !sameMainOwnedArtifactIdentity(mainOwnedIdentity, resultAuthority, result.summary.revision))) {
+        throw new Error("主进程原生权威检查点不属于当前 session/run lineage");
+      }
       const nativeProof = proofFromSummary(result.summary, result.checkpoint.rootHash);
-      this.recoveryRootHash = result.checkpoint.rootHash;
-      this.lastSummary = result.summary;
-      this.authorityState = exactCompatibleCheckpoint
-        ? recordNativeCoreAuthorityCheckpoint(this.authorityState, nativeProof, exactCompatibleCheckpoint)
-        : recordNativeCoreAuthorityProgress(this.authorityState, nativeProof);
-      return this.snapshot();
+      const currentProof = this.authorityState.latestVerifiedProof;
+      if (!currentProof || nativeProof.revision >= currentProof.revision || exactCompatibleCheckpoint) {
+        this.authorityState = exactCompatibleCheckpoint
+          ? recordNativeCoreAuthorityCheckpoint(this.authorityState, nativeProof, exactCompatibleCheckpoint)
+          : recordNativeCoreAuthorityProgress(this.authorityState, nativeProof);
+        this.recoveryRootHash = result.checkpoint.rootHash;
+        this.lastSummary = result.summary;
+      } else if (!mainOwnedIdentity || nativeProof.registryFingerprint !== currentProof.registryFingerprint) {
+        throw new Error("原生权威检查点 lineage 回退或发生替换");
+      }
+      const identity: NativeCoreDurableArtifactIdentity = resultAuthority
+        ? { ...resultAuthority }
+        : { sessionId: this.session.sessionId, runId: null, revision: result.summary.revision };
+      return {
+        artifact: {
+          identity,
+          checkpoint: { ...result.checkpoint },
+          summary: structuredClone(result.summary),
+        },
+        snapshot: this.snapshot(),
+      };
     } catch (error) {
       const reason = error instanceof Error ? error.message : "原生权威检查点失败";
+      if (this.mainOwnedPlayerAuthority &&
+        nativeErrorCode(error) === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY") {
+        throw error instanceof Error ? error : new Error(reason);
+      }
       this.authorityState = handleNativeCoreExit(this.authorityState, `authority-checkpoint-failed:${reason}`);
       throw new NativeCoreAuthorityPausedError(`原生检查点不确定，工厂已暂停：${reason}`, this.authorityState);
     }
@@ -431,17 +617,50 @@ export class WindowsNativeCoreBetaController {
     exportId: string,
     suggestedName?: string,
     savedAtMs = this.now(),
-  ): Promise<DesktopNativeCoreExportResult> {
+  ): Promise<NativeCoreAuthorityExportReceipt> {
     if (this.authorityState.phase !== "native-authoritative" ||
       this.authorityState.authority !== "native" || !this.session) {
       throw new Error("只有原生权威可以直接流式导出 v47 存档");
     }
     try {
-      const result = await this.session.exportV47(exportId, suggestedName, savedAtMs);
-      if (!this.lastSummary || result.result.revision !== this.lastSummary.revision) {
+      const mainOwnedIdentity = this.mainOwnedPlayerAuthority;
+      const result: DesktopNativePlayerAuthorityExportResult | DesktopNativeCoreExportResult = mainOwnedIdentity
+        ? await (() => {
+          const desktop = getDesktopBridge();
+          if (!desktop?.exportNativePlayerAuthorityV47) {
+            throw new Error("主进程原生权威导出桥接不可用");
+          }
+          return desktop.exportNativePlayerAuthorityV47({
+            exportId,
+            savedAtMs,
+            ...(suggestedName ? { suggestedName } : {}),
+          });
+        })()
+        : await this.session.exportV47(exportId, suggestedName, savedAtMs);
+      // The main-owned clock can advance between renderer projections and the
+      // frozen export boundary. The dedicated main broker proves that export
+      // belongs to the current lease, so forward progress is valid; a
+      // renderer-owned shadow must still match its exact cached revision. Once
+      // main returns, the selected file has already been atomically published;
+      // a renderer clock-lineage change is therefore a recovery warning, not a
+      // reason to misreport the durable file as failed.
+      const resultAuthority = playerAuthorityArtifactIdentity(result);
+      if (mainOwnedIdentity && (result.mode !== "normal" || !resultAuthority ||
+        !sameMainOwnedArtifactIdentity(mainOwnedIdentity, resultAuthority, result.result.revision))) {
+        throw new Error("主进程原生权威导出回执结构无效");
+      }
+      if (!this.lastSummary || (!mainOwnedIdentity &&
+        result.result.revision !== this.lastSummary.revision)) {
         throw new Error("原生导出 revision 与当前权威状态不一致");
       }
-      return result;
+      return {
+        artifact: {
+          identity: resultAuthority
+            ? { ...resultAuthority }
+            : { sessionId: this.session.sessionId, runId: null, revision: result.result.revision },
+          export: result,
+        },
+      };
     } catch (error) {
       const reason = error instanceof Error ? error.message : "原生权威导出失败";
       throw new Error(`原生 v47 导出失败，权威工厂未改变：${reason}`);
@@ -502,6 +721,234 @@ export class WindowsNativeCoreBetaController {
     return this.snapshot();
   }
 
+  /**
+   * Returns the bounded shell/selection/construction model only while the
+   * native shadow remains proven to be the exact renderer revision. Both the
+   * main-process boundary and this controller perform the revision check.
+   */
+  async readVerifiedFactoryReadModel(
+    request: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId" | "expectedRevision">,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreFactoryReadModelResult | null> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) ||
+      state.shadowRevision !== expectedRevision || state.latestVerifiedProof?.revision !== expectedRevision) {
+      return null;
+    }
+    try {
+      const projection = await session.factoryReadModel({ ...request, expectedRevision });
+      const current = this.authorityState;
+      if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
+        !["shadow", "native-ready"].includes(current.phase) ||
+        current.shadowRevision !== expectedRevision || current.latestVerifiedProof?.revision !== expectedRevision ||
+        projection.revision !== expectedRevision) {
+        return null;
+      }
+      return projection;
+    } catch {
+      // A read-model failure never changes authority state or stops simulation.
+      return null;
+    }
+  }
+
+  /**
+   * Optional read-only acceleration for the renderer. JavaScript remains the
+   * authority: a native result is exposed only while the shadow and its latest
+   * verified proof identify the exact revision requested by the caller.
+   */
+  async readVerifiedStatisticsProjection(
+    request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId" | "expectedRevision">,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreStatisticsProjectionResult | null> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) ||
+      state.shadowRevision !== expectedRevision || state.latestVerifiedProof?.revision !== expectedRevision) {
+      return null;
+    }
+    try {
+      const projection = await session.statisticsProjection({ ...request, expectedRevision });
+      const current = this.authorityState;
+      if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
+        !["shadow", "native-ready"].includes(current.phase) ||
+        current.shadowRevision !== expectedRevision || current.latestVerifiedProof?.revision !== expectedRevision ||
+        projection.revision !== expectedRevision) {
+        return null;
+      }
+      return projection;
+    } catch {
+      // A read-model failure never changes authority state or stops simulation.
+      return null;
+    }
+  }
+
+  async readVerifiedTechnologyProjection(
+    request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId" | "expectedRevision">,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreTechnologyProjectionResult | null> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) ||
+      state.shadowRevision !== expectedRevision || state.latestVerifiedProof?.revision !== expectedRevision) {
+      return null;
+    }
+    try {
+      const projection = await session.technologyProjection({ ...request, expectedRevision });
+      const current = this.authorityState;
+      if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
+        !["shadow", "native-ready"].includes(current.phase) ||
+        current.shadowRevision !== expectedRevision || current.latestVerifiedProof?.revision !== expectedRevision ||
+        projection.revision !== expectedRevision) {
+        return null;
+      }
+      return projection;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Exposes the bounded native star-map page only while the exact JavaScript
+   * shadow proof remains current. The registry fingerprint is always derived
+   * from that proof and overwrites any runtime property supplied by a caller.
+   */
+  async readVerifiedStarMapOverviewProjection(
+    request: Omit<
+      DesktopNativeCoreStarMapOverviewProjectionRequest,
+      "sessionId" | "expectedRevision" | "expectedRegistryFingerprint"
+  >,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreStarMapOverviewProjectionResult | null> {
+    try {
+      const identity = this.verifiedShadowReadIdentity(expectedRevision);
+      if (!identity) return null;
+      const projection = await identity.session.starMapOverviewProjection({
+        ...request,
+        expectedRevision: identity.revision,
+        expectedRegistryFingerprint: identity.registryFingerprint,
+      });
+      if (!this.isVerifiedShadowReadIdentityCurrent(identity) ||
+        projection.schemaVersion !== 1 || projection.projectionType !== "star-map-overview-v1" ||
+        projection.stateVersion !== 47 || projection.revision !== identity.revision ||
+        projection.registryFingerprint !== identity.registryFingerprint ||
+        projection.request.expectedRevision !== identity.revision ||
+        projection.request.expectedRegistryFingerprint !== identity.registryFingerprint ||
+        projection.request.cursor !== request.cursor || projection.request.limit !== request.limit) {
+        return null;
+      }
+      return projection;
+    } catch {
+      return null;
+    }
+  }
+
+  async readVerifiedStellarIndustryProjection(
+    request: Omit<
+      DesktopNativeCoreStellarIndustryProjectionRequest,
+      "sessionId" | "expectedRevision" | "expectedRegistryFingerprint"
+  >,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreStellarIndustryProjectionResult | null> {
+    try {
+      const identity = this.verifiedShadowReadIdentity(expectedRevision);
+      if (!identity) return null;
+      const projection = await identity.session.stellarIndustryProjection({
+        ...request,
+        expectedRevision: identity.revision,
+        expectedRegistryFingerprint: identity.registryFingerprint,
+      });
+      if (!this.isVerifiedShadowReadIdentityCurrent(identity) ||
+        projection.schemaVersion !== 1 || projection.projectionType !== "stellar-industry-v1" ||
+        projection.stateVersion !== 47 || projection.revision !== identity.revision ||
+        projection.registryFingerprint !== identity.registryFingerprint ||
+        projection.request.expectedRevision !== identity.revision ||
+        projection.request.expectedRegistryFingerprint !== identity.registryFingerprint ||
+        projection.request.systemId !== request.systemId || projection.request.planetId !== request.planetId ||
+        projection.request.planetCursor !== request.planetCursor || projection.request.planetLimit !== request.planetLimit ||
+        projection.request.stationCursor !== request.stationCursor || projection.request.stationLimit !== request.stationLimit) {
+        return null;
+      }
+      return projection;
+    } catch {
+      return null;
+    }
+  }
+
+  async readVerifiedStellarIndustryV2Projection(
+    request: Omit<
+      DesktopNativeCoreStellarIndustryV2ProjectionRequest,
+      "sessionId" | "expectedRevision" | "expectedRegistryFingerprint"
+    >,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult | null> {
+    try {
+      const identity = this.verifiedShadowReadIdentity(expectedRevision);
+      if (!identity) return null;
+      const projection = await identity.session.stellarIndustryV2Projection({
+        ...request,
+        expectedRevision: identity.revision,
+        expectedRegistryFingerprint: identity.registryFingerprint,
+      });
+      if (!this.isVerifiedShadowReadIdentityCurrent(identity) ||
+        projection.schemaVersion !== 2 || projection.projectionType !== "stellar-industry-v2" ||
+        projection.stateVersion !== 47 || projection.revision !== identity.revision ||
+        projection.registryFingerprint !== identity.registryFingerprint ||
+        projection.request.expectedRevision !== identity.revision ||
+        projection.request.expectedRegistryFingerprint !== identity.registryFingerprint ||
+        projection.request.systemId !== request.systemId || projection.request.planetId !== request.planetId ||
+        projection.request.planetCursor !== request.planetCursor || projection.request.planetLimit !== request.planetLimit ||
+        projection.request.stationCursor !== request.stationCursor || projection.request.stationLimit !== request.stationLimit ||
+        projection.request.routeCursor !== request.routeCursor || projection.request.routeLimit !== request.routeLimit ||
+        projection.request.routeFilter !== request.routeFilter || projection.request.query !== request.query ||
+        projection.scopeSystemId !== request.systemId || projection.scopePlanetId !== request.planetId) {
+        return null;
+      }
+      return projection;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Returns a viewport block only when the native shadow is still proven to be
+   * the exact renderer revision both before and after the asynchronous IPC.
+   * The main process independently binds expectedRevision to the response.
+   */
+  async readVerifiedViewportProjectionV2(
+    request: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId" | "expectedRevision">,
+    expectedRevision: number,
+  ): Promise<DesktopNativeCoreViewportProjectionV2Result | null> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) ||
+      state.shadowRevision !== expectedRevision || state.latestVerifiedProof?.revision !== expectedRevision) {
+      return null;
+    }
+    try {
+      const projection = await session.viewportProjectionV2({ ...request, expectedRevision });
+      const current = this.authorityState;
+      if (this.session !== session || this.operationInFlight || current.authority !== "javascript" ||
+        !["shadow", "native-ready"].includes(current.phase) ||
+        current.shadowRevision !== expectedRevision || current.latestVerifiedProof?.revision !== expectedRevision ||
+        projection.revision !== expectedRevision) {
+        return null;
+      }
+      return projection;
+    } catch {
+      // A read-model failure never changes authority state or stops simulation.
+      return null;
+    }
+  }
+
   private async readBoundedProjection(
     selection: NativeCoreProjectionSelection,
     expectedRevision: number,
@@ -512,12 +959,46 @@ export class WindowsNativeCoreBetaController {
     return projection;
   }
 
+  private verifiedShadowReadIdentity(expectedRevision: number): VerifiedNativeShadowReadIdentity | null {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    const session = this.session;
+    const state = this.authorityState;
+    const proof = state.latestVerifiedProof;
+    if (!session || this.operationInFlight || state.authority !== "javascript" ||
+      !["shadow", "native-ready"].includes(state.phase) || state.sessionId !== session.sessionId ||
+      state.shadowRevision !== expectedRevision || proof?.revision !== expectedRevision ||
+      typeof proof.registryFingerprint !== "string" || proof.registryFingerprint.length < 1) {
+      return null;
+    }
+    return {
+      session,
+      sessionId: session.sessionId,
+      revision: expectedRevision,
+      registryFingerprint: proof.registryFingerprint,
+      rootHash: proof.rootHash,
+      canonicalSha256: proof.canonicalSha256,
+      domainSha256: proof.domainSha256,
+    };
+  }
+
+  private isVerifiedShadowReadIdentityCurrent(identity: VerifiedNativeShadowReadIdentity): boolean {
+    const current = this.authorityState;
+    const proof = current.latestVerifiedProof;
+    return this.session === identity.session && identity.session.sessionId === identity.sessionId &&
+      !this.operationInFlight && current.authority === "javascript" &&
+      ["shadow", "native-ready"].includes(current.phase) && current.sessionId === identity.sessionId &&
+      current.shadowRevision === identity.revision && proof?.revision === identity.revision &&
+      proof.registryFingerprint === identity.registryFingerprint && proof.rootHash === identity.rootHash &&
+      proof.canonicalSha256 === identity.canonicalSha256 && proof.domainSha256 === identity.domainSha256;
+  }
+
   private async commitWithIdempotentRetry(input: {
     commandId: string;
     baseRevision: number;
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: NativeCoreAdvanceMode;
     includeDiagnostics: boolean;
   }): Promise<DesktopNativeCoreCommitOperationResult> {
     if (!this.session) throw new Error("原生核心会话不可用");
@@ -545,6 +1026,8 @@ export class WindowsNativeCoreBetaController {
   private async closeSession(): Promise<void> {
     const current = this.session;
     this.session = null;
-    if (current) await current.close().catch(() => undefined);
+    const mainOwned = this.mainOwnedPlayerAuthority;
+    this.mainOwnedPlayerAuthority = null;
+    if (current && !mainOwned) await current.close().catch(() => undefined);
   }
 }

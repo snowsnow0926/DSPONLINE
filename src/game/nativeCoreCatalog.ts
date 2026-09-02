@@ -4,6 +4,7 @@ import {
   FUEL_ENERGY_MJ,
   ITEMS,
   PLANET_LIST,
+  STAR_SYSTEM_LIST,
   PROLIFERATORS,
   RECIPES,
   TECHNOLOGIES,
@@ -11,6 +12,8 @@ import {
   getBeltTiers,
   getFuelEfficiency,
   getFuelItemIdsForBuilding,
+  getBuildingUpgradeTarget,
+  getBeltConstructionId,
 } from "./content";
 import { isRecursiveManufacturingRecipe } from "./engine";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -38,6 +41,14 @@ export function createNativeCoreCatalog(
       simulationOrder,
       orbitalYields: { ...planet.orbitalYields },
     }))),
+    starSystems: byId(STAR_SYSTEM_LIST.map((system) => ({
+      id: system.id,
+      name: system.name,
+      planetIds: [...system.planetIds],
+      explorationCost: system.explorationCost.map((cost) => ({ ...cost })),
+      ...(system.requiredTechId ? { requiredTechId: system.requiredTechId } : {}),
+      ...(system.prerequisiteSystemId ? { prerequisiteSystemId: system.prerequisiteSystemId } : {}),
+    }))),
     items: byId(Object.values(ITEMS).map((item) => ({
       id: item.id,
       name: item.name,
@@ -46,6 +57,9 @@ export function createNativeCoreCatalog(
     }))),
     buildings: byId(Object.values(BUILDINGS).map((building) => ({
       id: building.id,
+      name: building.name,
+      shortName: building.shortName,
+      description: building.description,
       kind: building.kind,
       speed: building.speed,
       inputCapacity: building.inputCapacity,
@@ -58,6 +72,22 @@ export function createNativeCoreCatalog(
       fuelEfficiency: getFuelEfficiency(building.id),
       ...(building.family ? { family: building.family } : {}),
       ...(building.accepts ? { accepts: building.accepts } : {}),
+      stackLimit: building.stackLimit ?? null,
+      stackLimitComplete: true,
+      ...(CONSTRUCTION.find((definition) => definition.buildingId === building.id)?.requiredTechId
+        ? { requiredTechId: CONSTRUCTION.find((definition) => definition.buildingId === building.id)!.requiredTechId }
+        : {}),
+      ...(building.upgradeTargetId ?? getBuildingUpgradeTarget(building.id)
+        ? { upgradeTargetId: building.upgradeTargetId ?? getBuildingUpgradeTarget(building.id) }
+        : {}),
+      megastructure: Boolean(building.megastructure),
+      unique: Boolean(building.unique ?? (building.id === "micro_black_hole_connector" || building.id === "time_warp_device")),
+      layoutWidth: building.layoutWidth ?? (building.megastructure ? 620 : 300),
+      layoutHeight: building.layoutHeight ?? (building.megastructure ? 420 : 220),
+      layoutClearance: building.layoutClearance ?? 24,
+      ports: (building.ports ?? []).map((port) => ({ ...port })),
+      capabilities: [...(building.capabilities ?? [])].sort(),
+      scripted: Boolean(building.scripted),
     }))),
     recipes: byId(Object.values(RECIPES).map((recipe) => ({
       id: recipe.id,
@@ -77,7 +107,16 @@ export function createNativeCoreCatalog(
       ...(definition.requiredTechId ? { requiredTechId: definition.requiredTechId } : {}),
       costs: definition.costs.map((cost) => ({ ...cost })),
     }))),
-    belts: getBeltTiers().map((tier) => ({ tier, speed: getBeltSpeed(tier) })),
+    belts: getBeltTiers().map((tier) => {
+      const constructionId = getBeltConstructionId(tier);
+      return {
+        tier,
+        speed: getBeltSpeed(tier),
+        id: constructionId,
+        constructionId,
+        name: CONSTRUCTION.find((definition) => definition.buildingId === constructionId)?.name ?? constructionId,
+      };
+    }),
     proliferators: Object.values(PROLIFERATORS).map((definition) => ({ ...definition })),
     technologies: byId(Object.values(TECHNOLOGIES).map((technology) => ({
       id: technology.id,

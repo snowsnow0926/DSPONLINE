@@ -17,7 +17,7 @@ import {
   Trophy,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ITEMS, getPlanet } from "../game/content";
 import {
   deliverOrbitalQuantumInventory,
@@ -130,15 +130,22 @@ export function OrbitalStationWorkspace({ game, onGameChange, onClose, mobile = 
   const decorationAvailable = station.status === "operational";
   const gameDialog = useGameDialog();
 
+  const onGameChangeRef = useRef(onGameChange);
+  onGameChangeRef.current = onGameChange;
+
+  // This is an open-boundary reconciliation, not a subscription to the
+  // callback identity. App intentionally supplies a lightweight inline
+  // adapter; treating each new function object as a new station day creates a
+  // commit -> render -> effect loop.
   useEffect(() => {
-    onGameChange((current) => {
+    onGameChangeRef.current((current) => {
       if (current.mode !== "normal") return current;
       const orbitalStation = synchronizeStationContracts(current, Date.now());
       return orbitalStation === current.orbitalStation
         ? reconcileOrbitalCargoTerminalBindings(current)
         : reconcileOrbitalCargoTerminalBindings({ ...current, orbitalStation });
     });
-  }, [onGameChange]);
+  }, []);
 
   useEffect(() => {
     setProfileTitle(station.profile.title);

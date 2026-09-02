@@ -49,7 +49,7 @@ function textSize(value: string): number {
   return typeof TextEncoder !== "undefined" ? new TextEncoder().encode(value).byteLength : value.length;
 }
 
-export function usePerformanceMonitor(getGame: () => GameState, paused = false) {
+export function usePerformanceMonitor(getGame: () => GameState, suspendLegacyStateSampling = false) {
   const initial = useRef<PerformanceMonitorSnapshot>({
     active: false,
     startedAt: null,
@@ -134,7 +134,12 @@ export function usePerformanceMonitor(getGame: () => GameState, paused = false) 
   }, []);
 
   useEffect(() => {
-    if (!snapshot.active) return;
+    // Native authority deliberately keeps the renderer's last JavaScript
+    // GameState only as a sealed fallback checkpoint. Sampling that object
+    // would serialize a large, stale mirror every five seconds and turn the
+    // diagnostics panel into an accidental second state reader. The caller
+    // therefore pauses this sampler for the entire native-authority lease.
+    if (!snapshot.active || suspendLegacyStateSampling) return;
     let frameId = 0;
     let previousFrameAt = performance.now();
     let windowStartedAt = previousFrameAt;
@@ -216,7 +221,7 @@ export function usePerformanceMonitor(getGame: () => GameState, paused = false) 
     };
     frameId = window.requestAnimationFrame(sampleFrame);
     return () => window.cancelAnimationFrame(frameId);
-  }, [getGame, paused, snapshot.active, updateSnapshot]);
+  }, [getGame, snapshot.active, suspendLegacyStateSampling, updateSnapshot]);
 
   const exportAnonymous = useCallback(async () => {
     const report = createAnonymousPerformanceReport(getGame(), snapshotRef.current);

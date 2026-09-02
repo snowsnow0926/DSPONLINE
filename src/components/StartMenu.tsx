@@ -127,12 +127,14 @@ type OfflineSettlementDecision = {
   failureKind: OfflineSettlementFailureKind;
   reason: string;
   exactAttempted: boolean;
+  allowNativeStartup?: boolean;
 };
 type OfflineSettlementPrompt = {
   loaded: DeferredLoadedGame;
   label: string;
   preserveReason?: string;
   complexity: OfflineComplexityReport;
+  allowNativeStartup?: boolean;
 };
 type TimeWarpRecoveryPrompt = {
   loaded: DeferredLoadedGame;
@@ -604,9 +606,11 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     label: string,
     preserveReason: string | undefined,
     storage: StorageModule,
-    options: { forceExact?: boolean } = {},
+    options: { forceExact?: boolean; allowNativeStartup?: boolean } = {},
   ) => {
     let completed = loaded.state;
+    let settlementLoaded = loaded;
+    let completedByNative = false;
     let approximationReport: OfflineApproximationReport | undefined;
     let complexityReport: OfflineComplexityReport | undefined;
     if (loaded.offlineSeconds >= 1) {
@@ -620,9 +624,58 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         phase: "preparing",
         wallClockMs: 0,
       });
-      const { runOfflineSimulationInWorkerDetailed } = await importWithRecovery(() => import("../game/offlineSimulation"), "离线结算模块");
+      if (options.allowNativeStartup && options.forceExact !== true &&
+          offlineSettlementPreference !== "exact") {
+        try {
+          const [nativeOffline, contentPacks] = await Promise.all([
+            importWithRecovery(() => import("../game/nativeOfflineStartup"), "Windows 原生离线结算模块"),
+            loadContentPackRuntimeModule(),
+          ]);
+          const runtime = contentPacks.createContentPackRuntimeSnapshot(
+            contentPacks.loadContentPackRegistry(),
+          );
+          const nativeResult = await nativeOffline.tryNativeOfflineStartupSettlement({
+            loaded,
+            runtime,
+            onProgress: (phase) => setOfflineProgress((current) => ({
+              label,
+              completedSeconds: current?.completedSeconds ?? 0,
+              totalSeconds: current?.totalSeconds ?? loaded.offlineSeconds,
+              progress: current?.progress ?? 0,
+              phase: phase === "calculating" ? "macro" : phase === "verifying" ? "validating" : "preparing",
+              wallClockMs: current?.wallClockMs ?? 0,
+              ...(current?.complexity ? { complexity: current.complexity } : {}),
+            })),
+          });
+          if (controller.signal.aborted) {
+            setOfflineProgress(null);
+            setMessage({ tone: "warning", text: "离线计算已取消；原存档、savedAt 和离线时长均未修改" });
+            return;
+          }
+          if (nativeResult.status === "complete") {
+            completed = nativeResult.state;
+            settlementLoaded = nativeResult.loaded;
+            approximationReport = nativeResult.approximation;
+            completedByNative = true;
+            setOfflineProgress({
+              label,
+              completedSeconds: nativeResult.loaded.offlineSeconds,
+              totalSeconds: nativeResult.loaded.offlineSeconds,
+              progress: 1,
+              phase: "validating",
+              wallClockMs: nativeResult.approximation.wallClockMs ?? 0,
+            });
+          }
+        } catch {
+          // The source checkpoint is read-only. Any native bridge/import error
+          // falls through to the existing Worker with the original loaded state.
+        }
+      }
+      const { runOfflineSimulationInWorkerDetailed } = completedByNative
+        ? { runOfflineSimulationInWorkerDetailed: null }
+        : await importWithRecovery(() => import("../game/offlineSimulation"), "离线结算模块");
       try {
-        const result = await runOfflineSimulationInWorkerDetailed(loaded.state, loaded.offlineSeconds, {
+        const result = completedByNative ? null : await runOfflineSimulationInWorkerDetailed!(loaded.state, loaded.offlineSeconds, {
           signal: controller.signal,
           approximate: options.forceExact !== true && offlineSettlementPreference !== "exact",
           onComplexity: (complexity) => {
@@ -639,6 +692,10 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
           },
           onProgress: (progress) => setOfflineProgress((current) => ({ label, ...progress, ...(current?.complexity ? { complexity: current.complexity } : {}) })),
         });
+        if (result === null) {
+          // The native candidate has already passed byte, state and revision
+          // verification; finalization below adds returning rewards once.
+        } else {
         complexityReport = result.complexity;
         if (result.status === "decision-required") {
           const reason = result.approximation.fallbackReason ?? "快速离线结算未完成，本次尚未提交离线收益";
@@ -651,6 +708,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
             failureKind: classifyOfflineSettlementFailure(reason),
             reason,
             exactAttempted: options.forceExact === true,
+            allowNativeStartup: false,
           });
           setOfflineSkipConfirmed(false);
           setOfflineProgress(null);
@@ -659,6 +717,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         }
         completed = result.state;
         approximationReport = result.approximation;
+        }
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
           setOfflineProgress(null);
@@ -674,6 +733,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
           failureKind: classifyOfflineSettlementFailure(reason),
           reason,
           exactAttempted: options.forceExact === true,
+          allowNativeStartup: false,
         });
         setOfflineSkipConfirmed(false);
         setOfflineProgress(null);
@@ -681,7 +741,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         return;
       }
     }
-    const finalized = storage.finalizeDeferredOfflineGame(loaded, completed, {
+    const finalized = storage.finalizeDeferredOfflineGame(settlementLoaded, completed, {
       ...(approximationReport ? { approximation: approximationReport } : {}),
       ...(complexityReport ? { complexity: complexityReport } : {}),
     });
@@ -726,14 +786,21 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     label: string,
     preserveReason: string | undefined,
     storage: StorageModule,
+    options: { allowNativeStartup?: boolean } = {},
   ) => {
     if (loaded.offlineSeconds >= 60 && loaded.state.mode !== "speedrun" && !loaded.state.speedrun?.enabled) {
       const { classifyOfflineWorkload } = await importWithRecovery(() => import("../game/offlineComplexity"), "离线工作量分析");
-      setOfflinePrompt({ loaded, label, ...(preserveReason ? { preserveReason } : {}), complexity: classifyOfflineWorkload(loaded.state, loaded.offlineSeconds) });
+      setOfflinePrompt({
+        loaded,
+        label,
+        ...(preserveReason ? { preserveReason } : {}),
+        complexity: classifyOfflineWorkload(loaded.state, loaded.offlineSeconds),
+        ...(options.allowNativeStartup ? { allowNativeStartup: true } : {}),
+      });
       setMessage({ tone: "warning", text: "请选择本次离线收益的处理方式；选择前原存档保持不变" });
       return;
     }
-    await completeDeferredLoad(loaded, label, preserveReason, storage);
+    await completeDeferredLoad(loaded, label, preserveReason, storage, options);
   };
 
   const recoverTimeWarpCheckpointAndFastSettle = async () => {
@@ -783,7 +850,10 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         setOfflineSkipConfirmed(true);
         return;
       }
-      await completeDeferredLoad(prompt.loaded, `${prompt.label} · ${choice === "exact" ? "精确结算" : "快速结算"}`, prompt.preserveReason, storage, { forceExact: choice === "exact" });
+      await completeDeferredLoad(prompt.loaded, `${prompt.label} · ${choice === "exact" ? "精确结算" : "快速结算"}`, prompt.preserveReason, storage, {
+        forceExact: choice === "exact",
+        allowNativeStartup: choice !== "exact" && prompt.allowNativeStartup === true,
+      });
     } catch (error) {
       handleLoadError(error, choice === "exact" ? "精确离线结算失败，原存档保持不变" : "快速离线结算失败，原存档保持不变");
     } finally {
@@ -802,7 +872,9 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     setOfflineSkipConfirmed(false);
     try {
       const storage = await loadStorageModule();
-      await completeDeferredLoad(decision.loaded, `${decision.label} · 快速重试`, decision.preserveReason, storage);
+      await completeDeferredLoad(decision.loaded, `${decision.label} · 快速重试`, decision.preserveReason, storage, {
+        allowNativeStartup: decision.allowNativeStartup === true,
+      });
     } catch (error) {
       handleLoadError(error, "快速离线结算再次失败，原存档保持不变");
     } finally {
@@ -915,7 +987,9 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
       const label = mode === "speedrun" ? "恢复速通工厂" : "恢复最近工厂";
       const prepared = await prepareTimeWarpDeferredLoad(loaded, label, undefined, mode === "normal");
       if (!prepared) return;
-      await beginDeferredLoad(prepared, label, undefined, storage);
+      await beginDeferredLoad(prepared, label, undefined, storage, {
+        allowNativeStartup: mode === "normal" && resolved?.save.source === "primary",
+      });
     } catch (error) {
       handleLoadError(error, "本地存档无法载入");
     } finally {

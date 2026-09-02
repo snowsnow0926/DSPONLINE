@@ -3335,6 +3335,11 @@ export async function saveGameVerifiedFromStateTransfer(
       return authoritativePersistenceFailure(committed.result, serialized.proof.byteLength, removedAutomaticSnapshots);
     }
     clearPrimarySaveEmergencyMirrorProof(mode, committed.result.proof.savedAt, committed.result.proof.stateChecksum);
+    // The selected menu payload may still be retained for the synchronous
+    // loader. A proof-bound commit is now the durable source of truth; drop
+    // that old raw string so a subsequent load cannot parse a stale viewport
+    // (and so a large save is not kept twice in the renderer heap).
+    clearLocalSaveRawPayloadCache();
     const automaticSnapshotStartedAt = monotonicNow();
     try {
       scheduleAutomaticSnapshotFromStateTransfer(
@@ -3476,6 +3481,7 @@ export async function saveGameVerifiedFromEnvelopeTransfer(
       ));
     }
     clearPrimarySaveEmergencyMirrorProof(mode, committed.result.proof.savedAt, committed.result.proof.stateChecksum);
+    clearLocalSaveRawPayloadCache();
     options.onProgress?.({ stage: "complete", bytes: serialized.proof.byteLength });
     return withReturnedOwnership({
       success: true,

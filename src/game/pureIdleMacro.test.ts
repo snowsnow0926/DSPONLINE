@@ -18,10 +18,12 @@ import {
   advanceExactSimulationWindow,
   applyPureIdleAffineContract,
   applyPureIdleLightweightContractInPlace,
+  captureAggregateConservationBaseline,
   capturePureIdleCombinedConservationCheckpoint,
   createPureIdleLightweightCalibration,
   reconcilePureIdleLightweightMaterialDeltas,
   runFastOfflineSettlement,
+  validateAggregateConservation,
   validatePureIdleCombinedSettlementConservation,
   validatePureIdleTerminalMaterialConservation,
   type PureIdleAffineContract,
@@ -684,6 +686,34 @@ function addRocketConservationFixture(state: GameState, prefilledRockets = 1_000
   });
 }
 
+function addSolarSailConservationFixture(state: GameState, prefilledSails = 1_000): void {
+  addWindGeneration(state, 1_000_000_000_000_000);
+  if (!state.research.completedTechIds.includes("dyson_swarm")) {
+    state.research.completedTechIds.push("dyson_swarm");
+  }
+  state.dysonEngineering.launchEnabled = true;
+  state.dysonEngineering.launchMode = "swarm";
+  state.dysonEngineering.launchThrottle = 1;
+  state.entities.push({
+    id: "prefilled-sail-ejector",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 300, y: 0 },
+    interactionLocked: false,
+    buildingId: "em_rail_ejector",
+    recipeId: "solar_sail_launch",
+    machineCount: 1_000,
+    minerCount: 0,
+    inputs: { solar_sail: prefilledSails },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+    targetDysonOrbitId: "dyson_orbit_helios_1",
+  });
+}
+
 function addSecondRocketSystemFixture(state: GameState, prefilledRockets = 1_000_000): void {
   const wind = state.entities.find((entity) => entity.id.startsWith("pure-idle-wind-"));
   const producer = state.entities.find((entity) => entity.id === "slow-rocket-producer");
@@ -1062,6 +1092,82 @@ describe("pure idle macro session", () => {
     expect(result).toMatchObject({ ok: true });
     expect(state.tray.iron_ore).toBe(110);
     expect(state.totalProduced.iron_ore).toBe(10);
+  });
+
+  it("counts a Galactic activity delivery once and treats pending batches as an ACK outbox", () => {
+    const source = pureIdleState();
+    source.tray.universe_matrix = 10;
+    const baseline = captureAggregateConservationBaseline(source);
+    expect(baseline.totals.get("universe_matrix")).toBe(10n);
+
+    const delivered = structuredClone(source);
+    delivered.tray.universe_matrix = 0;
+    delivered.endgame.exportProjects.universe_archive.totalDelivered = 10;
+    delivered.endgame.totalExported = 10;
+    delivered.endgame.constructionActivity.personalDelivered.universe_matrix = 10;
+    delivered.endgame.constructionActivity.pendingBatches.universe_matrix = {
+      id: "activity:participant:universe_matrix:0",
+      itemId: "universe_matrix",
+      amount: 10,
+      sequence: 0,
+      firstDeliveredAtMs: 1_000,
+      lastDeliveredAtMs: 1_000,
+    };
+
+    expect(validateAggregateConservation(baseline, delivered)).toBeNull();
+    const deliveredBaseline = captureAggregateConservationBaseline(delivered);
+    expect(deliveredBaseline.totals.get("universe_matrix") ?? 0n).toBe(0n);
+
+    const acknowledged = structuredClone(delivered);
+    acknowledged.endgame.constructionActivity.pendingBatches = {};
+    expect(validateAggregateConservation(deliveredBaseline, acknowledged)).toBeNull();
+  });
+
+  it("ignores activity-only personal and outbox mirrors in the combined terminal ledger", () => {
+    const source = pureIdleState();
+    const checkpoint = capturePureIdleCombinedConservationCheckpoint(source);
+    const synchronized = structuredClone(source);
+    synchronized.endgame.constructionActivity.personalDelivered.small_carrier_rocket = 50;
+    synchronized.endgame.constructionActivity.pendingBatches.small_carrier_rocket = {
+      id: "activity:participant:small_carrier_rocket:0",
+      itemId: "small_carrier_rocket",
+      amount: 50,
+      sequence: 0,
+      firstDeliveredAtMs: 2_000,
+      lastDeliveredAtMs: 2_000,
+    };
+
+    expect(validatePureIdleCombinedSettlementConservation(checkpoint, synchronized)).toBeNull();
+  });
+
+  it("accepts rocket and sail launch sinks funded by interval-start inventory", () => {
+    const source = pureIdleState();
+    source.tray.small_carrier_rocket = 3;
+    source.tray.solar_sail = 4;
+    const baseline = captureAggregateConservationBaseline(source);
+    const launched = structuredClone(source);
+    launched.tray.small_carrier_rocket = 0;
+    launched.tray.solar_sail = 0;
+    launched.dysonSphere.totalRocketsLaunched += 3;
+    launched.dysonSwarm.totalLaunched += 4;
+
+    expect(validateAggregateConservation(baseline, launched)).toBeNull();
+  });
+
+  it.each([
+    ["rocket launch", (state: GameState) => { state.dysonSphere.totalRocketsLaunched += 1; }],
+    ["solar-sail launch", (state: GameState) => { state.dysonSwarm.totalLaunched += 1; }],
+    ["Galactic export", (state: GameState) => { state.endgame.exportProjects.universe_archive.totalDelivered += 1; }],
+  ] as const)("rejects an unfunded physical %s sink in the aggregate ledger", (_label, mutate) => {
+    const source = pureIdleState();
+    source.tray.small_carrier_rocket = 0;
+    source.tray.solar_sail = 0;
+    source.tray.universe_matrix = 0;
+    const candidate = structuredClone(source);
+    mutate(candidate);
+
+    expect(validateAggregateConservation(captureAggregateConservationBaseline(source), candidate))
+      .toContain("超过生产、奖励与库存来源");
   });
 
   it("applies the closed lightweight contract without cloning the full state", () => {
@@ -2026,6 +2132,34 @@ describe("pure idle macro session", () => {
     expect(hashGameState(source)).toBe(sourceHash);
   });
 
+  it("does not affine-extrapolate prefilled solar-sail launches in the generic pure-idle path", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addSolarSailConservationFixture(source);
+    const sourceHash = hashGameState(source);
+    const initialSails = source.entities.find((entity) => entity.id === "prefilled-sail-ejector")!
+      .inputs.solar_sail ?? 0;
+    const session = createPureIdleMacroSession(structuredClone(source), "stable");
+    const exactPrefixLaunches = session.calibrationCheckpoint!.candidate.dysonSwarm.totalLaunched -
+      source.dysonSwarm.totalLaunched;
+
+    advancePureIdleMacroSession(session, 60);
+    const launches = session.candidate.dysonSwarm.totalLaunched - source.dysonSwarm.totalLaunched;
+    const endingSails = session.candidate.entities.find((entity) => entity.id === "prefilled-sail-ejector")!
+      .inputs.solar_sail ?? 0;
+
+    expect(session.conservativeOnly).toBe(false);
+    expect(exactPrefixLaunches).toBeGreaterThan(0);
+    // The exact prefix may consume known stock; the unproven affine tail must
+    // not copy the sampled ejector result a second time.
+    expect(launches).toBe(exactPrefixLaunches);
+    expect(launches).toBeLessThanOrEqual(initialSails - endingSails);
+    expect(session.degradedReason).toBeUndefined();
+    expect(validatePureIdleTerminalMaterialConservation(source, session.candidate)).toBeNull();
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
   it("keeps the ordinary small-save rocket tail deterministic across segmented affine buckets", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;
@@ -2265,7 +2399,8 @@ describe("pure idle macro session", () => {
 
     const result = applyPureIdleAffineContract(state, contract, 1, 1, { allowExactFallback: false });
     expect(result.ok).toBe(false);
-    expect(result.failure).toContain("终端物资守恒失败");
+    expect(result.failure).toContain("物资守恒失败");
+    expect(result.failure).toContain("small_carrier_rocket");
     expect(hashGameState(state)).toBe(sourceHash);
   });
 

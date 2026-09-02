@@ -12,9 +12,10 @@ interface FactoryRuntimeProps {
   initialLoad: LoadedGame;
   onReturnToMenu: () => void;
   onOpenReleaseNotes: () => void;
+  onReleaseNativeRendererState: (releasedLoad: LoadedGame) => void;
 }
 
-export default function FactoryRuntime({ launchId, initialLoad, onReturnToMenu, onOpenReleaseNotes }: FactoryRuntimeProps) {
+export default function FactoryRuntime({ launchId, initialLoad, onReturnToMenu, onOpenReleaseNotes, onReleaseNativeRendererState }: FactoryRuntimeProps) {
   const { locale } = useAppLocale();
   useEffect(() => {
     if (locale !== "en") return;
@@ -23,7 +24,7 @@ export default function FactoryRuntime({ launchId, initialLoad, onReturnToMenu, 
   return (
     <ReactFlowProvider key={launchId}>
       <RuntimeRenderProfile id="factory-game">
-      <FactoryGame initialLoad={initialLoad} onReturnToMenu={onReturnToMenu} onOpenReleaseNotes={onOpenReleaseNotes} />
+      <FactoryGame initialLoad={initialLoad} onReturnToMenu={onReturnToMenu} onOpenReleaseNotes={onOpenReleaseNotes} onReleaseNativeRendererState={onReleaseNativeRendererState} />
       </RuntimeRenderProfile>
     </ReactFlowProvider>
   );

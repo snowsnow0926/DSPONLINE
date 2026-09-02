@@ -29,6 +29,7 @@ jobs:
       DSP_ANDROID_PUBLIC_ORIGIN: https://dsponline.cn
       DSP_NATIVE_UPDATE_BASE_URL: https://dsponline.cn/downloads/
       DSP_ANDROID_VERSION_CODE: ${{ inputs.version_code }}
+      CARGO_BUILD_JOBS: "1"
       DSP_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       DSP_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       DSP_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
@@ -54,6 +55,8 @@ jobs:
       - run: npm ci
       - run: npm run licenses:check
       - run: npm run typecheck
+      - run: npm run test:native-core:serial
+      - run: npm run native:build-host
       - run: npm run test:native
       - run: npm run android:release
       - name: Create Android update manifest

@@ -2,6 +2,7 @@ import { Check, Factory, Layers3, Minus, PackageOpen, Plus, Power, Search, Truck
 import { useEffect, useMemo, useState } from "react";
 import { CONSTRUCTION, ITEMS, getConstructionDefinition, getPlanet, getRecipe, getTechnology, isConveyorBeltId } from "../game/content";
 import { PORTABLE_FLEET_ITEM_IDS, getConstructionAutomationCycleSeconds, getConstructionAutomationMaterialSeconds, getConstructionAutomationStatus, getConstructionAutomationStockLimit, isPortableFleetItem, isTechnologyCompleted } from "../game/engine";
+import type { FactoryConstructionWorkspaceReadModel } from "../game/factoryReadModels";
 import type { ConstructionAutomationTargetId, ConstructionId, GameState, ItemId, PortableFleetItemId, TechId } from "../game/types";
 import { formatQuantityCompact } from "../game/quantityFormat";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
@@ -113,9 +114,10 @@ function ConstructionTargetControl({ definition, target, stockLimit, unlocked, o
   </div>;
 }
 
-export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChange, onQuantumSourceChange, onTargetChange, onBatchTargetChange }: {
+export function ConstructionCenterWorkspace({ open, game, constructionReadModel, onClose, onEnabledChange, onQuantumSourceChange, onTargetChange, onBatchTargetChange }: {
   open: boolean;
   game: GameState;
+  constructionReadModel: FactoryConstructionWorkspaceReadModel;
   onClose: () => void;
   onEnabledChange: (enabled: boolean) => void;
   onQuantumSourceChange: (enabled: boolean) => void;
@@ -155,12 +157,24 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
     const materials = definition.costs.map((cost) => ITEMS[cost.itemId].name).join(" ");
     return `${definition.name} ${materials}`.toLocaleLowerCase("zh-CN").includes(term);
   }), [category, game.mode, game.orbitalStation.status, term]);
-  const activeTargets = Object.values(game.constructionAutomation.targetStock).filter((target) => (target ?? 0) > 0).length;
+  const nativeDisplayActive = constructionReadModel.source === "native-core";
+  const displayTargets = nativeDisplayActive
+    ? new Map(constructionReadModel.automation.targets.rows.map((row) => [row.targetId, row.amount] as const))
+    : null;
+  const activeTargets = nativeDisplayActive
+    ? constructionReadModel.automation.targets.rows.filter((row) => row.amount > 0).length
+    : Object.values(game.constructionAutomation.targetStock).filter((target) => (target ?? 0) > 0).length;
   const completedTargets = automationDefinitions().filter((definition) => {
-    const target = game.constructionAutomation.targetStock[definition.id] ?? 0;
+    const target = displayTargets?.get(definition.id) ?? game.constructionAutomation.targetStock[definition.id] ?? 0;
     const current = isPortableFleetItem(definition.id) ? game.portableFleet[definition.id] ?? 0 : game.construction[definition.id] ?? 0;
     return target > 0 && current >= target;
   }).length;
+  const displayJobs = nativeDisplayActive
+    ? new Map(constructionReadModel.automation.jobs.rows.map((job) => [job.entityId, job] as const))
+    : null;
+  const displayDestroyedByproducts = nativeDisplayActive
+    ? constructionReadModel.automation.destroyedByproducts.rows
+    : null;
   const unlockedBuildingCount = automationDefinitions().filter((definition) => !isPortableFleetItem(definition.id) &&
     (definition.id !== "orbital_cargo_terminal" || game.mode === "normal" && game.orbitalStation.status !== "locked") &&
     (!definition.requiredTechId || isTechnologyCompleted(game, definition.requiredTechId))).length;
@@ -215,17 +229,30 @@ export function ConstructionCenterWorkspace({ open, game, onClose, onEnabledChan
         {batchError ? <em role="alert">{batchError}</em> : null}
       </section>
 
-      <div className="construction-center-status">
+      <div
+        className="construction-center-status"
+        data-factory-read-model-source={constructionReadModel.source}
+        data-factory-read-model-revision={constructionReadModel.revision ?? "web"}
+      >
         <span><PackageOpen size={14} />取料行星 <strong>{getPlanet(sourcePlanetId).name}</strong></span>
         <span>量子直供 <strong>{!quantumNetworkEnabled ? "未启用" : quantumSourceEnabled ? "已启用" : "未启用"}</strong></span>
         {quantumSourceEnabled && quantumBufferTotal > 0 ? <span>中心直供缓存 <strong><QuantityValue value={quantumBufferTotal} /></strong></span> : null}
-        <span>累计制造 <strong><QuantityValue value={game.constructionAutomation.totalCrafted} /></strong></span>
-        <span>最近完成 <strong>{game.constructionAutomation.lastCraftedId ? isPortableFleetItem(game.constructionAutomation.lastCraftedId) ? ITEMS[game.constructionAutomation.lastCraftedId].name : getConstructionDefinition(game.constructionAutomation.lastCraftedId)?.name ?? "未知" : "尚无"}</strong></span>
+        <span>累计制造 <strong><QuantityValue value={constructionReadModel.automation.totalCrafted} /></strong></span>
+        <span>最近完成 <strong>{constructionReadModel.automation.lastCraftedId ? isPortableFleetItem(constructionReadModel.automation.lastCraftedId) ? ITEMS[constructionReadModel.automation.lastCraftedId].name : getConstructionDefinition(constructionReadModel.automation.lastCraftedId)?.name ?? "未知" : "尚无"}</strong></span>
         {centers.map((center) => {
           const status = getConstructionAutomationStatus(game, center.id);
-          const wipDetail = status.wipItems?.map((item) => `${ITEMS[item.itemId].name} ${formatQuantityCompact(item.amount)}`).join("、");
-          const destroyedDetail = status.destroyedByproductItems?.map((item) => `${ITEMS[item.itemId].name} ${formatQuantityCompact(item.amount)}`).join("、");
-          return <span key={center.id}>{getPlanet(center.planetId).name} <strong>{status.stage}</strong>{` · WIP ${formatQuantityCompact(status.wipCount ?? 0)}${wipDetail ? `（${wipDetail}）` : ""} · 已销毁副产物 ${formatQuantityCompact(status.destroyedByproductCount ?? 0)}${destroyedDetail ? `（${destroyedDetail}）` : ""}`}{status.missingItemId ? ` · 缺${ITEMS[status.missingItemId].name} ${formatQuantityCompact(status.missingAmount ?? 1)}` : status.etaSeconds > 0 ? ` · ${status.etaSeconds.toFixed(1)}s` : ""}{status.recipeFallbackReason ? ` · 已回退：${status.recipeFallbackReason}` : ""}</span>;
+          const displayJob = displayJobs?.get(center.id);
+          const wipItems = displayJob
+            ? displayJob.inventory.rows.map((item) => ({ itemId: item.itemId as ItemId, amount: item.amount }))
+            : status.wipItems ?? [];
+          const destroyedItems = displayDestroyedByproducts
+            ? displayDestroyedByproducts.map((item) => ({ itemId: item.itemId as ItemId, amount: item.amount }))
+            : status.destroyedByproductItems ?? [];
+          const wipCount = wipItems.reduce((sum, item) => sum + item.amount, 0);
+          const destroyedCount = destroyedItems.reduce((sum, item) => sum + item.amount, 0);
+          const wipDetail = wipItems.map((item) => `${ITEMS[item.itemId].name} ${formatQuantityCompact(item.amount)}`).join("、");
+          const destroyedDetail = destroyedItems.map((item) => `${ITEMS[item.itemId].name} ${formatQuantityCompact(item.amount)}`).join("、");
+          return <span key={center.id}>{getPlanet(center.planetId).name} <strong>{status.stage}</strong>{` · WIP ${formatQuantityCompact(wipCount)}${wipDetail ? `（${wipDetail}）` : ""} · 已销毁副产物 ${formatQuantityCompact(destroyedCount)}${destroyedDetail ? `（${destroyedDetail}）` : ""}`}{status.missingItemId ? ` · 缺${ITEMS[status.missingItemId].name} ${formatQuantityCompact(status.missingAmount ?? 1)}` : status.etaSeconds > 0 ? ` · ${status.etaSeconds.toFixed(1)}s` : ""}{status.recipeFallbackReason ? ` · 已回退：${status.recipeFallbackReason}` : ""}</span>;
         })}
         {centers.length === 0 ? <em>需要先在画布放置建筑制造中心</em> : null}
       </div>

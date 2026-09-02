@@ -82,7 +82,7 @@ test("every workflow pins third-party Actions and the release lane retains every
   const workflows = (await readdir(workflowDirectory)).filter((name) => /\.ya?ml$/.test(name));
   for (const workflow of workflows) {
     const contents = await readFile(`${workflowDirectory}/${workflow}`, "utf8");
-    for (const match of contents.matchAll(/^\s*uses:\s*[^\s]+@([^\s#]+)\s*$/gm)) {
+    for (const match of contents.matchAll(/^\s*(?:-\s*)?uses:\s*[^\s]+@([^\s#]+)\s*$/gm)) {
       assert.match(match[1], /^[a-f0-9]{40}$/, `${workflow} must pin Actions to a full commit SHA`);
     }
   }
@@ -90,6 +90,8 @@ test("every workflow pins third-party Actions and the release lane retains every
   const releaseGate = await readFile(`${workflowDirectory}/release-gate.yml`, "utf8");
   for (const command of [
     "npm run typecheck",
+    "npm run test:native-core:serial",
+    "npm run native:build-host",
     "npm test -- --maxWorkers=1",
     "npm run test:server",
     "npm run test:ops",
@@ -105,4 +107,20 @@ test("every workflow pins third-party Actions and the release lane retains every
     "release-gate.mjs provenance",
     "release-gate.mjs verify-provenance",
   ]) assert.match(releaseGate, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.ok(
+    releaseGate.indexOf("npm run native:build-host") < releaseGate.indexOf("npm test -- --maxWorkers=1"),
+    "release native Host must exist before Vitest can exercise differential integration",
+  );
+  assert.ok(
+    releaseGate.indexOf("npm run native:build-host") <
+      releaseGate.indexOf("run: npm run test:native\n"),
+    "release native Host must exist before native integration tests",
+  );
+
+  const desktopRelease = await readFile(`${workflowDirectory}/desktop-release.yml`, "utf8");
+  assert.match(desktopRelease, /@\("release-performance-edition", "release-performance-edition-fallback"\)/);
+  assert.match(desktopRelease, /DSP_DESKTOP_RELEASE_OUTPUT=\$\(\$complete\[0\]\)/);
+  assert.match(desktopRelease, /\$\{\{ env\.DSP_DESKTOP_RELEASE_OUTPUT \}\}\/\*\.exe/);
+  assert.match(desktopRelease, /if-no-files-found:\s*error/);
+  assert.doesNotMatch(desktopRelease, /^\s+release\/\*\.(?:exe|blockmap)$/m);
 });

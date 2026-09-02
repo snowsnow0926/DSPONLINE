@@ -5,6 +5,7 @@ import {
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  type Edge,
   type Node,
   type OnNodeDrag,
   type Viewport,
@@ -40,6 +41,12 @@ const STATUS_INDEX: Record<OrbitalStationState["status"], number> = {
   "showcase-building": 4,
   operational: 5,
 };
+
+// React Flow treats `edges` as a controlled collection. Passing a fresh `[]`
+// on every render makes StoreUpdater publish another store update, which can
+// recurse until React trips its maximum-update-depth guard when the workspace
+// itself reacts to a viewport or selection change.
+const EMPTY_STATION_EDGES: Edge[] = [];
 
 const FUNCTIONAL_MODULES = [
   { id: "core", label: "轨道核心", subtitle: "全星系设施控制", x: -400, y: -170, width: 260, height: 180, required: 2, icon: <Satellite size={24} /> },
@@ -147,7 +154,7 @@ export function StationCanvasRenderer({
       <ReactFlow
         id="orbital-station-flow"
         nodes={nodes}
-        edges={[]}
+        edges={EMPTY_STATION_EDGES}
         defaultViewport={station.viewport}
         minZoom={0.2}
         maxZoom={2.5}

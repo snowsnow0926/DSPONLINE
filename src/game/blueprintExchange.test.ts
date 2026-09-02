@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { MAX_BELT_LANES, MAX_BUILDING_STACK_COUNT, createBlueprint, createInitialState, installMiner, placeBlueprint, placeBuilding, setLogisticsItem, setStationHubConfiguration, setStationSlotRoutePolicy, setStationSlotWarperBudget, setStationWarperAutoRefill, setStationWarperTarget } from "./engine";
-import { importBlueprintExchange, parseBlueprintExchange, serializeBlueprintExchange } from "./blueprintExchange";
+import {
+  BLUEPRINT_EXCHANGE_MAX_BELTS,
+  BLUEPRINT_EXCHANGE_MAX_BYTES,
+  BLUEPRINT_EXCHANGE_MAX_ENTITIES,
+  BLUEPRINT_LIBRARY_MAX_ROWS,
+  importBlueprintExchange,
+  parseBlueprintExchange,
+  serializeBlueprintExchange,
+} from "./blueprintExchange";
+import type { BlueprintDefinition, GameState } from "./types";
 
 describe("blueprint exchange", () => {
   it("round-trips a valid blueprint and assigns a safe local id on import", () => {
@@ -13,9 +22,11 @@ describe("blueprint exchange", () => {
     const result = parseBlueprintExchange(serializeBlueprintExchange(original));
     expect(result.valid).toBe(true);
     const imported = importBlueprintExchange(state, result.blueprint!);
-    expect(imported.blueprints).toHaveLength(2);
-    expect(imported.blueprints[1]).toMatchObject({ name: "交换测试 2", entities: [{ buildingId: "arc_smelter" }] });
-    expect(imported.blueprints[1].id).not.toBe(original.id);
+    expect(imported.ok).toBe(true);
+    if (!imported.ok) throw new Error(imported.reason);
+    expect(imported.state.blueprints).toHaveLength(2);
+    expect(imported.state.blueprints[1]).toMatchObject({ name: "交换测试 2", entities: [{ buildingId: "arc_smelter" }] });
+    expect(imported.state.blueprints[1].id).not.toBe(original.id);
   });
 
   it("round-trips high stack counts without truncating blueprint production", () => {
@@ -223,5 +234,212 @@ describe("blueprint exchange", () => {
     const parsed = parseBlueprintExchange(JSON.stringify(legacy));
     expect(parsed.valid).toBe(true);
     expect(parsed.blueprint?.entities[0].buildingId).toBe("arc_smelter");
+  });
+
+  it("rejects duplicate JSON fields, malformed exportedAt values, and v1 anchors that would be discarded", () => {
+    expect(parseBlueprintExchange('{"type":"dsp-idle-blueprint","type":"other","formatVersion":2,"blueprint":{}}').issues)
+      .toEqual(["蓝图文件包含重复的 JSON 字段"]);
+    expect(parseBlueprintExchange(JSON.stringify({
+      type: "dsp-idle-blueprint",
+      formatVersion: 2,
+      exportedAt: "2026-09-01T00:00:00Z",
+      blueprint: { name: "时间", entities: [{ key: "node_1", buildingId: "storage_mk1", offset: { x: 0, y: 0 }, machineCount: 1 }], belts: [] },
+    })).issues).toEqual(["蓝图文件 exportedAt 必须是精确的 UTC ISO 时间"]);
+    expect(parseBlueprintExchange(JSON.stringify({
+      type: "dsp-idle-blueprint",
+      formatVersion: 1,
+      blueprint: {
+        name: "旧锚点",
+        entities: [],
+        resourceAnchors: [{ key: "resource_1", resourceId: "iron_ore", extractorBuildingId: "mining_machine", offset: { x: 0, y: 0 }, minerCount: 1 }],
+        belts: [],
+      },
+    })).issues).toEqual(["v1 蓝图不能包含资源锚点"]);
+  });
+
+  it("accepts the shared 512 entity and 1024 belt boundary and rejects the next row", () => {
+    const entities = Array.from({ length: BLUEPRINT_EXCHANGE_MAX_ENTITIES }, (_, index) => ({
+      key: `node_${index + 1}`,
+      buildingId: "storage_mk1",
+      offset: { x: index, y: 0 },
+      machineCount: 1,
+    }));
+    const belts = Array.from({ length: BLUEPRINT_EXCHANGE_MAX_BELTS }, (_, index) => ({
+      key: `line_${index + 1}`,
+      sourceKey: `node_${index % BLUEPRINT_EXCHANGE_MAX_ENTITIES + 1}`,
+      targetKey: `node_${(index + 1) % BLUEPRINT_EXCHANGE_MAX_ENTITIES + 1}`,
+      itemId: "iron_ingot",
+      lanes: 1,
+      tier: 1,
+      priority: 0,
+    }));
+    const envelope = {
+      type: "dsp-idle-blueprint",
+      formatVersion: 2,
+      blueprint: { name: "边界蓝图", entities, belts },
+    };
+
+    expect(parseBlueprintExchange(JSON.stringify(envelope)).valid).toBe(true);
+    expect(parseBlueprintExchange(JSON.stringify({
+      ...envelope,
+      blueprint: { ...envelope.blueprint, entities: [...entities, entities[0]] },
+    })).issues[0]).toContain("数量");
+    expect(parseBlueprintExchange(JSON.stringify({
+      ...envelope,
+      blueprint: { ...envelope.blueprint, belts: [...belts, belts[0]] },
+    })).issues[0]).toContain("数量");
+
+    const blueprint: BlueprintDefinition = {
+      id: "blueprint_boundary",
+      name: "边界蓝图",
+      entities: entities as BlueprintDefinition["entities"],
+      belts: belts.map((belt) => ({ ...belt, sorterTier: belt.tier })) as BlueprintDefinition["belts"],
+      recipeOverrides: {},
+    };
+    expect(parseBlueprintExchange(serializeBlueprintExchange(blueprint)).valid).toBe(true);
+    expect(() => serializeBlueprintExchange({ ...blueprint, entities: [...blueprint.entities, blueprint.entities[0]] }))
+      .toThrow(/设备或线路数量/);
+    expect(() => serializeBlueprintExchange({ ...blueprint, belts: [...blueprint.belts, blueprint.belts[0]] }))
+      .toThrow(/设备或线路数量/);
+  });
+
+  it("preflights an oversized array before reading or cloning its entries", () => {
+    const entities: BlueprintDefinition["entities"] = [];
+    entities.length = BLUEPRINT_EXCHANGE_MAX_ENTITIES + 1;
+    Object.defineProperty(entities, 0, { get: () => { throw new Error("entry was accessed"); } });
+    expect(() => serializeBlueprintExchange({
+      id: "blueprint_oversized",
+      name: "超限",
+      entities,
+      belts: [],
+      recipeOverrides: {},
+    })).toThrow(/设备或线路数量/);
+  });
+
+  it("serializes only canonical fields and rejects invalid names before stringifying", () => {
+    const blueprint = {
+      id: "blueprint_canonical",
+      name: "x".repeat(48),
+      entities: [{ key: "node_1", buildingId: "storage_mk1", offset: { x: 0, y: 0 }, machineCount: 1, unknownRuntimeCache: { cyclic: null } }],
+      belts: [],
+      recipeOverrides: {},
+      unknownRootCache: "must-not-export",
+    } as unknown as BlueprintDefinition & { unknownRootCache: string };
+    (blueprint.entities[0] as unknown as { unknownRuntimeCache: { cyclic: unknown } }).unknownRuntimeCache.cyclic = blueprint;
+    const raw = serializeBlueprintExchange(blueprint);
+    expect(raw).not.toContain("unknownRootCache");
+    expect(raw).not.toContain("unknownRuntimeCache");
+    expect(parseBlueprintExchange(raw).valid).toBe(true);
+    expect(() => serializeBlueprintExchange({ ...blueprint, name: "x".repeat(49) })).toThrow(/48/);
+    expect(() => serializeBlueprintExchange({ ...blueprint, name: "bad\ud800" })).toThrow(/Unicode/);
+  });
+
+  it("enforces the one MiB UTF-8 boundary and rejects lone UTF-16 surrogates", () => {
+    const compact = JSON.stringify({
+      type: "dsp-idle-blueprint",
+      formatVersion: 2,
+      blueprint: {
+        name: "字节边界",
+        entities: [{ key: "node_1", buildingId: "storage_mk1", offset: { x: 0, y: 0 }, machineCount: 1 }],
+        belts: [],
+      },
+    });
+    const exact = `${compact}${" ".repeat(
+      BLUEPRINT_EXCHANGE_MAX_BYTES - new TextEncoder().encode(compact).byteLength,
+    )}`;
+    expect(new TextEncoder().encode(exact)).toHaveLength(BLUEPRINT_EXCHANGE_MAX_BYTES);
+    expect(parseBlueprintExchange(exact).valid).toBe(true);
+    expect(parseBlueprintExchange(`${exact} `).issues).toEqual(["蓝图文件超过 1 MiB 安全上限"]);
+    expect(parseBlueprintExchange(`${compact}\ud800`).issues).toEqual(["蓝图文件包含无效 Unicode 字符"]);
+    expect(parseBlueprintExchange(JSON.stringify({
+      type: "dsp-idle-blueprint",
+      formatVersion: 2,
+      blueprint: {
+        name: "\ud800",
+        entities: [{ key: "node_1", buildingId: "storage_mk1", offset: { x: 0, y: 0 }, machineCount: 1 }],
+        belts: [],
+      },
+    })).valid).toBe(false);
+  });
+
+  it("refuses a full 64-row library without evicting data or advancing the allocator", () => {
+    let state = createInitialState();
+    state = placeBuilding(state, "arc_smelter", { x: 120, y: 80 });
+    const smelter = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
+    state = createBlueprint(state, [smelter.id], "容量蓝图");
+    const source = state.blueprints[0];
+    state = {
+      ...state,
+      nextId: 10_000,
+      blueprints: Array.from({ length: BLUEPRINT_LIBRARY_MAX_ROWS }, (_, index) => ({
+        ...source,
+        id: `blueprint_full_${index}`,
+        name: `容量蓝图 ${index}`,
+      })),
+    };
+    const before = JSON.stringify(state);
+    const result = importBlueprintExchange(state, source);
+    expect(result).toEqual({ ok: false, reason: "library-full" });
+    expect(JSON.stringify(state)).toBe(before);
+  });
+
+  it("terminates long-name collision suffixes without splitting a surrogate pair", () => {
+    let state = createInitialState();
+    state = placeBuilding(state, "arc_smelter", { x: 120, y: 80 });
+    const smelter = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
+    state = createBlueprint(state, [smelter.id], "来源");
+    const source = { ...state.blueprints[0], name: `${"x".repeat(46)}😀` };
+    state = {
+      ...state,
+      nextId: 5_000,
+      blueprints: [
+        { ...source, id: "blueprint_existing_1" },
+        { ...source, id: "blueprint_existing_2", name: `${"x".repeat(46)} 2` },
+      ],
+    };
+    const imported = importBlueprintExchange(state, source);
+    expect(imported.ok).toBe(true);
+    if (!imported.ok) throw new Error(imported.reason);
+    expect(imported.state.blueprints).toHaveLength(3);
+    expect(imported.state.blueprints[2].name).toBe(`${"x".repeat(46)} 3`);
+    expect(imported.state.blueprints[2].name.length).toBeLessThanOrEqual(48);
+    expect(imported.state.blueprints[2].name).not.toContain("�");
+  });
+
+  it.each([
+    ["entity id", (state: GameState, id: string) => { state.entities[0].id = id; }],
+    ["belt id", (state: GameState, id: string) => { state.belts.push({ id, source: state.entities[0].id, target: state.entities[1].id, itemId: "iron_ingot", lanes: 1, tier: 1, sorterTier: 1, priority: 0, progress: 0, lastFlow: 0, planetId: state.activePlanetId }); }],
+    ["version id", (state: GameState, id: string) => { state.blueprintVersions.push({ id, blueprintId: "other_blueprint", revision: 1, definition: state.blueprints[0] }); }],
+    ["version blueprintId", (state: GameState, id: string) => { state.blueprintVersions.push({ id: "blueprint_version_other", blueprintId: id, revision: 1, definition: state.blueprints[0] }); }],
+    ["queue id", (state: GameState, id: string) => { state.constructionQueue.push({ id, blueprintId: "other_blueprint", blueprintName: "排队", planetId: state.activePlanetId, position: { x: 0, y: 0 }, rotation: 0, mirror: "none", queuedAt: 0 }); }],
+    ["queue blueprintId", (state: GameState, id: string) => { state.constructionQueue.push({ id: "construction_other", blueprintId: id, blueprintName: "排队", planetId: state.activePlanetId, position: { x: 0, y: 0 }, rotation: 0, mirror: "none", queuedAt: 0 }); }],
+  ])("rejects allocator collision with %s without mutating state", (_label, collide) => {
+    let state = createInitialState();
+    state = placeBuilding(state, "arc_smelter", { x: 120, y: 80 });
+    state = placeBuilding(state, "storage_mk1", { x: 420, y: 80 });
+    const sourceEntity = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
+    state = createBlueprint(state, [sourceEntity.id], "冲突来源");
+    state.nextId = 50_000;
+    const importedId = `blueprint_${state.nextId}`;
+    collide(state, importedId);
+    const before = JSON.stringify(state);
+    expect(importBlueprintExchange(state, state.blueprints[0])).toEqual({ ok: false, reason: "id-collision" });
+    expect(JSON.stringify(state)).toBe(before);
+  });
+
+  it("reports invalid and exhausted allocators without advancing nextId or the library", () => {
+    let state = createInitialState();
+    state = placeBuilding(state, "arc_smelter", { x: 120, y: 80 });
+    const sourceEntity = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
+    state = createBlueprint(state, [sourceEntity.id], "分配来源");
+    const blueprint = state.blueprints[0];
+
+    for (const [nextId, reason] of [[Number.NaN, "invalid-next-id"], [-1, "invalid-next-id"], [Number.MAX_SAFE_INTEGER, "allocator-exhausted"]] as const) {
+      const candidate = { ...state, nextId };
+      const beforeBlueprints = candidate.blueprints;
+      expect(importBlueprintExchange(candidate, blueprint)).toEqual({ ok: false, reason });
+      expect(candidate.nextId).toBe(nextId);
+      expect(candidate.blueprints).toBe(beforeBlueprints);
+    }
   });
 });

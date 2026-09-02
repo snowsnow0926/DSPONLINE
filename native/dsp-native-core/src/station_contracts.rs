@@ -388,7 +388,7 @@ fn item_name(state: &CoreState, item: ContractItem) -> &str {
         .unwrap_or(item.item_id)
 }
 
-fn create_contract(
+pub(crate) fn create_contract(
     state: &CoreState,
     base: &Map<String, Value>,
     task_day: u64,
@@ -765,7 +765,21 @@ fn expire_contracts(station: &mut Map<String, Value>, task_day: u64) -> anyhow::
         history.insert(0, value);
         history.truncate(HISTORY_LIMIT);
     }
-    if clear_featured {
+    let featured_still_available = featured.as_deref().is_none_or(|id| {
+        station
+            .get("contractBoard")
+            .and_then(Value::as_object)
+            .and_then(|board| board.get("history"))
+            .and_then(Value::as_array)
+            .is_some_and(|history| {
+                history.iter().any(|value| {
+                    value.get("id").and_then(Value::as_str) == Some(id)
+                        && value.get("settlementReason").and_then(Value::as_str)
+                            == Some("completed")
+                })
+            })
+    });
+    if clear_featured || !featured_still_available {
         station
             .get_mut("contractBoard")
             .and_then(Value::as_object_mut)
@@ -885,4 +899,31 @@ pub(crate) fn synchronize(state: &CoreState, base: &mut Map<String, Value>) -> a
         );
     }
     Ok(())
+}
+
+/// Advances the contract-board clock from one Host-confirmed wall-clock sample.
+///
+/// The caller owns sampling. Keeping the monotonic calibration here ensures
+/// semantic commands use the same UTC+8 task-day and expiry rules as ordinary
+/// station settlement, while a replay of the same command bytes cannot acquire
+/// a newer clock value.
+pub(crate) fn synchronize_with_confirmed_wall_clock(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    confirmed_wall_clock_ms: u64,
+) -> anyhow::Result<()> {
+    let board = base
+        .get_mut("orbitalStation")
+        .and_then(Value::as_object_mut)
+        .and_then(|station| station.get_mut("contractBoard"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native station contract board is missing"))?;
+    let previous = finite_number(board.get("lastConfirmedWallClockMs"))
+        .floor()
+        .max(0.0) as u64;
+    board.insert(
+        "lastConfirmedWallClockMs".to_owned(),
+        Value::from(previous.max(confirmed_wall_clock_ms)),
+    );
+    synchronize(state, base)
 }

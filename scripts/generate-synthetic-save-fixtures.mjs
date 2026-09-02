@@ -7,7 +7,7 @@ import { once } from "node:events";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const SYNTHETIC_FIXTURE_GENERATOR_VERSION = "p2-07-v1";
+export const SYNTHETIC_FIXTURE_GENERATOR_VERSION = "p2-08-v1";
 export const SYNTHETIC_FIXTURE_SEED = 1_040_406;
 export const SYNTHETIC_FIXTURE_SAVED_AT = 1_767_225_600_000;
 export const SYNTHETIC_FIXTURE_FORMAT_VERSION = 2;
@@ -30,6 +30,7 @@ const COVERAGE = [
   "fluids",
   "byproducts",
   "recursive-manufacturing",
+  "galactic-exports",
   "finite-veins",
   "infinite-veins",
   "cache-boundaries",
@@ -196,7 +197,7 @@ function coreEntities(resourceMode) {
       powerOutputKw: 90_000,
       powerFactor: 0.25,
     }),
-    baseEntity("syn_power_ray_receiver", "power", "ray_receiver", { x: 300, y: 400 }, {
+    baseEntity("syn_power_ray_receiver", "machine", "ray_receiver", { x: 300, y: 400 }, {
       machineCount: 12_000_000,
       recipeId: "critical_photon",
       inputs: { graviton_lens: 999_999 },
@@ -226,8 +227,38 @@ function coreEntities(resourceMode) {
     baseEntity("syn_storage_fluid", "storage", "storage_tank", { x: 600, y: 580 }, {
       machineCount: 1_000_000,
       storedItemId: "hydrogen",
-      inputs: { hydrogen: 999_999, refined_oil: 1 },
-      outputs: { hydrogen: 1_000_000, refined_oil: 0 },
+      inputs: { hydrogen: 999_999 },
+      outputs: { hydrogen: 1_000_000 },
+    }),
+    baseEntity("syn_storage_refined_oil", "storage", "storage_tank", { x: 600, y: 760 }, {
+      machineCount: 1_000_000,
+      storedItemId: "refined_oil",
+      inputs: { refined_oil: 1 },
+      outputs: { refined_oil: 0 },
+    }),
+    baseEntity("syn_storage_water", "storage", "storage_tank", { x: 600, y: 940 }, {
+      machineCount: 1_000_000,
+      storedItemId: "water",
+      inputs: { water: 999_999 },
+      outputs: { water: 1_000_000 },
+    }),
+    baseEntity("syn_storage_solar_sail", "storage", "storage_mk1", { x: 600, y: 1_120 }, {
+      machineCount: 1_000_000,
+      storedItemId: "solar_sail",
+      inputs: { solar_sail: 1_000_000 },
+      outputs: { solar_sail: 1_000_000 },
+    }),
+    baseEntity("syn_storage_carrier_rocket", "storage", "storage_mk1", { x: 600, y: 1_300 }, {
+      machineCount: 1_000_000,
+      storedItemId: "small_carrier_rocket",
+      inputs: { small_carrier_rocket: 999_999 },
+      outputs: { small_carrier_rocket: 999_999 },
+    }),
+    baseEntity("syn_storage_titanium", "storage", "storage_mk1", { x: 600, y: 1_480 }, {
+      machineCount: 1_000_000,
+      storedItemId: "titanium_ingot",
+      inputs: { titanium_ingot: 999_999 },
+      outputs: { titanium_ingot: 1_000_000 },
     }),
     baseEntity("syn_machine_smelter", "machine", "plane_smelter", { x: 900, y: 40 }, {
       machineCount: 88_000_000,
@@ -315,6 +346,7 @@ function coreEntities(resourceMode) {
       stationRoutes: [],
       stationDispatchCursor: 7,
       stationCongestion: 0.25,
+      storedItemId: "iron_ingot",
       outputs: { iron_ingot: 100_000_000, hydrogen: 50_000_000 },
     }),
     baseEntity("syn_station_planetary_demand", "station", "planetary_logistics_station", { x: 1_500, y: 220 }, {
@@ -324,7 +356,7 @@ function coreEntities(resourceMode) {
       stationProgress: 0.75,
       stationTrips: 123_457,
       stationLastTransfer: 999,
-      stationMinimumLoad: 0.5,
+      stationMinimumLoad: 0.25,
       stationSlots: stationSlots("iron_ingot", "hydrogen", "demand"),
       stationRoutes: [{
         id: "syn_route_local_inflight",
@@ -341,9 +373,11 @@ function coreEntities(resourceMode) {
       }],
       stationDispatchCursor: 8,
       stationCongestion: 0.75,
+      storedItemId: "iron_ingot",
       inputs: { iron_ingot: 99_999_999, hydrogen: 100_000_000 },
     }),
     baseEntity("syn_station_interstellar_supply", "station", "interstellar_logistics_station", { x: 1_500, y: 400 }, {
+      planetId: "frost",
       machineCount: 10_000,
       stationMode: "supply",
       stationTier: 2,
@@ -361,10 +395,11 @@ function coreEntities(resourceMode) {
       stationWarperTarget: 5_000,
       stationHubEnabled: true,
       stationHubPriority: 2,
-      stationMinimumLoad: 0.5,
+      stationMinimumLoad: 0.25,
       stationSlots: stationSlots("processor", "space_warper", "supply"),
       stationRoutes: [],
       stationDispatchCursor: 11,
+      storedItemId: "processor",
       outputs: { processor: 100_000_000, space_warper: 99_999_999 },
     }),
     baseEntity("syn_station_interstellar_demand", "station", "interstellar_logistics_station", { x: 1_500, y: 580 }, {
@@ -385,7 +420,7 @@ function coreEntities(resourceMode) {
       stationWarperTarget: 5_000,
       stationHubEnabled: false,
       stationHubPriority: 1,
-      stationMinimumLoad: 0.5,
+      stationMinimumLoad: 0.25,
       stationSlots: stationSlots("processor", "space_warper", "demand"),
       stationRoutes: [{
         id: "syn_route_remote_inflight",
@@ -399,10 +434,12 @@ function coreEntities(resourceMode) {
         duration: 120,
         requiresWarp: true,
         distanceLy: 18.5,
-        warpersPerVessel: 2,
+        waypointStationIds: [],
+        warpersPerVessel: 1,
         vehicleStationId: "syn_station_interstellar_supply",
       }],
       stationDispatchCursor: 12,
+      storedItemId: "processor",
       inputs: { processor: 99_999_999, space_warper: 100_000_000 },
     }),
     baseEntity("syn_quantum_supply", "station", "interstellar_logistics_station", { x: 1_800, y: 40 }, {
@@ -427,6 +464,7 @@ function coreEntities(resourceMode) {
       stationSlots: stationSlots("titanium_ingot", "hydrogen", "supply"),
       stationRoutes: [],
       stationDispatchCursor: 21,
+      storedItemId: "titanium_ingot",
       outputs: { titanium_ingot: 100_000_000, hydrogen: 99_999_999 },
     }),
     baseEntity("syn_quantum_demand", "station", "interstellar_logistics_station", { x: 1_800, y: 220 }, {
@@ -451,6 +489,7 @@ function coreEntities(resourceMode) {
       stationSlots: stationSlots("titanium_ingot", "hydrogen", "demand"),
       stationRoutes: [],
       stationDispatchCursor: 22,
+      storedItemId: "titanium_ingot",
       inputs: { titanium_ingot: 99_999_999, hydrogen: 100_000_000 },
     }),
     {
@@ -523,12 +562,12 @@ function coreBelts() {
     belt("syn_belt_smelter_blocked", "syn_machine_smelter", "syn_storage_full", "iron_ingot", 3),
     belt("syn_belt_oil_to_refinery", "syn_vein_oil", "syn_machine_refinery_byproduct", "crude_oil", 4),
     belt("syn_belt_refinery_hydrogen", "syn_machine_refinery_byproduct", "syn_storage_fluid", "hydrogen", 5),
-    belt("syn_belt_refinery_oil", "syn_machine_refinery_byproduct", "syn_storage_fluid", "refined_oil", 6),
-    belt("syn_belt_water_boundary", "syn_vein_water_infinite", "syn_storage_fluid", "water", 7),
+    belt("syn_belt_refinery_oil", "syn_machine_refinery_byproduct", "syn_storage_refined_oil", "refined_oil", 6),
+    belt("syn_belt_water_boundary", "syn_vein_water_infinite", "syn_storage_water", "water", 7),
     belt("syn_belt_station_supply", "syn_storage_near_full", "syn_station_planetary_supply", "iron_ingot", 8),
-    belt("syn_belt_station_demand", "syn_station_planetary_demand", "syn_machine_recursive_target", "iron_ingot", 9),
-    belt("syn_belt_dyson_sail", "syn_storage_full", "syn_dyson_ejector", "solar_sail", 10),
-    belt("syn_belt_dyson_rocket", "syn_storage_full", "syn_dyson_silo", "small_carrier_rocket", 11),
+    belt("syn_belt_station_demand", "syn_station_planetary_demand", "syn_storage_empty", "iron_ingot", 9),
+    belt("syn_belt_dyson_sail", "syn_storage_solar_sail", "syn_dyson_ejector", "solar_sail", 10),
+    belt("syn_belt_dyson_rocket", "syn_storage_carrier_rocket", "syn_dyson_silo", "small_carrier_rocket", 11),
   ];
 }
 
@@ -550,7 +589,7 @@ const GENERATED_ENTITY_TEMPLATES = [
   { kind: "machine", buildingId: "assembling_machine_mk3", recipeId: "casimir_crystal_advanced", inputs: ["optical_grating_crystal", "graphene", "hydrogen"], outputs: ["casimir_crystal"] },
   { kind: "machine", buildingId: "matrix_lab", recipeId: "universe_matrix", inputs: ["electromagnetic_matrix", "energy_matrix", "structure_matrix", "information_matrix", "gravity_matrix", "antimatter"], outputs: ["universe_matrix"] },
   { kind: "storage", buildingId: "storage_mk1", storedItemId: "processor", inputs: ["processor"], outputs: ["processor"] },
-  { kind: "power", buildingId: "ray_receiver", recipeId: "critical_photon", inputs: ["graviton_lens"], outputs: ["critical_photon"] },
+  { kind: "machine", buildingId: "ray_receiver", recipeId: "critical_photon", inputs: ["graviton_lens"], outputs: ["critical_photon"] },
 ];
 
 function generatedEntity(index, seed) {
@@ -599,7 +638,7 @@ const GENERATED_BELT_ENDPOINTS = [
   ["syn_machine_refinery_byproduct", "syn_storage_fluid", "hydrogen"],
   ["syn_machine_fire_ice_byproduct", "syn_storage_fluid", "hydrogen"],
   ["syn_storage_near_full", "syn_station_planetary_supply", "iron_ingot"],
-  ["syn_quantum_demand", "syn_machine_recursive_target", "titanium_ingot"],
+  ["syn_quantum_demand", "syn_storage_titanium", "titanium_ingot"],
 ];
 
 function generatedBelt(index, seed) {
@@ -668,7 +707,10 @@ function exportProjects() {
   ].map(([id], index) => [id, {
     id,
     enabled: index % 2 === 0,
-    priority: index % 3,
+    // Galactic export priorities are a distinct 1..3 domain (belt priority
+    // remains 0..2 above). Keep the fixture admissible to the authoritative
+    // export stage so thread/performance gates exercise the complete state.
+    priority: (index % 3) + 1,
     level: index + 1,
     delivered: index * 1_000,
     totalDelivered: index * 10_000,
@@ -1106,13 +1148,25 @@ export function createSyntheticFixturePlan(options = {}) {
   const available = profile.targetBytes - fixedBytes;
   const entityBudget = Math.floor(available * 0.46);
   let generatedEntityCount = 0;
-  let generatedEntityBytes = 0;
+  let canonicalEntityBytes = 0;
   while (true) {
-    const next = JSON.stringify(generatedEntity(generatedEntityCount, seed));
+    // Profile shape must not drift when callers vary the content seed. Plan
+    // the entity count from the pinned generator seed, then account for the
+    // requested seed's exact bytes below. Belts and final padding absorb the
+    // small representation-size delta without changing the entity workload.
+    const next = JSON.stringify(generatedEntity(generatedEntityCount, SYNTHETIC_FIXTURE_SEED));
     const cost = 1 + encodedBytes(next);
-    if (generatedEntityBytes + cost > entityBudget) break;
-    generatedEntityBytes += cost;
+    if (canonicalEntityBytes + cost > entityBudget) break;
+    canonicalEntityBytes += cost;
     generatedEntityCount += 1;
+  }
+
+  let generatedEntityBytes = 0;
+  for (let index = 0; index < generatedEntityCount; index += 1) {
+    generatedEntityBytes += 1 + encodedBytes(JSON.stringify(generatedEntity(index, seed)));
+  }
+  if (generatedEntityBytes >= available) {
+    throw new Error(`Synthetic fixture ${profile.id} seeded entities exceed its target size`);
   }
 
   let generatedBeltCount = 0;

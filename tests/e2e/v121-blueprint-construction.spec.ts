@@ -61,6 +61,23 @@ function seedPendingBlueprintFixture() {
   };
 }
 
+test("bounded factory headline preserves visible blueprint queue and planet summary", async ({ page }) => {
+  await page.addInitScript(seedPendingBlueprintFixture());
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "打开蓝图库" }).click();
+  const workspace = page.getByRole("dialog", { name: "蓝图与待建施工" });
+  const headline = workspace.locator(".blueprint-headline");
+  await expect(headline).toContainText("模板 1");
+  await expect(headline).toContainText("施工队列 1");
+  await expect(headline).toContainText("部署行星 澄海 I");
+  await expect(headline.locator("[data-factory-read-model-source]"))
+    .toHaveAttribute("data-factory-read-model-source", "web-game-state");
+  await expect(headline.locator("[data-factory-read-model-revision]"))
+    .toHaveAttribute("data-factory-read-model-revision", "web");
+});
+
 test("v45 queued blueprints render a viewport ghost and deploy atomically after funding", async ({ page }) => {
   await page.addInitScript(seedPendingBlueprintFixture());
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -190,4 +207,3 @@ test("pending blueprint funding remains usable in the next mobile UI at 200 perc
   await page.locator(".mobile-next-topbar").getByRole("button", { name: /返回工厂/ }).click();
   await expect(page.locator('.react-flow__node[data-id^="entity_"]')).toHaveCount(2);
 });
-

@@ -6,6 +6,7 @@
 > 适用基线：1.1.8 内存优化候选、GameState v47、save envelope v2、cloud schema v8、SQLite layout v3。
 > 目标平台：Windows 10/11 x64 为主要性能目标；Web/PWA 与 Android 保持功能和存档兼容。
 > 2026-08-27 补充说明：第 19 节记录基于 1.2.1 Windows 开发候选观察得到的下一阶段优化包。1.2.1 的 Rust 核心仍是影子校验，不能把双重计算或单项原生基准误报为玩家可见的完整性能提升。
+> 2026-08-28 实施说明：第 20～22 节记录 develop 角色在独立工作树中的实际落地与验证；它们不会把原计划预算、外部硬件 Gate 或 No-Go 自动改写为“完成”。当前最终开发包仍为 `authorityEligible=false`，未签名、未部署、未连接生产。
 
 ## 1. 执行摘要
 
@@ -1431,3 +1432,1317 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 44,167,989 字节、45,904 实体、91,955 线路的只读 v47 玩家档在 15×、10 分钟墙钟纯挂机中，30 秒校准白矩阵增加 1,141,066,480，最终候选增加 335,450,292,523；火箭校准增加 23,804,542，最终按 8 个恒星系账本增加 7,007,145,985；建筑制造完成 13,076,629 件。三个窗口的全宇宙稳态因子精确为 `0.981143945`，最低效率为 `0.979864957`，最终供电边界重校准为 `0` 次。原始 e503、初次 E18 + e503 整合和当前最终算法的“总专项/宏观尾段”分别为 `39.728/1.094 s`、`114.899/74.138 s`、`40.639/1.266 s`：当前相对初次整合总耗时降低 `64.631%`、尾段降低 `98.292%`，相对原始 e503 总耗时增加 `2.293%`、尾段增加 `15.722%`。这组数据只证明已消除重复重校准回退并量化新增守恒门成本，不能包装成相对原始方案的性能提升。施工专项 64 秒完成 12,950,502 件约用 376.701 ms；8×、64 模拟秒时间扭曲使用 v6 并在约 6.084 秒内完成，储能只授权有界精确前缀且没有伪造宏观尾段。测试前后原文件大小、mtime 和 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 均不变。
 
 这些是当前整合源码与 clean Windows 诊断包的新鲜开发证据，已经覆盖完整 Vitest、server/ops、production build、完整 E2E、目录包、ZIP 哈希和启动冒烟，但不代替 24 小时多硬件、Defender/磁盘故障、签名、覆盖升级、真实云往返或灰度门禁。该包仍为 `NotSigned` 且没有 installer，不能作为稳定版发布。
+
+## 22. 1.2.3 Windows 三层计划本地高价值收口（2026-08-28）
+
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
+>
+> 分支：`codex/windows-native-plan-completion`
+>
+> 最终运行时/打包提交：`be80af000295a34208bdbee2a73cd42795eec999`
+>
+> 状态：本地开发候选；`authorityEligible=false`；未签名、未部署、未连接生产。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均未改变。
+
+### 22.1 本轮继续落地的实现
+
+1. **私有检查点 v2 与失败关闭恢复**：base 拆成 core、logistics、Dyson、statistics、unknown-mod 五个域，实体页和线路页继续分别分块；v2 对全部 chunk 强制 SHA-256，v1 可读并在首次 v2 检查点惰性升级。只有 durable commit ACK 才清除脏标记；superblock 已替换但 ACK 丢失时允许同 session 对账，无法确认时阻止后续命令、推进和普通/精确提交，避免产生无法检查点化的新 revision。当前五个 base 域仍会在每次检查点先序列化并哈希再比较，不是完整 per-domain dirty bitset。
+2. **线路稀疏热循环**：线路选择统一为 `All / Dense / Mask`；稀疏路径只对活动路由执行时钟、传输、后处理和重置，并按本步触及槽位清理，输出额度改为 O(1) 查找；活动路由达到 75% 时退化为稳定顺序的稠密全扫描。选择阶段仍遍历全部 route group，因此这不是完整 O(active) 反向唤醒网络。
+3. **私有 24 小时分层生产历史**：原生 session 在不改变公开 v47 `productionHistory` 字节的前提下维护 1 秒、1 分钟、10 分钟和 1 小时层级，保留目标 24 小时；切桶使用前一库存，不读取未来库存。任意 base/命令修改会使缓存失效并安全重建或回退公开历史。该缓存不持久化，进程重启后只能从公开约一小时历史重新建立，采样边界仍需扫描权威记录。
+4. **严格 `.json.gz` 原生导入**：在既有 `.json` current-v47 流式导入上增加单 gzip member 解码，压缩输入和解码正文均受 256 MiB 上限约束；损坏、截断、尾随数据、第二 member、校验错误、reparse/symlink 和打开期间身份变化均失败关闭。SHA-256 与字节数针对解码后的 JSON 证明，renderer 仍不接收路径或正文。旧版迁移和实际云文件句柄上传没有因此完成。
+5. **推进语义与镜像一致性**：`advanceMode` 在分段请求、Beta 镜像、durable intent 和幂等重试中完整传播；保守纯挂机明确发送 `pure-idle-conservative-v2`，精确路径保持缺省 exact，避免影子核心把近似推进误记为精确推进。
+6. **常驻容量收紧与 Beta 包通道**：实体/线路 SoA、动态列、拓扑索引、路线组和本地物流目录在建成后移除几何增长余量。最终 `desktop:pack` 在没有显式覆盖时继承 package 的 `beta`，不会把性能开发版静默标成 stable。
+
+### 22.2 真实档内存门禁与确定性证据
+
+只读夹具 `D:/360安全浏览器下载/dsp-idle-save-2026-08-26.json` 为 44,167,989 字节、45,904 个实体、91,955 条线路，文件 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8`。全部测试前后 bytes、mtime 和 SHA-256 不变。
+
+当前内存硬门禁为正文大小的 3 倍，即 132,503,967 B。冻结旧 Host 的三次打开都得到精确往返哈希，但估算常驻量 133,730,449 B，超过门禁 1,226,482 B，因此三个进程都按设计在 open 阶段失败，后续 exact/durable/checkpoint/burst 没有执行。不得把这份失败证据写成完整 A/B。最终包内 Host 的三次 full stress 为 3/3，通过估算 130,413,884 B，低于门禁 2,090,083 B；相对旧值减少 3,316,565 B（2.480%）。同口径打开后 Private Bytes 中位从 180,060,160 B 降到 168,476,672 B（6.433%），拓扑索引从 23,824,603 B 降到 21,798,899 B（8.503%）；打开峰值中位只降低 0.508%，打开耗时中位反而由 4,201.25 ms 增至 4,253.92 ms（慢 1.254%），负向指标不隐藏。
+
+最终包内三轮 full stress 的一秒原生 exact 中位为 1,260.54 ms，同轮 JavaScript 中位 1,901.04 ms，约为 1.508 倍吞吐；三轮 exact 状态均为 `02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c`，三连推进均为 `69a8da6798a1ead4797fd3b55fa9bf14fff2aa789b3c398f02a8643913aba1dd`。最终包的 `1/2/4/8/auto × 3` 线程矩阵 15/15 产生相同 exact 哈希，证明本机确定性；其中 auto 样本出现明显抖动，中位 2,413.04 ms，因此这批 packaged matrix 只作为确定性证据，不用来宣传固定多核加速。较早的 `db763d3` 隔离矩阵中位依次为 1,706.71 / 1,439.52 / 1,314.38 / 1,278.88 / 1,275.27 ms，auto 相对单线程约 1.338 倍；它不是跨硬件结论。
+
+### 22.3 最终本地自动化与包
+
+- 最终 `be80af0` source 新跑 TypeScript、Vitest、server/station、Ops、native、Rust、build、完整 Chromium 和 durable E2E：Vitest 201 文件通过/14 条件跳过，1,696 项通过/29 跳过/0 失败；server 384/2 加 station 4/4；Ops 56/6；Windows native/desktop 179 通过/1 个 symlink 权限条件跳过/0 失败；Rust workspace 244/244（core 166、Host 78），fmt、clippy `-D warnings` 通过；125 个运行时许可证及根/server 生产依赖审计 0 漏洞。
+- Chromium 为 431 通过/27 条件跳过/0 失败（458 总项、0 flaky、0 retry，381,422.982 ms）；durable E2E 为 7/0/0（45,963.117 ms），两项均为最终 source 直接通过，没有首次失败复跑。
+- production build 为 1,982 modules；startup 总 gzip 179,916 B、JavaScript 86,749 B、CSS 93,167 B、最大启动 JS 58,974 B、menu 253,542 B、forbidden 0。
+- Build ID `1.2.3+be80af000295` 的固定目录包为 75 文件、413,466,490 B；包内 `releaseChannel=beta`，EXE SHA-256 `7e3d9be2239ffbb9b157beb1b9dc73abdc970ea23202baf27f76d0804960f704`，ASAR SHA-256 `2b7c81cd296034e6c27067a6f382868d061f1593f51eeff1e2608f00ae051af1`，Host SHA-256 `6a9760dff92023b7a63bc76aa4b52e0365cd229dbfbfdca1666e6f2cf47b42d9`，75 文件聚合 SHA-256 `b7c1fcd3030b394d815310f085e1508a77e92bd20e3ca129111af83ba78ff26e`。
+- unsigned ZIP 为 157,875,293 B，SHA-256 `cd625a80f3d4a94b153c907c25d5c1461ca845859a9a7b23bb4d305f85651d7f`。Authenticode 为 `NotSigned`，没有 installer、正式 API、更新源或下载页发布。
+- 12 秒启动冒烟中，最终目录包主进程存活且可响应，原生 Host 可见，精确清理进程树后残留 0；但进程级临时 `APPDATA/LOCALAPPDATA` 没有改变 Electron `app.getPath("appData")`，程序使用既有专用性能版 profile `C:/Users/WINDOWS/AppData/Roaming/DSPidle2-Performance-Edition`。它没有触及 stable profile，但 `temporary-profile-isolation=false`，故 overall smoke 为失败；不得写成隔离启动通过，也不移动既有 profile 强行复测。
+
+### 22.4 工作包最终诚实状态
+
+| 工作包 | 1.2.3 本地结算 | 仍未关闭 |
+| --- | --- | --- |
+| WIN-400 原生权威/薄 UI | 部分完成，继续 No-Go | renderer/Worker 仍持有完整 GameState；原生 pure-idle/offline/time-warp 未覆盖；`authorityEligible=false` |
+| WIN-410 活动脏块保存 | v2 SHA、域/页复用、ACK 对账和失败关闭完成 | base 域仍先全序列化/哈希；空闲 compaction、磁盘水位、Defender/磁盘故障与 24 小时未闭合 |
+| WIN-420 事件驱动线路 | 稀疏热循环与 75% 稠密退化完成 | selection 仍扫描全部 route group；无完整反向依赖与真正 O(active) 队列 |
+| WIN-430 确定性原生多核 | 本机热阶段 1/2/4/8/auto 哈希一致 | 非全领域权威并行；无多 CPU、Windows 10/11、跨调度 24 小时矩阵 |
+| WIN-440 有界增量投影 | 协议与校验已有 | App UI 未消费；MessagePort 是有界二进制 clone，不是共享内存零拷贝 |
+| WIN-450 GPU/Canvas | 继承既有候选，部分完成 | 无新 WebGL/WebGPU 权威路径、GPU 丢失/RDP/多硬件矩阵 |
+| WIN-460 原生统计/诊断 | session 私有 24 小时分层缓存完成 | 重启不持久；采样仍扫描记录；非全领域事件桶 |
+| WIN-470 流式 v47/云准备 | `.json`/严格 `.json.gz` 本地导入和流式导出完成 | 旧版适配、完整普通入口、实际云文件句柄上传和生产往返未闭合 |
+| WIN-480 紧凑布局/分配 | Arc/SoA、变化写回、容量收紧完成 | 无 mmap/LRU 冷页预算与 24 小时全进程内存斜率 |
+| WIN-490 外壳替换 | No-Go | 薄 UI 后 Electron 固定成本占比没有达到有证据的启动条件 |
+
+本地可安全自动化闭合的高价值实现已经完成，但“Windows 三层计划全部完成”为 false。剩余 24 小时、多硬件、签名、覆盖升级、真实薄 UI、mmap/LRU、生产云文件句柄和灰度都需要独立环境、发布授权或更大架构阶段，不能由本工作树冒充通过。
+
+## 23. a4a76e1 继续收口与最终本地候选（2026-08-28）
+
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
+>
+> 分支：`codex/windows-native-plan-completion`
+>
+> 最终运行时/打包提交：`a4a76e1310ad7e61448b3ac694ae072353af62bd`
+>
+> Build ID：`1.2.3+a4a76e1310ad`
+>
+> 状态：Windows 本地性能开发候选；未签名、未部署、未连接生产，真实玩家存档只读。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 不变。
+
+本节取代第 22 节中已被后续代码关闭或部分关闭的三项旧描述：磁盘水位不再是“未实现”，统计工作区已经消费 `statistics-v1` 窄读模型，私有 24 小时统计冷层也已经可跨重启持久化。它们仍不足以把 WIN-410、WIN-440 或 WIN-460 整体标记完成。
+
+### 23.1 本轮增量实现
+
+1. **保存写入双层磁盘门禁**：JavaScript 以精确 UTF-8 字节数预检固定保存根；Rust 在 chunk、WAL、manifest、superblock、统计 sidecar、实时 lease 和 v47 `.part` 的实际写入边界再次检查写入量加 64 MiB。API 明确不受支持时只返回 unchecked；空间不足、路径、I/O、回执和整数异常均失败关闭。v47 采用两遍流式编码取得精确长度，不引入完整正文副本。
+2. **空闲保存合并与线路稀疏循环**：新 checkpoint/WAL 会取消并重排尚未开始的 15 秒 compaction；稀疏线路 reservation 只遍历已选 route 行，达到 75% 自动稳定退化全扫描。已经开始的 Host compaction 不可中断，route selection 仍扫描全部 group。
+3. **统计窄读和持久 sidecar**：统计面板打开只发出一次 revision-verified `sync-statistics`，不索取完整 checkpoint，并仅在新 `historyRecordedAt` 边界刷新。Rust 的 1 秒/1 分/10 分/1 小时冷层绑定 checkpoint 与 SHA-256 持久化；恢复时校验规范、连续、无重叠/缺口且不超过 24 小时。
+4. **本机线程确定性**：新增独立进程 `1/2/4/8` 实际 worker 矩阵，对完整状态、领域和守恒摘要 fail-closed；真实 v47 档 4/4 哈希一致。该结果不是跨硬件加速声明。
+5. **原生守恒型纯挂机前缀**：私有 `pure-idle-macro-v10` 执行 `3 × 10` 秒 exact，并持久化 session credit 与最终 `SettlementProof`；无法证明的物料尾段冻结，只推进时间。JavaScript e503 仍是玩家路径并继续提供闭合、有收益的宏观尾段，Rust 尚未完整移植该 productive 证书，因此三个原生权威能力标志保持 false。
+6. **可审计包冒烟**：beta/nightly 性能包使用显式临时 profile 和精确 PID 树；12 秒冒烟确认主进程响应、Rust Host 可见、profile 隔离和清理后残留 0。空残留数组固定序列化为 `[]`。
+
+### 23.2 真实档性能与守恒证据
+
+只读夹具 `D:/360安全浏览器下载/dsp-idle-save-2026-08-26.json` 为 44,167,989 字节、45,904 个实体、91,955 条线路；测试前后 bytes、mtime 与 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 不变。
+
+- 玩家 JavaScript 纯挂机 15×、600 秒墙钟：30 秒校准耗时 34,070 ms，宏观尾段 1,339 ms；白矩阵最终增加 335,450,292,523，合法火箭增加 7,007,145,985，建筑制造完成 13,076,629，8 个恒星系账本闭合，最终守恒门禁及序列化/重载通过。
+- 原生 full stress 三轮中位：打开 4,179.85 ms；打开后 Private Bytes 增量约 160.7 MiB；打开峰值约 1,029.4 MiB；一秒 exact 1,234.03 ms，对应同轮 JavaScript 1,745.76 ms，约 1.44× 吞吐；checkpoint 378.99 ms、变化字节 2,255,510；三轮 exact 和三秒 burst 哈希分别一致。
+- 真实历史档的通用 aggregate validator 仍因缺少 construction receipt 报告不可验证，所以不能宣称“通用 aggregate 守恒通过”；能证明的是原生完整状态严格等于 JavaScript oracle、确定性哈希一致，以及专用 settlement/conservation 摘要一致。
+- 线程矩阵在实际 1/2/4/8 worker 下 4/4 得到相同 revision、规范状态哈希、领域哈希和守恒摘要；仅作为本机确定性门禁，不包装成固定性能倍数。
+
+### 23.3 新鲜自动化与可测试包
+
+- TypeScript 通过；Vitest 201 文件通过/14 条件跳过、1,702 项通过/29 跳过/0 失败；server 384/2 加 station 4/4；Ops 56/6；Windows native/desktop 195/1/0；Rust workspace 266/266（core 174、Host 92），fmt 与 clippy `-D warnings` 通过。
+- Chromium 首轮 430/27/1 暴露统计入口重复窄读；修复后定向 1/1、完整复跑 431/27/0。durable E2E 7/7。首轮失败不删除。
+- production build 为 1,982 modules；startup 总 gzip 179,912 B、JavaScript 86,745 B、CSS 93,167 B、最大启动 JS 58,974 B、menu 253,532 B、forbidden 0；125 个运行时许可证，根/server production audit 均为 0 漏洞。
+- `win-unpacked` 为 75 文件、413,584,327 B；EXE 为 225,485,824 B，SHA-256 `2242a0b3e28881e4577ebaf7ea56a7949b9e501dddc0eae5be7ad59e921730ea`；包内 Host SHA-256 `e4ad68c30442bf17cd570dc44a06b0c52718a7504fc4f07e7169edcaac202ddc`；Authenticode `NotSigned`。
+- unsigned ZIP 为 157,915,912 B，SHA-256 `a64b8d98ef8f8f5615bd2574049954796572902a641d97510626a666d7098aed`；75/75 条目逐文件一致。没有 installer、更新清单、下载页上传或生产发布。
+- 新包使用独立的 `windows-performance-plan-completion-a4a76e1310ad-*` candidate、package、逐文件 SHA、SHA256SUMS 和 final gate 元数据，明确列出外部门禁；不得复用 `be80af0` 的旧 final gate 给本包背书。
+
+完整实现、原始数字、制品路径、SHA 和未关闭门禁见 [a4a76e1 继续收口报告](./releases/1.2.3-windows-native-plan-completion-a4a76e1-development-report-2026-08-28.md)。
+
+### 23.4 工作包状态更新
+
+| 工作包 | a4a76e1 本地结算 | 仍未关闭 |
+| --- | --- | --- |
+| WIN-400 原生权威/薄 UI | 部分完成，继续 No-Go | renderer/Worker 仍持完整 GameState；Rust productive pure-idle/offline/time-warp 未覆盖；三个 authority flag 均为 false |
+| WIN-410 活动脏块保存 | 双层磁盘门禁、ACK 安全与空闲合并调度已落地，整体部分完成 | base 域仍先全序列化/哈希；已启动 compaction 不可取消；真实磁盘/Defender/升级/24 小时未测 |
+| WIN-420 事件驱动线路 | 稀疏热循环继续收敛，整体部分完成 | selection 仍扫描全部 route group；无完整反向依赖和真正 O(active) 队列 |
+| WIN-430 确定性原生多核 | 本机 1/2/4/8 矩阵通过，整体部分完成 | 非全领域权威并行；无跨 CPU/Windows/调度/24 小时矩阵 |
+| WIN-440 有界增量投影 | 统计消费者已接入，整体部分完成 | 工厂 viewport UI 未切换；renderer 仍持完整状态；MessagePort 不是共享内存零拷贝 |
+| WIN-450 GPU/Canvas | 继承既有候选，部分完成 | 无新 WebGL/WebGPU 权威路径及 GPU 丢失/RDP/多硬件门禁 |
+| WIN-460 原生统计/诊断 | 私有分层持久 sidecar 与窄读完成，整体部分完成 | 采样仍扫描记录；不是全领域事件桶 |
+| WIN-470 流式 v47/云准备 | current-v47 json/gzip 导入和流式导出完成，整体部分完成 | 旧版适配、云文件句柄上传、取消/背压和生产往返未闭合 |
+| WIN-480 紧凑布局/分配 | Arc/SoA、变化写回和容量收紧完成，整体部分完成 | 无 mmap/LRU、完整 allocator 预算和 24 小时全进程内存斜率 |
+| WIN-490 外壳替换 | No-Go | Rust 唯一权威和真正薄 UI 尚未完成，也没有证据证明 Electron 固定开销超过 15% |
+
+本工作树已完成当前单机可安全自动化闭合的高价值实现；“Windows 三层计划全部完成”仍为 false。剩余项目需要新的架构阶段、真实多硬件长跑、签名/云凭据或生产发布授权，不能以本地短测替代。
+
+## 24. Rust 权威、薄 UI、活动物流与并行阶段继续开发（2026-08-29～30）
+
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
+>
+> 分支：`codex/windows-native-plan-completion`
+>
+> 24.1～24.4 的产品/测试冻结基线为 `3654552`；24.5 与 24.7 分别记录其后切片的独立新鲜证据；24.8 记录 2026-08-31 当前开发候选。各小节数字只证明各自明示的源码状态，不能混成同一个冻结提交。在空间站、建筑制造语义命令和薄 UI 之后，集成态闭合了“只消费已有施工库存”的 30 秒规范块保守纯挂机尾段、Rust 蓝图重命名及只读 durable receipt 对账；传送带冲突组件并行候选因真实性能退化只合入 No-Go 证据，产品原型全部撤销。24.8 只报告该节实际新跑的门禁，不复用更早数字。release-style 的最终完整 E2E 与耐久 E2E 已在 24.8 闭合；24 小时、多硬件、真实磁盘/Defender、安装/覆盖升级、签名与灰度仍未闭合。它仍是本地开发候选，未签名、未部署、未连接生产。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均未改变，`authorityEligible=false` 继续保持关闭。
+
+### 24.1 当前完成度口径
+
+以下百分比是用于安排开发先后的固定能力分母工程估算，不是发布通过率，也不是性能提升倍数。早期按已列小任务数量得到的“当前开发机可闭合工作 98% / 四项目标综合代码 96%”从本节起正式停用；它漏算了剩余跨域权威、全领域并行和真实发布门禁，不能再与当前能力加权进度混用：
+
+| 目标 | 估算进度 | 已闭合的主要切片 | 仍未闭合 |
+| --- | ---: | --- | --- |
+| Rust 唯一玩家可见权威 | 约 85% | main-owned 连续时钟、durable 命令回执、耐久暂停/继续和启动恢复、同 revision 投影、接管前完整覆盖门禁；公开存档/云/恢复边界已在 native ownership 下失败关闭；普通蓝图 capture/import/export/direct-deploy/queue/fund/deploy/cancel 生命周期和恒星系空间站七类可达 intent 均由 Rust 验证并耐久提交；响应丢失只做 main-owned 只读 receipt 对账，renderer 不重发 mutation；普通闭合配方、科研、火箭、太阳帆和“已有施工库存”具备部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口合同、运营、银河、MOD、戴森完整几何、公开主档写回和全部玩家命令覆盖仍不足；接管前 legacy fallback 仍必须保留完整 GameState，因此不能把“单一写入机制”写成“全游戏已经 Rust 权威” |
+| 完整薄 UI | 约 97% | 主画布、minimap、运行状态、行星导航、科研、配方、生产缓存、星际工业、量子库存、普通建筑/线路及库存交互、星图、戴森、制造中心、普通蓝图完整生命周期和内置恒星系空间站均可消费同 revision 有界 Rust 投影或提交最小意图；写面等待 durable ACK、只读 reconciliation 和新投影，renderer 不乐观改写权威状态 | orbital contract、运营、银河、MOD/其他批量操作和戴森完整几何仍未迁移；微型黑洞端口编辑及毁灭账本也未迁移；失败关闭不等于功能迁移完成，renderer 仍不是完整薄客户端 |
+| 真正 `O(active)` 物流 | 约 97% | 线路活动调度、本地/星际 ready 与 dispatch、peer directory、跨 revision demand queue、量子普通 flush/休眠 download、量子五秒上传和模式过渡均使用持久活动/待处理集合与反向唤醒；持久有序 active-route 索引使无脏变化线路选择为 `O(A)`；ordinary storage/splitter bridge 也使用 writer-closed wake queue；所有稀疏路径保留 75% 稠密退化和 MOD/失配失败关闭 | network parse/write 仍遍历部分库存键；拓扑重编、连续生产、material-delivery hubs、量子高扇出、自然稠密和 fail-closed 路径按语义仍会全扫；冲突组件物料应用并行原型实测退化后已拒绝而非冒充完成 |
+| 全领域确定性原生并行 | 约 74% | 既有普通机器、线路、矿脉、物流、量子、施工、轨道终端、银河出口、任务指标和历史阶段之外，冷启动八类缓存与每模拟步 ready-station/vein/machine 三类电力需求已接入固定 4/8 异构只读 prepare；所有分区完整 join 后按历史顺序检查错误并串行提交，1/2/4/8 的核心工厂状态/规范/领域/守恒哈希一致 | 共享 inventory/production/Dyson 写入、belt conflict 与全部物流 commit、完整 pure-idle/offline/time-warp 仍串行；尚无跨 CPU、Windows 10/11、不同调度和 24 小时矩阵 |
+| 四目标能力加权本地开发 | 约 89% | 原生权威基础设施、薄 UI、活动物流、确定性并行、内存压缩、存档保护、耐久暂停、ordinary 蓝图完整生命周期和恒星系空间站写面均有可回归提交 | 尚余约 11% 能力缺口，主要是剩余跨域 Rust 权威、玩家可达写面、物流末端全扫热点和共享状态确定性并行；不包含下行单列的真实发布门禁 |
+| 可放心发布成熟度 | 约 60% | 本机类型、完整单元、native 边界、Rust core/Host、production build、启动预算、最终完整 E2E `433/27/0` 和耐久 E2E `7/7` 已有新鲜结果 | 真实大档全进程 24 小时、多硬件、Defender/磁盘故障、安装/覆盖升级、签名和灰度均未完成 |
+
+以上六行从本节起采用固定分母：四个困难目标、四目标能力加权本地开发和发布成熟度分别只与自身比较。旧 `98% / 96%` 是已经停用的小任务计数历史估算，不是当前进度基线；截至 2026-09-01，经普通蓝图完整生命周期、恒星系空间站可达写面、ordinary buffer wake queue 与固定异构 prepare 独立复审后，当前能力加权本地开发为约 `89%`、尚余约 `11%`。发布成熟度仍为 `60%`，因为代码进度不能替代 24 小时、多硬件、安装、签名和灰度。
+
+### 24.2 本轮关键实现
+
+1. `d0eea76` 把 authority coverage、v47、normal、未暂停和 exact revision 检查提前到所有者转移之前；覆盖不完整时 renderer 继续持有原会话，不会先转移再把玩家卡在半接管状态。
+2. `b6091a7`、`5b07ade` 让玩家命令的稳定 ID、连续 revision、变化实体/线路和 topology dirty 回执持久化并可在进程启动后恢复。main-owned runtime 只能按既有稳定 command ID 幂等恢复已经暂存的命令；renderer 不拥有重试权。后续蓝图链进一步要求响应丢失时只执行 read-only receipt lookup，绝不再次 dispatch/retry mutation。
+3. `3e89f3b`、`8c9b88f`、`5445d38` 让画布、选择/inspector/多选/连接，以及工厂运行、施工和星球导航直接读取 main-owned Rust 的同 revision 小投影。任何 session、revision、行数、截断或语义不一致都会整块回退，不拼接新旧权威。
+4. `f206d44`、`3ca478c`、`fef8ca3`、`6b7cb65` 增加普通物料、科研、火箭与太阳帆的保守纯挂机物料证书；`f1b44e8` 用常量额外内存的周期检测替代会随窗口增长的状态集合。无法闭合的尾段继续冻结，不能仅靠倍率外推物料终端结果。
+5. `c27879c` 把星际 peer directory 和需求队列保留到后续 revision，并按库存、容量、电力恢复、曲速器、路线/中继完成、量子/科研和拓扑事件反向唤醒；只有星际派发需求探测与 peer 查找达到稀疏稳态 `O(active changes + matching peers)`，没有将整体物流虚报为 `O(active)`。
+6. `e8aabad` 为轨道采集器建立持久的稳定实体行拓扑索引；稀疏工厂每步只访问采集器行，达到 75% 时退化为旧稳定全扫描，非标准/MOD 采集器形状或索引失配也回退全扫描。1/5/60 秒专项与旧 oracle 字节严格一致；该提交只关闭采集器发现扫描，不代表 station power、warper、ready/congestion 或 route-ledger 已达到 `O(active)`。
+7. `f167366` 在生产历史采样顺序扫描中顺带生成 campaign 只读指标，避免同一采样秒再次扫描全部实体和线路等级。4,097 实体合成夹具中该后处理提交为约 `51 µs`，对照回退约 `1,399 µs`；只代表这一小段，不外推整次模拟。
+8. 本轮把本地/星际 ready 外层改为跨 revision 保留的 ready 集合与反向待处理队列；星际派遣与 readiness 分队列，保证 readiness 之后的量子、皮带和 warper 写入不会被同一步派遣探测提前排空。构建期完整校验 key/rank/order，活动拓扑每个缓存只校验一次；稳态候选达到 75%、遇到 opaque/MOD、非法 pending 或目录失配时按稳定全序失败关闭。1/5/60 秒字节 oracle 只覆盖 readiness/功率/派遣/线路推进切片，不冒充完整 `simulate_step` 五秒量子边界证明。
+9. 本轮继续把本地 dispatch 的旧全站外层改为 revision 私有需求队列：需求侧容量/载具变化直接唤醒自身，供应侧库存/载具/路线变化按本地 `(planet, item)` 反向目录展开，ready 候选和功率恢复边分别补入同一稳定实体顺序。缓存只在整批派遣成功后提交；候选达到全部本地站 75%、opaque/MOD 路线、非法 pending 或构建期精确 key/rank/order 失配时仍走旧完整站序。逐秒 dispatch + local route 专项在 1/5/60 秒与 full-station oracle 字节严格一致；该证据不包含完整 `simulate_step` 的量子五秒边界，也不证明剩余量子/全局预留阶段为 `O(active)`。
+10. 本轮为量子物流建立 revision 私有 `QuantumLogisticsDirectory`。塔/采集器堆叠、上传/下载 slot 与 station/item 反向键只在打开、科技/玩家命令或拓扑变化时重编；普通 flush 使用持久 pending 集合，容量为零的下载计划休眠，库存/容量、belt credit、本地/星际路线写回、量子库存释放和模式/拓扑变化精确唤醒。共享 `StationRouteLedger` 同一次路线解析生成量子专用 raw-cargo/all-scope 预留与在途视图，保持未知 scope、小数 cargo“累加后取整”的旧语义。正容量需求即使仓库无货也保持活动，以保留共享带宽公平性；75% 稠密、非 ASCII/MOD slot、精确 key/rank/slot 或拓扑失配按稳定全序失败关闭。普通步与五秒边界只把实际库存写入站反向唤醒，不再无条件唤醒全部量子端点。Rust full-scan oracle 逐秒覆盖 1～60 秒并校验每个五秒下载边界，完整 JS↔Rust 差分覆盖 1/4/5/10/60/600 秒；本阶段仍串行提交，线程数不参与量子分配顺序。
+11. `26b205d` 与 `78cbf24` 增加完整、有界、分页的 `star-map-catalog-v1`，并让星图恒星系、行星、资源与特征目录在原生权威模式只读取该投影。session、revision、registry fingerprint、分页链或 MOD/UTF-8 校验失败时整页失败关闭，星图修改操作继续只读。
+12. `451a38f` 把生产历史刷新改为固定 2,048 行私有分片和主线程原顺序提交，不改变 IEEE-754、舍入或负零语义。76,898,141 字节、80,674 个实体、155,746 条线路的真实只读存档中，生产历史阶段中位从 84.272 ms 降至 28.593 ms（2.95×），库存/速率阶段从 50.912 ms 降至 21.091 ms（2.41×），完整模拟秒从 1,751.84 ms 降至 1,165.17 ms（1.50×）；1/2/4/8/16 线程与 JavaScript oracle 的规范哈希一致。该结果仍未达到“现实 1 秒推进 1 个模拟秒”。
+13. `79f3d2b` 与 `16be03f` 封住原生权威持久化边界：native ownership 下的本地自动保存只接受并读回 Rust durable checkpoint，手动导出走原生 v47 流；公开云自动同步、导入/恢复、槽位/快照、内容包替换和返回主菜单在缺少完整原生公开写回与恢复链时失败关闭。它优先避免陈旧 renderer GameState 覆盖 Rust 状态，不把“按钮暂时不可用”伪装成保存成功。
+14. `b33e143`、`a10fd74` 与 `e9aeafe` 增加 `dyson-workspace-v1` 六类独立分页投影和完整只读薄 UI，显示全局/逐恒星系结构、火箭、太阳帆、功率、壳层、轨道、节点、框架、壳面与工程指标。只有恒星系选择和关闭可交互；全部设计/发射修改在原生命令闭合前禁用，loading 或旧 revision 不显示保留帧，也不读取旧 JavaScript 戴森状态。
+15. `af4d308` 与 `52165fc` 为原生科研开放已证明闭合的小范围命令：向已有有限科研追加队列、移出队列并级联移除失去前置的后续项、切换无限科研自动续研。开始/选择/暂停/取消/恢复和无限科研目标选择仍在 UI 明确禁用；Rust 对旧 revision、完成边界、未知科技、依赖次序和跨域夹带全部失败关闭。
+16. `eb7ee8a` 把五秒量子上传边界也接入持久 active/pending 集合、station/item/collector 反向索引和稳定公平次序。安静 48 行目录首次校准后选中 0 行，单采集器唤醒选中 1 行，3/4 活动时精确稠密退化；MOD、未知或签名漂移回到旧全序扫描。分段推进、目录重建与 full-scan oracle 逐字节一致；未接纳请求保持 active，候选失败不提交目录状态。
+17. `42c4514` 收紧真实运行时的物流拓扑内存：共享不可变字符串和容量、去除重复的 owned key 与全量临时集合，同时保留精确往返和旧格式兼容。44 MB 真实存档的估算运行时占用从 150,678,461 B 降至 130,839,639 B（-13.17%），低于 3× 原文件预算 1,664,328 B；其中物流拓扑从 42,051,591 B 降至 22,212,769 B（-47.18%）。打开后的 Private Bytes 约下降 29.16 MB；解析峰值仍约 1.076 GB，因此该提交不能被描述为消除了启动峰值。
+18. `4251e7b`、`30bb5e2`、`3e1a1ab` 与 `d170545` 闭合第一批 Rust 行星切换和薄 UI 安全边界。renderer 不再从旧 `game.activePlanetId` 猜原生路线，只提交带 base revision 的活动行星命令；收到 durable receipt 后仍要等 workspace 与 canvas 同 session/revision/target 双重确认才显示。普通同星球 revision 的短读窗口会保留同 session 的确认路线，不再每秒取消长按/平移；真实切星球、会话 rebound 或未知结果会提升 gesture epoch、释放 pointer capture、清空连接/框选/选择/放置等全部行星局部状态。检查器在 native ownership 下只显示逐字段完全匹配的 Rust 摘要；托盘、施工栏、蓝图、批量编辑、制造页、手机旧壳和旧引导没有原生命令时全部失败关闭。失败关闭仅保护数据，不代表这些功能已经迁移完成。
+19. `e2cc8f0` 把传送带预留容量探测按固定 1,024 行分片交给最多 8 个线程；worker 只读并使用私有量子会话，库存扣减、浮点累计和结果提交仍按原稳定顺序。真实 76.9 MB 存档在 1/2/4/8 线程的规范状态哈希均为 `5cdb3da983444e3166866290deb1124a4bab1d55591937c2ce677e032014ddc1`。8 线程线路预留阶段中位从 42.571 ms 降至 30.688 ms（-27.91%），完整模拟秒中位从 1,133.41 ms 降至 1,116.16 ms（-1.52%），峰值内存基本持平；显式 1 线程完整秒中位从 1,708.05 ms 增至 1,734.17 ms（+1.53%），因此本切片只按默认多核收益接纳，不宣称单线程加速。
+20. `a084809`、`db8588e`、`f76affa`、`6424758`、`eae8b3a`、`b1282d3`、`fc50d99`、`2a87cce`、`c369215` 与 `7e7ca5e` 把 renderer、Worker、存储和 main-owned Rust 权威之间的异步缝隙改为带 lease、run/session/revision 与 durable journal 的显式交接。旧异步回调、启动恢复、保存、宏观结算完成或清理回执均不能越过已更换的所有者；恢复失败保留最后有效检查点，不用旧 JavaScript 全量状态覆盖 Rust。该批只关闭双写/竞态风险，没有把 `authorityEligible` 打开。
+21. `cc1849b`、`65b4e32`、`c8368c4`、`0b528aa`、`5706bf0`、`cb3feca`、`e1aaf54`、`431050d6`、`f1ae391`、`d2fc7f4`、`0cca132` 与 `74e20f7` 将施工中心、施工量子需求、电力依赖、系统空间站发现/模式过渡、量子库存写回和活动请求顺序继续收敛到运行时私有索引。稀疏集合只在成功 revision 后安装，候选失败不消费 wake；持续活跃、MOD、索引漂移或达到 75% 时稳定退化旧全序，不能把自然稠密场景包装成固定比例收益。
+22. `46b6ba8`、`385e077`、`c56cbe5`、`e1911e3`、`28f9c3c`、`3b6a181`、`941260b`、`8d79c36`、`256d4e5`、`5fb3328`、`23ea55a`、`baefd31`、`2a972d2`、`07aa2f6`、`716120d`、`c5f0f34`、`fbcc9b5`、`aeebc05` 把工厂库存/施工库存读面和普通建筑放置、移除、堆叠、普通线路放置、移除、优先级、线道数接到同 revision Rust 命令。每个命令只携带必要叶字段和精确上下文，durable ACK 后重读投影；预览不预测物料或建筑状态，未知/MOD/旧 revision/跨行星/夹带字段全部失败关闭。
+23. `3cf06a1`、`2268b9f`、`41cd25d`、`b354d19`、`975a580`、`e35b6cd`、`d973166`、`02fa990`、`99485bf`、`deeabf7`、`66c8dff`、`2d9c3cc`、`832ba50` 与 `ab758bd` 继续把玩家可见 renderer 薄化：统计、页头、命令搜索、星图、检查器、选择锁和配方焦点只消费有界 Rust 投影；native ownership 下旧 overlays、旧诊断和无原生命令的 workspace 失败关闭，并释放 renderer 全状态镜像。普通 Web 路径保持原行为，展示偏好仍可留在本地 UI，但生产、库存、位置和选择持久字段不得从旧 `gameRef` 读取。
+24. `5c355c6`、`3930c87` 与 `af22528` 为 Rust 保守纯挂机补上施工 receipt 和动态射线供电的永久可再生证明。施工产出只有精确内部候选携带同 revision receipt 才可记账；射线尾段必须逐电网证明风、光、地热及已经守恒的戴森结构/壳面足以覆盖需求，燃料、储能、旧在轨帆和跨电网借电均不能伪装成无限电源。无法证明时整段冻结；600 秒单次、1/5/60 秒分段和 runtime cache 重建保持一致。
+25. `40ce353` 复用每个精确模拟步内的戴森发射状态，避免在多个终端阶段重复解析和聚合相同大型结构。44 MB、45,904 实体、91,955 线路真实只读档中，电力/机器/矿机阶段由约 930.427 ms 降至 60.472 ms（-93.50%，15.39×），完整 state simulate 由约 1,740.101 ms 降至 870.263 ms（-49.99%），完整 advance 由约 1,835.565 ms 降至 965.653 ms（-47.39%）；1/2/4/8 线程与 JavaScript oracle 的规范哈希一致。该收益来自该真实档的戴森密集形状，不外推所有存档。
+26. `434b23a`、`bb56d5b` 将行星相机和戴森发射调度纳入薄 UI 写路径。相机保存与跨行星目的视角只用 Rust `planetViewports` 投影；戴森发射开关、均衡/太阳帆/火箭模式和 25/50/75/100% 节流只提交精确 `dysonEngineering` 叶命令。两者都绑定当前 revision，pending 时禁用重复操作，ACK 后等待新投影。`41fed97` 进一步为活动壳层、活动太阳帆轨道及轨道半径/倾角/经度建立同 revision 命令 helper 和 MOD/跨恒星系/范围校验；该提交只关闭命令生成底座，尚未把对应 UI 控件计作迁移完成。
+27. `a77187f` 为量子 attachment/mode 过渡增加运行时私有活动索引。在 1,024 行安静合成网络中仅探测 2 行，减少约 99.80%，1/5/60 秒与旧全扫描结果逐字节一致；75% 稠密、MOD、漂移、目录缺失和候选失败均安全回退或保持旧索引。四线程与串行 core 当时分别为 582/582；该提交仍会在五秒边界从活动/opaque 需求构造一次反向视图，因此“整个量子网络真正 O(active)”仍需最后收口。
+28. `24d2657` 在 44 MB、45,904 实体、91,955 条线路的真实只读档上继续拆分线路容量探测。四线程完整原生推进中位由 615.02 ms 降至 564.65 ms（-8.19%），推进峰值 Private Bytes 约由 715.9 MB 降至 713.1 MB；1/2/4/8 线程规范哈希、完整哈希和 JavaScript/full-scan oracle 全部一致。该档有 75,559 条线路发生变化，属于自然稠密场景，所以本提交没有伪造高比例休眠收益。
+29. `a634e5d` 把量子模式过渡使用的反向路线依赖保留在成功 revision 的运行时目录中，不再于每个五秒边界从候选请求重建整张反向视图。1,024 行稀疏夹具只探测 2 个候选并验证 1 个活动请求，反向视图重建次数为 0；1/5/60 秒、目录重建和 full-scan oracle 严格一致。MOD、漂移、稠密和候选失败仍失败关闭，因此该结果仍不等于量子领域已 100% `O(active)`。
+30. `b8c3d31` 与 `b1e0ea2` 闭合普通内置配方建筑的库存双向交互：玩家可把 Rust 投影中的建筑输入/输出取到手持或托盘，也可从同 revision 手持/托盘放入合法输入。容量、配方、物品、活动行星和 MOD registry 都由 Rust 原子重验；命令 durable ACK 后才重读，不在 renderer 预测物料数量。站点、燃料、未知/MOD 建筑和跨行星操作继续关闭。
+31. `41fed97` 与 `835d109` 将戴森活动壳层、活动太阳帆轨道及轨道半径、倾角、经度控件接到同 revision Rust 命令。界面只显示 Rust 投影，pending 时禁止重复提交，ACK 后等待新投影；跨恒星系、未知/MOD 轨道、越界参数和夹带字段全部失败关闭。它与既有发射开关、模式和节流命令一起覆盖当前可安全证明的戴森计划控制面，但新建/删除完整几何设计仍未迁移。
+32. `c5b2775` 在 native ownership 下切断遗留 achievement 与 campaign 进度同步 effect，避免旧 renderer GameState 在 Rust 接管后继续形成隐蔽的第二写入源。普通 Web 路径不变；该提交只消除双写残留，没有改变存档格式，也没有打开接管门禁。
+33. `13c7b95` 为保守纯挂机尾段增加有界手工制造账本：只使用活动行星真实托盘起始库存，最多结算 4,096 个完整批次，每批明确扣输入、加输出并写入队列、库存和 `totalProduced` 收据；库存不足、输出堵塞、跨行星队首、异常或超限时冻结。8×/12×/15×/16×、单段/多段和 reload 哈希一致。在该提交当时，施工、银河出口、合同和其余无法证明守恒的物料终端仍冻结；后续第 76 项只为“已有施工库存 + 永久可再生供电”增加窄 construction-only 例外，银河出口与合同仍不外推。
+34. `1e20b63` 将 14 类内置普通用电建筑的 `powerPriority` 与内置四向分流器的 `distributionMode` 接到 Rust 精确命令；session/run/revision/活动行星、建筑目录、锁定状态和当前叶值全部重验。`energyMode` 会清空或退款库存、移除线路并重置配方/进度，不能用单叶命令等价表达，所以继续 No-Go；站点、MOD、燃料、配方和批量配置也没有被冒充为完成。
+35. `ce3bf6a` 与 `7e0b034` 补齐星际工业薄 UI 中可由既有 Rust station validator 精确证明的配置：最低装载率、直达/优先中转/强制中转策略及 1～4 跳翘曲器预算。投影新增“目标是否为主槽位”布尔值，以便仅在真正主槽位原子同步旧 `stationMinimumLoad` 兼容叶；未知槽位、普通行星站上的星际字段、锁定/MOD/旧 revision 和夹带修改均失败关闭。界面只在 durable ACK 后重读，不先显示预测值。
+36. `e590754` 把量子 flush 计划的只读合法性探测按固定 1,024 行分片并行，主线程仍按持久计划次序选择最早失败项，带宽、公平游标、BigUint、浮点与库存写入继续串行稳定提交；小批量自动保持单线程。44 MB 真实只读档的四线程 5 次候选中位为 527.43 ms，对照中位 559.16 ms（-5.67%）；推进峰值中位增加约 42.6 MB，但最大值 759.0→759.8 MB 基本持平。1/2/4/8 线程 exact 与 full 矩阵共 8/8 单元完成，规范哈希分别固定为 `02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c` 和 `69a8da6798a1ead4797fd3b55fa9bf14fff2aa789b3c398f02a8643913aba1dd`，JavaScript oracle 与输入 SHA-256 均保持不变。
+37. `4f27a96`、`8b0b10c` 与 `c9f8879` 把玩家暂停/继续接入 main-owned Rust 耐久事务。renderer 只能提交 `{ paused: boolean }` 意图，不能提交 session、revision、deadline、checkpoint 或 command ID；main 先结清请求锚点前已经到期的模拟秒，再按 stage → WAL → checkpoint → change receipt → lease ACK 顺序提交暂停。暂停后无计时器，保存仍可读取同一已确认检查点，普通玩法命令保持关闭；继续使用新的主进程墙钟锚点，57 秒暂停时间不会变成待补算积压。相同请求和丢失回执按派生 ID 幂等恢复，进程在五个持久边界中的任一点退出都由 Rust 启动恢复；普通泛用命令在 TS、main broker 与 Rust 三层继续禁止修改 `paused`。如果暂停前最后一个普通 tick 的回执本身不确定，程序会失败关闭并明确要求重启恢复，不会切回旧 JavaScript 状态或用检查点主动回退画面。
+38. `2a6031c` 修复真实存档线程矩阵的施工守恒诊断误报。JavaScript oracle 仍原样调用 `advanceSimulationBudget`，但施工前后账本和模块私有 branded receipt 由 `offlineApproximation` 内部捕获、签发并立即消费；外部不能提交任意候选或取得收据，普通 `validateAggregateConservation` 无收据时仍失败关闭。矩阵 verifier 也改为任何非空守恒错误都直接失败，不能再把“四个线程一致报错”算成通过。纯模拟耗时与额外守恒扫描耗时分字段记录，避免美化 native/JS 比值。
+39. `b1f6f2f` 闭合 Rust 工厂库存投影与 Electron 严格过滤层之间遗漏的 `productionBufferLimit` 合同。新 Host 已返回该字段、TypeScript 也已声明，但旧过滤层会因多字段把整页拒绝；现在按 1,000～100,000,000 的游戏边界精确校验并透传，缺失、多余或越界仍失败关闭。首次 native 全套真实暴露该问题为 405 通过、1 失败、1 条件跳过；修复后定向边界 23/23、真实 Host 集成 1/1、完整 native 406 通过、1 条件跳过、0 失败。
+40. `53ebe6e` 将 `productionBufferLimit` 从只读投影补成 Rust 权威设置。renderer 只提交 1,000～100,000,000 的精确叶意图，Rust 重验当前 revision、单叶 patch shape、整数边界、同值和混合字段；该全局设置没有额外宣称 built-in catalog 限制。durable ACK 后 UI 才读取新投影。`2bb4fb6` 仅补齐该批测试的 rustfmt，没有修改运行语义。
+41. `8f2cd4c` 闭合 built-in catalog 下有限科研的开始、选择、暂停、恢复、取消、完成奖励与队列推进，以及无限科研的开始、切换、暂停/停止语义；所有 `matrix_research` 进度重置由 Rust 从最小意图确定性展开并可由通用 WAL 重放。stale、MOD、未知科技、依赖不满足、跨域夹带和展开后失败均保持源 revision/hash 不变。
+42. `e754293` 将科技树标准/精简布局改为 `settings.technologyLayout` 精确叶命令；Rust 在 built-in catalog、当前 revision、合法枚举、同值和混合字段上失败关闭，原生 UI 单飞等待 ACK，普通 Web 行为不变。整合审查发现“按整个 settings 根分流”会误拦生产缓存设置，最终改为按精确字段分流，并以既有生产缓存回归确认两者可共存。
+43. `cbe1a43` 把线路源快照探测按固定 1,024 行分片并行，1 worker 保留旧路径；最早缺失 symbol 错误、partial 边界和所有共享库存/线路写入仍按旧稳定 group 顺序提交。76.9 MB、80,674 实体、155,746 线路真实只读档的该阶段由 35.590 ms 降至 12.161 ms（2.93×，-65.8%）；dense/sparse 的 1/2/4/8 worker 状态、规范/领域哈希和守恒摘要与 JavaScript 严格一致。该数字只代表源快照阶段，不是整秒或整应用加速倍数。
+44. `388fdb6` 把本地物流站缓冲计划改为固定 1,024 站私有分片和原站序回放；重复物料槽、输入到输出、最早错误以及 legacy 已发生的 partial-mutation 边界保持不变，不能误写成“任何失败都不提交”。真实大档 1/8 worker 的该阶段中位由 45.338 ms 降至 27.857 ms（-38.6%，1.63×），完整状态、哈希与守恒一致；8 worker 峰值 1,249,038,336 B，未高于 1 worker 的 1,260,457,984 B。
+45. `06a4f58` 只把 `selected_indices=None` 时 legacy full-scan/fail-closed 曲速器路线预留的只读准备阶段改为固定 1,024 实体分片；正常 sparse ledger 不会因此重新全扫实体。1 worker 仍直走旧函数，多 worker 私有收集后按原实体/route 顺序串行回放，因此 IEEE-754 累加、首次 key 插入、Unicode/MOD/null/负零和共享写入边界不变。真实大档交错 1/8 worker 各三次共 6/6 与 JavaScript 及跨线程规范哈希一致；8 worker `local-dispatch` 由 37.304 ms 降至 30.513 ms（约 -18.2%），完整模拟秒由 467.32 ms 降至 460.55 ms（约 -1.45%）。
+46. 本轮为量子活动请求排序连续实现并测量了两套候选，逐值、BigUint、公平游标、dirty 集与 full-scan oracle 均通过，但性能门禁都失败并完整撤销。第一套在 4,096 个同物料请求上中位退化 9.90%，17 物料形状中位只改善 0.68%；第二套首轮同物料/17 物料分别为 +0.025%/-3.39%，确认轮分别为 +3.07%/-4.85%。`quantum_logistics.rs`、临时基准和测试计数器均恢复为零差异。该负向证据说明当前剩余 `O(A log A)` 不能只靠预计算排序 key 或小型基数排序消除，不能用“写过代码”提高 `O(active)` 完成度。
+47. `38d2dab` 把已经闭合的 main-owned 耐久暂停/继续事务接到玩家可见页头。原生接管时按钮不再走旧 `setGame`，而是等待 durable receipt；普通 Web 路径保持旧行为。该提交只开放既有事务入口，没有降低积压或内存保护门槛，也没有恢复任何会主动回滚检查点的旧策略。
+48. `9d38bb9` 把内置能量枢纽的充电/放电模式切换改为 Rust 语义意图。Rust 在同 revision 重验活动行星、built-in 目录、实体类型、锁定和当前模式，并按旧规则原子清空或退款相关缓存、移除并退款相连线路以及重置配方/进度；renderer 不拼装这些副作用。旧 revision、同值、MOD、跨行星和混合字段均失败关闭，WAL 冷重放得到同一展开结果。
+49. `ab810e3` 将生产历史的记录重放改为固定分片私有探针和原行序提交，保留 IEEE-754、负零、BigInt/数量格式及“最早非法记录”边界；小批量自动保留串行路径。后续同一真实档单次 profile 中 `history-probe-replay` 为 15.651 ms、`advance-production-history` 为 31.948 ms；该数字与施工/量子提交共同存在，不作为隔离 A/B 倍数发布。
+50. `f1c9db4` 让施工运行时把成功 revision 的活动中心行直接交给量子施工需求阶段，避免在稀疏稳态重新发现全部施工中心；索引缺失、MOD、签名漂移、候选失败和 75% 稠密门槛仍走稳定全序。后续真实档单次 profile 的 `construction` 为 24.830 ms、`quantum-supply-buffers` 为 18.378 ms；同样只作为热点定位证据，不冒充隔离收益。
+51. `4cca590` 把手工采矿接到 Rust 权威命令。renderer 只提交目标矿点与操作意图；Rust 重验活动行星、矿脉剩余量、科技/倍率、托盘容量、有限/无限资源模式和 revision，原子扣减矿量并记入托盘与累计生产。旧 revision、跨行星、堵塞、未知/MOD 资源和夹带修改保持源状态不变；Host 冷重放及普通 Web 回归均覆盖。
+52. `2645578` 把量子供给只读合法性探测按固定分片并行，主线程仍按旧稳定请求次序做共享库存扣减、BigUint/浮点累计和最终写回；1 worker 保留原路径，小批量不强制并行。它只并行可证明无副作用的探针，不把量子公平分配本身改成非确定性并发。
+53. `a66fc29` 把火力发电站、微型聚变发电站和人造恒星三类内置燃料建筑的燃料类型切换改为 Rust 语义意图。Rust 从 built-in 目录重验允许燃料、当前槽位、活动行星与锁定状态，并按旧 JavaScript 规则处理燃烧进度、剩余能量、相连线路及库存退款；renderer 不能直接提交燃料库存或能量叶。MOD、未知燃料、旧 revision、同值和混合补丁均失败关闭，WAL/Host 冷重放不触碰累计产出或无关库存。
+54. `373116f` 与 `06e3fca` 修复真实大档中 Rust 施工和 JavaScript 的首个完整状态分叉：planet-wide 普通预算严格为 256 次迭代/24 次计划构建，extended 为 512/512；中心间公平分配会归还未使用预算；同一次 simulate call 的 direct-buffer 目标缓存可在物料变化时失效重建；无 job 的递归 raw-blocker 及已有 job 的剩余五秒批次都会按旧规则从量子库存预取。新增三个跨语言差分测试覆盖递归预取、已有任务批次与 guarded plan cache；真实 44,566,548 字节档的 1/2/4/8 线程均与 JavaScript 完整状态一致。
+55. `ae3a75e` 修复同一真实档仅剩的 `generationKw` 4 单位差异。JavaScript 会分别按实体原序累加风、光、地热、射线，以及换能器、燃料、蓄电池，再以固定左结合顺序合并；Rust 现在显式镜像该 IEEE-754 顺序，而不是按持久实体混合顺序或并行归约。两个最小 bits 差分、真实档 JavaScript oracle 和 1/2/4/8 线程均一致，没有硬编码补偿值。
+56. `a940633` 把内置微型黑洞连接器的暂停、首次二次确认启动和再次启动接到 Rust 权威命令。renderer 只提交 `{ paused, confirmActivation }` 意图；Rust 重验活动行星、内置目录、实体类型、锁定、当前两项标志和 revision，持久 WAL 只保存语义意图，冷重放再确定性展开 `blackHolePaused` 与首次确认位。端口、累计毁灭量和 MOD 连接器不会被命令携带或修改；普通泛用命令直接写两个叶字段也被明确拒绝。该切片没有迁移黑洞端口编辑或毁灭账本展示。
+57. 对 `power-demand-index` 普通机器只读探针实现过固定 1,024 行私有分片候选，但严格 A/B 未达到接纳门槛并已完整撤销。32,905 行/24,679 probes 的 17 对交错样本中位仅由 6.732700 ms 到 6.714600 ms（+0.268837%）；44 MB 真实档 exact 1 秒各五次交错中位反而由 500.89 ms 到 509.85 ms（-1.788816%），峰值最大值增加 5.919144%。10/10 JavaScript/native 哈希一致不能抵消性能失败，因此源码、临时夹具与测试全部回退；未用这次尝试提高并行完成度。
+58. `efc5763` 把时间扭曲全局开关/倍率和电磁弹射器目标轨道接到 Rust 权威。时间扭曲 renderer 只提交控制器 ID 加目标开关或倍率，Rust 重验 built-in 目录、活动行星、控制器类型、锁定、当前状态和 revision，并确定性展开全部派生字段；弹射器只提交 `targetDysonOrbitId`，目标只能来自最多 8 行的同 revision 有界戴森轨道投影。WAL 保存语义意图并在冷启动重新展开；该切片没有开放更换时间扭曲控制器或创建、删除、编辑太阳帆轨道。
+59. `47f66f7` 清理施工模块三处不改变语义的 Clippy 门禁：移除已由下界保证的冗余 clamp、合并嵌套条件和保持旧批次计算。施工定向 72 项与 core `-D warnings` 通过；这只是让最终 Rust 静态门禁可审计，不作为性能提升或功能进度单独计数。
+60. `e2ce7c3` 修复空间站舰队卸载的库存去向：物流无人机和运输船现在只在 `portableFleet` 与目标物流站之间守恒移动，绝不会退回普通行星托盘。ILS/PLS、忙碌本地/星际路线、部分便携库存、忙碌数量下限、托盘哨兵、peer 进度、路线不变和 live/generic WAL 重放均由共享最小夹具覆盖。该 P0 只修复 Rust 账本和 validator；玩家可见舰队/翘曲器最小意图以及完整空间站投影正在后续切片收口。
+61. `5ea1356` 为物流无人机/运输船目标和空间站翘曲器装卸增加最小语义意图。renderer 只能提交站 ID、舰队种类与目标数，或一个带符号的翘曲器增减量；Rust 从当前 revision 重验活动行星、built-in 目录、锁定、容量、忙碌载具下限、`portableFleet` 或所属行星托盘，并决定部分装载后的真实结果。WAL 保存意图，generic replay、冷启动和 5 个持久化边界都重新从权威状态展开；恢复 receipt 会包含实际受影响的 peer progress，且两类命令明确不制造 topology dirty。开发首跑曾暴露 AfterStage receipt 漏 peer、AfterWal marker 被误报 topology dirty，两项均修复并保留回归；该提交只提供 Rust/Host/TS 底座，尚未接玩家 UI。
+62. `0adbce0` 增加严格有界的空间站配置读模型和第一批薄 UI。Rust 只为当前活动行星、当前选择、built-in PLS/ILS 生成固定 5 槽配置；MOD、跨行星或不一致镜像失败关闭。renderer 的 generic/viewport v1/v2 投影移除完整 `stationRoutes`，只接收同 session/run/revision 的有界字段；checkpoint、导出和规范哈希不变。玩家可写的优先级、最低装载、槽位库存上下限、ILS 路线策略/翘曲预算以及 warp/hub 标量仍提交最小意图并等待 durable ACK；槽位物品/模式、舰队数量和站内翘曲器在本提交保持只读。开发首轮 Rust 全套曾因测试夹具已经规范化、却仍发送同值 legacy repair 叶而失败；产品 validator 没有放宽，测试改为先精确制造旧格式漂移再验证修复，定向和完整套件随后通过。
+63. 本地物流 `dispatch-power-wake` 候选完成 14 对真实 44,566,548 字节档交错 A/B 后被拒绝并完整撤销。候选把局部 `local-dispatch` 中位由 32.367 ms 降到 25.184 ms，节省 7.183 ms，但完整 `nativeAdvance` 中位由 635.99 ms 升到 644.48 ms（-1.335%），P95 由 645.58 ms 升到 668.54 ms（-3.556%），两项均退化；候选局部绝对值也没有达到不高于 17.8 ms 的接纳门槛。14/14 规范/领域/守恒哈希完全一致，fixture SHA-256 前后不变；按最终规定的最大峰值口径，内存只增加约 1.969 MiB、该单项通过。开发中曾用“峰值样本中位差 +16.38 MiB”快速口径误报内存失败，最终报告已经纠正，不能复用错误口径。由于整体速度和 P95 失败，该候选没有提交，也没有继续运行后置 1/2/4/8 矩阵。
+
+这次拒绝后的下一轮 `O(active)` 工作必须按以下六个可独立撤销的切片推进，禁止重新合成一个大改动后再猜收益：
+
+- A / Snapshot-only：以稳定 rank 的常驻 bit/byte power state 和事务化 change journal 取代每秒完整 powered `Vec` 快照；保留现有 `HashMap`、依赖展开和 dispatch 语义，单独测量是否消除全量 clone/alloc。
+- B / PowerView-only：用借用式 `StationPowerView` 取代 `station_powers HashMap` 和稠密 station list materialization；collector、显式 power factor、planet/grid factor 的旧优先级及 NaN/缺项失败关闭不变。
+- C / Lazy-scan-only：把 `dispatch_scan` 的 `to_vec`/clone/sort 改为借用 Full/Pending/MergeUnique 计划；不同时修改供电检测。
+- D / CSR-wake-only：预计算 grid/station 到 demand 的稳定 rank CSR，并使用常驻 generation scratch；只在供电恢复合成档和真实档上验证 reverse expansion。
+- E / Event-source：由电网 factor 和显式 override 输出 changed domains；事件不完整、MOD/opaque 或拓扑签名漂移时永久失败关闭到 full scan。这一片才是从 `O(stations)` 到 `O(changed domains + active)` 的关键。
+- F / Combined：仅在 A–E 各自通过功能、原子性、7 对真实档 A/B 和内存门禁后组合；随后重跑 1/2/4/8、JavaScript、full-scan oracle、规范/领域/守恒哈希矩阵。任何单片不通过都只撤销该片，不用其他片的收益掩盖。
+64. `87788ff` 增加空间站槽位模式与物品的最小语义意图，并保留旧 direct full-diff validator 兼容。renderer 只可提交 `{slotIndex, scope, mode}` 或 `{slotIndex, itemId}` marker；Rust 重验 built-in 注册表、活动行星、锁定、固定 5 槽、物品目录/兼容性和重复项，再独立派生路线取消、peer 进度、旧物料退款、无人机/飞船便携舰队、线路施工材料、载具所属站翘曲器及溢出行星托盘。路线 cargo 只释放 reservation，不再次退款或复制；真实量子网络和未知 payload 保持不变。generic WAL 冷重放只保存 marker，Host 五个 durable 故障边界保持源状态原子。该提交尚未开放槽位 UI；更换物品需要后续同 revision 目录选择和明确破坏性确认。
+65. `5c2d8b3` 把 PLS/ILS 无人机、ILS 运输船和站内翘曲器接到玩家可见薄 UI。按钮支持 -10/-1/归零/+1/+10/填满，但 renderer 只根据同 session/run/revision/活动选择的 Rust `stationConfiguration` 生成既有 fleet/warper marker；不发送 `stationDrones`、`stationVessels`、`stationWarpers`、`portableFleet`、托盘或路线叶。Rust 仍按忙碌载具下限、容量、便携舰队和活动行星翘曲器库存裁定真实结果。pending、stale、锁定和未解锁科技均禁用；界面不预演，只有新 durable revision 投影才显示钳制后的数量。普通 Web handler、Rust/Host、schema/version 均未改变。
+66. `b19072d` 完成空间站槽位物品和本地/星际模式薄 UI。Rust 为 built-in PLS/ILS 投影固定排序、最多 128 行的兼容物品目录；超过上限时，当前槽位的页外物品仍可在原槽显示和清空，但不能被其他槽位重新分配。renderer 只提交 `87788ff` 已验证的语义 marker；更换物品必须经过显式破坏性确认，selection、session、run、revision、活动行星、锁定或 pending 任一变化都会取消确认。路线取消、cargo reservation、建筑输入输出、线路施工材料、无人机/运输船、翘曲器、托盘和 peer progress 仍完全由 Rust 当前状态展开；界面不预测，只有 durable ACK 后的新投影会显示结果。第二人只读审计未发现 P0/P1 问题；当前物品恰为排序后第 129 项的 Rust 回归已经补齐并以 1/1 通过，证明目录截断不会隐藏或改变既有槽位绑定。真实 Host→main→preload→renderer 的 Electron station fixture 仍作为冻结前 P2 证据补强保留。
+67. `WIN-420 A / Snapshot-only` 在隔离提交 `6afedddb` 实现稳定 rank 常驻 power byte state、固定事务 journal 和复用 dependency buffer，定向 Rust 43/43、fmt 与 strict clippy 均通过，但真实档快速 A/B 触发预先声明的终止门禁，因此没有合入共享分支。三对交错样本中，`nativeAdvance` 中位由 640.08 ms 降到 633.98 ms，只改善 0.953%，低于 3% 门槛；P95 由 646.58 ms 增至 665.44 ms，退化 2.917%；完整 durable authority 中位改善 0.736%，P95 仍由 2046.00 ms 增至 2049.96 ms。全工作流最大 Private Bytes 由 1,082,494,976 B 降到 1,082,437,632 B，差 57,344 B，近似持平。全部进程、打开往返、JavaScript 差分、集成证明、durable 幂等、增量检查点、连续 burst 和 Windows 峰值样本均通过，真实 fixture SHA-256 前后不变；正确不代表值得合并。由于快速筛选已经同时失败“中位至少 3%”与“P95 不退化”，没有再浪费约 14 分钟运行七对确认样本，也没有用局部临时分配下降掩盖整段尾延迟。
+68. `6e18bc9` 增加 Rust v47 蓝图/版本/施工队列只读工作区。蓝图库与队列各按持久数组顺序每页 32 行，renderer 一帧只并发读取当前两页，选中当前页模板时才增加一次详情读取；Rust 仍在分页前校验最多 4,096 条的完整源目录、重复 ID 和顶层 shape，页外坏数据不能借分页绕过。详情上限固定为 512 个建筑、1,024 条线路、256 个资源锚点和 256 个外部端口，总投影超过 1 MiB 或语义未获 built-in 目录证明时只返回空明细及精确 `truncated/unsupported` 原因。队列按版本 ID 解析但始终 `actionable:false`；该提交当时不接捕获、导入、重命名、变换、删除、部署、撤销、取消或导出等写回调，后续第 78 项只取代其中的“重命名未迁移”状态，其余写面仍关闭。隔离提交完整 Rust 841/0、Node 410/7/0、Vitest 2,377/69/0，TypeScript、生产构建、启动预算、fmt、strict clippy 和静态审计通过；合并空间站 UI 后交叉 Vitest 48/48、Electron 边界 27/27、TypeScript 继续通过。
+69. `WIN-420 B / PowerView-only` 在隔离提交 `6eaca9c` 用连续 `Vec<f64>` 和零堆分配借用视图取代每步临时 station power `HashMap`，local/interstellar 仅增加窄查询 trait，专项/旧 oracle 9/9、fmt 与 strict clippy 均通过；但真实档快速 A/B 明确失败，未合入共享分支。44,566,548 字节真实档的三对交错 full scenario 中，原生单秒推进中位由 668.81 ms 退化到 1,011.96 ms（慢 51.31%），nearest-rank P95 由 777.12 ms 退化到 1,081.72 ms（慢 39.20%）；durable authority 中位由 2,281.94 ms 退化到 2,370.51 ms（慢 3.88%），P95 由 2,338.56 ms 退化到 3,222.86 ms（慢 37.81%）。完整测量流程峰值中位只下降 466,944 B（0.043%），最大值反而增加 233,472 B，但仍低于 +8 MiB 内存上限。全部进程、打开往返、JavaScript/native 全状态、集成证明、durable 幂等、增量检查点、连续 burst 和 Windows 峰值采样均通过，fixture SHA-256 前后不变；正确和少一次 HashMap 分配不能抵消每次二分查询的热路径代价。由于同时失败“中位至少改善 3%”和“P95 不退化”，按预声明 quick screen 停止，没有运行七对确认样本。
+70. `a805dad` 将建筑制造自动补足开关、量子仓库直供开关和单个目标库存接入 Rust 语义命令。renderer/WAL 只携带一个最小意图，Rust 从当前 revision、built-in 目录、科技、制造中心和库存重新展开；把目标降到已有库存时，只取消同目标任务，但会按既有 JavaScript 语义退还全部制造中心量子预留。v47 没有保存对象插入顺序，因此取消前先以 `BigUint` 按物品汇总并在临时量子网络中证明退款顺序无关：零接收、全接收或同一退款行星的部分接收可提交；跨行星、同物品且量子只能部分接收时在任何写入前失败关闭，revision、规范哈希和物料不变。Core、Host live/replay/recovery 与 renderer 对三种意图均保守发出 `topologyDirty=true`。开发期间两轮独立审计先后发现“目标归零没有取消/退款”和“恢复 topology 标志不一致、跨星球部分接收顺序不可恢复”两组 P1；候选没有掩盖或猜测顺序，而是在单提交中修复后通过第三审。共享合并态新跑 Core 5/5、Host 2/2、Vitest 27/27、Electron 边界 27/27 与 TypeScript；跨星球部分接收仍是明确的可用性限制，不是守恒或兼容性破坏。
+71. `29988fa` 增加建筑制造中心的有界只读薄 UI，并复用既有 `factory-read-model-v1` 与 Host→main→preload 操作，不新建第二条 IPC。Rust 只在 built-in 注册表精确匹配时生成工作区，完整验证全部目标、科技、配方、成本、中心、任务、材料、量子缓存和副产物后才截断为目标 128、中心/任务各 64、材料/量子/副产物各 256、单目标成本 32 行，整个工厂 atom 继续受 1 MiB 门禁。renderer 强绑定 session/run/revision/活动行星；原生组件不接 GameState、旧制造组件或 mutation callback，全部写控件明确禁用。独立审计发现 present-invalid 的暂停、量子直供、量子缓存和量子网络字段最初会被静默显示为 false/empty；合并前改为仅兼容缺失旧可选字段，而任何已存在的错误类型都令整个 slice 为 null，并新增五种损坏状态 hash 不变回归。最终第二审 P0/P1/P2 均为零；共享态 Rust 8/8、真实 Release Host 5/5、Node 29/29、Vitest 57/57、TypeScript、fmt 与差异检查通过。当前写按钮仍未连接 `a805dad` 的语义命令，不能把只读迁移虚报为完整制造控制面。
+72. `WIN-420 C / Lazy-scan-only` 在隔离提交 `acdc7d5` 把 local dispatch 的物化 clone/stable-sort/dedup 改为借用 `Full/Pending/MergeUnique` 计划，并让 interstellar probe/full rows 借用原目录；供电、事件源、reservation、ledger 和算法均未改变。专项 5/5、较宽 dispatch 21/21、check、strict clippy、fmt 与只读复审通过，但冻结真实档 quick A/B 只将 `nativeAdvance` 中位从 1,058.54 ms 降到 1,041.52 ms，改善 1.6079%，低于 3% 门槛，因此拒绝且未合并。P95 从 1,080.41 ms 降到 1,059.80 ms、完整流程最大峰值只增加 712,704 B，两项门禁通过；6/6 进程、8 项正确性、18 项 Windows 峰值和 fixture SHA 均通过。正确但收益太小，按预声明停止，没有运行七对确认，也没有让 C 与其他候选叠加后掩盖单片收益。下一片必须是独立 D / CSR-wake-only。
+73. `WIN-430 / 非物流下一并行片` 在隔离基线 `8f321cb` 对第二份 44,566,548 字节真实只读档完成热点剖析和 1/2/4/8 线程确定性矩阵后判定 No-Go，产品差异保持 0，也没有制造一个“实验性提交”混入共享历史。该档 19,896 台普通机器被科研、火箭、太阳帆等 550 个全局顺序屏障切成 536 段，只有 1 段达到安全并行阈值，覆盖 5.34%；最大候选串行段“机器原序上下文捕获”中位 39.715 ms，而八线程完整推进中位 1,020.57 ms、P95 1,085.04 ms，预计整步收益只有约 0.208%，远低于 3% 接纳门槛。1/2/4/8 四格仍全部与 JavaScript 完整状态一致，规范、领域、守恒哈希分别固定为 `c4ea336fb581125baae31d21be4976e718c954b3a79a1003aff5d1ecccf11f2d`、`2ae45c211717b5baf1a7e3980aeb06308d559071a1b0ea2e4f8ac154b877990e`、`ef9f323ca51a53378af418a970f35ead35183e147286c272749073f032f189dd`；输入 SHA-256 前后不变。结论不是“并行已完成”，而是不能跨越这些共享物料/浮点顺序屏障冒险并行；下一片必须选择占完整推进至少 3% 且能用私有输出、稳定提交证明确定性的更大领域。
+74. `9075f80` 将建筑制造自动补足、量子直供和单目标库存三个既有 Rust 语义意图接入同 revision 薄 UI。Rust command 与 read-model 现在共用 `writeAvailable` 资格判定，同源重验 built-in registry、catalog、制造科技及全行星至少一个未锁定、正安全机器数的制造中心；它复用打开存档时已证明的 `construction_center_indices`，每次投影只扫描制造中心而不是全部实体。desktop 与 TypeScript 对缺失/错误类型严格失败关闭，组件与 App 三个 callback 都在提交前复验；降低任意目标必须确认，降到已有库存以下会明确提示取消同目标任务并守恒退款。Enter 触发降低后随后的 blur 不再撤销确认，同值 Enter 也不会先清确认。renderer 不做乐观写入，只在 durable receipt 后等待同 session/run/行星且 revision 不小于 receipt 的新投影。隔离候选 `b8c6aad` 最终 Rust 15/15、Node 20/20、focused Vitest 62/62、TypeScript、fmt、strict clippy 与差异检查通过，独立终审没有 P1/P2；首次 RED 的 Rust 7/9、Node 19/20、Vitest 10/14 仍按事实保留。本条未新增 GameState、envelope、cloud、SQLite 或 public Host operation，也未开放非原子的批量目标；共享合并态新鲜专项已按下节所列数字独立补跑，不复用隔离结果。
+75. `WIN-420 D / CSR-wake-only` 在隔离提交 `0414a31` 预计算本地/星际 grid/station 到 dispatch demand 的稳定 rank CSR，并以常驻 generation scratch 展开供电恢复唤醒；普通 revision 复用图，目录 key-order、topology、catalog 或 registry 变化会重建，MOD/opaque、失配、达到 75% 或候选失败均失败关闭到旧全扫，scratch 只在完整 state commit 后安装。新增 CSR 专项 6/6、相关 1/5/60 oracle、fmt、check、strict clippy 均通过，两个独立 Release Host 和第二份 44,566,548 字节只读真实档的 3 对 full A/B 也有 6/6 完整正确性，输入 SHA-256 前后不变；但 `nativeAdvance` 中位从 576.16 ms 退化到 589.62 ms，慢 2.3362%，明确失败“至少改善 3%”门禁，因此拒绝且未合并。P95 613.46→613.08 ms、最大峰值 1,084,612,608→1,084,493,824 B 两项通过也不能抵消中位退化；按预声明没有再跑七对或 1/2/4/8。首次 A/B 在 0/6 前因隔离 worktree 缺少 Vitest 依赖退出，partial 被保留；核对 package/lock 哈希后只建立 ignored junction 并从 0/6 写新报告，结束时仅删除链接且共享依赖仍在。下一片 E / Event-source 只有在不依赖被拒绝 D 产品代码、独立达到同一门禁时才可接纳。
+76. `0c6b843`、`d16e6eb` 将 Rust 保守纯挂机的施工收益收敛为 construction-only 规范块。它只消费精确前缀边界已经归属施工的真实库存，不下载新的量子材料，也不授予普通生产、物流、科研、戴森、出口或合同收益；每个中心必须有永久可再生电网下界，手工/放置施工队列并存、身份漂移、电力证明失败或库存/目标边界都会冻结或原子丢弃。固定 30 秒规范块和小于 30 秒的私有 carry 使任意请求分段、内部 checkpoint/reload 与一个长窗口得到同一块序列；carry 不进入公开 v47 或规范哈希。18 个 Rust 测试形成 48 个矩阵格；30 天一中心中位约 812.51 ms，5 个共享中心约 2,708.59 ms，接近真实形状的 221 实体/44,311 堆叠夹具因库存耗尽只执行 378 次并在约 19.36 ms 停止。该结果允许少发收益，不允许借未来产量复制物料。
+77. `53609bc` 只合入传送带冲突组件并行实验的 14,148 B No-Go 证据，SHA-256 `14cd3cb43851983e4557ce8ae0c36d81063d41dcd4caeeaf95cfc98b89ac49a3`。候选 24/24 语义矩阵与 full-scan baseline 逐字段一致，但 `nativeAdvance` 中位 `569.44 → 625.62 ms`（慢 `9.8658%`）、P95 `575.62 → 642.09 ms`（慢 `11.5475%`）；峰值中位只增加 8,192 B 不能抵消时间退化。产品原型全部撤销、产品 diff 为零，不能把理论 profiler 上界或“语义正确”写成全领域并行已完成。
+78. `279404e`、`fd5add7`、`4163e94`、`73ed077`、`db5f8e7` 闭合 Rust 蓝图重命名、稳定草稿和不确定提交对账。Rust/Host 只接受最小 `{kind,id,name}` marker，并在 live/WAL 重放中重验全目录、目标原行、UTF-16 名称和当前 revision；同 lineage 的 UI 保留同一 input DOM、草稿和 IME。丢失响应后 renderer 消费原 source 并只向 main-owned broker 查询已缓存的 exact receipt，绝不重发 mutation；committed/pending/not-committed/conflict 四态均严格 schema 化，receipt 必须绑定 session/run/command/base revision 且 revision 恰好 `+1`。bounded retry 每个 authority 状态世代最多 8 次，只有依赖世代变化才开启新轮。独立复审 P0/P1 为零；最后一个 P2 连续 revision 门也已补齐，equal、`+2`、无安全后继和非安全整数均拒绝。
+
+### 24.3 当前开发链新鲜验证
+
+- 当前产品/测试冻结基线 `3654552` 新跑 Rust Core `695/695`、Host `174/174`，共 `869/869`；Windows native/Electron Node `422` 通过、`1` 条件跳过、`0` 失败；完整 Vitest 为 `315` 文件通过、`14` 文件条件跳过，`2,471` 项通过、`29` 项条件跳过、`0` 失败。TypeScript、`cargo fmt --check`、workspace check、strict clippy `-D warnings`、production build 和 startup budget 均通过；启动闭包总 gzip `180,336 B`、JavaScript `86,806 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,704 B`、forbidden module `0`。
+- 首次集成完整 Vitest 真实记录为 `314` 文件通过、`14` 文件条件跳过、`1` 文件失败，`2,447` 项通过、`29` 项条件跳过、`24` 项失败。重建 Release Host 后定向仍为 `15/24/1`，排除旧二进制；根因是 `coreProjection` 按 `0adbce0` 的薄 UI 契约删除 `stationRoutes`，而历史差分测试仍直接比较完整实体，首个断言退出又未执行 `coreClose`，造成 session-limit 级联。`3654552` 只让 renderer 投影期望删除该私有账本，34 处投影断言统一使用 helper；完整状态 canonical fields/SHA、domain 与守恒对照继续覆盖未删减权威状态。定向修复后 `39/39` 通过、`1` 条件跳过，随后整套从零重跑得到上条全绿结果；失败历史没有被删除或伪装成一次通过。
+- 历史共享工作树完整客户端门禁位于 `a940633`：TypeScript 0 错误；完整 Vitest 为 299 文件通过、14 文件条件跳过、0 失败，2,368 项通过、29 项跳过、0 失败，Vitest 耗时 59.91 秒。微型黑洞 TS/UI 定向 14/14、main-owned command broker 21/21、Rust 黑洞事务与 Host 冷重放 6/6 也均通过；该数字只证明历史提交，不替代上方当前冻结基线。
+- 时间扭曲/弹射器切片在隔离工作树新跑完整 Vitest 2,337 通过/69 跳过/0 失败、Rust workspace 809/0、Windows native/desktop JavaScript 402 通过/7 条件跳过/0 失败，TypeScript、production build/startup、fmt 和差异检查均通过。空间站便携舰队守恒切片在隔离工作树新跑完整 Vitest 2,329/69/0、Rust core 646 + Host 162、Windows native/desktop JavaScript 401/7/0；这些结果证明各自提交，不代替后续合并 HEAD 的最终整套复跑。
+- `5ea1356` 的空间站舰队/翘曲器语义意图切片新跑完整 Vitest 2,341 通过/69 跳过/0 失败（300 文件通过/16 条件跳过）、Rust core 653 + Host 166 = 819/0、Windows native/desktop JavaScript 402 通过/7 条件跳过/0 失败；TypeScript、production build/startup、fmt、strict clippy `-D warnings` 和差异检查通过。开发期间的新 Host 边界测试首跑失败已按上条记录修复，不能从审计历史中删除；最终数字仍只证明该隔离提交，合并 HEAD 的冻结整套门禁要在剩余功能代码完成后重新执行。
+- `0adbce0` 的有界空间站配置读模型和第一批薄 UI 新跑完整 Vitest 2,347 通过/69 跳过/0 失败、Rust core 653 + Host 164 = 817/0、Windows native/desktop JavaScript 402 通过/7 条件跳过/0 失败；TypeScript、production build/startup、fmt、strict clippy `-D warnings` 和差异检查均通过。第一次完整 Rust 运行的 652/653 失败及其夹具根因按上条记录保留；该结果仍只证明隔离提交，后续槽位和舰队 UI 合并后必须重跑冻结套件。
+- `87788ff` 的槽位语义意图在隔离提交新跑 focused TS 3/3、focused Rust core 10 + Host 2、完整 Vitest 2,344 通过/69 跳过/0 失败、Rust core 657 + Host 168 = 825/0、Windows native/desktop JavaScript 402 通过/7 条件跳过/0 失败；TypeScript、production build/startup（总 gzip 180,347 B，JS 86,817 B，CSS 93,530 B，forbidden 0）、fmt 和 strict clippy 均通过。首次 focused Rust 曾因新测试 fixture 用索引访问不存在的顶层键而得到 9/10，改用 `Map::insert` 后 12/12；该失败历史保留。此数字证明基于 `5ea1356` 的隔离提交，合到 `0adbce0` 后仍须在最终冻结套件重新验证交互。
+- `5c2d8b3` 的舰队/翘曲器薄 UI 在隔离提交新跑 focused TS 24/24、完整 Vitest 2,353 通过/69 跳过/0 失败、既有 Rust 语义意图专项 fleet 7 + warper 4 = 11/11、Windows native/desktop JavaScript 402 通过/7 条件跳过/0 失败；TypeScript、production build/startup（startup gzip 180,342 B，menu 257,715 B）、fmt、strict clippy 和差异检查均通过。该提交没有修改 Rust/Host 产品代码，因此没有把旧 817 项 workspace 数字伪装成新跑完整结果；最终合并 HEAD 仍会执行统一 Rust 套件。
+- `b19072d` 的空间站槽位物品/模式薄 UI 在隔离提交新跑 focused Vitest 39/39、renderer boundary Node 20/20、focused Rust 5/5；完整 Vitest 为 303 文件通过/16 条件跳过、2,359 项通过/69 条件跳过/0 失败，Rust core 665 + Host 169 = 834/0，Windows native/desktop JavaScript 402 通过/7 条件跳过/0 失败。TypeScript、production build（2,040 modules）、startup budget（startup gzip 180,344 B，JS 86,814 B，CSS 93,530 B，最大 JS 58,974 B，menu 257,709 B，forbidden 0）、fmt、strict clippy 和差异检查均通过。开发首轮先遇到缺少 node_modules，安装后首个真实 focused 为 16/24，修复旧 fixture/marker 后 39/39；首次完整 Vitest 又由 UI 文案字面量触发 2 项静态 guard，改为不引用完整状态名后最终全绿。失败历史保留，不能把最终数字写成一次通过。
+- 被拒绝的 Snapshot-only 决策报告位于 `D:/GameDev/DSPidle2-native-power-state-snapshot/artifacts/native-power-state-snapshot-ab/rejected-snapshot-only-0adbce0-6afedddb-2026-08-30.json`，SHA-256 为 `6084da4212bc787b0cc5e30f5ff154413cfa15e132aa4d8b7b08ebd3418e1e13`；三对原始交错报告位于 `D:/GameDev/DSPidle2-native-power-state-ab/results/snapshot-only-quick-3x.json`，SHA-256 为 `f40c8918c0774ebd3532768b33a2d1ef93993c0b8b51d52d858c6717394c1784`。基线/候选 Release Host SHA-256 分别为 `87a7e71f46688e1af75017962aad9b91f2cd3566f714636531d8b8f0b96c0416`、`253e30ce2782c50fcba606451b3e730d11fc020a0e73cec4e463442a4b9d9d92`，证明不是同一缓存二进制。对应实验工作树保持在 `6afedddb`，共享分支没有该产品代码。
+- 被拒绝的 PowerView-only 决策报告位于 `D:/GameDev/DSPidle2-native-power-view/artifacts/native-power-view-ab/rejected-power-view-b19072d-6eaca9c-2026-08-30.json`，SHA-256 为 `0b01048a79c793650e17976e4002c105746ea3d177109134d5096527405e99f0`；三对原始 full A/B 报告位于 `D:/GameDev/DSPidle2-native-power-view-ab/results/power-view-quick-3x.json`，SHA-256 为 `1523248265f86dc25c856fe3830e401f8d4b7001a0e9f997a74d2d2aebdb89bf`。基线/候选使用两个独立 `CARGO_TARGET_DIR` 构建，Release Host SHA-256 分别为 `4eb53f1ab9a043ef5fd8b979324dde874b85c1d27236421e0728436a2bc1e80a`、`33850d54334dfccb0a80a2b4d44193e06db4a8742c99fe3ea5892e84f271cb09`；候选分支保留审计，共享分支没有该产品代码。
+- 建筑制造语义命令隔离候选为 `b344329a2a390366da9bdb72842899f52b2b4c51`，合并提交为 `a805dad`。第三人只读审计复跑 Core 5/5、Host 2/2、Vitest 14/14、TypeScript、fmt 与差异检查，未发现 P0/P1/P2；共享合并态再跑 Core 5/5、Host 2/2、跨蓝图/空间站/建筑制造 Vitest 27/27、Electron 边界 27/27 和 TypeScript。隔离 Host 的两项测试内部覆盖 enabled/quantum/target 三类命令与五个持久化故障点，WAL 冷重放、重复请求、receipt、lease ACK、物料和规范哈希均保持原子一致。
+- 建筑制造中心薄 UI 隔离候选由 `5b2a6ef` 在审计 P2 修复后 amend 为 `ab08a7e9d12947c13675ff7d7faab6438ef06bd9`，合并提交为 `29988fa`。隔离最终为 Rust 8/8、Node 22/22、Vitest 45/45、TypeScript/fmt/diff 通过；第二人复审又运行 Rust 8/8、边界 20/20、相关 Vitest 12/12，P0/P1/P2 为零。共享 HEAD 构建优化 Host 后，五项原先条件跳过的真实 Electron↔Rust integration 全部通过；跨建筑制造、蓝图和空间站再跑 Node 29/29、Vitest 57/57、Rust 8/8 与 TypeScript，均为零失败。协议残余是 main/renderer 对截断集合的隐藏父外键依赖 Rust 全源证明；当前 built-in 目标 44<128 且 Rust 在 `take` 前全扫，未发现可利用绕过，后续仍应增加超上限隐藏坏行和单 slice 1 MiB 专项。
+- 建筑制造写 UI 隔离候选 `b8c6aad94ce5c9cef49fd216477ef01e7513ffdb` 合并为 `9075f80`。隔离首轮 RED 为 Rust 7/9、Node 19/20、Vitest 10/14；修复资格假写入、Enter/blur 和全实体扫描后，最终为 factory projection 10/10、command 5/5、Node 20/20、focused Vitest 62/62、TypeScript、fmt、strict clippy、diff 全过，独立终审 P1/P2 为零。共享合并态新跑 factory projection 10/10、command 5/5、Host live/冷重放/耐久故障 2/2、renderer boundary 20/20、同一 10 文件 Vitest 62/62、TypeScript、fmt 与 strict clippy，均零失败；另一次较窄五文件 Vitest 23/23 也通过。补充 Rust 命令首轮曾因从仓库根目录遗漏 `--manifest-path native/Cargo.toml` 在测试启动前退出，修正路径后 1/1 通过，不能把调用错误删成“一次全绿”。
+- 被拒绝的 Lazy-scan-only 原始三对报告位于 `D:/GameDev/DSPidle2-native-lazy-scan-ab/results/lazy-scan-quick-3x.json`，SHA-256 为 `b54dc3780394aaa0fae46d709a6bcea5d2e7d090a8cb26e6f4035726a05f516d`；拒绝决策位于同目录 `rejected-lazy-scan-38f3a2b-acdc7d5-2026-08-30.json`，SHA-256 为 `85c47df51549c6213c5c4c5fa8252fa094a384e79ebcdd96780c30d5bae301ec`。基线/候选 Release Host SHA-256 分别为 `c041e25b5c3bd23630931e0ad4599f679b8d377d0047e8135e4a85d299bb96d4`、`b3d6a8c48dbf981e9a5eb631b8972c785fcdaf9891ca745965e506ffecb3706c`；fixture 前后 SHA-256 均为 `77aca1697a336bf84f8305e3c049620852ebabe6b7dd5622f3c84be4ec3d956d`。隔离工作树保持 clean，共享分支没有该产品代码。
+- 被拒绝的非物流下一并行片没有产品提交；完整 No-Go 决策位于 `D:/GameDev/DSPidle2-native-parallel-nonlogistics-8f321cb/artifacts/native-parallel-no-go/nonlogistics-next-slice-8f321cb-2026-08-30-decision.json`，大小 10,983 B，SHA-256 为 `9aea6cec17834fce1bb23d3902315b0d284cd5f0cd164b9dfe0bd7ce14cc509d`。文件包含五次八线程 profile 原始值、536 段/550 屏障统计、1/2/4/8 四格、三种哈希、fixture/基线 Host/审计 Host SHA、3% 与 P95 门禁及 `productDiffBytes=0`；已由 `.gitignore` 排除，隔离工作树 HEAD 仍为 `8f321cb67d4ffccc2448a39a7d0e46afa569bdd3` 且 clean。
+- 被拒绝的 CSR-wake-only 完整 raw 位于 `D:/GameDev/DSPidle2-native-csr-wake-ab/results/csr-wake-quick-3x-rerun.json`，SHA-256 为 `ee4e3a7667e0e922d61d55520d31452e517d5d8db8eae0c047d1979eb93d5f7b`；拒绝决策为同目录 `rejected-csr-wake-8f321cb-0414a31-2026-08-30.json`，SHA-256 为 `844ce48acaea8fbc5b2d22e0b50703de0d351854f43c23da740a5a872a67edaa`。0/6 环境失败 partial SHA-256 为 `680b9aaeadc86fcfbaf5213aa7ca10ff43323cc0c03cf1d0d2428462be154389`；基线/候选 Host SHA-256 分别为 `07a6253b93655c98a3542bf706c81974c6b2bd16bbb8e80b65fc3a2d5041d81b`、`973fa6490318c0ace86ea9e1e762f876254dfc45fee5baf4b4ce01006fe5ebc2`，fixture SHA-256 为 `77aca1697a336bf84f8305e3c049620852ebabe6b7dd5622f3c84be4ec3d956d`。候选工作树保持在 `0414a319fe2dc5c8736e5bfaab1340f7460031ef` 且 clean，共享分支没有该产品代码。
+- 被拒绝的 `dispatch-power-wake` A/B 决策报告位于隔离工作树 `D:/GameDev/DSPidle2-native-local-power-wake/artifacts/native-local-power-wake-ab/rejected-local-dispatch-power-wake-a940633-2026-08-30.json`，SHA-256 为 `a006bf5b6a7eae2ca8b89a8b223ab6cd5674dc2e64c6e8665a31c59f901f35f5`；原始 14 对报告 SHA-256 为 `55a50aa98728be43a54e4b834cb1fc8f8261cd877ca84a097facf602dbec005`。对应工作树已恢复到 `a940633` 且状态干净，没有产品代码提交。
+- `a940633` 的 clean production build 为 2,036 modules；startup 总 gzip 180,332 B、JavaScript 86,802 B、CSS 93,530 B、最大启动 JavaScript 58,974 B、menu 257,695 B、forbidden 0，预算通过。后续源码或证据文档提交都会改变 Build ID，因此最终候选必须重新构建，不能把本次开发 build 冒充成发布包。
+- 较早 `a940633` Release Rust Host 以单 build job 编译通过；当时 Windows native/desktop JavaScript 为 406 通过、1 个目录 symlink 权限不足 `EPERM` 条件跳过、0 失败。当前 `3654552` 的对应新鲜数字已由本节首条 `422/1/0` 取代。
+- Rust `cargo fmt --check` 通过。Clippy 首轮只发现科研测试的一处不必要 clone，`662d9cd` 修复后 `--workspace --all-targets -D warnings` 通过，定向科研生命周期 1/1。16 test threads 的 workspace 运行在 core 中途复现本机 `0xc0000005`，没有断言失败汇总；按既定边界以单 build job、单 test thread 完整复验为 core 617/617、Host 157/157，总计 774/774、0 失败。该异常证据保留，不能写成 16 线程完整通过。
+- 当前 Server/API/SQLite 主套件已新跑 384 通过、2 条件跳过；空间站 4/4；运维 56 通过、6 条 Linux/systemd/权限条件跳过，全部 0 失败，且没有连接生产。根项目和 server 的 production dependency audit 均为 0 漏洞；125 个运行时包许可证清单一致。
+- 最近一次较早共享基线的完整 Chromium E2E 为 432 通过、27 条件跳过、1 失败、0 retry、0 flaky；durable E2E 为 7/7、0 retry、0 flaky。唯一失败是被动 WAL 一小时压力的 `longTaskCount <= 1` 得到 2；此前 450 次 pending/journal/head、零 checkpoint、零 transfer-checkpoint 和 WAL 小于 8 MiB 的功能/容量断言均已通过。首次失败不删除、不改写成全绿。随后只对该项做一次诊断复测为 1/1：WAL 1,839,996 B、transfer-checkpoint 0、耗时 898.70 ms、long task 1。`3654552` 尚未重跑完整 E2E，因此该历史结果不能作为当前 release-style 闭合证据。
+- 第三方许可证：125 个运行时包一致；根项目和 server 的 production dependency audit 均为 0 漏洞。
+- 原生行星导航、手势、只读检查器和 factory thin-view 定向：10 文件、64/64 通过。
+- 44,167,989 字节真实大档在当前 runtime/Release Host 上统一重跑实际 1/2/4/8 worker：4/4 complete，完整状态与 JavaScript oracle 严格一致，规范哈希均为 `02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c`，领域哈希均为 `c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b`，守恒摘要均为 `3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7`，`conservationValidationFailure=null`。源文件 44,167,989 B、mtime 与 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 前后不变；Release Host 也保持 SHA-256 `99905e8cd23f731fe8111da9df50a7c88a6e917bc9a76ce57d9fb4dce5d0824b`。证据为 `artifacts/native-real-save-thread-matrix/662d9cd-2026-08-30-final-runtime.json`。
+- 施工与功率次序修复合并后的 `06e3fca` 使用新 Release Host（SHA-256 `55edd794dd87cbdca659dbc0e47f2c3471bf586f33854004e9a9d85676197c19`）重跑第二份 44,566,548 字节真实只读档。请求 1/2/4/8 线程的 4/4 单元全部 complete 且与 JavaScript 完整状态严格一致；规范、领域和守恒哈希分别固定为 `c4ea336fb581125baae31d21be4976e718c954b3a79a1003aff5d1ecccf11f2d`、`2ae45c211717b5baf1a7e3980aeb06308d559071a1b0ea2e4f8ac154b877990e`、`ef9f323ca51a53378af418a970f35ead35183e147286c272749073f032f189dd`，守恒错误为空。该次未开启 profile，故只证明不同线程设置下结果一致，不把未记录的 observed worker count 冒充成证据。输入 SHA-256 `77aca1697a336bf84f8305e3c049620852ebabe6b7dd5622f3c84be4ec3d956d` 前后不变；证据为 `artifacts/native-real-save-thread-matrix/06e3fca-2026-08-30-aug27-combined.json`。
+- 同一 Host 对原 44,167,989 字节档的回归请求 1/2/4/8 线程也为 4/4 complete、JavaScript 完整状态严格一致；规范、领域和守恒哈希分别为 `02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c`、`c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b`、`3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7`。输入 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 前后不变；证据为 `artifacts/native-real-save-thread-matrix/06e3fca-2026-08-30-aug26-regression.json`。
+- 真实大档内存门禁：1/1 通过；精确 round trip 成立，输入文件 SHA-256 前后不变。量子专项 21/21、本地物流专项 34/34、当时完整 core 459/459 均通过。
+- Windows 高并发 Rust 测试仍保留两类未归因抖动：一次进程级 `0xc0000005`，一次 transition 并行矩阵失败；对应测试隔离运行通过，完整 core 串行通过。该证据不得删除，也不能用来宣称多硬件门禁已经完成。
+- 本轮没有完成 24 小时全进程长跑、多硬件矩阵、Defender/磁盘满/只读目录/覆盖升级、最终安装包构建、Authenticode 签名或真实云往返，因此不得复用旧包 SHA 或旧 final gate 作为本 HEAD 发布证据。
+
+### 24.4 28 线程测试主机异常边界
+
+冻结测试 EXE 在本机 16 线程与 24 线程分别得到 316/316；28 线程、全部 P+E 核的 7 轮中只有 2 轮通过，5 轮随机崩在互不相关的标准库、`ntdll.dll` 或 `VCRUNTIME140.dll` 路径。仅 P 核或仅 E 核的对照可通过，且同一时间窗 `rustc.exe 1.96.1` 自身也出现 `0xC0000005`/`0xC0000409`。失败时系统仍有约 8.36 GB 可用物理内存和约 21.8 GB 提交余量，不符合 OOM 特征。
+
+因此当前 Windows 常规源码验收固定使用 `CARGO_BUILD_JOBS=1` 和单 test thread；16/24 线程数字只保留为冻结 316-test EXE 的诊断样本，不能复用为当前 workspace 通过证据。产品仍最多使用 8 workers，并继续用 1/2/4/8 独立进程状态哈希矩阵证明确定性。该证据只说明 28 线程故障更像本机硬件/BIOS/异构调度或 Rust/LLVM/Windows 工具链高负载问题；在第二台机器、Rust 版本和默认 BIOS 对照完成前，既不能把它归为产品内存安全 bug，也不能宣称主机硬件已确定损坏。
+
+### 24.5 pure-idle v14 ordinary→五秒量子→施工闭合（2026-08-30，当前共享开发树）
+
+本阶段把先前只能消费精确前缀既有库存的 construction-only v12 尾段收窄后扩展为 `native-pure-idle-macro-v10-closed-ledger-construction-quantum-v14`。它没有增加第二套普通生产算法，而是在同一个 disposable candidate 内串接既有闭合 ordinary 合同、真实五秒量子下载和固定 30 秒施工规范块：
+
+1. ordinary 宏观结算先按完整闭合配方、有限资源、科研与终端门禁写入候选；量子共享库存相对 ordinary 前的逐物料正增量被记为 construction pending credit，而不是默认成区间起点已经存在的库存。施工应用会先从复制的量子库存 hold back 这些归属，再按 ordinary 证书的逐秒安全整数产率，在每个绝对五秒边界仅释放当时成熟的部分，调用真实 `settle_construction_macro_download_boundary` 后才让 construction runtime 继续工作。真实下载是显式 wake event；receipt bridge 保持连续 revision 证明，不能通过重建 runtime 丢失精确阶段回执。由此长窗口、`30+570`、`10+20+540`、checkpoint/reload 与不同倍率必须产生同一 canonical state，且 30 秒信用不能在首个五秒边界一次性消费。
+2. bounded quantum replay 对一个连续 macro-v10 session 总计最多 30 模拟秒。原生 internal manifest 私有保存 `pureIdleMacroConstructionQuantumReplayRemainingSeconds` 与 `pureIdleMacroConstructionQuantumPendingCredits`；前者只允许 `0..=30`，后者是非空物料 ID 到 JavaScript safe integer `u64` 的确定性表。显式 replay 只接受当前 macro-v10 session，pending key 本身还要求 replay 大于零；完整/增量 checkpoint 均往返，旧 manifest 缺字段分别默认 `30` 与空表。无 session、conservative/orphan、manifest session revision 不匹配、空 ID、负数、字符串、`null`、超范围或超过 safe integer 都失败关闭；运行中后来发生的 committed revision 漂移通过 getter 恢复 `30`/空表，切换到 conservative session 会清空 attribution。公开 GameState v47、v47 envelope、canonical hash、envelope v2、cloud schema v8 与 SQLite layout v3 不含这些私有字段。
+3. capacity horizon 明确失败关闭。ordinary 结算一旦因量子逐物料容量而截断，本候选立即把施工 replay 置零并清空 pending attribution；施工下载即使随后释放空间，也不能回头扩张已经签发的 ordinary 产量。已经证明并写入容量以内的 ordinary 结果与本地已有施工库存可以保留，但不再执行这次联合量子回放。该规则刻意少发收益来保证 one-shot、分段和 reload 一致，不能被描述为吞吐优化。
+4. 本轮修复期间，联合 split/reload 专项先后真实暴露“重建 construction runtime 丢失 recipe input receipt”和“reload 后 ordinary future credit 被当作旧库存”的两次诊断失败；前者改为保留 receipt bridge 并以下载事件 wake，后者增加 pending holdback/按五秒释放，最终专项 `1/1` 通过。容量审计随后补上“施工释放容量重开 ordinary horizon”的分段风险并按上一条关闭。失败历史保留，不能把本阶段写成从第一次运行就全绿。
+5. pending attribution 不能脱离当前 ordinary 产率证书独立存在。应用施工尾段前会逐物料要求当前证书中仍有正的安全整数 release rate；缺失或为零时 disposable candidate 在任何状态安装前原子拒绝，source revision 与 canonical hash 不变。专项覆盖“保存了 pending、但当前 ordinary rate map 为空”的陈旧证书场景，防止私有 checkpoint 余额被误当作无来源库存。
+6. construction macro tail 不得把小数时钟向上取整。候选要求尾段开始与结束微秒都整除一秒；任一 fractional boundary 都以“fractional work remains exact-only”失败关闭，由 exact path 处理，不能凑成一个额外整秒或固定 30 秒施工块。专项以 `0.25 → 59.8` 秒证明拒绝前后 revision/canonical hash 不变。
+7. 量子物流内部 owner identity 改为命名空间、实体 ID、物料 ID 各自带 UTF-8 字节长度的结构化 key，避免冒号分隔在 MOD/Unicode ID 下产生别名。历史 `order_key` 仅保留确定性分配顺序，不再用作聚合身份；结构化 key 同时提供碰撞自由身份和最终 tie-break。守恒专项构造旧分隔符下相同的 station/construction key，最终普通 owner 获得 100、施工 owner 获得 1、总下载和库存扣减均为 101，即 `101 = 100 + 1`，并验证 construction-only 排他边界仍会原子拒绝混合 owner。
+
+当前工件的新鲜验证如下；focused 数字均是 Core 全量的子集，不能相加冒充额外覆盖：
+
+- Rust Core 单线程最终全量 `716/716`、Rust Host 最终全量 `174/174`，均为 `0` 失败、`0` 跳过；`cargo check -p dsp-native-core --all-targets` 与 `cargo fmt --check` 通过。
+- 较早 focused 运行包括 construction macro `7/7`、量子物流 `62/62`、pure-idle construction `6/6`、joint split/reload 最终 `1/1`、state `76/76`（其中 pending checkpoint 严格/往返 `2/2`）；上述数字是最终 Core 全量的子集且早于三项审计回归。最终 `716/716` 已包含 pending-current-rate 原子拒绝、fractional exact-only 和 MOD/Unicode/冒号 owner 的 `101 = 100 + 1` 守恒测试，不能把 focused 数字与全量相加。
+- fresh Release Host 下以 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 运行完整 Vitest：`315` 文件通过、`14` 文件条件跳过，`2,472` 项通过、`28` 项条件跳过、`0` 失败，201.81 秒；long differential 已执行，真实玩家档条件用例未执行。`npm run typecheck` 通过。
+- 发布编排修订后重跑 `npm run test:native` 为 `453` 总项、`452` 通过、`1` 个 Windows symlink 权限条件跳过、`0` 失败，7.437 秒。脚本现已补入此前漏列的 `native-player-authority-state-delivery`、`native-player-authority-pause-ipc`、`native-construction-belt-lane-context`、`native-construction-belt-placement-context`、`native-dyson-workspace-projection-ipc` 和 `account-archive-download` 六个文件，并加入标准/fallback 打包目录与 update feed 失败传播回归；较早的 `422/1/0` 只属于扩容前诊断史，不是当前门禁。
+- CI 的 unit job 在完整 Vitest 前构建 Release Host，CI 的 server-ops-native job 以及 desktop/Android release 在 `test:native` 前构建 Release Host，release-gate 则在完整 Vitest 与 native integration 两者之前构建；对应顺序回归已加入 release-gate 脚本测试。这避免 Host 缺失时条件跳过差分用例，也避免复用陈旧二进制。`npm run build` 通过并处理 2,048 modules；startup 总 gzip `180,339 B`、JavaScript `86,809 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,706 B`、forbidden module `0`。
+- 本阶段没有新跑完整 E2E、24 小时全进程、多硬件、Defender/磁盘满/只读目录、原生打包/安装/覆盖升级、Authenticode、真实云往返或灰度；不得把 source build 或工作流顺序改动写成 E2E/包已通过。
+
+这项工作只闭合了“已证明 ordinary 生产如何按时间进入量子、再供 construction”这一条跨域账本，并补齐对应原生私有 checkpoint。它不等于四大目标全部完成：剩余玩家可达命令、薄 UI、MOD/opaque 形状、完整离线/时间扭曲权威、全领域确定性、24 小时、多硬件、签名与发布门禁仍按下节推进；`authorityEligible=false` 保持不变。
+
+### 24.6 下一批开发顺序
+
+1. 扩展原生物料/命令覆盖，只有所有玩家可达规则、离线和时间扭曲都通过守恒与确定性门禁后才允许 `authorityEligible=true`。
+2. 科研全生命周期、配方、托盘/手持物与普通建筑交互、星图、戴森只读面、全局行星切换和蓝图重命名已经迁移；下一步迁移蓝图捕获/导入/变换/删除/部署、运营、银河、合同、剩余空间站、MOD/燃料/批量/`energyMode` 和戴森完整几何。完成前 renderer 仍不是完整薄 UI；当前失败关闭的按钮不能计作功能完成。
+3. 五秒量子上传预算已转为活动集合；下一步只接纳对同物料高扇出与多物料形状都不退化的新活动分配方案，并继续收敛施工量子需求、库存表解析/写回和模式过渡等跨域边界。继续用稳定 full-scan oracle 做 1/5/60 秒严格等价回归；两套排序候选已经用 A/B 证明不应保留，不能把 `O(A log A)`、连续生产、高扇出自然稠密或 fail-closed 场景包装成 `O(active)` 完成。
+4. 对剩余跨域只读探针实施固定分片私有输出、稳定顺序提交；共享浮点和物料写入只有在逐线程规范哈希一致时才并行。
+5. 在功能代码冻结后重新执行 server/API、完整 E2E、真实大档全进程峰值/吞吐/保存 P95、24 小时和多硬件矩阵；签名、云往返和发布仍交给独立 Release Agent。
+
+### 24.7 Rust 工厂节点展示 sidecar 与遗留写入口封堵（2026-08-30）
+
+`d6066d2` 先把原生 ownership 下的遗留 `commitGame` 通用 JavaScript 写入口改为在读取 hollow `gameRef` 或执行 updater 之前立即拒绝。`d966b5d` 随后关闭画布最直接的一组“Rust 实体 + JavaScript 空壳推导”错误：
+
+1. `viewport-v2` 保留 schemaVersion 2 和旧响应，只有显式请求 `entityPresentationVersion:1` 且 Host hello 发布 `native-core-viewport-entity-presentation-v1` 时，Rust 才增加同序、同数量 `entityPresentation`。支持行给出状态、供电因子、资源储量、输出容量、周期速率、有界输入/输出物料和太阳帆轨道标签；当前均诚实标为 `coverage:"conservative"`。非默认注册表、未知物料、超过 32 项或无法证明语义的行严格退化为 `{entityId,supported:false}`，不伪造零值。
+2. sidecar 只存在于 projection：不写入 `FactoryEntity`、命令、WAL、checkpoint、v47 或 canonical hash。旧 Rust API 的签名和无 opt-in JSON 逐字保持；新增字段仍计入 1 MiB 响应上限。Host、main 和 renderer 分别校验能力、owner、session/revision、请求上下文、SHA-256、精确字段、数值范围、行数和 entity ID 对齐。
+3. `NativeFactoryThinViewStore` 只在同一 revision 收齐所有独立分页后发布；重复 pin 的实体与 presentation 必须逐字一致。缺 sidecar、错序、错数量、跨页漂移、额外字段、错误 cursor 或旧 revision 会保留上一完整帧/进入不可用状态，不安装部分页。`NativeAuthoritativeFactoryCanvasFrame` 再次独立校验并把 sidecar 存成单独 Map，永远不 spread 进实体。
+4. App 的远距静态卡和近距动态卡都先读取 Rust presentation；静态缓存签名包含完整 sidecar 语义，因此从 Web 切换到 Rust 或 revision 更新时不能沿用旧卡。native ownership 下不再创建全量 JavaScript display lookup，也不再用 hollow GameState 计算这组状态；unsupported 行只显示无端口、不可连线的只读拓扑卡。Web/PWA 继续走原 helper，行为不变。
+5. 这仍只是完整薄 UI 的一个 P0 切片。全局科研、完成科技、戴森/太阳帆总量、时间扭曲、电力环境倍率、完整端口与线路计数、物流活动、告警、上下游追踪和若干 workspace 仍未形成同 revision Rust presentation；原生交互层仍有受限的混合只读 `GameState` 兼容接口。它们必须继续迁移，不能把本节描述为“完整薄 UI 已完成”。`authorityEligible=false` 保持关闭，公开 GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均不变。
+
+本切片的新鲜验证：
+
+- Rust Core 单线程全量 `720/720`、Host `176/176`，总计 `896/896`；core/Host all-target strict clippy、fmt 与 diff check 通过。一次默认并发 workspace 在既有 Rayon worker 上 stack overflow/`STATUS_ACCESS_VIOLATION`，随后单 test thread 从零完成上述全量；失败历史保留。
+- 完整 Vitest `316` 文件通过、`14` 文件条件跳过，`2,479` 项通过、`29` 项条件跳过、`0` 失败，214.92 秒。
+- `npm run test:native` 为 `455` 通过、`1` 个 Windows symlink 权限条件跳过、`0` 失败；新增直接边界/分页/App 专项另有 desktop `49/49` 与 Vitest `49/49`，它们已包含在相应完整套件中，不能重复相加。
+- TypeScript 与 production build 通过；build 处理 2,048 modules，startup 总 gzip `180,342 B`、JavaScript `86,812 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,701 B`、forbidden module `0`。
+- 未执行完整 E2E、24 小时、多硬件、Defender/磁盘满/只读目录、安装/覆盖升级、打包、Authenticode、云往返或灰度；未连接生产，也未修改真实玩家存档。
+
+24.7 写下的顺序是先迁移画布全局 presentation/端口/拓扑 trace，再关闭普通生产者一跳反向唤醒造成的常醒线路；其中后一项已由 24.8 完成。剩余 presentation 迁移继续推进，下一项确定性并行领域仍只有在实测有收益且保持稳定提交顺序时才可接纳。
+
+### 24.8 普通生产者反向唤醒与 clone-safe 线路工作区（2026-08-31，开发候选）
+
+本切片完成了 24.7 末尾所列的普通生产者一跳反向唤醒，并同时修复了 disposable clone 会抽干已提交线路工作区的失败原子性问题；它尚未证明真实大档墙钟收益，因此不提高 `O(active)` 或发布成熟度估算。
+
+1. 只有内置默认内容目录的普通生产配方进入新的休眠证明。过去输出组会因“配方可能生产该物料”永久常醒；现在它必须具有现有输出/输入、运行时信号、一个完整输入周期或明确反向唤醒。MOD、opaque、特殊/全局配方和无法证明的目录形状仍走保守常醒，75% 稠密阈值及稳定全扫描退化保持不变。
+2. 输入线路实际写入生产者时，会按配方反向目录唤醒该生产者的全部已路由输出。完整输入周期也在选择边界播种输出组，语义继续使用既有 `EPSILON` 和整数 floor 规则。若写入发生在本步 transfer 活动集合已经截取之后，新唤醒且未被原集合覆盖的普通输出组会在 reservation 前补齐同一步线路时钟；这样不会额外延迟一个模拟步，也不会改变历史稳定提交顺序。未路由/未 intern 的副产物安全跳过。
+3. `BeltActivitySnapshot` 不再独占并可被 clone 取走一个 `Mutex<Option<...>>`。精确拓扑现在共享一个单槽复用池，活动索引使用共享不可变所有权；候选借用失败或在发布前丢弃时，`BeltRuntime` 的销毁边界会清空全部逻辑状态并把保留容量的缓冲归还。重叠候选在池为空时各自分配，归还采用 first-return-wins；后完成的 clone 不覆盖已经回池的缓冲。真实 `Barrier` 双线程回归会阻止任一候选在另一候选完成 checkout 前发布，验证同一时刻只有一个候选复用驻留工作区、另一个使用独立分配，且两者不共享可变缓冲；回池后下一借用也会清除获胜来源的旧活动位。
+4. sparse selection 的 group/route 两个临时向量在 `Result` 失败时也会归还；pending wake 在 finalize 失败前恢复；完整失败 reset 保留工厂尺度分配但清除活动位、post action、目标容量、逐组候选和待唤醒集合。纯挂机连续三个 disposable window、直接写回失败和重叠 clone 回归都证明 live snapshot 仍可复用，且下一候选不会继承失败活动状态。
+5. `stableRoutesSkipped` 只统计 transfer/reservation pass 没有扫描的拓扑线路。新反向唤醒组仍可能执行一次有界时钟补齐，所以该计数不能描述成“整条线路在该 revision 完全未接触”。
+
+本切片的新鲜验证：
+
+- Rust Core 单线程全量 `729/729`（`209.61s`）、Host `176/176`，均 `0` 失败；重建 Release Host 后的 native differential 为 `40` 通过、`1` 个条件跳过、`0` 失败；最终源状态完整 Vitest 为 `316` 个文件通过、`14` 个文件条件跳过，`2,480` 项通过、`29` 项条件跳过、`0` 失败（`220.32s`）；server 为 `388/2/0`；重建 Host 后 native JavaScript/桌面边界为 `455` 通过、`1` 个 Windows symlink 权限条件跳过、`0` 失败。workspace strict clippy、Rust fmt、TypeScript 与 diff check 通过。
+- 完整 Vitest 首轮 stale Host 断言失败、第二轮一个 fork 异常退出的失败证据均保留；另一工作树停止重型 Playwright 后，第三轮独占诊断复跑为 `2,480/29/0`（`222.19s`），最终源状态随后以 `220.32s` 取得上条同计数门禁。production build 处理 `2,048 modules`，startup 总 gzip `180,342 B`、JavaScript `86,812 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,709 B`、forbidden module `0`。
+- 96 个休眠普通生产者的合成夹具中，route pass 检查数为：`1 s 309 → 6`（减少 98.06%）、`5 s 1545 → 48`（减少 96.89%）、`60 s 18540 → 1034`（减少 94.42%）。JavaScript active、JavaScript forced full scan 与 Rust exact 的有界实体/线路投影、分段和完整 canonical hash 在 `1/5/60` 秒保持一致。
+- 同一小型合成夹具的完整测试墙钟约 `+2%`，候选没有实测时间优势；route scan 数下降没有转化为这个形状的整体吞吐提升。真实大档中其他阶段可能占主导，因此在完成独立全进程 A/B 前不作性能收益承诺。
+- GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 和 `authorityEligible=false` 均未改变。完整 E2E 失败史保留：收紧 v103 离线报告门禁后的首轮为 `431/27/2`；v33 银河出口单 Worker 原样通过，v144 堆叠失败由合法 2 秒精确报告令画布保持 `inert` 引起。v144 助手改为只接受 1～10 秒、原始=提交、全程精确、未用宏观外推、0% 误差、`deterministic-exact`、收益已验证、状态精确且无警告的报告，定向 `3/3` 通过。下一轮完整结果为 `432/27/1`；唯一 v108 失败来自 Playwright 对离屏 hub 的隐式滚动与 React Flow 滚动复位竞态。原样单 Worker `1/1`、连续 `3/3` 均通过；测试现先执行真实 Fit View，等待节点完整入窗且中心 topmost 后再普通点击，并将旧的无条件离线报告 handler 替换为同样的 fail-closed 精确门禁，v108 全文件 `5/5` 通过。当前最终完整 E2E 为 `433/27/0`（`7.1m`），耐久 E2E 为 `7/7`（`48.9s`）。24 小时、多硬件、签名、安装/覆盖升级或部署未执行，也未连接生产。
+
+下一步只允许把“按实体生成私有 mutation journal、再按原线路顺序提交”的 replacement-style 候选作为隔离实验；共享目标或冲突组件不能直接并行写入。它必须先在真实大档 A/B 中证明墙钟收益并通过同一 1/5/60、分段、失败原子性与 `1/2/4/8` 确定性矩阵，否则只保留 No-Go 证据，不合入产品代码。
+
+### 24.9 制造中心批量建筑目标原子意图（2026-08-31，开发候选）
+
+本切片关闭 24.1 中制造中心唯一明确列出的批量写面，但固定百分比仍按原分母和整数估算保持 `Rust 83% / 薄 UI 96%`，不因一个小切片人为跳点：
+
+1. renderer 只发送 `{ kind: "batchBuildingTargetStock", target }`，不发送建筑 ID、任务、库存或退款目录。Rust 在同一 authoritative revision 中重新验证 built-in registry、制造科技、可用制造中心和当前科技库存上限，再从 `construction_planner::targets` 的稳定顺序自行筛选已解锁 `building` 目标。`target` 必须为 `1..=stockLimit`，不夹紧；额外字段、MOD/目录漂移、无已解锁建筑和无实际变化都在写入前拒绝。
+2. 批量操作严格复用历史 Web 规则的“策略变更”语义，而不复用单目标降低时的取消/退款策略。Rust 只写发生变化的 `constructionAutomation.targetStock.<id>`；现有 jobs、WIP、量子预留、托盘、随身库存、非建筑 fleet 目标和未知 opaque 键逐值保留。live 应用和 WAL 重放得到同一 revision、结果与规范哈希，失败时源 revision、规范哈希和基对象不变。
+3. 薄 UI 要求完整未截断的同 session/run/revision/活动行星目标投影，每次应用都先显示影响、变化和降低数量并要求显式确认。确认期间 projection、行集合、计数或 pending 状态变化会使确认失效；提交后所有制造写控件保持锁定，等待 durable ACK 和新 revision 投影。界面不乐观改写任何目标，也不会循环多条单目标命令伪装原子操作。
+4. 本切片没有新增 IPC、持久字段或迁移。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 与 `authorityEligible=false` 均不变；Web/PWA 的既有批量策略路径保持原行为。
+5. 原生建筑制造中心现进入 native command palette 的专用允许列表，并由 App 正常路由到既有 `NativeConstructionCenterWorkspace`；Web 命令列表不新增该入口，继续由历史“已放置制造中心”可见性控制。该入口不会绕过同 revision projection、确认、durable ACK 或 pending 锁。本轮命令入口与 App 边界 focused 为 `6/6`。
+6. 制造中心不再在相邻权威 revision 的投影读取间隙卸载整页。renderer 只在 session/run/活动行星完全相同且旧 frame revision 不大于最新权威 revision 时，保留上一份已验证 frame 作为**只读显示缓存**；搜索、分类、输入草稿、DOM 实例、焦点与 IME 状态因此不会随普通模拟 revision 抖动。缓存期间没有精确同 revision frame，启停、量子直供、步进、预设、批量应用、Enter 和失焦提交全部锁死；目标与批量文本框只允许继续编辑本地草稿。run 或活动行星切换会同步移除旧 frame，绝不跨身份显示或回退到 JavaScript。新增组件和 App 身份边界回归连同命令入口共 `19/19` 通过，TypeScript 通过。
+
+本切片的独立新鲜验证：Rust construction automation 专项 `7/7`、Core 单线程全量 `731/731`、新增批量降低专项 `2/2`、Host live/cold-WAL/五故障点专项 `2/2`，strict clippy、check 与 fmt 通过；首次并发全量在无关本地物流测试处出现一次 Windows `STATUS_ACCESS_VIOLATION`，随后按本计划固定的单 test thread 从零全量通过，异常记录不删除。组件、App 边界、intent workflow 与命令 helper 聚焦 Vitest 为 `4` 文件、`26/26`，TypeScript 和 production build/startup budget 通过；build 处理 `2,048` modules，startup 总 gzip `180,345 B`、JavaScript `86,815 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,713 B`、forbidden module `0`。交叉终审先发现“App 无法证明确认”和“历史高目标不能合法降低”两项边界，以及“降低夹具其实在提高”和“真实 Host WAL 未覆盖 marker”两项 P1 测试缺口；合并前分别以三项确认计数同 revision 复核、兼容历史 safe integer 目标、真实降低夹具和第五条 ID-free WAL marker 关闭，复审 P0/P1/P2 为零。完整组合 Vitest、native Node、server、E2E、24 小时、多硬件、安装/覆盖升级、签名和灰度仍需在后续组合源码冻结后新跑；本节不复用 24.8 的结果，也未连接生产或修改玩家存档。
+
+### 24.10 内置 legacy PLS/ILS 物品级 belt-source `O(active)`（2026-08-31，开发候选）
+
+本切片把内置旧式行星/星际物流站的传送带供货端从“站点整座常醒”收窄到 `(source station, item)` 物品组；只接管 built-in 默认 registry、固定五槽且身份、目录和拓扑都能完整证明的 legacy PLS/ILS。进度继续按能力缺口而不是“改过多少文件”计算：`Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 95% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 87% / 可放心发布成熟度约 60%`。此前“整体代码 96%”是按已列任务数量计数，会把体量最大的原生并行和发布门禁低估，现已停止作为总完成度口径；因此当前仍约有 `13%` 开发能力缺口和约 `40%` 发布验证缺口，而不是进度倒退。
+
+1. legacy 站点中没有现货、时钟余额、待完成线路或其他运行时信号的空物品组可以休眠；唤醒目录按 `(station, item)` 建立，而不是把同站五种物品绑成一组。站点库存 writer 给出精确 changed station 后，Rust 只唤醒该站当前 `outputs[item] > EPSILON` 的已路由物品组；同站其他空物品不会因一次无关写入进入 selection clock 或抢占共享目标容量。
+2. 普通传送带写入物流站时增加的是 `inputs`，不会在本步伪装成可立即发出的 `outputs`，因此不做同一步 station clock catch-up；只有真实 local-buffer promotion 和航线完成把货物写入输出侧时，才按当前有输出的物品证据唤醒相应组，并由既有稳定线路顺序参与下一合法结算边界。缺少正向选择证据时失败关闭，不猜测一个可能产出的物品。
+3. quantum 模式物流站、MOD/opaque registry、特殊站、轨道采集器/电梯和任何形状或身份不可证明的站点继续 `always-awake`。量子下载、上传、翘曲器补充或其他旁路不会被包装成 legacy 物品级证明；保守常醒是语义门禁，不是待宣传的优化收益。
+4. 实际 `quantumMode`/站点运行模式改变时，外层以稀有 `O(all)` 路径重新编译 `PreparedRoutes` 并原地重分类活动集合；普通 Active 量子桥刷新不触发重复重编。重编先验证旧/新拓扑身份与稳定线路字段，保留线路动态列、dirty/touched 状态和稳定提交顺序。候选暂借旧 snapshot 的大型工作区；只有状态提交并安装新 activity 后才发布到新 pool，任何检查、写回或提交失败都会把同一工作区归还旧 snapshot。重叠候选仍采用 first-return-wins，不形成 rollback pool 链，也不同时持有第二份工厂级缓冲。
+5. 全局共享目标容量严格按传送带持久化行顺序结算；同一 `(source, item)` 内的公平次序固定为 UTF-8 字节顺序，与 Rust `str::cmp` 一致。旧 JavaScript `localeCompare` 会让合法的大小写、Unicode 或 MOD opaque 线路 ID 与 Rust 选中不同下游，现已用 `Z/a` 同源竞争夹具让旧实现稳定失败，并验证 JavaScript indexed、no-index fallback 与 Rust 三方状态、领域哈希和有界投影一致。该 fallback 仍共享“跳过已证明休眠组”的逻辑，因此不把它冒充独立 `O(all)` oracle；新增竞争组本身处于活动态，不影响 UTF-8 回归结论。缺失的 legacy 默认值继续兼容：槽位 `localMode`、`remoteMode`、`routePolicy` 的 missing/null 按 legacy 默认处理；其他非字符串或非法枚举失败关闭。`stationOperationMode`、`quantumMode` 的 null/非字符串/非法枚举以及 `minimumLoad` 的 null/非精确目录值一律退出可休眠证明并常醒，但不拒绝玩家加载存档。
+6. 以上活动目录、反向索引、候选位和 pool 身份都只属于 Rust session runtime，不进入 v47、WAL 的公开状态、导出正文或 canonical hash。本切片没有持久字段或迁移；GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 与 `authorityEligible=false` 均不变。
+
+本切片在最终组合源码上的新鲜门禁为：Rust Core 单线程 `745/745`、Host `176/176`，合计 `921/921`、零失败零跳过；完整 native differential `49` 通过、`1` 个显式 opt-in 长测跳过、零失败；完整 Vitest `316` 个文件通过、`14` 个条件跳过，`2,495` 项通过、`29` 项跳过、零失败；Windows native/desktop `455` 通过、`1` 个 symlink 权限条件跳过、零失败；Server `384/2/0` 加 station `4/0/0`；完整 Chromium E2E `433` 通过、`27` 个条件跳过、零失败（`6.8m`）。TypeScript、workspace check、strict clippy、Rust fmt、`git diff --check` 和 production build/startup budget 全部通过；build 处理 `2,048` modules，startup 总 gzip `180,343 B`、JavaScript `86,813 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,724 B`、forbidden module `0`。
+
+只读真实夹具仍为 `44,167,989 B / 45,904 entities / 91,955 belts`，测试前后 mtime、大小和 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 不变。冻结基线 Host 为 `399c8f3e578f5050f57aa2331ad5cc72e3c2f5d04f12ffed595b4aa19ff1fa03`，候选 Host 为 `6cd7d700d1992e46686525ad6e5b0516061bbccaae1ca816ae6d2d87fc21409b`。外层 Windows launcher 请求 P 核 affinity `FFFF`、高优先级和 8 workers；已跟踪的报告 schema 只记录 workers/scenario/order，没有记录 affinity 或 priority，故这里把前两项视为运行命令说明，而不是报告可独立复核的门禁。Full `B,C,C,B` 报告在 `artifacts/performance/native-station-source-oactive-pcore-full-20260831-042346.json`：所有 open、JavaScript 对照、守恒、集成 proof、durable WAL、增量 checkpoint、三连 burst 和内存采样门禁均通过。该真实档没有可跟踪 legacy station source，scheduler 正确退化全扫描，所以它只用于无回退门禁；两组 native advance 配对分别为候选快 `1.10%` 与 `12.32%`，但候选自身前后漂移 `12.56%`，不能把中位 `6.67%` 写成可信加速。补跑 4 轮 Exact 交错报告 `artifacts/performance/native-station-source-oactive-pcore-exact-20260831-042845.json` 的中位为候选快 `3.68%`，四组配对却为 `-0.76% / +5.24% / -8.74% / +8.60%`，同样只证明没有稳定复现的候选回退或收益；不得用该数字宣传性能提升。先前固定顺序 Full 报告中约 `75%` 的差异跨越整机速度档，已判无效，不再作为结论。两份去路径 JSON 与 Full Markdown 已作为可追踪 evidence 强制纳入本提交；SHA-256 分别为 `337e8abda7e42ff7092fe6e8ad0a9624299d566256ed292358dee7b009283c5e`、`610ed0d1080c0d53d593edf88e9a4b1227b4e978d03d98cf48bde33acccbf0d7` 与 `731f57367b37987cbd5cdcc8c8c8895205a80e0e5670783872667d2517101d76`，候选源码由包含这些证据的同一提交固定，不再依赖不可追溯的 dirty worktree 描述。
+
+本切片只做到“每一步只访问活动线路行”，恢复全局持久顺序时 JavaScript 与 Rust 仍需排序，稀疏复杂度为 `O(A log A)`，尚未达到严格数学意义的 `O(active)`。下一步需要把稳定有序活动 route index 作为 runtime 结构增量维护，在 wake/sleep 时更新，并新增不复用 dormant-filter 的独立 flat `O(all)` oracle；没有该结构与独立 oracle 前不把 95% 提高到 100%。本轮完整 E2E 已通过；24 小时、多硬件、安装/覆盖升级、签名和灰度仍待最终冻结后执行。
+
+产品当前不存在受支持的 quantum detach（quantum→legacy）流程，所以不能伪造一条产品集成用例来关闭该方向；受支持的 legacy→quantum 和 elevator→legacy 过渡已经覆盖，底层反向合成重分类只证明 runtime 防御性，不能写成玩家可用的 detach 功能。该切片仍是未发布开发候选，未连接生产，也未修改真实玩家存档。
+
+### 24.11 持久有序 active-route 索引与独立 flat `O(all)` oracle（2026-08-31，开发候选）
+
+本切片关闭 24.10 明确留下的“稀疏线路每步重新排序”和“对照路径复用休眠过滤器”两项缺口。进度仍按同一能力分母估算为：`Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`。线路选择热段已从 `O(A log A)` 收敛为无脏变化时的 `O(A)`，但整个物流系统仍含库存键解析/写回、活动组更新、稠密/失败关闭与连续生产等合法全扫路径，因此不能把总目标写成 100%。
+
+1. `BeltRuntime` 与已提交 `BeltActivitySnapshot` 现在持有严格递增、无重复、按传送带持久化行号排序的 `active_route_indices`。冷启动或拓扑重编只做一次 `O(all routes)` 播种；普通 wake/sleep 只记录脏来源组，下一 selection 按稳定组序生成去重 route delta，再与旧活动线路做一次稳定合并。没有脏组时不排序、不重建，也不分配新的线路向量；指针与容量稳定性由回归直接证明。
+2. 脏组协调发生在 75% Dense/Mask 判定之前；selection 独占本 pass 的不可变线路切片，中途出现的 wake 按既有语义延迟到下一 pass，不会改变当前共享目标容量顺序。重复 toggle、Dense→Mask、快照携带、拓扑漂移、候选失败和共享 pool 回滚都验证了严格有序、去重、活动组/线路一一对应及旧 revision 不被候选污染。运行时活动线路、脏组和复用缓冲仍不进入 GameState v47、WAL 公开状态或 canonical hash。
+3. JavaScript 新增只供测试显式启用的 `forceFlatRouteOracle`。该路径不创建或读取 indexed lookup、active/dormant 目录或 fallback selection，而是从原始实体状态和全部持久化线路做两遍 `O(all)`：第一遍按 `(source entity, item)` 汇总“源输出、任一兄弟线路信号、任一兄弟 allowance”，第二遍按原始线路行逐条结算。只要同物料任一 sibling 有信号，整个组必须醒着；这条 shared-target 回归会让旧的逐线路休眠实现产生规范哈希分歧。
+4. 对照 profiler 明确要求每个物流 pass 访问全部行、`stableRoutesSkipped=0`；UTF-8 `Z/a` 同源竞争、同物料 sibling 共享容量、96 条休眠线路、75% 稠密退化、量子边界、模式重分类与普通生产者反向唤醒均由 JavaScript active、JavaScript flat `O(all)` 与 Rust 三方比较。完整 native differential 为 `50` 通过、`1` 个显式 opt-in 长测跳过、`0` 失败。
+5. 新 Release Host 为 `13,330,432 B`，SHA-256 `af5d990292abc878f667b3cb6d0dd88867eeacd180c2fadee186740535189152`。当前组合源码的新鲜门禁为 Rust Core 单线程 `749/749`、Host `176/176`（合计 `925/925`）；完整 Vitest `316` 文件通过、`14` 文件条件跳过，`2,496` 项通过、`29` 项条件跳过、`0` 失败；Windows native/desktop `455/1/0`；Server `384/2/0` 加 station `4/0/0`；TypeScript、workspace check、strict clippy、Rust fmt、diff check 与 production build/startup budget 均通过。build 处理 `2,048 modules`，startup 总 gzip `180,344 B`、JavaScript `86,814 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,714 B`、forbidden module `0`。
+6. 完整 Chromium 首轮为 `432/27/1`：唯一失败在蓝图夹具导入时发生 Chromium `Target crashed`，同一时段另一个只读性能任务正在编译 Rust 基线。没有删除该失败或修改产品/阈值；安静环境单 Worker 原样连续 `3/3` 通过，随后从零完整复跑为 `433/27/0`（`6.7m`）。交叉终审在修正 flat oracle 的 sibling 组语义后判定 P0/P1/P2 均为零。
+
+固定 P 核合成稀疏 A/B 最终判为 **No-Result**，不接受表面加速数字，也不据此拒绝候选。runner 使用 `baseline → candidate → candidate → baseline → baseline → candidate`，6/6 进程、P 核 affinity `0xFFFF`、8 workers、Host 退出、稀疏诊断和五个 warmed 60 秒推进均成功；场景均为 525 entities、65,543 routes、517 groups，其中 16,384 条活动、49,152 条休眠 legacy-station route，每个测量步跳过约 884.7 万条稳定线路检查。但 runner 在每个进程内重新生成 GameState，导致 6 个 fixture SHA 与 warm/逐步 canonical hash 全部不同；三组表面候选降幅 `1.812% / 4.129% / 4.723%` 因输入字节不一致全部作废。去路径证据为 `artifacts/performance/native-station-active-route-pcore-ab-20260831/synthetic-pcore-ab-no-result.sanitized.json` 与 `.md`，SHA-256 分别为 `2823ecbe7edc288ed527b6dba74b9f18b603cfc80602cca5271a6ca0e9edebeb`、`58427b9ca60428144cfd0a57e0e780c3bc5541b25476c331df3b03ceccd6e959`。下一次必须先持久化同一 synthetic v47 envelope，并在计时前强制 fixture 与 pre-step canonical hash 全等。
+
+旧 `6cd7…` 提交前候选 Host 已不存在；本轮基线由 detached clean `5cc95ca` 独立构建，SHA-256 `48f097027b90481b37631a2845cb38fcab96ff0db9aedd4b7dbb9e0c9739dc03`，只作为源码里程碑身份，不冒充 bit-identical 旧二进制。真实 `91,955` 线路玩家夹具没有可跟踪 legacy station source，只能继续作为稠密非退化与文件哈希门禁，不能用来证明本结构的稀疏收益。本切片因此只接纳经过完整正确性和复杂度回归证明的 runtime 结构，不作墙钟性能宣传；后续固定输入 A/B 若发现退化，仍必须撤销或返修。
+
+### 24.12 单建筑配方语义意图与 fixed-affinity A/B 合同（2026-08-31，开发候选）
+
+本切片迁移一个玩家可达的普通生产建筑写面，并把 24.11 中因每进程重新生成输入而作废的性能实验改造成默认失败关闭的固定输入证据链。它没有正式重跑耗时 A/B，因此不产生新的性能结论；固定进度口径仍为 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`。
+
+1. renderer 对单建筑更换配方只发送 `{entityId,targetRecipeId}`，其余 top-level/entity/belt patch 必须全空。Rust 在当前 revision 重验 built-in registry、活动陆地行星、目标实体、锁定状态、建筑族、当前/目标配方、所需科技、机器数和全部缓存；射线接收站、能量枢纽、喷涂机、MOD/opaque 目录、跨星球、旧 revision、no-op 或畸形状态全部在写入前拒绝。
+2. Rust 从同一权威状态退款输入和输出；无人机/运输船沿用便携舰队，其余物料回行星托盘，并复用 JavaScript `floor(current + amount + 0.0001)` 规则。所有相邻传送带按持久化行顺序删除，按 tier/lane 退款施工材料；随后清空 `inputs/outputs/progress/proliferatorBonusProgress` 并设置新配方。缓存行最多 4,096、相邻线路最多 16,384、展开变化最多 65,536；溢出或任一验证失败时候选、revision 和规范哈希均不变。
+3. live、generic replay 与冷 WAL 恢复使用同一语义 marker，公开 v47 导出不包含 `entityRecipe` 临时节点。交叉审计发现合法线路 ID 可超过 durable receipt 的 512-byte 单 ID 上限；live/replay 回执因此统一压缩为 `changedEntityIds=[entityId]`、`changedBeltIds=[]`、`topologyDirty=true`。真实线路退款/删除不变，renderer 收到回执后重读完整拓扑，避免“状态已提交但回执过大令 checkpoint 后失败”的 P1。
+4. 薄 UI 的候选目录来自同 revision 的内置配方投影，确认身份同时绑定 session、run、revision、registry、活动行星、实体 ID、建筑、锁和当前配方。更换会明确提示退款缓存、拆除相邻线路并重置进度；pending、选择、目录、当前配方或 revision 漂移都会取消确认。界面不读取旧 JavaScript GameState 推导科技，不发送派生退款，也不乐观显示结果。
+5. 新的 tracked `benchmark:native-core-fixed-affinity-ab` 只接受预先持久化、有效 checksum 的 envelope-v2/GameState-v47 文件；runner 和所有子进程都不生成输入。fixture 必须是非符号链接普通文件，写入 helper 使用复制快照、同目录独占临时文件、`fsync`、hard-link 原子发布并禁止覆盖；每个子进程与最终阶段都重新验证同一个 byte SHA-256。
+6. `preflight baseline/candidate + 6 个交错 measured sample` 全部严格绑定 fixture SHA、open/pre-step/measured canonical/domain SHA、Node/Host affinity、显式 priority、requested/effective/observed/writeBack workers、profile 状态、正计时结果和对应 baseline/candidate 二进制初始 SHA；结束后再复核两个 Host 文件。环境只继承操作系统运行所需 allowlist 和 runner 明确管理的证据变量，`NODE_OPTIONS` 及环境残留不会进入子进程。任一进程、字段、文件或 hash 漂移都只生成带原因码的 `NO_RESULT`，不会保留部分速度摘要。
+7. 该工具明确称为 `fixed-affinity`，因为十六进制 mask 不能证明 CPU 性能核类型；不得再把它写成 P-core 证据。非 Windows 或逻辑处理器超过 64、processor group 归属无法证明时直接 `NO_RESULT`。本切片只完成工具合同和自动化假进程验证，尚未执行真实 `2 + 6` 个耗时 Host 进程，所以 24.11 的旧 No-Result 仍是唯一性能事实。
+
+本切片的新鲜验证为：Rust Core 单线程 `753/753`、Host `177/177`，合计 `930/930`；最终组合源码完整 Vitest `318` 文件通过、`14` 文件条件跳过，`2,504` 项通过、`29` 项跳过、`0` 失败（`231.11s`）；固定输入合同聚焦 `13/13`；Windows native/desktop Node 在接入三组新测试后为 `468` 通过、`1` 个条件跳过、`0` 失败；Server `384/2/0` 加 station `4/0/0`；完整 Chromium E2E `433/27/0`（`6.8m`）。TypeScript、workspace check、strict clippy、Rust fmt、diff check 与 production build/startup budget 通过；build 处理 `2,049` modules，startup 总 gzip `180,342 B`、JavaScript `86,812 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,705 B`、forbidden module `0`。固定输入 helper 接入后的 TypeScript、聚焦 `13/13`、完整 Node `468/1/0`、完整 Vitest 与 diff check 均为更新后源码新跑；Rust、Server、E2E 与 build 是配方产品代码冻结后、仅增加测试证据采集前完成。未把未执行的正式 A/B 冒充通过。
+
+GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 与 `authorityEligible=false` 均不变。本切片未连接生产、未部署、未签名，也未读取或修改真实玩家存档。下一项玩家权威写面优先选择单蓝图 `rotation + mirror` 的 target-state 语义意图；并行方面只先增加 legacy local-dispatch 的按行星工作量 profiler，只有理论净收益超过完整推进 3.5% 且真实固定输入 A/B 通过后才允许实现多核产品候选。
+
+### 24.13 response-bound 调度证据与蓝图删除闭环（2026-08-31，开发候选）
+
+本切片完成 24.12 所列的两个直接后续：把 local-dispatch profiler 从可受 stderr 到达时序影响的旁路日志收口为同一响应帧证据；把 Rust 权威蓝图工作区从 rename/transform 延伸到 delete。它闭合的是证据原子性和一个玩家可见写面，不代表“全领域并行”已经完成，也没有执行正式固定输入 A/B。固定进度口径保持 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`。
+
+1. Rust profile evidence 使用 thread-local、有界 collector，只有显式 profile operation 才构造 accumulator；普通路径通过缓存的环境开关直接跳过，也不克隆 observer payload。`LocalDispatchScan.profile` 为 boxed optional payload，并有普通对象尺寸上限回归。
+2. `coreAdvance` 在一次 stdout response frame 内返回 `profileEvidence`。Host 绑定 exact request/session SHA、base/measured revision、purpose 和恰好一条 record；stderr 退回纯诊断，旧的 150 ms quiescence 等待与结构化 stderr parser 已删除，迟到或重复 stderr 不可能替换当前请求的证据。
+3. 计时 session 使用普通 `dispatch`，结构 session 使用 `dispatch_profiled`；二者从同一 checkpoint 启动且 canonical/domain/revision 必须相等。纳秒原值与显示毫秒交叉校验，理论门禁只计算 `stageShare × parallelizableRatio`，低于 `35,000 ppm`、形状漂移、缺失/重复 evidence 或任一身份不一致都输出 `NO_GO`，summary/candidate reduction 保持 `null`，CLI 非零退出。
+4. 该门禁只回答“是否值得继续实现候选”，不证明产品加速。本轮没有执行正式 `2 + 6` 固定输入 A/B，也没有将 profiled proxy work 当成完整推进计时，因而没有速度百分比、通过宣称或并行产品代码混入。
+5. 蓝图 delete marker 精确为 `{kind:"delete",id,revision}`；Rust 重验完整 public-v47 blueprint directory、行数上限、每行结构、唯一 ID、目标 revision 和 JavaScript safe integer。目标行 revision 可以等于 MAX_SAFE，因为删除不递增该行；全局 revision 无法再加一时前端和 Core 均失败关闭。
+6. 删除展开现在返回不透明的 Core-only `delete_index` 计划；普通 rename/transform 仍走叶级 patches。事务候选从现有状态统一 clone 一次后，在其 `blueprints` 数组执行 `remove(index)`；不再构造 retained array，也不再由通用 set patch 再复制一遍整库。通用 `apply_value_patch()` 继续拒绝 `Index + delete`，新增回归证明 raw 数组删除失败且 revision/hash 不变。
+7. 删除只改变当前蓝图目录：`blueprintVersions`、`constructionQueue`、施工任务库存、实体、线路、物流和 allocator 逐字保留，已排队订单继续消费不可变版本。WAL 只保存 marker，不保存下标或正文；live、generic replay、cold reopen、重复 command ID、五个 Host durable fault boundary 与 v47 export 均证明 marker 不泄漏且 hash 一致。live 和 cold recovery receipt 都以空 entity/belt IDs 加 `topologyDirty=true` 触发 bounded workspace 重读。
+8. 薄 UI 在 dispatch 前再次绑定 session/run/revision/registry/selection/row revision/library total。没有 optimistic splice；成功 ACK 后也只进入 awaiting-projection。未知 transport outcome 固定执行六次只读 reconcile（`0/100/250/500/1000/2000 ms`），没有任何 apply/resend 分支；明确 not-committed 才解锁，conflict、无效 receipt、超时或不可用继续锁定。
+9. 删除确认只接受同 lineage、authority/frame 同 revision、不早于 ACK、library total 恰减一、target ID 缺席和 selection 为 null。queue total 不作为确认条件：后续精确 tick 可合法推进施工队列，但这不能否定已经耐久提交的蓝图目录删除。session/run handoff 会退役旧 pending，迟到 promise 不会在新 lineage 生效。
+
+冻结组合源码的新鲜验证为：Rust Core 串行 `767/767`（`198.57s`）、Host 串行 `181/181`（`18.59s`），合计 `948/948`；完整 Vitest `327` 文件通过、`13` 文件条件跳过，`2,563` 项通过、`29` 项跳过、`0` 失败（`231.56s`）；Windows native/desktop Node `483` 通过、`1` 个权限条件跳过、`0` 失败；Server `384/2/0` 加 station `4/0/0`；完整 Chromium E2E `433/27/0`（`6.9m`）。蓝图聚焦为 Vitest `80/80`、Core `19/19`、Host `7/7`，另有两次独立只读审查未发现 P0/P1。TypeScript、workspace check、strict clippy、Rust fmt、diff check 与 production build/startup budget 均通过；build 处理 `2,057` modules，startup 总 gzip `180,347 B`、JavaScript `86,817 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,721 B`、forbidden module `0`。
+
+GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 与 `authorityEligible=false` 均未改变。本切片未连接生产、未部署、未签名，未读取或修改真实玩家存档；完整 E2E 的 27 个跳过项仍是显式可选真实存档、durable 故障注入或生产预览基准，不能冒充已通过。后续优先级仍是扩大 Rust 玩家可见写面，随后才依据合法固定输入 profile gate 选择值得做的原生并行阶段；24 小时、多硬件、安装/覆盖升级、磁盘满/Defender、签名与灰度继续属于发布门禁。
+
+### 24.14 量子物流形状证据与施工队列取消退款（2026-08-31，开发候选）
+
+本切片在提交 `188f406` 和 `4ea78d5` 中分别关闭两个小而独立的边界：为量子物流剩余 `O(active)` 热点建立响应绑定的结构证据；让玩家从 Windows 薄 UI 打开蓝图工作区，并由 Rust 权威取消一条施工队列订单、完整返还仍被该订单占用的施工物料。它们没有完成全部量子物流、蓝图部署或全领域原生并行，固定进度口径继续保持 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`。
+
+1. 新的 opt-in purpose `quantum-oactive-shape-v1` 把 selected/total owner、网络解析 selected/total、dirty/total/dense write、签名、零归一化、线性/全量排序、比较次数和有界逐物料 fanout 作为一条聚合 record 放进同一个 `coreAdvance` 响应。证据绑定 request/session hash、base/measured revision 与 purpose；`1/5/60` 秒一次 advance 都必须恰好一条记录。普通非 profile 路径不构造 payload，既有 comparator 与确定性提交顺序不变。本轮没有执行正式固定输入 `2 + 6` A/B，也没有速度收益结论；这些计数只用于决定下一处值得优化的量子热段。
+2. 原生蓝图入口已加入顶栏与 overflow 菜单。施工队列行提供“取消并返还”，但 renderer 只发送 `{kind:"cancel",id,revision}`；退款物料、目标下标、蓝图版本和库存结果都由 Rust 从当前 v47 权威状态重新验证并计算。`reservedConstruction` 返回 `construction`，`reservedFleet` 返回 `portableFleet`，整数 floor、非负夹紧和 JavaScript safe-integer 溢出行为与旧 Web 规则一致。队列行与不再被任何订单引用的 blueprint version 在同一事务中删除；已放置建筑、实体和线路不回滚。当前按钮没有第二层确认对话框，这是仍保留的 UX 边界，不改变退款和提交的原子性。
+3. WAL 只保存三字段 marker，不保存退款正文或私有下标。live、generic replay、冷 WAL、重复 request ID 与五个 durable fault boundary 使用同一语义展开；候选失败不修改源状态。回执固定为空 entity/belt ID 且 `topologyDirty=true`，迫使界面重新读取有界工作区；GameState v47、公开 envelope/cloud/SQLite schema 与 canonical hash 规则均未增加字段。
+4. UI 没有 optimistic queue splice。传输结果不确定时固定执行六次只读对账（`0/100/250/500/1000/2000 ms`），绝不重发 mutation。提交确认不再依赖当前 32 行分页或“总数恰减一”，而是请求 Rust 在同 revision 校验完整蓝图/版本/队列目录后，对目标 stable ID 给出全队列存在/缺席证明；因此目标跨页以及 ACK 后其他订单同时完成都不会误确认或永久误锁。
+5. 两轮独立复审先后发现并关闭两个 P1。第一项是仅看当前页会把移动到第 33 行以后的目标误当缺席，且总数多减会误锁；现在由完整队列 membership proof 取代。第二项是 proof 读取期间每秒 tick 可把 revision R 推进到 R+1；现在 flight 同时绑定 token/revision/目标/source，旧 R 的 proof、`null` 或异常只会被丢弃，新 revision 会重新只读查询，当前 revision 的畸形结果仍失败关闭。两种 deferred 竞态回归都证明写命令始终只有一次。最终快速复审未发现剩余 P0/P1。
+
+最终组合源码已从零完成与当前 HEAD 绑定的门禁：Rust Core 串行 `774/774`，Host library `183/183`、Host main `1/1`，合计 `958/958`；fresh Release Host 且 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 为 `330` 文件通过、`13` 文件条件跳过，`2,580` 项通过、`28` 项跳过、`0` 失败（`403.99s`）；Windows native/desktop Node 为 `484/1/0`；Server `384/2/0` 加 station `4/0/0`；完整 Chromium E2E `433/27/0`（`6.5m`），耐久 WAL E2E `7/7`（`48.1s`）。TypeScript、workspace check、strict clippy、Rust fmt、diff check 与 production build/startup budget 均通过；build 处理 `2,060` modules，startup 总 gzip `180,334 B`、JavaScript `86,804 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,702 B`、forbidden module `0`。量子 profile 和施工取消聚焦数字仍只作为诊断子集，不与上述完整套件重复相加。
+
+本切片没有连接生产、部署、签名或读取/修改真实玩家存档。`authorityEligible=false`、GameState v47、envelope v2、cloud schema v8、SQLite layout v3 与 package 1.2.3 全部保持不变。上述完整自动化通过不替代 24 小时、多硬件、Win10/11、Defender/磁盘故障、安装/覆盖升级、签名和灰度。接下来仍优先关闭剩余玩家可达 Rust 写面和量子解析/写回/零归一化热点；全领域并行只有在结构证据超过门槛且真实固定输入 A/B 通过后才进入产品代码。
+
+### 24.15 量子脏键证明与蓝图配方覆盖权威（2026-08-31，开发候选）
+
+本切片分别收敛一个量子稀疏热段和一个玩家可达蓝图写面。它没有执行新的真实固定输入性能 A/B，也没有关闭全领域原生并行或正式发布门禁；固定口径继续为 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`。
+
+1. 提交 `c9be64f` 让量子网络稀疏写回后的证明只访问本步真实 dirty inventory key，不再为了证明少量变化而重新枚举整张库存表。既有三分之四稠密退化、非规范/MOD 失败关闭、稳定键顺序、候选原子性和 `1/5/60` 秒 full-oracle 一致性保持不变；新增计数回归证明未触及键不会进入稀疏证明。本切片没有新的可信墙钟 A/B，因此不把复杂度收敛宣传成确定百分比加速。
+2. 蓝图详情投影新增按源配方分组的 `recipeOverrideGroups`。分组顺序取蓝图实体首次出现顺序，候选选项取当前 Rust catalog 顺序，并同时校验源/目标配方、完成科技以及全部匹配建筑模板的 registry-backed building family；内置与有明确 family 的 MOD 建筑可用，未知/锁定/不兼容目录失败关闭。可选 v47 `recipeOverrides` 缺失或为 null 仍可读，不要求迁移存档。
+3. renderer 每次只提交 `{kind:"recipe-override",id,sourceRecipeId,targetRecipeId}`。Rust 重验完整最多 4,096 行的蓝图目录、目标行、源模板、catalog、科技、building family、当前覆盖和安全整数 revision；设置只写一个目标键，恢复默认只删除一个键。首次非默认覆盖可原子创建一项 map；已有 4,096 项时禁止扩成 4,097。其余蓝图字段、版本、队列、实体、线路、物流和存档版本保持不变，失败前后源 revision 与规范哈希不变。
+4. UI 使用受控选择框且不乐观改写；pending 时锁住蓝图工作区的其他写操作。未知 transport outcome 固定执行 `0/100/250/500/1000/2000 ms` 六次只读 receipt/projection reconciliation，绝不重发 mutation。普通写选择器在目标行达到 `Number.MAX_SAFE_INTEGER` 时关闭；只读对账选择器仍可确认由 `MAX_SAFE-1` 合法提交得到的最终 `MAX_SAFE` 行，避免成功事务永久锁死。
+5. Rust 在构造配方选项前同时限制单组、跨组总 option 数和保守序列化估算：跨组最多 4,096 项、配方区域构造预算最多 512 KiB，超限直接返回空的 unsupported detail。TypeScript IPC parser 同样要求跨组总数不超过 4,096，并对所有 opaque 字段先验证真实 string 类型；伪造数字字段或 4,097 项不能穿过 renderer 边界并生成百万级 `<option>`。
+6. 当前源码新跑 Rust workspace 串行 Core `786/786`、Host library `183/183`、Host main `1/1`，合计 `970/970`；蓝图配方聚焦为 Rust 投影 `13/13`、权威命令 `6/6`、Vitest `70/70`。fresh Release Host 且 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 为 `333` 文件通过、`13` 文件条件跳过，`2,598` 项通过、`28` 项条件跳过、`0` 失败（`403.05s`）；Windows native/desktop Node 为 `484` 通过、`1` 个权限条件跳过、`0` 失败；完整 Chromium E2E 为 `433/27/0`（`6.6m`），耐久 WAL E2E 为 `7/7`（`46.8s`）。TypeScript、Rust fmt、workspace strict clippy、diff check 与 production build/startup budget 通过；build 处理 `2,063` modules，startup 总 gzip `180,398 B`、JavaScript `86,811 B`、CSS `93,587 B`、最大启动 JavaScript `58,974 B`、menu `257,772 B`、forbidden module `0`。
+
+该切片未连接生产、未部署、未签名，也未读取或修改真实玩家存档。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均未改变。仍未迁移的蓝图捕获、导入、部署及其余队列操作继续失败关闭或使用接管前 legacy fallback；24 小时、多硬件、真实磁盘/Defender、安装/覆盖升级、签名和灰度仍是独立发布门禁。
+
+### 24.16 Rust 权威 queue-only 蓝图入队与画布定位闭环（2026-08-31，开发候选）
+
+本切片把上一节仍缺失的第一条“蓝图进入施工队列”玩家写面迁到 Rust 权威路径，但有意只闭合 queue-only 入队，不把筹资、预留、施工或部署混进同一事务。固定能力分母不因这一个切片重新估算，继续使用 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`；源码冻结后的组合门禁已经补录，包括完整 Chromium 与 durable WAL E2E。
+
+1. 原生蓝图工作区只在完整、未截断、同 session/run/revision/registry 的受支持详情上显示“加入待建施工”。按钮只进入独立画布定位态，不在工作区点击时写入队列；画布点击只提供经过有限数校验的吸附坐标。点击当刻再向 Rust 请求 `blueprint-enqueue-context-v1`，请求绑定 expected revision、registry fingerprint、blueprint ID 和 blueprint row revision；活动行星、`construction_${nextId}` 预期队列 ID、目录支持结论及其失败原因全部由当前权威状态推导，renderer 不猜测。
+2. mutation 只允许在 `constructionQueue.intent` 写入精确 marker：`{kind:"enqueue", blueprintId, blueprintRevision, position:{x,y}, revision}`。marker 不携带 planet ID、queue ID、名称、rotation、mirror、queuedAt、immutable version、蓝图正文、库存或退款结果；Rust 在应用和重放时再次从同一 revision 推导这些字段，校验完整蓝图/版本/队列目录、活动陆地行星、allocator、安全整数、队列上限、现有实体与同星球 `pending-materials` 订单的精确坐标重叠，并固定 `allowExactOverlap=false`。
+3. 第一阶段只允许能够由内置目录完整证明的 ordinary 蓝图。MOD/命名空间物料或建筑、resource anchor、external port、special building、无法证明的既有同星球 pending 队列、目录漂移和畸形版本均失败关闭；不能因为 renderer 能展示详情就绕过 Rust 的更窄入队证明。合法旧 v47 中缺失或为 `null` 的 `blueprintVersions` 按空目录读取，并在同一原子事务中创建数组和不可变版本快照；非空且非数组的损坏形状继续拒绝，不做静默迁移。
+4. 成功事务只新增一条 `status:"pending-materials"` 的订单、必要的 immutable blueprint version，并递增 `nextId` 与 authority revision。`reservedConstruction`、`reservedFleet` 和 `placedEntityIdsByKey` 初始为空；本步骤不扣 construction/portable fleet/托盘/量子库存，不创建实体或线路，也不宣称已经筹资或部署。后续施工循环仍按既有规则独立筹资、等待舰队和放置。
+5. renderer 对一次定位只允许调用一次 mutation。正常路径必须取得恰好 `R+1` 的 durable ACK；传输结果不确定时只按 `0/100/250/500/1000/2000 ms` 执行六次 main-owned 只读 receipt reconciliation，绝不 resend/apply。ACK 后不依赖当前 32 行分页或 total 猜测，而是在不早于 ACK 的同 lineage revision 上读取 `expectedQueueId` 的完整队列 membership proof；只有 `present=true` 才解除 pending。revision 前进会废弃旧 proof 并在新 revision 重读，session/run 变化会安全退役旧事务。
+6. live apply、generic replay 和 Host 冷启动 WAL 恢复使用同一个最小 marker，冷恢复重新推导相同 queue ID、不可变版本、订单内容和规范哈希；WAL 不保存 renderer 派生的 queue row。任何验证、持久提交或恢复失败都丢弃候选并保持源 revision/hash，不安装半条订单。
+7. 本切片不等于完整蓝图 capture/import/fund/deploy，也没有开放 resource anchor、external port、special building 或 MOD 入队。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均保持不变；它仍是本地开发候选，未签名、未部署、未连接生产，也未读取或修改真实玩家存档。
+8. 冻结源码后新跑 typecheck 通过，前端专项 8 文件、124 项通过。启用 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 为 350 文件总计（337 通过、13 条件跳过）、2,695 项总计（2,667 通过、28 条件跳过、0 失败），用时 553.36 秒。Rust fmt、strict clippy 与全量通过：Core `791/791`、Host library `186/186`、Host main `1/1`，合计 `978/978`；最终 native/desktop 为 490 总项、489 通过、1 个 Windows symlink 权限条件跳过、0 失败。production build 与 startup budget 通过：startup 总 gzip `180,401 B`、menu `257,770 B`、forbidden module `0`。普通 Chromium E2E 为 460 总项、433 通过、27 条件跳过、0 失败（7.2 分钟）；durable WAL E2E 为 7 总项、7 通过、0 跳过、0 失败（51.8 秒）。
+
+并发开发期间的失败史保留：前端在 props/fixture 尚未合拢时出现两次 TypeScript 失败；App 集成测试有一条旧 fallback 断言；Host 合成 fixture 有两条旧 checksum 失败；Rust strict clippy 曾拒绝过大的命令枚举；蓝图工作区测试有一条错误断言。fresh Release Host 能力检查还曾以 `34/35` 揭露磁盘上的 Host 过旧；第一次 native 全量有两条旧 projection 枚举断言失败。它们均已分别通过补齐精确 props/边界、更新旧断言、重算 fixture checksum、缩小/装箱枚举、重建 Host 及更新旧枚举预期按根因处理，并由后续对应门禁覆盖；失败历史没有被最终绿灯抹去。当前源码门禁通过仍不等于 24 小时、多硬件、安装、签名或灰度发布门禁通过。
+
+### 24.17 Rust 权威待建施工领料事务（2026-08-31，开发候选）
+
+本切片紧接 24.16，把 queue-only 订单从“只能入队/取消”推进到“可以由 Rust 权威领取并预留材料”。它有意仍不在同一事务部署实体或线路，以便先单独证明库存守恒、WAL 重放和未知传输结果不会重复扣料。固定能力百分比暂不因这个中间切片重估；ordinary 部署闭环完成后再统一审计分母。
+
+1. renderer 只允许在 `constructionQueue.intent` 写入 `{kind:"fund",id,scope,revision}`，其中 scope 只能为 `construction/fleet/all`。marker 不含蓝图正文、需求表、库存余额、预留数、行下标、planet 或 allocator；Rust 每次从当前 v47 权威状态、immutable blueprint version 或合法 live definition 重新推导。
+2. 当前只承接 24.16 已证明的内置 ordinary 子域。需求按模板顺序累计 building `machineCount`、每个 `sprayCoaterInstalled=true` 模板一个 `spray_coater`，以及每条 belt 的 tier→construction 映射乘 lanes；所有求和、扣取和返还都受 JavaScript 安全整数上限约束。MOD、资源锚点、外部端口、特殊建筑、损坏引用或非 `pending-materials` 行失败关闭。
+3. `construction` 只规范并补充施工件；`fleet` 只处理载具；`all` 顺序执行两者。ordinary 子域不含 station，因此载具目标严格为零，fleet/all 只把历史 reserved fleet 守恒返还 `portableFleet`，不能由 renderer 指定新目标。缺料允许部分预留；超出需求或不再属于需求的施工预留守恒返还。合法旧 v47 缺失/null `blueprintVersions` 可按空版本目录解析 live blueprint，missing/null reservation map 按空记录处理；损坏非对象/非数组仍拒绝。
+4. 成功候选只更新 `construction`、`portableFleet` 和目标行 reservation，并递增一次 authority revision。它不创建/修改/删除实体或线路，不改变队列 status，不部署，不清理版本。完全 no-op 明确拒绝，重复点击不会制造空 revision；任何晚期失败都丢弃克隆候选，源 revision/hash 与工厂拓扑保持不变。
+5. 前端绑定点击时可见的 session/run/revision/registry、队列 ID、页游标、队列总数、pending 状态和两类初始预留总数。mutation 只 dispatch 一次；响应未知时只按六个固定延迟查询 durable receipt。receipt 必须是连续 `R+1`、实体/线路 dirty ID 为空且 `topologyDirty=true`；确认投影可位于 R+1 或同 lineage 更晚 revision，以避免模拟时钟推进造成永久锁，但必须与当前 authority revision 完全一致、仍在同页找到同 ID pending 行，并证明至少一类预留总数变化。旧投影继续等待，分页/行/语义漂移或 totals 未变保持锁定。
+6. 本切片不升级 GameState v47、envelope v2、cloud schema v8 或 SQLite layout v3；package 仍为 1.2.3，`authorityEligible=false` 保持关闭。它尚不等于自动队列调度、ordinary deploy、蓝图 capture/import 或 direct deploy；未签名、未部署、未连接生产，也未读取或修改真实玩家存档。
+7. 当前源码实际新跑 typecheck 与 diff check 通过；前端领料专项 `30/30`、App 组合专项 `14/14`；启用 long differential 的完整 Vitest 为 353 文件总计（340 通过、13 条件跳过）、2,706 项总计（2,678 通过、28 条件跳过、0 失败，543.73 秒）。Rust 领料专项 `6/6`、fmt、strict clippy 与 Core 串行全量 `797/797` 通过。默认并行 Core 曾在既有 interstellar logistics 稀疏线路测试触发 BTree unsafe-precondition 进程中止，同一源码串行重跑该项及全量均通过；该失败历史保留。本切片没有复用上一节的 Host/native、build、E2E 或发布结果，这些门禁需在 ordinary deployment 合拢后重新执行。
+
+### 24.18 Rust 权威 ordinary 待建施工部署闭环（2026-08-31，开发候选）
+
+本切片承接 24.16 的 queue-only 入队和 24.17 的权威领料，首次把受支持的 ordinary 订单闭合为“入队 → 领料 → 部署”。它不等于全部蓝图生命周期或自动施工队列已经迁移；固定能力百分比继续使用 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`，待更广写面审计后再统一调整分母。
+
+1. renderer 只在 Rust 队列投影给出 `actionable=true` 时发送 `{kind:"deploy",id,revision}`。marker 不含 blueprint body、planet、reservation、inventory、entity/belt body、ID 或 `nextId`；Rust 在 live apply 和 WAL replay 中都从当前 v47 权威状态重新派生。
+2. ready 证明限定内置 ordinary `pending-materials`：construction reservation 必须与 catalog 推导需求精确相等、fleet reservation 必须为零，禁止 MOD、station/fleet、resource anchor、external port、special building、exact overlap、已部分放置、目录漂移和无法证明的 optional 语义。部署目标固定取持久 `row.planetId`，不受当前 active planet 切换影响。
+3. 提交时以 `O(实体 + 队列 + 蓝图)` 扫描同星球实体、其他订单和候选内部位置。ID 从当前 `nextId` 按实体在前、belt 在后的稳定顺序分配；编译结果保留合法 recipe override、spray、Dyson orbit、storage/fuel、power grid/priority/generation priority，以及 belt tier/lanes/priority/stack/monitor/route。任何重叠、碰撞、耗尽或物料目标冲突都会在发布候选前拒绝。
+4. 成功事务写入规范实体/线路，删除目标队列行并随行消费 reservation，只清理由其他订单不再引用的 immutable version，更新 `nextId` 并递增一次 authority revision。所有变更在克隆候选上完成；晚期失败丢弃候选，不部分部署、退款或修改源 hash。
+5. live、generic replay、冷 WAL 和 Host 故障恢复共享最小 marker。部署回执主动清空 changed entity/belt IDs 并设 `topologyDirty=true`，让消费者重新读取完整拓扑。Host 新增 generic cold-WAL 完整状态/hash 一致回归，以及 `AfterStage/AfterWal/AfterCheckpoint/AfterReceipt/AfterLeaseAcknowledge` 五边界幂等恢复；同一 command ID 重开后只能取得 duplicate，不能重复建造。
+6. UI 不乐观删除订单，也不根据当前 32 行分页猜测成功。每个事务只 dispatch 一次；响应未知只按 `0/100/250/500/1000/2000 ms` 查询 durable receipt。连续 `R+1` ACK 后仍需同 lineage/registry、当前或更晚 revision 的 exact queue membership `present=false`；旧 proof 会退役重读，present/mismatch 保持锁定，lineage 变化安全结束旧事务，绝不 resend mutation。
+7. 当前源码新跑 typecheck、diff check、Rust fmt 和 Core/Host strict clippy 通过；前端相关 12 文件 `95/95`、desktop projection `8/8`；启用 long differential 的完整 Vitest 为 356 文件总计（343 通过、13 条件跳过）、2,732 项总计（2,704 通过、28 条件跳过、0 失败，545.22 秒）。Rust Core `803/803`、Host library `188/188`、Host main `1/1`，合计 `992/992`；新增 Host deploy 定向 `2/2`。Windows native/desktop 为 490 总项（489 通过、1 个 Windows symlink 权限条件跳过、0 失败）；production build 为 2,073 modules，startup 总 gzip `180,401 B`、menu `257,769 B`、forbidden module `0`；完整 Chromium 为 `433/27/0`（7.0 分钟），durable E2E 为 `7/7`（50.7 秒）。合成 v47 Host 夹具最初以 `20.0/30.0` 产生 JavaScript checksum 数字表示不一致，改为语义等价整数后通过，该失败历史保留。发布制品仍需在冻结提交后独立生成和验证。
+8. 本切片没有连接生产、部署、签名或读取/修改真实玩家存档。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 不变，`authorityEligible=false` 继续关闭。blueprint capture/import/direct deploy、自动队列调度、MOD/空间站/特殊建筑，以及 24 小时、多硬件、真实 Defender/磁盘故障、安装/覆盖升级、签名与灰度仍未闭合。
+
+### 24.19 Rust 权威 ordinary 蓝图直接部署（2026-08-31，开发候选）
+
+本切片在 24.16～24.18 的 queue-only 入队、领料与队列部署之外，新增一条独立的 ordinary live-blueprint 直接部署路径。它让玩家在原生蓝图工作区选择位置后由 Rust 一次完成全额扣料与建造，但不把失败请求静默变成施工订单，也不代表 capture/import、MOD/空间站/特殊建筑或自动调度已经迁移。固定能力百分比暂不因这一小段重新估算，继续使用 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`。
+
+1. 蓝图工作区的“直接部署”只进入独立画布定位。玩家落点时 renderer 以当前 session/run/revision、registry fingerprint、选中蓝图 ID/行 revision 和有限 `{x,y}` 请求 `blueprint-direct-deploy-context-v1`；Rust 在同 revision 重新验证完整目录和当前活动陆地行星，并只返回有界 support/reason，不投影蓝图正文、材料数、余额、allocator 或生成 ID。
+2. context 通过后唯一允许的 durable marker 精确为 `{kind:"direct-deploy",blueprintId,blueprintRevision,position:{x,y},revision}`。marker 不含 planet、蓝图名称/正文、construction 需求或余额、实体/线路正文、派生 ID、`nextId`、queue ID 或 fallback mode；live apply、generic replay 和 cold WAL 都必须重新从当前 v47 权威状态展开同一语义。
+3. 当前只支持默认内置 registry 的 ordinary live blueprint。Rust 重新验证蓝图行 revision、完成科技、建筑/配方/喷涂/Dyson orbit/storage/fuel/power 语义及 belt tier/lanes/priority/stack/monitor/route。MOD/命名空间内容、非陆地活动行星、resource anchor、external port、特殊建筑、目录或 catalog 漂移与无法证明的 optional 字段全部失败关闭。
+4. 直接部署从权威 `construction` 计算建筑堆叠、每个已安装喷涂模块和每条 belt tier×lanes 的完整需求，要求一次付清并在同一事务全额扣除。缺少任一材料、小数/负数/非安全整数或目录不完整都会保持原库存；不允许部分扣料、部分建造，也没有隐式 queue-only 回退。成功和失败都不创建 `constructionQueue` 行或 immutable queue version，既有队列逐字保留。
+5. Rust 在提交时重验候选内部、活动行星 live entity 与全部既有施工订单的精确位置重叠，并检查生成 ID 不与 entity、belt 或 queue ID 碰撞。合法候选从当前 `nextId` 按“全部实体在前、全部线路在后”的稳定顺序分配 ID，写入规范记录、更新 `nextId` 并让 authority revision 只增加一次；任何晚期验证、编译、插入或持久化失败都会丢弃候选，不修改源 hash、库存、队列或拓扑。
+6. UI 不乐观插入实体，也不在 context 拒绝、材料不足或写入结果未知时改走 enqueue。每次定位最多调用一次 mutation；未知 transport outcome 固定按 `0/100/250/500/1000/2000 ms` 做六次 main-owned 只读 durable receipt 对账，绝不 resend。回执必须为连续 `R+1`、空 entity/belt dirty IDs 与 `topologyDirty=true`；随后只在同 lineage/registry 且 topology revision 不早于 ACK 时解锁，旧 revision 继续等待，畸形或冲突保持锁定。
+7. generic cold-WAL reopen 与 live 结果必须保持完整 v47 状态和 canonical hash 一致；WAL 只保存 direct-deploy marker，不保存扣料表或展开拓扑。Host 对 `AfterStage/AfterWal/AfterCheckpoint/AfterReceipt/AfterLeaseAcknowledge` 五个 durable fault boundary 逐一恢复，同一 command ID 只能观察一次扣料和一次建造，重开后的 duplicate 不得再次应用。
+8. 本切片专项实际结果为 Rust Core `809/809`、Host `193/193`、focused Vitest `100/100`、Node `37/37`、renderer boundary `41/41`，以及重建 Release Host 后的真实 Host integration `5/5`。失败历史保留：focused Vitest 首轮因一条夹具缺少新增 direct-deploy 字段而为 `98/99`；真实 Host integration 首轮使用尚无新 context capability 的旧 Host 得到 `4/5`，重建后才取得 `5/5`。当前源码随后新跑的完整 Vitest 为 360 文件总计（347 通过、13 条件跳过）、2,771 项总计（2,743 通过、28 条件跳过、0 失败，410.11 秒）；Windows native/desktop 为 490 总项（489 通过、1 个 Windows symlink 权限条件跳过、0 失败）；production build 为 2,077 modules，startup 总 gzip `180,401 B`、menu `257,771 B`、forbidden module `0`；完整 Chromium 为 `433/27/0`（6.7 分钟），durable E2E 为 `7/7`（47.0 秒）。打包、签名和发布仍是独立未通过门禁。
+9. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均保持不变。本切片未连接生产、未部署、未签名、未发布，也未读取或修改真实玩家存档；24 小时、多硬件、真实 Defender/磁盘故障、安装/覆盖升级、签名与灰度仍是独立未闭合门禁。
+
+### 24.20 Rust 权威 ordinary 蓝图捕获与直接放置交接（2026-08-31，开发候选）
+
+本切片把原生接管模式下 SelectionToolbar 的 Copy 从 legacy `createBlueprint` / `commitGame` 改为 Rust 权威 ordinary capture，并在捕获确认后直接交给 24.19 的 Rust direct-deploy 定位。它没有把捕获和部署合成一个事务：capture 只原子新增蓝图库成员，玩家点击落点时必须重新取得 fresh direct-deploy context，随后才允许发送独立的 direct-deploy marker。Web/PWA 继续保留既有复制行为；ordinary import/export 正在同一开发批次继续实现，本节不把它们写成已完成。
+
+1. renderer 只能从同一原生权威 session/run/revision、registry fingerprint、活动行星和未截断 pinned selection 形成捕获请求，实体 ID 顺序必须与 Rust 投影完全一致。`blueprint-capture-context-v1` 只返回有界 support/reason、预期 blueprint ID/name/revision 和公开 limits，不返回选区实体、线路、蓝图正文、allocator 或 `nextId`；选区、session/run、revision、registry 或 planet 在 context 在途期间变化都会淘汰旧请求，不能提交 stale context。
+2. 唯一合法 durable marker 精确为 `{kind:"capture",entityIds:[...],revision}`。它不含 session/run、planet、blueprint ID/name/revision、entity/belt body、recipe/目录、`nextId` 或 fallback mode；live apply、generic replay 和 cold WAL 都由 Rust 从当前 v47 权威状态重新展开。native capture 路径不会调用旧 `createBlueprint` 或 `commitGame`，也不会在拒绝或未知结果时静默回退到 legacy 写入。
+3. Rust 只接受默认内置目录下、当前活动陆地行星中可完整证明的 ordinary 选区；它重新验证实体唯一性、关联线路、目录与 recipe、position overlap、蓝图库 64 项容量以及 `nextId` 安全边界，并确定性生成预期 ID、名称和 revision 1。MOD/命名空间内容、resource anchor、external port、station/特殊建筑、目录不完整、重叠、library full 或 ID 耗尽均在发布候选前失败关闭；失败时不改实体、线路、队列、蓝图库、revision 或 canonical hash。
+4. capture 的 WAL 只保存上面的语义 marker；成功只新增规范蓝图并让 authority revision 连续增加一次，原选区实体、线路与施工队列保持不变。Host 验证 live、generic cold-WAL reopen 和五个 `AfterStage/AfterWal/AfterCheckpoint/AfterReceipt/AfterLeaseAcknowledge` 故障边界得到同一完整状态/canonical hash，同一 command ID 重开后不得重复新增蓝图。
+5. UI 每个 capture 事务只 dispatch 一次。未知 transport outcome 只按 `0/100/250/500/1000/2000 ms` 做六次 main-owned durable receipt 只读对账，绝不 resend；回执必须绑定原 session/run/command/base revision，严格为 `R+1`、空 changed entity/belt IDs 且 `topologyDirty=true`。随后还必须取得同 lineage/registry 的 `library-membership` 投影，查询参数固定为目标 blueprint ID、cursor `0`、limit `32`，rows 只能为 `{id}`，并在当前权威 revision 证明 `present=true`；旧 proof 重读，畸形、缺失或漂移保持锁定。
+6. membership proof 成功后，UI 用 context 中已经证明的目标 ID/name/revision 进入 direct-deploy placement，但不会复用 capture context 作为部署凭证。落点点击仍按 24.19 重新读取 fresh `blueprint-direct-deploy-context-v1`，再发送独立 direct-deploy marker；因此 capture 后的行 revision、registry、活动行星、材料、重叠或 allocator 漂移都会在部署事务重新失败关闭。SelectionToolbar 仅为满足上述证明的 Copy 放行，auto-layout、upgrade、batch、remove 等尚未迁移的破坏性按钮继续锁定。
+7. 审计发现的 P1 是 preload 原先未在跨 Electron IPC 前统一约束 capture 请求：非法超大或非 exact 请求可能先经过 `ipcRenderer.invoke` / MessagePort，再由 main/Host 拒绝。修复后 direct invoke 与 binary transfer 共用 preload normalizer；direct 请求必须精确为 `{sessionId,expectedRevision,expectedRegistryFingerprint,entityIds}`，transfer 外层必须精确为 `{sessionId,projectionType,payload}` 且 payload 只有后三项。门禁还要求 1～512 个唯一且 Unicode well-formed 的实体 ID、每项最多 512 UTF-8 bytes、整体序列化最多 1 MiB；未知键、重复 ID、孤立 surrogate、控制字符或越界请求都必须在 `invoke/postMessage` 前本地拒绝且发送次数为零。缺少 capture capability、broker/renderer binding 不一致或 binary response 越界同样失败关闭。
+8. 失败历史完整保留。Core capture focused 首轮为 `1/4`，三项失败共同源于合成 catalog 缺少 recipe display names；只补齐测试目录字段后为 `7/7`，没有放宽产品目录校验。Host 首轮全量为 `193/196`，三项新增 capture 测试共同使用了不属于已证明 ordinary capture 域的合成 recipe/stack/lane 组合；只把测试夹具改为既有验证过的普通域组合后，focused capture `4/4`、Host library `196/196`、Host main `2/2`，没有兼容猜测、静默 fallback 或 validator 放宽。preload P1 定向中间为 `7/8`，最后一项 lone surrogate 因 NaN 比较漏过；改为显式 surrogate 区间判断后通过。
+9. 当前组合源码的定向结果为 Core `816/816`、Host library `196/196` 加 Host main `2/2`、capture UI focused `103/103`、P1 修复后的 capture/desktop Node 组合 `45/45`，TypeScript typecheck 通过。完整 Vitest、完整 native/desktop、production build、完整 E2E、durable E2E 和安装包均未为这批 capture/import/export 大改在最终组合源码上重跑；不得复用 24.19 或其他旧切片结果冒充当前门禁，也不得写成已部署、已签名或已发布。
+10. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均未改变。本切片未连接生产、未部署、未签名、未发布，也未读取或修改真实玩家存档；ordinary import/export、自动施工调度、其余队列操作、MOD/空间站/特殊建筑，以及完整全量、构建、24 小时、多硬件、真实 Defender/磁盘、安装/覆盖升级、签名与灰度仍是独立未闭合门禁。
+
+### 24.21 Rust 权威 ordinary 蓝图捕获、导入与导出生命周期（2026-09-01，开发候选）
+
+本切片在 24.20 已保留的 ordinary capture 与 24.19 direct-deploy 交接之上，补齐原生接管模式下的 ordinary import/export 开发路径。这里的“补齐”只描述专项源码边界已经形成，不代表集成全量、构建、安装、签名、发布或生产门禁完成；固定能力百分比不在本节重估。
+
+1. 原生导入界面只接收粘贴文本或文件原始字节：文件先以 metadata 拒绝超过 1 MiB 的输入，再做 fatal UTF-8 decode、well-formed Unicode 与逐字节 round trip；粘贴只做空值、Unicode 和 UTF-8 byte length 检查。renderer 不运行 `JSON.parse`、不读取蓝图字段、不按目录修补输入，也不派生 ID、名称、revision、catalog 语义或 allocator 结果；完整 raw 只发送给同一 session/run/revision 与 registry fingerprint 绑定的 `blueprint-import-context-v1`。
+2. Rust 是原生导入唯一 parser 和 canonicalizer：strict JSON 拒绝 duplicate/unknown keys、尾随数据、非法时间和越界数字，兼容交换 envelope v1/v2，但 ordinary 域仅允许 1～512 个实体、0～1,024 条线路、空 resource anchors/external ports、内置 registry 与当前陆地活动行星。它重新验证目录、recipe/building/item/belt 语义、内部位置重叠、64 行蓝图库上限、名称与 `nextId` 分配；library full 必须拒绝，禁止删除或驱逐任何既有蓝图来腾位。
+3. Rust context 成功时返回的唯一合法 durable marker 精确为 `{kind:"import",sourceName,blueprint,blueprintSha256,revision}`。raw exchange 不进入 command 或 WAL；marker 中是 Rust 已规范化、已绑定摘要且受 1 MiB command budget 约束的完整 ordinary blueprint。renderer 只能原样发送这份 prepared marker，不能自行解析、重建或增补字段。live apply 与 replay 都重新检查 marker 摘要、规范正文、当前 revision、目录、allocator 和 library length；成功只在同一个原子候选中追加一条 revision 1 蓝图、递增 `nextId` 和 authority revision，失败保持原 state/canonical hash/library/queue/topology 不变。
+4. import marker 自足于 generic cold-WAL，不依赖 Host blob store。Host 必须证明 live、generic cold-WAL reopen 与 `AfterStage/AfterWal/AfterCheckpoint/AfterReceipt/AfterLeaseAcknowledge` 五个 durable fault boundary 产生相同完整状态与 canonical hash；同一 command ID 重开后只能返回 duplicate，不能重复导入、重复占用 ID 或重复改名。
+5. 导入 UI 每个事务只 dispatch 一次；transport 结果未知时仅按 `0/100/250/500/1000/2000 ms` 做六次 main-owned durable receipt 只读对账，绝不 resend 或回退到 Web `parseBlueprintExchange` / `importBlueprintExchange` / `commitGame`。ACK 必须严格为连续 `R+1`、空 changed entity/belt IDs 且 `topologyDirty=true`；之后还要取得同 lineage/registry、当前 authority revision、目标 blueprint ID 且 `present=true` 的 exact `library-membership` 证明才解锁，旧 proof 重读，缺失或冲突继续锁定。
+6. 原生导出是 Rust 的只读 `blueprint-export-context-v1`，精确绑定 session/run/current revision、registry fingerprint、选中 blueprint ID/行 revision/name 和当前活动行星。Rust 在克隆可变 legacy 图之前先按深度、字符串、512 entities、1,024 belts 与 1 MiB 图预算有界扫描，只接受同一 ordinary 内置域；随后确定性重编号 `node_1...` / `line_1...`、规范 nullable optional 字段、belt 默认值和 Windows 安全文件名，并生成不含时间戳的 v2 exchange、精确 byte count 与 SHA-256。exchange 和整个 projection 都各自不得超过 1 MiB；越界、版本漂移、目录/语义/位置不支持均返回有界拒绝，不写 state、不写 WAL。
+7. desktop renderer 对 Rust 导出只验证 exact projection shape、同一绑定、公开 limits、UTF-8 byte count、SHA-256 和安全文件名，然后把 Rust `rawExchange` 交给下载层；它不解析、重序列化或修补蓝图正文。读取期间 session/run/revision/registry、选中行 ID/revision/name 任一漂移都会丢弃旧结果，不生成文件。原生导入和导出都不复用 legacy JavaScript 蓝图正文作为权威来源。
+8. Web/PWA fallback 继续使用独立 JavaScript exchange 路径，并统一硬上限为 512 entities、1,024 belts、1 MiB raw/serialized exchange 与 64 library rows。满 64 行时导入返回失败且原状态不变，不允许 eviction；该 fallback 不进入 Rust command、Host WAL 或 native authority，不能据此放宽原生 ordinary 域。
+9. 本批最终组合源码按不重复桶记录：capture/import/export UI focused `190/190`、相关 Node focused `58/58`、fresh Release Host integration `6/6`；独立 import+export IPC `9/9` 已包含在 Node 桶中。Rust 全量为 Core `833/833`、Host library `203/203`、Host main `2/2`，合计 `1038/1038`；完整 Windows native/desktop 为 `491` 通过、`1` 个 Windows symlink 权限条件跳过、`0` 失败。开启 long differential 的完整 Vitest 为 371 files（358 通过、13 条件跳过）、2,879 tests（2,851 通过、28 条件跳过、0 失败，432.19 秒）。这些计数来自当前最终组合源码，不复用 24.19/24.20 的旧全量结果。
+10. 失败历史继续保留。capture 的 Core 首轮 `1/4`、Host 首轮 `193/196` 与 preload 中间 `7/8` 分别来自合成 catalog 缺 recipe names、不受支持的 synthetic recipe/stack/lane 组合，以及 lone high surrogate 判断落入 NaN；前两项只修 fixture，后一项修显式 surrogate 判断。import UI focused 首轮 `16/17` 是测试误以为合法 stale identity 会在 reader 前拒绝，按真实“读取后再淘汰”时序修测试后为 `20/20`。本轮 App/组件曾先为 `52/53`，后为 `90/92`：旧 AppIntegration regex 漏记新增 pending，且组件测试把真实“模组蓝图 Ω”误写成“模块蓝图 Ω”，均属于测试预期漂移而非产品行为改变；只修测试预期后，当前 UI 合并 focused 桶为 `190/190`。Node import focused 曾为 `35/36`，旧 handler count 仍写 56，而 import 加入后 main/preload 实际均为 57 且集合一致；按最终 import+export handler 集合修测试后为 `58/58`。Web fallback 首轮 `14/16` 来自 exact-1-MiB fixture 的字符/UTF-8 byte 误差和未形成真实碰撞的长名 fixture；修 fixture 后 `16/16`。Rust export oversize fixture、`MAX_SAFE` 分支与 clippy `items_after_test_module` 均已按根因修复。随后跨域 allocator 红测 `0/1` 揭露 construction queue/version 域遗漏，fresh Host 冷回放揭露 Node `-0`/Rust `0` 词法漂移，审计又捕获 export 误拒合法外键；分别由共享八域 helper、规范整数零和真实 import→enqueue→export 正向回归修复。首次完整 Vitest `2850/28/1` 的唯一失败是 Windows 真实进程 benchmark 沿用不够覆盖内部等待的全局 5 秒上限，专属 20 秒上限后 focused `5/1/0` 且最终全量 `2851/28/0`。并行 Release Host 构建还曾出现 Windows rustc `STATUS_HEAP_CORRUPTION`；同源码以 `CARGO_BUILD_JOBS=1` 成功，失败史不删除。
+11. 当前最终组合源码的集成代码门禁已执行：typecheck、fmt、strict clippy、diff check 通过；production build 为 2,088 modules，startup 总 gzip `180,576 B`、JavaScript `86,989 B`、CSS `93,587 B`、最大启动 JavaScript `58,974 B`、menu `257,943 B`、forbidden startup module `0`；完整 Chromium 为 460 项（433 通过、27 条件跳过、0 失败，6.6 分钟），durable WAL E2E 为 `7/7`、0 跳过、0 失败（48.7 秒）。desktop pack/install/覆盖升级、24 小时、多硬件、真实 Defender/磁盘故障、签名与灰度仍未执行，因此正式发布保持 No-Go。
+12. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；没有连接生产、部署、发布、签名、改版本、改 schema、读取或修改真实玩家存档。MOD/空间站/舰队、resource anchor、external port、特殊建筑、自动施工调度和其余尚未迁移写面继续失败关闭。
+13. 原生蓝图工作区除既有页头与溢出菜单入口外，现已进入 native command palette 的允许列表；键盘入口不再因 renderer authority 模式被错误过滤。本轮命令入口与蓝图 App 边界 focused 为 `23/23`，随后 production build 处理 `2,095 modules`，startup 总 gzip `180,779 B`、JavaScript `87,091 B`、CSS `93,688 B`、最大启动 JavaScript `58,974 B`、menu `258,331 B`、forbidden startup module `0`。这只是入口修复，不扩大 ordinary 蓝图语义范围。
+
+### 24.22 Ordinary storage/splitter bridge 的确定性活动队列（2026-09-01，开发候选）
+
+本切片只收敛 `simple_factory` 中覆盖全部普通 storage/splitter 的 `inputs → outputs` bridge，不横向修改空间站命令、投影、Host IPC 或 App UI。旧实现每个模拟步遍历 `factory_topology.logistics_buffer_indices` 全表；新实现把真实库存变化变成精确 wake，并保留稠密和无法证明场景的原 full-scan oracle。固定进度百分比不因这一条纵切人为重估。
+
+1. `LogisticsBufferRuntime` 只存在于 Rust session。它记录打开时实体数、buffer 行数、稳定递增的 `BTreeSet<entity row>` wake queue 和 fail-closed 状态；冷启动、topology rebuild 或 cache 失效后的第一次结算完整扫描，保持旧版本对 missing/fractional input/output 的规范化语义。runtime 不进入公开 v47、WAL、checkpoint、增量 chunk、导出或 canonical hash。
+2. 一次旧 bridge 会把当前可搬输入全部移走，或者把输出填到堆叠容量；在容量、机器数和 stored item 不变时，同一行再次运行不会产生变化。因此结算成功后该行可以休眠，只有真实外部库存 writer 才能唤醒。当前闭合 writer 是两段 belt transfer 的物料移动证据：`moved > 0` 时 belt 已同时记录 source 和 target entity，runtime 对 topology 的排序行号做二分 membership，并以持久实体行顺序去重结算。普通命令/拓扑更新继续失效整个 prepared runtime，不猜测跨 revision wake。
+3. 活动行恰好达到 `3/4` 时改走全部 buffer 行，保证高密度下没有树集合开销；实体数量、目录顺序、kind 或 topology 计数漂移也完整回退。无事件稳态可以选择零行。MOD/opaque 或无法完整证明的记录不会被静默当成休眠证据，原 admission/error 行为保持失败关闭。
+4. selection 与实体候选是同一个 disposable simulation transaction。只有 bridge 全部成功且外层 authority revision 完成提交，候选 runtime 才安装到 `CoreState`；任一选中行失败不会清除源 wake，也不会安装部分队列或部分实体。运行时内存预算纳入该 queue 的保守估算，但不增加持久 schema。
+5. 回归使用独立 `force_full_scan` 测试 oracle，每一步比较完整实体 JSON bytes。确定性矩阵包含 `1/5/60` 秒各重复两次并核对 SHA-256；随机差分包含 5 个固定种子、每个 120 步、每步 1～3 个 inventory event，整段重复运行还比较逐步 scan diagnostics。另覆盖 exact `6/8` 稠密退化、乱序/重复 wake 的稳定行顺序、MOD registry 持续 full scan，以及 sparse candidate 失败后 wake 保留并可重试。
+6. 合成 1,024 个普通 buffer 的安静 revision 中，冷校准为 `selected=1024 / total=1024`；下一无事件步为 `0/1024`；仅第 512 行收到输入后为 `1/1024`、`skipped=1023`，外层 bridge 少访问 `99.90234375%` 的稳定行。这是扫描计数证据，不是墙钟加速承诺；真实大档若这些行持续活跃，会自然触发稀疏队列或 75% full scan。
+7. 首轮 Core 全量在较大的 4,096 行合成稀疏测试已经通过后，Windows 测试进程随后以 `STATUS_ACCESS_VIOLATION` 结束；当时同一模块 focused `5/5` 通过。为降低单进程组合测试压力，计数夹具收敛为仍能证明同一复杂度的 1,024 行。随后又加强失败候选重试断言并增加 MOD writer 失败关闭回归；最终 focused 为 `6/6`，workspace 串行全量为 Core `839/839`（211.68 秒）、Host library `203/203`（30.55 秒）、Host main `2/2`（0.00 秒），合计 `1044/1044`、0 失败、0 跳过；workspace strict clippy、Rust fmt 与 diff check 通过。该失败史保留，不能写成首轮全绿。
+
+仍未关闭的全扫域包括：连续生产/矿机/供电探针的合法活动集合，material-delivery hubs，量子高扇出与部分 inventory key parse/write，拓扑重建、75% 稠密和所有 fail-closed 退化。它们必须分别建立 writer-closed wake 证书和独立 flat oracle 后才能继续收敛；本节不能把整个物流系统或四大目标标成 100%。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 均不变；本切片未连接生产、部署、签名或处理真实玩家存档。
+
+### 24.23 WIN-430 固定异构 prepare 与确定性串行提交（2026-09-01，开发候选）
+
+本切片选择的是能独立构造私有结果、并且能够恢复历史提交顺序的跨领域准备阶段；它没有跨越共享物料、浮点累加或线路冲突写屏障。与 24.24 及此前 ordinary 蓝图/O(active) 切片统一复审后，固定能力口径更新为 `Rust 唯一权威约 85% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 74% / 四项目标能力加权综合约 89% / 可放心发布成熟度约 60%`。
+
+1. `DeterministicRuntime::partitioned_prepare4/8` 使用进程生命周期内既有、最多 8 个 worker 的 Rayon 池，以固定二叉 join 拓扑运行异构只读闭包。返回值始终保持分区序号；所有任务必须完成后调用者才能检查 `Result`。活动分区少于 2、总工作量少于 4,096 或线程策略为 1 时自动在调用线程串行运行，不创建第二个池，也不让一次错误取消其他分区并由调度时序决定首个错误。
+2. 冷启动和缓存失效时，把 belt routes、ordinary logistics-buffer runtime、local peer directory、quantum directory、construction runtime、station-mode transition、quantum transition 以及 interstellar peer/activity 八类候选，从同一个不可变 Core revision 分区准备。belt 与 local 的可失败结果仍按旧 `belt → local` 顺序解包；星际目录刷新仍在 join 后的固定串行边界执行。只有整个 `PreparedFactoryAdvance` 成功并完成外层权威提交，这些候选才允许进入下一 revision；打开失败或推进失败不会安装部分缓存。
+3. 每个精确模拟步把 ready station、vein 和 ordinary machine 三类电力需求探针分区生成 owned event buffers。验证和电网累加继续严格按 `ready station → vein → machine` 以及各域原实体行顺序执行，因此 IEEE-754 加法、第一条可见错误和断电判定不受 worker 完成顺序影响。后续矿脉、普通机器、可再生能源和行星指标阶段共用同一个注入 runtime，1-thread 测试不再意外调用全局多线程 runtime。
+4. 可观测性新增 `partitioned-open-domain-prepare`、`partitioned-factory-domain-prepare` 和 `partitioned-power-demand-prepare` profile 行，包含活动分区、以 `entities + belts` 作为 threshold source rows 的输入代理、按策略计算的 worker 上限、实际进入外层分区闭包的 worker 数代理和并行标记；它不表示预留了固定 worker 子集，也不等于八个领域的真实累计工作量。它们只证明调度形状，不宣称真实档墙钟加速；冷启动同时构造多个目录可能增加短时 scratch overlap，需由固定真实输入的完整进程树 Private Bytes A/B 再决定是否接纳为默认性能收益。
+5. 回归使用不含玩家数据的 4,096+ ordinary machines、97 veins 合成夹具，比较一次核心工厂候选提交在 1/2/4/8 workers 下的序列化状态字节、canonical SHA-256、domain SHA-256 和物料投影 SHA-256，并重复 8-worker 运行。该 helper 有意不冒充 public advance：production-history、campaign、speedrun finalizer 和正式 cache-install 路径仍由既有集成回归覆盖。另有跨领域双失败回归证明所有闭包均已 join 后仍按固定域/行选择错误，以及两类原子性回归：第一分区失败和较晚 local 分区失败时，源 revision、规范哈希、完整字节和全部 prepared cache 均不改变。
+6. 本切片仍不等于全领域权威并行。共享 inventory/production/Dyson 的确定性写入、belt reservation/commit 冲突、全部物流提交、pure-idle/offline/time-warp、跨 CPU 与 Windows 10/11 调度矩阵、24 小时压力、真实档性能和全进程树内存仍未关闭；这些门禁未通过前 WIN-430 继续标记“部分完成”，`authorityEligible=false` 不得放开。
+7. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和玩家存档均未改变。本切片不连接生产、不部署、不签名、不读取或修改真实玩家存档。
+
+### 24.24 恒星系空间站可达写面、跨存档围栏与 definite rejection（2026-09-01，开发候选）
+
+本切片把已经存在的有界空间站投影和七类 durable intent 从“有代码但玩家没有可靠入口”闭合为星图可达链，同时修复两项会阻止正式接管的 P1：旧投影可能在新存档同 revision 上重新绑定，以及普通业务拒绝会把整个 Rust authority 误判为 uncertain。与 24.23 及此前 ordinary 蓝图/O(active) 切片统一复审后，采用上方 `85/97/97/74/89/60` 固定能力口径，不按文件数重复加点。
+
+1. 已发现的内置恒星系在 native/legacy 星图都显示“管理本系空间站”。原生 authority 打开 `system-space-station-workspace-v1`；Web/接管前继续使用既有 workspace。原生 UI 不读取完整 `GameState` 提交写入，也不把 patch、余额、奖励或升级范围发给 Host。
+2. renderer 的请求精确携带投影 `sessionId/runId/revision/registryFingerprint/systemId` 和一个 intent。broker 必须在调用时逐项匹配当前 main-owned runtime；system ID 同时进入语义摘要、command ID、Host 请求和 Rust request。Start/Deliver/Module/UpgradeAll 的 system 参数必须与投影一致；UpgradeOne/Mode/Output 由 Rust 从实体→行星→恒星系重新推导并限制在同一 system。旧窗口、session/run 切换、跨存档同 revision、跨系实体和全银河批量都失败关闭。
+3. `prepare_system_space_station_command` 与隔离 clone 的 apply 发生的缺科技、库存不足、unchanged/max/非法目标等错误，在 durable pending command 创建前包装为专用 Rust error type。Host 只用 `downcast_ref` 映射 `NATIVE_CORE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED`，禁止按消息字符串猜测。
+4. main runtime 只有在 active entry 是 `system-space-station` 且 error code 精确匹配时才把结果当 definite：拒绝当前 promise，取消所有依赖其预期 revision 的排队命令，保持 published checkpoint/revision/sequence，恢复 active 并重新启动时钟。普通 generic command 即使收到同 code 仍 uncertain。
+5. 首次响应 EPIPE 时仍进入 uncertain 并保留原字节请求；只有 byte-identical retry 真正取得 typed pre-stage rejection 后才恢复 active。已经 pending/ACK 的 replay、协议畸形以及 AfterStage/AfterWal/AfterCheckpoint/AfterReceipt/AfterLeaseAcknowledge 全部不得降级为 definite，继续使用既有幂等恢复。
+6. 当前组合 fresh 门禁为 typecheck、Node `74/74`、Rust Core 空间站 `13/13`、Host 空间站 `6/6`、Host typed response `1/1`、UI/store/App `34/34`，独立终审 P0/P1 为零。Rust fmt 首轮只发现测试夹具机械排版，标准格式化后提交；失败史保留。非阻塞 P2 是 preload 方法恒定存在导致人为混装旧 Host 时按钮可能先显示再被 capability 拒绝，匹配构建无影响。
+7. 本节不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；没有连接生产、部署、签名、读取或修改真实玩家存档。完整 orbital contract、运营/银河、MOD、productive pure-idle/offline/time-warp 和正式发布门禁继续按后续工作包推进。
+### 24.25 Ordinary producer/miner 的确定性活动结算（2026-09-01，开发候选）
+
+本切片只关闭 `simple_factory` 中已能证明全部 writer 的内置本地普通机器与矿脉外层扫描；不改固定能力百分比，也不把 power source、全局科研/戴森 barrier、行星指标或整个生产系统描述成已经完整 `O(active)`。
+
+1. `OrdinaryProductionRuntime` 是 revision 外的 session-only 目录，保存 topology identity、内置普通机器/矿脉稳定行目录、逐电网正 miner 计数，以及两个按实体持久行号排序的 wake set。它没有任何 GameState 字段，不进入 v47、WAL、checkpoint、导出、canonical/domain hash 或云协议。冷启动、command invalidation 和 topology rebuild 后的第一拍使用旧完整扫描。
+2. 当前接纳的最大独立安全子集是内置目录中的本地普通机器与矿脉。`matrix_research`、`solar_sail_launch` 和 `carrier_rocket_launch` 保持逐拍活动、按旧行序提交；活跃科研使整组 producer/miner 回到 full scan，因为同一拍可能完成科技或改变生产/矿速。非空 MOD registry、`mod:`/命名空间实体身份、实体数量或 topology identity 漂移、无法复验的选中行，以及任何 writer 覆盖不确定都会持续走原 oracle。
+3. 已闭合的外部 wake 包括 input 与 output 两段 belt 的真实 source/target 库存移动，以及 reservation 中有正 output credit 的精确 producer source key。普通实体、配方、科技、电力设置、机器/矿机数量、buffer capacity、resource mode 与 topology 的命令都沿既有 command/rebuild 边界失效 runtime；电源设施仍完整探测，仍可运行的机器和旧语义仍有 power demand 的矿脉不会休眠。有限资源耗尽由本行结算直接观察；full-output 矿脉只有 belt/output-credit 释放容量时才重新生产。
+4. 休眠采用一拍 quiesce：下一拍 wake 为 `pre-step runnable || post-step runnable`。因此机器消费最后一份输入、机器刚填满输出或矿机刚填满输出后，下一拍仍执行旧结算并把 `utilization`、`productionRate`、`progress` 和适用的 `powerFactor` 归零；只有从拍首到拍尾均不可运行、power demand 也不活动且零值已经落盘的行才休眠。有限矿耗尽同样完成拍间零值一致性，但旧 power probe 对“输出未满但资源耗尽”的 miner 仍报告 demand active，所以归零后仍常醒；不能为了更低计数改变旧电力语义。
+5. sparse selection 直接合并有序 wake、常醒 barrier 与 power-source 行，电力探针、矿脉 settlement 和普通机器 planner 都消费同一稳定子序列；共享产量、IEEE-754 累加和可见错误顺序不变。活动达到或超过 `75%` 时改走完整目录。full-output 休眠 miner 的 per-grid connected/disconnected 计数用同 topology 的整数聚合精确补回。
+6. runtime 与实体候选属于同一个 disposable transaction。`commit_selection` 先验证每个 selected supported row 的精确就绪顺序，验证完成后才替换两个 wake set；外层只有在完整 state revision 提交成功后才安装候选 Arc。测试在 wake 选择已经发生后故意破坏 `totalProduced`，证明失败时源 bytes、revision、Arc identity、pending wakes 和 scan history 都不改变。
+7. 独立 force-full oracle 在 `1/5/60` 秒逐步比较完整状态 bytes、canonical SHA-256、domain SHA-256 与物料守恒 SHA-256；同一 60 秒输入还比较 1/2/4/8 worker 和重复 8-worker 运行。4,164 行夹具的 scan rows 为 `4164`、`4164→2×4`、`4164→2×59`。另外覆盖 5 个固定随机种子各 120 步、每步 1～3 个库存事件，精确 `768/1024` 稠密退化，电源失去/恢复、燃料恢复、输入/输出阻塞、有限矿耗尽、矿机满输出、MOD、opaque identity/topology 漂移和失败候选。扫描计数只证明工作形状；未做固定输入 interleaved wall-clock A/B，因此不宣称吞吐提升。
+8. 仍未关闭的外扫/常醒域包括 power-source probes，科研与戴森全局 recipes，活跃科研触发的 producer/miner oracle，`collect_planet_metrics_with_runtime` 的全实体归集，production-history rate sampling，material-delivery hubs，量子高扇出/部分 inventory key parse-write，topology rebuild、自然稠密与全部 fail-closed 退化。这些域要分别取得 writer-closed 证书才能继续收敛。
+9. 最终源码的 workspace 串行全量为 Core `872/872`（246.64 秒）、Host library `210/210`（24.40 秒）、Host main `3/3`（0.02 秒），合计 `1085/1085`、0 失败、0 跳过；focused ordinary O(active) 为 `6/6`，simple_factory 为 `41/41`。1/2/4/8 worker 专项、Rust fmt、workspace strict clippy 与 diff check 均通过；这些数字不复用 24.22/24.23 的旧计数。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均不改变；本切片未连接生产、部署、签名，也未读取或修改真实玩家存档。
+### 24.26 Rust 权威轨道空间站合同板（2026-09-01，开发候选）
+
+本纵切在恒星系空间站工作区之后迁移玩家可见轨道合同操作，不调整 24.1 的固定能力百分比。范围只包括 contract board；cargo-terminal binding、decorations、profile/public showcase、construction、其他银河操作与 MOD 继续失败关闭。
+
+1. renderer 只提交 accept、deliver-quantum、claim、abandon、feature 五类 deny-unknown-fields intent，并绑定 session/run/revision/内置 registry。Rust 从当前 v47 权威状态重新生成 offer、限制 accepted 数量、核验任务日/状态/ID/库存，按请求量、可用量和剩余需求三者最小值守恒交付，重算加权结算与确定奖励。renderer 不提交 GameState、patch、余额、进度或奖励。
+2. durable request 额外绑定 main-owned `confirmedWallClockMs`。mutation broker 首次排队只采样一次并把它纳入 command ID；transport loss 复用同一 FIFO entry、clock、command ID 和 Host bytes。Rust 在 disposable clone 中先把 board clock 单调设为 max，再调用既有 `(lastConfirmedWallClockMs + TIME_ZONE_OFFSET_MS) / TASK_DAY_MS` 上海 UTC+8 synchronize，完成 expiry、offer rollover 后才执行 intent；成功进入既有 WAL/checkpoint/receipt/cold-replay 事务，reject 不修改源状态。
+3. 同 revision projection 不缓存昨日结果。main projection broker 每次读取内部采样 clock，renderer exact request 没有时间字段；Host 以 exact-realtime lease 二次证明 authority session/run/registry，Rust 在只读 clone 上 synchronize 后输出最多 4 offer、3 accepted、8 completed history、每合同 6 requirements、256 KiB。旧 offer 点击 definite reject 后 UI 在 FIFO settle 时强制重读，取得当前日 projection，不提交 rollover-only 伪成功。
+4. completed history 保持 8 行时采用 newest 7 + 较旧 featured；featured 已在 newest 8 时保留正常 newest 8。持久 history 满 48 条且 expiry 或 direct claim/abandon 插入淘汰最老 featured 时清 null，避免 strict projection 永久失败。orbitalMarks、stationReputation 和 exportedByItem 与 Web 一样在 256 位饱和，completedContracts 在 MAX_SAFE 饱和；command base revision 达 MAX_SAFE 前置拒绝。
+5. 当前 focused 结果为 Core `15/15`、Host `4/4`、Node `58/58`、renderer boundary `23/23`、Vitest `16/16`，typecheck 与 diff check 通过。测试覆盖库存不足、stale revision/run/registry、无源 mutation reject、上海午夜前后、旧 offer→fresh projection、到期同事务归档、direct claim/abandon 满 48 条历史、duplicate/lost response、五个 durable fault boundaries、cold replay、投影边界和跨语言饱和向量。完整仓库门禁仍须在冻结提交上执行，不能用本节 focused 数字替代发布验证。
+
+本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未连接生产、部署、签名、打包或处理真实玩家存档。
+
+### 24.27 活跃科研边界下 ordinary producer/miner 的确定性稀疏结算（2026-09-01，开发候选）
+
+本纵切只关闭 24.25 中“只要有活跃科研就无条件扫描全部普通 producer/miner”的已知退化；不修改科研结算公式、持久格式、固定能力百分比，也不把科研本身、全生产系统或全部物流描述为已经 `O(active)`。
+
+1. `matrix_research` 行继续逐拍常醒，并始终按持久实体行的历史顺序参与电力与结算。当前步若有可能完成有限科技或无限科研，ordinary producer/miner 必须在同一步使用原 full-scan oracle，因此研究行之后的机器/矿脉可以精确取得新科技、新无限等级带来的生产、采矿、堆叠或速度倍率；不能把完成事件延迟到下一拍。
+2. belt 输入阶段完成、科研结算尚未开始时，Rust 生成一个仅供本步选择使用的 `ResearchCompletionBoundaryProof`。全部研究所当前矩阵库存是本步可投入矩阵的严格物料上界，因为后续阶段在科研结算前没有 writer 会再增加 lab input。有限科研至少需要各成本剩余整数单位之和的 cycle；无限科研至少需要当前 level 剩余成本的 cycle。
+3. cycle 上界有意宁大勿小：对全部 research 行假设整拍满功率、持续使用可允许的最高 speed spray、忽略输入/输出限制，并纳入 building、machineCount、科研、行星专精倍率、已有 progress、向上取整及正浮点裕量。只有某项矩阵库存严格不足，或该上界仍严格小于剩余 cycle，proof 才允许其余已休眠普通行沿用 wake index；等于边界也 full scan。该证明只排除“本步第一次完成”，所以不需要预测完成后发生的 queue rollover 或 auto infinite 续研。
+4. 未知/MOD/opaque research writer、目录/实体/topology 漂移、非法或非有限数值、越界整数、缺失成本/进度/倍率、无限等级上限、可能完成和其他无法闭合的情况都稳定 fail closed 到 full scan。proof 不保存到 `OrdinaryProductionRuntime`，也不进入 GameState、WAL、checkpoint、增量 chunk、导出或 canonical/domain hash；普通命令、科技/设置/容量/拓扑变更仍沿既有 rebuild/invalidation 丢弃 prepared runtime。
+5. runtime 与实体候选保持同一事务边界：research proof 只影响 disposable selection；选中行失败、candidate 失败或更外层 revision commit 失败，都不得安装候选 runtime、清除源 wake 或部分提交实体。force-full oracle 继续比较正式序列化字节、canonical、domain 和物料守恒 SHA-256。
+6. 合成 4,164 行、活跃长科研的扫描证据为：有限科研在 `1/5/60` 秒得到 `4164`、`4164→2×4`、`4164→2×59`；无限科研得到 `4164`、`4164→2×4`、`4164→2×52→1×7`。两类都逐步等于 force-full 的完整 bytes 与三类 hash，并在 1/2/4/8 workers 下得到相同结果。接近有限/无限完成会回退 full scan；强边界回归让 `matrix_compression` 在研究行完成后，使同拍后置普通机器精确从 100 增至 104，错误关闭 oracle 会直接失败。
+7. 24.25 审计 P2 使用真实两段 persisted belt，而不是测试专用 wake API：满输出 producer 连接满 buffer，再连接下游 sink；下游移动逐拍腾出 bridge 与 producer capacity 后，producer 由真实 source/target 库存事件唤醒。最终扫描为 `33→1→1→1→1`，每拍与 force-full 的完整 bytes、canonical、domain 和物料守恒 hash 相同。首次 RED 为 `33→0→0→0→0`；根因是合成 storage 缺公开 `storedItemId`，按合法 bridge 语义不能搬运。只补齐测试夹具后转绿，没有放宽产品校验或直接注入 wake。
+8. 新增回归覆盖有限/无限科研、auto infinite 开/关、暂停、矩阵不足、库存足但 cycle 不足、接近完成、queued next tech、opaque state、同拍完成顺序、`1/5/60` 分段、1/2/4/8 workers，以及真实 belt 多拍唤醒。既有 ordinary focused `6/6` 继续通过，其原矩阵已覆盖有限资源、电源失去/恢复、低供给、输入/输出堵塞、随机库存事件、失败候选和 command/topology invalidation；本切片没有以新 helper 替代这些既有回归。
+9. 仍未关闭的外扫/常醒域包括科研 recipe 本身、power-source probes、戴森全局 barrier、行星指标全实体归集、production-history 采样、material-delivery hubs、拓扑重建、自然稠密、75% 普通活动集合及全部 fail-closed 路径。扫描计数不等于墙钟收益，真实大档、24 小时、多硬件、签名与发布仍是独立门禁。
+10. 冻结源码的最终 workspace 串行全量为 Core `891/891`（287.97 秒）、Host library `214/214`（34.72 秒）、Host main `3/3`（0.00 秒），合计 `1108/1108`、0 失败、0 跳过。既有 ordinary focused 为 `6/6`（22.02 秒）；新增长科研、fail-closed proof、同拍完成和真实 belt 回归均分别通过。Rust fmt 与 workspace `--all-targets --all-features -D warnings` strict clippy 最终通过。strict clippy 首轮真实报告两处 `manual_range_contains` 与一处 `if_same_then_else`；按等价 RangeInclusive 和合并布尔条件修复后 focused `1/1`、strict clippy 与最终全量转绿，失败史不删除。
+
+GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均未改变；本切片未连接生产、部署、签名、发布，也未读取或修改真实玩家存档。
+
+### 24.28 Campaign / Galaxy 完整薄 UI 玩家壳纵切（2026-09-01，开发候选）
+
+本纵切恢复 Rust 玩家权威下此前完全消失的 Campaign 与 Galaxy 两个入口；页头主按钮、溢出菜单和命令面板均直接进入对应 Native workspace。不调整 24.1 的固定百分比，不把入口恢复写成完整 Windows 计划完成。
+
+1. `campaign-workspace-v1` 由 Rust 固定任务目录导出最多 16 章、64 任务和 256 KiB；只含任务 ID/主支线/状态/完成与进度，以及最小 item/technology/entity/planet/workspace locator。renderer 复用静态目录仅显示标题与说明，不接收实体、线路、库存、奖励账本或 GameState；locator 只路由 UI，不选择任务或写游戏。
+2. Campaign 的任务总数与 Galaxy `campaignTotal` 都从同一 Rust `TASKS` 目录导出，完成 ID 只计算已知、去重条目。当前 projection 打开时仍调用实体解析并归集 factory metrics，复杂度为 `O(entities + belts)`；这是只读数据边界收敛，不是低成本缓存或 `O(active)` 查询。后续优化必须先建立同 revision 指标缓存或闭合事件账本。
+3. `galaxy-account-workspace-v1` 限 64 KiB 和 256 位十进制，只暴露模式/时间、累计生产、发电/吞吐、Campaign/科研/探索、银河评分与戴森摘要。所有浮点聚合先饱和到有限上限，再转十进制；研究/恒星系/行星计数只接纳当前目录中去重 ID，且全部不超过 JavaScript safe integer。
+4. Galaxy 的 Rust 游戏摘要与 renderer `accountState` 严格分层。账户创建、切换、资料、登录与绑定可以继续；native authority 下的账户操作不调用旧 GameState 记账。恢复、导入和覆盖活动主档没有组件 callback 或按钮，只显示必须先退出权威并经过受控持久化切换的说明。
+5. 两个请求精确绑定 `sessionId/runId/revision/registryFingerprint`；这四重 lineage 由 preload、main broker、Host exact-realtime lease、Rust 与 renderer boundary 逐层重验，异步 read 前后 authority snapshot 都必须一致。请求额外字段由 preload 与 Node `NativeCoreSessionRegistry` 拒绝，响应额外字段由 renderer boundary 拒绝；Rust `ControlRequest` 依赖 trusted Node 提交已经 exact-normalized 的请求，不宣称全局 unknown-field deny。旧 run 同 revision ABA、stale registry/revision、payload 超限、重复任务、计数不一致或 `truncated=true` 均整页失败关闭，不能拼接 Web GameState。普通同 lineage revision 前进时，renderer 继续挂载最近一份已完整验证的 Rust projection，直到新 revision 到达；不会每秒卸载 Campaign 控件或 Galaxy 账户输入、丢焦点/IME/草稿，迟到回包只能单调推进，run/registry 切换仍立即淘汰旧页。保留的 Campaign 数据只允许界面定位，Galaxy 写控件只属于独立账户域，因此旧显示 projection 不能写游戏权威。Web fallback 行为保持原样。
+6. 门禁覆盖 Core、Host、Node boundary、组件与 App：有界/只读/源 hash 不变；四重 lineage/ABA；truncated、重复 ID、counts、difficulty、decimal、unsafe count、主档兼容 flag；native route 只挂 Native workspace；失败页不暴露任务/账户操作；组件无 GameState 与主档 writer。冻结前 focused 为 Core `3/3`、Host exact lease `1/1`、Host bin `3/3`、Node `62 passed / 6 skipped / 0 failed`（6 个 release Host 集成测试因本工作树未建该二进制而明确跳过）；本轮 Campaign/Galaxy 稳定 DOM、草稿/焦点、run 切换、页头/命令入口及 App 集成 Vitest 为 `5` files、`30/30`，typecheck 通过。此前 strict clippy、fmt、production build/startup budget 与 diff check 也已通过；最终组合冻结后仍须重跑完整门禁，不能用这些 focused 数字替代 E2E、长跑、多硬件、签名或灰度。
+7. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、固定能力百分比或 `authorityEligible=false`；不使用真实玩家存档，不连接生产，不部署、不签名。
+
+### 24.29 WIN-430 pure-idle v10 确定性证书准备并行纵切（2026-09-01，开发候选）
+
+本切片继续关闭 24.23 明确留下的 pure-idle prepare 缺口，但不跨越共享状态、时间步或提交屏障。24.1 的固定能力百分比保持 `85/97/97/74/89/60`，不因一个安全纵切重新估算，也不把 WIN-430 标记为全部完成。
+
+1. ordinary 闭合流证书按旧依赖图形成两波。第一波从同一不可变 Core revision 私有准备 `exclusive vein sources / research sink / Dyson sail sink / Dyson rocket sink`；所有任务 join 后，第二波私有准备依赖 source 的 finite-vein 账本、仅在 sail sink 存在时有效的 renewable-power floor，以及独立的三窗口 ordinary flow。施工证书先用显式注入的同一个 runtime 完整解析一次实体目录并 join，再用同池准备 renewable power、construction-center identity 和 construction quantum fingerprint/grant；renewable/quantum 只读共享该私有快照。partition closure 不嵌套 Rayon，也不回退进程全局第二池。所有任务只读，不直接安装证书、cache 或修改 inventory/Dyson。
+2. 每波完整 join 后才按历史顺序串行传播错误和组装证书：ordinary 保持 `source → finite vein → research → sail → renewable → rocket → flow/closed recipe`，construction 保持 `renewable → centers → quantum`。太阳帆仍排斥并优先于火箭；source-only fallback 的原错误优先级保持不变。worker 完成先后不能选择错误，也不能部分发布。
+3. 调度沿用进程生命周期内既有、最多 8 worker 的 `DeterministicRuntime`/Rayon 池，不创建临时池。`entities + belts < 4,096`、worker=1 或活动分区少于 2 时自动串行。大合成目录为 `4,166 entities + 1 belt = 4,167 work items`；8-worker 专项实际记录 wave1 `4 selected / 4 observed`、无 sail 的 wave2 `2/2`、construction `3/3`，三者 `parallel=true`。同一目录的实体解析闭包在注入的 1/2/4/8-worker runtime 上实际记录 `1/1、2/2、4/4、8/8` selected/observed；这不是只读取配置值的伪诊断。wave2 不再把缺少 sail 时的 renewable 空任务计成活动分区。
+4. 回归比较 1/2/4/8/auto 与重复 8-worker 的完整 materialized state bytes、canonical/domain/conservation hash 和序列化报告；finite/infinite source、research、sail/rocket 互斥、renewable grid 与 construction quantum 证书均一致。新增 research+sail 与 center+quantum 相邻域双失败，证明完整 join 后仍由历史较早域选择 rejection；晚目录合法 JSON 但错误实体形状经过 public advance 时，1/2/4/8 返回同一拒绝，源 revision、完整字节、canonical hash、纯挂机额度均不变，且不安装 runtime cache。
+5. 修复隐藏全局 runtime 后重新执行 release prepare-only A/B：同一不可变合成输入先做 3 对预热，再执行 15 对交错 `1→8 / 8→1`。1-worker 中位为 `26,646,300 ns`，范围 `26,208,600..27,834,100 ns`；8-worker 中位为 `18,288,900 ns`，范围 `18,159,100..19,883,800 ns`。按 `1 - median(8) / median(1)` 得到 `31.364%`，通过合入前固定的 `3.5%` 门禁；nearest-rank P95（15 样本即最大值）改善 `28.563%`，没有尾延迟回退。结果只代表一次 injected-runtime entity parse + ordinary/construction certificate prepare，不包含 exact calibration、宏观应用、权威提交、production history、序列化或 I/O；不得宣传为端到端收益。
+6. 去路径证据 `docs/releases/1.2.3-windows-native-pure-idle-certificate-parallel-evidence-2026-09-01.json` 固化 15 轮原始纳秒、交错顺序、fixture 形状、阈值、实际解析 worker、输入 state/snapshot hashes、范围、中位数/P95、公式、Go 判定和首轮证据因全局 runtime/嵌套调度而失效的原因。证据不含真实玩家存档或本机绝对路径。
+7. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议或 `authorityEligible=false`。它不跨时间并行，不并行共享 inventory、production 或 Dyson 写入；完整 pure-idle/offline/time-warp 权威覆盖、跨 CPU/Windows 10/11、24 小时、多硬件与正式发布门禁仍未关闭。本工作树未连接生产、未部署、未签名，也未读取或修改真实玩家存档。
+8. 当前基线冻结源最终为 pure-idle focused `110 passed / 1 ignored / 0 failed`、Core 串行全量 `904/1/0`（905 项）、Host library `215/0/0`、Host binary `3/0/0`，release A/B `1/0/0`。失败史完整保留：旧基线第一次全量 `891/1/1` 抓到“轻量量子门禁通过、详细 fingerprint 随后不可建立”时的 panic，修复为候选守闭 `Ok(None)`；P1 首轮 focused 为 `109/1/1`，原因是新增 late-malformed 测试错误要求既有拒绝文本包含实体 ID，改为验证 1/2/4/8 完整拒绝原因一致后 exact 与最终 focused 通过，没有为测试放宽产品错误语义。独立审计还判定旧 A/B 因 partition 内调用全局 runtime/嵌套 Rayon 而证据失效；本节数值只使用修复后的重新认证结果。冻结提交上的 `cargo fmt --all -- --check`、workspace all-target/all-feature strict Clippy、证据 JSON 解析和 `git diff --check` 均通过；这里不以最终绿色掩盖门禁实际发现的问题。
+
+### 24.30 Material-delivery hub 双阶段确定性活动队列（2026-09-01，开发候选）
+
+本纵切只关闭 `simple_factory` 中 built-in material-delivery hub 每拍前后两次无条件全扫；不修改枢纽配送公式、持久格式、目录 admission 或固定能力百分比，也不把 opaque/MOD hub、连续生产或全部物流写成已经 `O(active)`。
+
+1. 运行时新增 session-only、按持久实体行号排序的 `MaterialDeliveryRuntime`。冷启动或 runtime 失效后的第一拍仍在两个历史 drain 阶段各遍历全部 hub，保留原行序与缺失/旧显示字段的归一语义。第一阶段选中的每一行都必须带入第二阶段，即使它已把输入清空；这样同拍末尾仍会按旧路径把 `utilization`、`productionRate` 和 `progress` 归零。
+2. 第二阶段完成后，只有实体身份属于内置 `material_delivery_hub`、三个 `deliverySlots` 形状合法、全部 `inputs` 值均为有限数值零，且每个已配置的普通物料目标行星托盘仍未满时才允许休眠。任何残留输入都继续常醒；托盘满也继续常醒，因此不需要证明托盘的全部潜在 writer。运输机/运输船仍按既有 portable-fleet 语义处理。
+3. 输入与输出两次真实 `belts::transfer_with_bandwidth` 都会清空并重新生成精确的 source/target changed-entity 集合。每一段在对应 drain 前把其中的 hub 行加入 wake queue；后段不是前段事件的追加集合。真实合成链分别使用 feeder→relay→hub、producer→hub 和 hub→sink，证明 relay 的前段移动、producer 的后段移动以及 hub 作为 belt source 的输出移动都能唤醒，而不是通过测试专用 wake API 伪造事件。
+4. 活动达到精确 `75%` 时按全 hub 持久行序执行 full scan。非空 registry、顶层/slot MOD 字段、legacy/opaque slot、未知物料、非有限输入或托盘、entity count/ID/building/planet 漂移、topology Arc 或目录数量漂移，以及任何无法闭合的形状都保持常醒或稳定回到 full-scan oracle；候选不能基于“不确定但当前恰好为零”进入休眠。runtime 持有 topology `Arc` clone，因此同长度、同容量的内容修改也会被后续 `Arc::make_mut` 强制 COW，pointer identity 必然变化并触发全扫；专项回归固定了这一边界。
+5. runtime 只在完整 simulation candidate 与外层 revision commit 成功后安装；它不进入 GameState、WAL、checkpoint、增量 chunk、v47 导出、canonical 或 domain hash。第一、第二阶段的 wake 更新都发生在 candidate-owned Arc 上；后段 readiness 在验证选中行与结果行完全同序后才原子替换队列。后续生产/全局结算失败时，源状态字节、Arc 身份、pending wake 和 scan history 均保持不变。
+6. flat-full 选择对照不调用 `MaterialDeliveryRuntime::select` 或任何 `force_full_scan` 开关，而是把 topology 的全部 1,024 hub 行直接送入与 indexed 路径共享的旧 drain body。它是独立于活动选择器的控制路径，不是第二套独立结算实现。`1/5/60` 秒分别产生 `2/10/120` 次 drain；indexed 冷拍两次均选 `1024`，随后每阶段最多选 `1`，flat-full 每次均选 `1024`。两者完整物化 bytes、canonical SHA-256、domain SHA-256 与合成物料守恒 SHA-256 完全一致；60 秒结果在 1/2/4/8 workers 下相同。
+7. 边界回归另覆盖精确 `6/8` 的 75% 稠密回退、托盘满且输入为零仍保持全部 hub 常醒、零显示字段规范化、MOD registry、opaque entity、选中 ID 漂移、同长度/同容量 topology COW 漂移，以及失败候选保留 wake。真实两段 belt 的 5 秒 indexed/flat-full 还逐字比较四类结果，并观察到 steady drain pair `(1,1)`；新增 hub→sink 用例证明真实 source 输出移动会唤醒休眠 hub。60 秒一次 advance 还分别与 `1/10/30` 秒内部步长下的 `60/6/2` 次提交比较：revision 增量先独立精确断言，只在比较副本中显式对齐该字段，之后完整物化 bytes、canonical、domain、守恒摘要及所有其余状态字段一致，没有按字段白名单掩盖差异。
+8. runtime `estimated_bytes` 是候选峰值而非稳态驻留数字：除 `MaterialDeliveryRuntime` 本体外，保守加入私有布局无法直接计量的首个 `BTreeSet` 节点固定余量、全 hub key payload，并按源 Arc 与 disposable candidate COW 同时存活计算双份。此前 Core 串行全量 `899/899`、0 失败、0 忽略（278.82 秒）严格属于隔离源码 `ab109bc`，不代表 `df47619` 或当前组合工作树；最终组合全量由 root 冻结后重跑。本审计修复块只执行 focused Rust、Rust fmt、workspace `--all-targets --all-features -D warnings` strict clippy 与 diff check，不运行 Host、Node、renderer、E2E、打包、安装、24 小时、多硬件、签名或灰度门禁。
+
+GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均未改变；本切片未连接生产、未部署、未签名，也未读取或修改真实玩家存档。
+### 24.31 Operations 分域薄 UI 与七个 durable 叶设置（2026-09-01，开发候选）
+
+本纵切恢复 Rust 玩家权威下此前整页拒绝的 Operations 入口。它只提供五个玩家可用页面：警报、设置、性能、存档和帮助；不复制旧组件的巨型 `GameState` props，也不把入口恢复描述成尚未迁移操作已经可用。
+
+1. `operations-workspace-v1` 精确绑定 session/run/revision/registry，外层固定 `truncated=false`，总载荷不超过 512 KiB。投影只包含七个权威设置叶、暂停/时间/实体/线路/当前星球/施工队列计数，以及最多 1,024 条同 revision 保守警报。preload、Node registry/main broker 和 renderer boundary 拒绝请求/响应额外字段并复验 identity、limits、counts 与 payload；Rust protocol 仍依赖 trusted Node 已做 exact normalization，不给整个 `ControlRequest` 添加全局 `deny_unknown_fields`。
+2. 警报复用 Rust factory presentation 的保守状态。`blocked` 为严重、`warning` 为警告，只有已知 `running/idle` 可无警报通过；无法证明的实体或未知 tone 不会静默漏掉，而是按 `unsupported-state` 严重警报。实体/线路行星必须属于当前内置目录，活动行与严重/警告计数全部使用 checked increment。总数超过 1,024 时返回 `status=overflow`、精确严重/警告计数和空 rows；renderer 同样拒绝任何携带部分 rows 的 overflow，避免展示部分真相。
+3. 唯一可写的游戏权威设置是 `simulationSpeed`、`technologyLayout`、`defaultBeltRouteMode`、`productionBufferLimit`、`logisticsBufferLimit`、`beltBufferLimit`、`proliferatorBufferLimit`。renderer 只提交 tagged semantic intent。main-owned FIFO 生成绑定 lineage 的 command ID；Rust deny unknown fields，重新验证范围和 unchanged，派生一个且仅一个 `settings.<leaf>` patch，并在 clone 上证明 entity/belt changed IDs 为空、数量不变且 `topologyDirty=false`，然后才进入既有 WAL/checkpoint/receipt/ACK。四个 buffer limit 无法证明单字段时失败关闭；不会清空、退款或重建线路。
+4. 资源模式、难度、能量模式、自动存档规则及其他破坏性/复合切换没有 intent。主题、字号、语言、警报显示、画布细节、连接点/命中区和默认传送带并联数是设备/renderer 偏好，不进入 Rust 或云存档；性能页的工厂规模来自同 revision Rust summary，60 秒监测明确标为本地 renderer 诊断，不作为游戏权威事实。
+5. 存档页只复用 main-owned 手动 native checkpoint 和流式 v47 export。import、confirm import、restore、overwrite、slot save/load、snapshot rollback，以及 MOD validate/register/enable/remove 都以 disabled 说明呈现，Native 组件没有对应 callback。诊断导出显式调用 `collectClientDiagnostics(undefined)`，不读取旧 renderer GameState。
+6. 同一 `session/run/registry` 的 authority revision 前进时，组件继续挂载最近一份已完整验证的 Rust projection，异步读取更新 revision；不会瞬间切成 loading、卸载输入 DOM、丢失焦点/IME，亦不会回退到旧 renderer `GameState`。晚到的同 scope 回包只可单调推进显示 revision，不能覆盖更新结果；session/run/registry 真正切换时则立即关闭旧 scope。设置草稿按该 scope 保存，只有 scope 切换、明确提交失败，或 durable ACK 后到达同 scope 的更高完整 projection 才按 Rust 值复位。玩家在旧显示 projection 仍挂载时提交的意图绑定当前 authority identity 的最新 revision，由 Rust 再验证 leaf/unchanged；不拿旧显示 revision 冒充当前权威。Native 与 Web 共用 App 持有的 `operationsTab`；页头主按钮、溢出菜单和命令面板都可直接进入原生 Operations，页头“设置”快捷入口直接打开设置页，组件切页也同步同一状态。设置 durable ACK 必须连续到 `R+1`，且 leaf-only receipt 不能带 entity/belt IDs 或 topology dirty；成功 ACK 本身不会解除 pending，只有同 scope 更高 revision 的完整 projection 到达才解锁，明确失败才可立即复位。同步锁阻止 React rerender 前的连续点击重复入队。Web 仍走原 `OperationsWorkspace` 与既有 props/callback，行为不变。
+7. 当前组合源码 focused 为 Rust Core `2/2`、Host `3/3`（包含七叶 FIFO、duplicate ACK 与五个 durable fault boundary 冷恢复）、Node/preload/renderer/runtime `125/125`；本轮稳定 DOM、当前 revision 提交、迟到回包单调性、入口和 App 集成 Vitest `17/17`，typecheck、Rust fmt 与 workspace strict clippy 通过。此前组合完整 Vitest 为 366 files 通过、13 files 跳过，`2,897` tests 通过、`29` 跳过、0 失败；本轮 UI 修复后的最终完整 Vitest 尚待 source freeze 后重跑。完整 E2E 首轮为 `432` 通过、`27` 跳过、`1` 个英文星图新增按钮漏翻译失败；补齐精确词条后该失败用例单独重跑 `1/1` 通过，最终完整 E2E 同样留到组合冻结后执行。不能用 focused 或单用例数字替代最终发布门禁。
+8. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；不连接生产、不部署、不签名，也不读取或修改真实玩家存档。
+
+### 24.32 行星指标活动探测与重型工作区跨 revision 稳定显示（2026-09-01，开发候选）
+
+本组合纵切同时收敛一个每模拟步热点和两个重型薄 UI 的 revision 抖动。它不改变公开状态，不把只读显示缓存当成权威状态，也不据此提高尚未统一复审的固定百分比：
+
+1. `PlanetMetricsRuntime` 在 session 内保留按持久实体序排列的紧凑 probe baseline，并只对本步实际 writer 精确唤醒的实体重新读取 JSON/catalog。`productionRate`、储能、燃料剩余/被选燃料输入、机器数量以及行星/建筑/拓扑的全部 writer 已逐项审计；量子、线路、物流、施工、物料配送、戴森接收、银河出口和纯挂机尾段分别使用精确 wake、跨 barrier pending 或全量失效，不凭观察到的零值猜休眠。
+2. 汇总仍按全局持久实体顺序串行重放紧凑标量，保留既有 IEEE-754 加法顺序；优化的是昂贵 JSON/catalog 探测，不宣称总阶段已经严格 `O(active)`。MOD/opaque、非法 shape、registry/目录证据不全、拓扑 Arc/COW 漂移、命令/import、75% 稠密阈值或索引失配都走真正绕过 selector 的 flat-full 路径。候选 runtime 只在外层状态 commit 成功后安装，失败时源 bytes、规范/领域/守恒 hash、pending 集合和 Arc 身份不变。
+3. 16,384 行 × 9 轮合成 pre-gate 中，indexed 与 flat-full 每轮先证明完整结果逐 bit 相等；昂贵 probe 行数为 `9 / 147,456`，debug 中位约 `502 / 1,416 µs`。该数字只说明探测切片，不外推完整模拟秒或真实玩家档。首次合并后 `planet_metric` 专项 `15/15` 通过，但独立复审仍判定 No-Go：pause-only 命令递增 revision 却保留旧绑定，首次误判 full 又会把 `directory_fallback` 永久粘住。候选现只在这个已证明不改实体/目录/拓扑的 pause-only 事务中重绑 runtime revision；其他命令继续全量失效。新增 warm→pause→resume→5 内部步回归要求五步均 sparse，修复后专项为 `16/16`，另含 1/5/60、1/10/30 分段、1/2/4/8 worker、同长度 COW、MOD/损坏 shape、失败原子性与 post-barrier writer；原 pause lifecycle `1/1` 继续通过。
+4. 建筑制造中心和戴森规划在同 session/scope 且旧 revision 不大于当前 authority revision 时，可继续挂载最近一份**完整验证过的只读投影**等待新页。DOM、搜索/草稿、焦点和 IME 不再被普通模拟 revision 每秒卸载；run/活动行星、registry/恒星系或投影可用性变化会同步移除旧 frame。缓存期间全部 Rust 权威按钮、Enter、失焦和选择命令锁死，App 命令处理器仍只接受当前精确 frame，不会拿旧 frame 提交，也不会回退读取 renderer GameState。
+5. 制造中心相关组件/App focused 为 `19/19`，戴森组件/store/命令/App focused 为 `23/23`，两轮 TypeScript 均通过。本节数字仍不是源码冻结的完整 Vitest、native、server、build 或 E2E；这些组合门禁必须在剩余功能合并后重新从零执行。
+6. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；不连接生产、不部署、不签名，也不读取或修改真实玩家存档。
+
+### 24.33 生产统计刷新边界复用稳定拓扑（2026-09-01，开发候选）
+
+本纵切消除每个 10 秒生产统计刷新边界上两次可证明多余的全实体诊断遍历。刷新仍须为库存快照和历史速率按持久顺序读取全部实体；本节没有把这个必要主遍历伪称为 `O(active)`，只把紧随其后的电源网发现和堵塞建筑分类改为复用冷启动已经完整建立的稳定拓扑索引。
+
+1. 电源网探测只访问 `power_source_indices` 中的内置 power 行和 `ray_receiver/ray_power` 行；每行仍从原存档对象读取精确 `powerGridId` 字符串，并再次验证 kind/building/recipe，因而不会把未知 MOD 网格折叠成同一个紧凑 ID，也不会改变缺失字段默认值。
+2. 堵塞分类复用按持久实体行号稳定排序的 `production_history_rate_indices`。稀疏目录只访问 machine/vein 候选；索引达到精确 75%、构建期已经释放稠密索引、或索引有效性无法证明时，仍走历史全扫描。分类函数、浮点累加顺序、research/power/resource/输出堵塞规则均未复制或改写。
+3. 新的 flat-full 对照不调用稀疏选择器：它把 power 索引替换为全部实体，并强制堵塞分类走完整实体目录；共享分类函数在每行重新验证资格。4,097 行合成目录中，旧的两个额外诊断遍历共探测 `8,194` 行，新路径探测 `1` 条电源行和 `64` 条生产候选，共 `65` 行。1/2/4/8 worker 下，稀疏路径与强制 full oracle 的完整 JSON bytes 和 canonical SHA-256 均一致，源状态 bytes/hash 不变。
+4. 当前源码的 production-history 聚焦套件为 `25/25`，新增 flat-full 对照单测为 `1/1`；Rust fmt、workspace all-target strict clippy 和 diff check 通过。这里没有执行或复用最终完整 Vitest、Host、Server、E2E、24 小时、多硬件、安装、签名或灰度门禁；组合源码冻结后仍须全部重跑。
+5. 本切片不增加持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、canonical 规则或 `authorityEligible=false`；未连接生产、未部署、未签名，也未读取或修改真实玩家存档。
+
+### 24.34 两类空间站薄 UI 跨 revision 稳定挂载（2026-09-01，开发候选）
+
+本纵切让恒星系空间站和轨道合同在同一个 authority session/run/registry/scope 内等待下一 revision 时继续显示上一份完整验证的有界 Rust 投影。它优化的是 renderer DOM、输入草稿和分页稳定性，不把旧投影提升为当前权威，也不改变任何游戏结算。
+
+1. 恒星系空间站 store 现在区分“scope 身份”和“精确 revision 身份”。普通 revision 前进可暂存同 system、同分页 selector、revision 不晚于当前权威的上一帧；run、registry、system 切换以及管理员恢复式 revision 回退都立即拒绝旧帧。新请求失败仍清空缓存并进入 unavailable，不会永久展示旧数据。
+2. hook 的四路分页 cursor 只在 session/run/registry/system 真正切换时复位，普通每秒 revision 不再跳回第一页。组件在 React effect 开始新请求之前就把旧 revision 识别为 loading，因此全部施工、交付、模块、升级、模式、输出口和分页按钮锁定；只有精确当前 revision 的完整投影才重新开放命令。
+3. 空间站内容块放在 loading 提示之前保持稳定 React 位置。专项实际保留同一个 overview DOM 节点和第 65 行分页，随后单调替换为 revision 42；旧 run 的迟到响应继续由 AbortSignal、token 和 request key 三重隔离。
+4. 轨道合同只在 session/run/registry 相同且缓存 revision 不晚于当前 authority 时显示旧帧；普通 revision 期间合同列表和量子交付草稿保持挂载，但接受、交付、领取、放弃和展示按钮全部锁定。run 切换的同步 render 已直接隐藏旧合同，不等待 effect 或 IPC 返回，因而没有一帧跨存档内容泄漏。
+5. 当前组合 focused 为 4 files、`27/27`，包含 store、两类组件和 App 接线；typecheck 与 diff check 通过。这里未执行最终完整 Vitest、production build、Chromium E2E、安装、24 小时、多硬件、签名或灰度，组合源码冻结后仍须重新运行。
+6. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host 协议、canonical 规则或 `authorityEligible=false`；未连接生产、未部署、未签名，也未读取或修改真实玩家存档。
+### 24.35 Operations 同 lineage/revision 增量投影（2026-09-01，开发候选）
+
+本纵切只优化 24.31 的只读警报与规模摘要，不改变警报规则、设置写面或 Web fallback。结论是“同 revision 与普通稀疏实体变化的热路径已收敛”，不是“Operations 警报已经在所有 revision 上严格 `O(active)`”。
+
+1. Rust 增加 hash-neutral、checkpoint-neutral 的 `OperationsProjectionRuntime`。缓存绑定 checkpoint lineage、revision、目录/拓扑语义和实体稳定行顺序；保存每行 `Quiet/Critical/Warning` 分类，但警报正文始终最多驻留 1,024 行。相同 lineage/revision 的重复打开直接复用已验证快照，实体、线路和全局依赖访问数都为 0；活动行星实体/线路数量直接读取 `FactoryTopology` 的 per-planet 索引，不再为摘要扫描全表。
+2. 精确模拟提交复用现有 raw `Arc` identity 得到 changed entity rows。全局警报依赖摘要不变且变化少于 75% 时，只重新分类这些稳定行，并按旧行序增量调整分类计数；普通非 overflow 情况只为最终仍告警的变化行构造正文。由 overflow 恢复到不超过 1,024 行时才有界重建全部最终正文；仍 overflow 时临时正文数保持 0。变化达到 75% 先直接 Reset，不再浪费一次全局依赖构造和 SHA。
+3. 冷启动/失效继续使用独立 flat-full oracle，并以固定 persisted row 顺序在 1/2/4/8 worker 上并行准备分类；实体验证仍先于线路验证，错误可见顺序不变。线路只影响当前警报投影的目录/行星合法性，因此稀疏实体 revision 的增量路径访问 0 条线路；拓扑、命令、import/reload、checkpoint lineage、目录语义和未知 writer 边界全部丢弃 cache，下一次打开才 flat rebuild。
+4. 全局依赖闭包明确包含暂停、四类 buffer/resource/speed、电网与行星供电、矿脉利用、海洋类型、戴森发射/轨道、施工开关/任务 membership、时间扭曲 controller/enabled/effective 和科研 selected/completed membership。测试逐项修改 19 个依赖并要求事务 Reset 后与 flat oracle 一致。`CoreState.catalog` 对 Host 改为只读 snapshot accessor，防止外部安全 Rust 在不更新 topology seal 的情况下替换已验证目录。
+5. cache 只在所有可失败的权威候选工作完成后从源 runtime 移出并与同一 revision 一起发布；clone、失败候选、失败命令、保存失败、Worker/reload/import 都不能泄漏或部分安装新分类。更重要的是，Operations 是 disposable read model：增量投影本身若遇到 malformed/MOD presentation 数据，只会把 prepared token 降级为 sealed Reset，绝不能让一个已经通过游戏规则的模拟提交因“玩家是否打开过 Operations”而成功或失败。专项用例比较开/不开 cache 的完整 materialized bytes、revision 与 canonical SHA-256，并在提交后继续让 UI 投影严格报错，而不是掩盖坏数据。
+6. 内存估算纳入 cache 的分类数组、最多 1,024 行正文及树节点保守开销；summary cache 同时绑定 Operations runtime bytes，transaction clone 不会把源 cache 内存误报给空 clone。初次打开、后续增量安装和 cache 清除都会使 summary 在同 revision 下重新计算准确 runtime bytes。
+7. 最终 focused 为 `14 passed / 0 failed / 1 ignored / 911 filtered`；ignored 项是显式手工 release 基准。5 万实体、5 千线路的最终合成基准为 flat oracle `220,030 µs`、cold cache `45,792 µs`、同 revision 20 次投影 `27,318 µs`（约 `1,366 µs/次`，包含有界 JSON 投影组装）、单行 `operations-only` 增量 prepare+install `97 µs`，cache 驻留估算 `515,269 B`。这组数字只证明 Operations 子阶段，不包含完整模拟、实体 raw 编码、UI 渲染或进程 IPC，也不是玩家真实档吞吐承诺。
+8. 回归另覆盖 `1/5/60` 分段、flat-full oracle、失败候选/命令/保存、checkpoint reload/public import、MOD/opaque、overflow、目录漂移、1/2/4/8 worker 确定性和 cache memory bound。首轮最终复跑与其他 Rust 门禁并发时 rustc 因系统内存不足中断，未产生测试断言失败；资源释放后上述 focused 与 workspace strict clippy 通过。冻结提交前还执行 Rust fmt、workspace check、strict clippy 和 diff check；不把一次基础设施 OOM 改写成产品测试失败或首轮全绿。
+9. 完整 alerts 跨 revision 的严格 `O(active)` 仍为 **No-Go**：只要玩家打开过 Operations，每个稀疏 revision 仍需遍历规模较小但可能全局的电网、行星、戴森轨道、施工任务和科研 membership 来证明没有高扇出语义变化；冷启动、依赖变化、75% 稠密、拓扑和所有 fail-closed 路径仍 flat rebuild。只有这些全局 writer 取得事件化 revision stamp 或闭合账本后，才能删除该依赖遍历并宣称完整活动化。
+10. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议或 `authorityEligible=false`；未读取真实玩家存档，未连接生产，未部署、打包或签名。Web 行为保持原样。
+
+### 24.36 生产统计薄 UI 跨 revision 稳定挂载（2026-09-01，开发候选）
+
+本纵切修复 `NativeStatisticsWorkspace` 的 renderer 生命周期与 player-authority 读取接线；它不改变 Rust 统计桶、模拟结算或持久状态。
+
+1. 审计先确认两个独立根因。App 过去把“当前 authority revision”和“不带 identity 的上一份 samples”分开保存，刷新窗口会把旧历史误标成最新 revision；更早的打开/刷新路径还调用只允许 JavaScript shadow 的 `WindowsNativeCoreBetaController.readVerifiedStatisticsProjection`，Rust player authority 下必然 fail closed。更关键的是，runtime 成功 tick 会先发布新的 active revision、再在 promise `finally` 清除 `inFlight/currentOperation`；通用 active selector 因此每秒短暂返回 null，统计 key 在 scope 与 `native-statistics-unbound` 之间往返并整棵卸载。原生统计现不再复用 beta/Worker 缓存，Web/JavaScript 路径保持原行为。
+2. 新的 session-only `NativeStatisticsWorkspaceStore` 把 samples 与 `sessionId/runId/revision/registryFingerprint` 原子绑定。同 session/run/registry 且缓存 revision 不大于当前 authority revision 时，上一份完整验证的 frame 可在 effect 前、loading 期间以及新读暂不可用时继续作为只读缓存；页头、data attribute 与提示始终标注 frame 自身 revision。精确新帧只允许单调替换，旧请求由 token 与 exact key 隔离。除比较缓存 revision 外，selector 还比较最近一次 `requestedRevision`：ready 17 → pending 20 → authority rollback 19 会同步隐藏并清除 17，late 20 不能复活。
+3. App 现在把统计 authority 分成 `displayFrame` 和 `readFrame`。settled active 同时提供二者；active tick 瞬态只沿用同 session/run、revision 未回退的 `lastConfirmedFrame` 作为 display，`readFrame=null`，所以 effect 不 close、也不发不确定 revision 的 IPC。settled 新帧到达后才前推读 identity。组件 scope key 不含 revision，普通每秒推进、读取失败和旧帧替换都保留同一个输入 DOM、筛选、趋势选择、焦点与 IME；session/run/registry 变化、uncertain/paused/terminal phase 或 revision rollback 仍立即移除旧数据。
+4. direct statistics request 现同时携带 `runId` 与 `expectedRegistryFingerprint`；两者必须成对出现。main 只要发现任一 player-authority lineage tag 就强制走 broker，即使 handoff 后 broker 已不再 owns 该 session 也不会回落 renderer-owned shadow route。broker 在读前/读后用 runtime snapshot 校验 session/run/revision；`NativeCoreSessionRegistry` 为 open/import/startup-recovery session 保存不可变 registry fingerprint，并让 broker 再校验 owner、owner epoch 与 registry。这样 same-session/same-revision 的 run ABA、registry 漂移、读中 handoff 和单 tag 请求均失败关闭；无 tag 的 JavaScript shadow 请求继续兼容。
+5. 统计薄 UI 只有本地筛选、趋势选择和关闭，没有游戏权威写 callback；旧 frame 期间不存在可误提交的权威写面，组件仍不接收 `GameState`、Worker、`commitGame` 或 legacy `statisticsHistory`。全历史请求遵守 Host 精确硬上限 `30 × 24 × 60 × 60 × 10,000` 秒和 512 samples；只有单页完整返回且 `nextCursor=null` 才发布，多页结果不会被截断后冒充完整历史。
+6. 当前 focused 为组件/store/App integration 3 files `17/17`、player-authority projection broker `11/11`、Native Host `28/28`，合计 `56/56`；TypeScript、production build（含 startup budget）与 scoped diff check 通过。回归覆盖 settled 17 → tick in-flight → settled 18 全程同一 input DOM/筛选/选择/焦点且 tick 中不读、target revision rollback、同 scope 失败缓存、late response、run pre/post race、registry/ownerEpoch race、tagged no-fallback、单 tag 拒绝、untagged shadow 兼容和真实 Host 窗口上限。这里不是完整 Vitest、Rust、server、E2E、安装、签名或多硬件门禁，组合源码冻结后仍须统一重跑。
+7. 本切片只扩展 renderer→main 统计读请求的可选 lineage metadata 与 main 内部 session metadata；Host 统计 wire result、Rust projection schema、`state.rs`、`operations_workspace.rs`、GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、canonical 规则和 `authorityEligible=false` 均不变。未读取真实玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.37 Campaign 指标 writer-closed 增量账本（2026-09-01，开发候选）
+
+本纵切收敛两个此前叠加的全厂扫描：未完成 Campaign 会在每个精确模拟 revision 重新统计全部建筑、矿机、物流站行程、喷涂机和线路等级；生产历史采样又可能为同一 Campaign 再收集一次。新实现把可证明的稳定指标留在 Rust session，并只接收本步真实 writer 事件；Campaign 规则、奖励、公开 v47 和浮点兼容语义不变。
+
+1. `CampaignProjectionRuntime` 保存 checkpoint lineage、revision、按持久实体行排列的紧凑 contribution、建筑/矿机/喷涂机累计值和线路等级计数。它只在未完成 Campaign 打开存档时复用已经为 admission 解析的实体记录播种；已完成 Campaign 的存档驻留开销为零，只有玩家真正打开 Campaign 工作区后才懒构建只读缓存。cache、负缓存和诊断均不进入 GameState、WAL、checkpoint、canonical hash 或云存档，事务 clone 从空 runtime 开始。
+2. 普通精确模拟中，`buildingId`、`machineCount`、`minerCount`、`sprayCoaterInstalled` 和 belt tier 都属于稳定 topology；审计确认唯一动态 Campaign factory 指标是 `stationTrips`。本地与星际物流推进现在返回实际写过的 station persisted rows，外层跨 1/5/60 秒内部步稳定排序去重后提交。空间站模式造成 topology 变化时不猜测，整份 cache 失效；命令、import、raw/topology 写面和未知纯挂机提交同样失败关闭。
+3. 增量账本只接受非负、整数且不超过 JavaScript 最大安全整数的 contribution，并用 checked add/sub 证明累计值。合法小数、MOD/opaque 或溢出形状继续使用旧 f64 全扫描结果，绝不为了性能改变 Campaign 进度；同时以 lineage-scoped negative cache 记住整数账本不适用，后续 revision 不再先做一次注定失败的 O(全部实体) rebuild。invalidate 或 lineage 改变会清除此结论并重新证明。
+4. 生产历史现在可接收同 revision 已证明的 Campaign metrics。非 10 秒 refresh 边界因此继续走 production-rate 稀疏目录，不会仅因 Campaign 未完成而强制全实体扫描；refresh 仍为库存和堵塞诊断读取必要行，但不再产生第二份 Campaign collector。4,097 行合成例中，prepared 路径与旧 full collector 的完整 history JSON、Campaign 结果和 canonical 顺序相同。
+5. prepared token 在所有可失败的实体编码、belt seal、canonical/summary 工作完成后才从源 runtime 移入候选并安装；失败候选、取消、保存/摘要失败和 clone 不会清空源 cache 或发布部分 revision。cache 内存纳入 `estimated_runtime_bytes` 和 summary cache key；旧 topology memory 测试同步补齐其手工公式漏掉的全部稳定 index 与 64-byte catalog fingerprint，而不是把真实内存隐藏在固定数字外。
+6. 回归覆盖 same-revision 工作区复用、1/5/60 秒增量与独立 flat oracle 完整投影 bytes/canonical hash、两类物流站行程 writer、topology reset、小数 MOD 负缓存、已完成 Campaign 零预载、历史稀疏复用、1/2/4/8 worker 旧 f64 收集一致性，以及三个失败候选/外层 Campaign 原子性边界。当前 focused 为 Campaign 过滤桶 `10/10`、production-history `23/23`、失败原子性 `3/3`；workspace check、Rust fmt、all-target strict clippy 和 diff check 通过。
+7. 完整 Core 默认并行首跑在 Windows 测试进程中以 `STATUS_ACCESS_VIOLATION` 退出，独立复跑又出现 `STATUS_HEAP_CORRUPTION`；相关定向并发/route/Campaign 测试均通过，改动不含 `unsafe`。单测试线程的 943 项首轮为 `940` 通过、`2` 按设计忽略、`1` 个旧 topology memory 手工公式失败；该公式按根因修复后，产品代码冻结点的 945 项串行全量为 `943` 通过、`2` 按设计忽略、`0` 失败（319.11 秒）。其后只把已有 completed-cache 测试扩展为 cold revision `0 rows/0 bytes`、workspace warm revision `0 rows incremental`，该扩展 fresh `1/1` 通过，未再改变产品代码。默认并行 heap corruption 另列 Windows 测试基础设施/全局状态 P0 调查，不静默删除，也不能用串行通过冒充并行问题已经解决。
+8. 本切片没有新增持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Campaign 奖励、Host 协议或 `authorityEligible=false`；未读取真实玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.38 Technology / Recipe / Dyson 跨 tick 稳定薄 UI 与自动边界门禁（2026-09-01，开发候选）
+
+本组合纵切把统计、Campaign/Galaxy 之后仍会在 player-authority tick 瞬态卸载的三个高频工作区统一收口，并把“Native 玩家界面不能重新吃回完整 GameState”从人工约定升级为 production build 门禁。它只稳定已存在的有界 Rust 投影和命令入口，不增加任何新的游戏结算语义。
+
+1. `6e74167` 让 Technology、Recipe 与 Dyson 使用同一套 `displayFrame/readFrame` 时钟边界。settled frame 可同时显示和读取；tick 已发布新 revision、main 尚未清除 in-flight 的窄窗口只保留同 session/run 的最后确认 frame 只读显示，不发不确定 revision 的 IPC。组件 key 不再包含 revision，因此普通每秒推进不会重建 DOM、清空搜索/草稿或丢失焦点与 IME。
+2. 三类 store 的 frame 与 source 都显式绑定 `sessionId/runId/revision/registryFingerprint`。同 lineage 的旧 revision 仅可在 loading/unavailable 窗口显示，所有写操作仍要求当前精确 projection；run、registry、owner epoch、revision 回退和 selector 改变会立即失败关闭。Technology/Recipe 请求与 projection broker 增加 run/registry 双侧验证，Dyson 默认恒星系也只从同 run 已验证页继承，不从旧 GameState 猜测。
+3. 请求去重只复用 exact request key 的同一 promise；迟到结果还要再次通过 owner、owner epoch、run、revision 与 registry 检查才可发布。业务拒绝不会把整个 authority 标成 uncertain，handoff/ABA 或 registry race 也不会把旧页重新绑定到新运行代际。
+4. `ed1b814` 增加基于 TypeScript AST 的 `verify-native-thin-ui-boundary`。production build 现在检查 App 中 13 个专用 Native 玩家界面绑定，禁止 `game/GameState/state/Worker/commitGame` 等完整状态或旧写入入口、禁止 JSX spread 隐藏整包依赖；同时扫描 12 个独立 Native 组件文件，拒绝 `GameState/FactoryEntity/BeltConnection` 完整工厂类型和直接 legacy authority 调用。合成反例与当前仓库门禁为 `4/4`。
+5. `62ea013` 修复一条旧静态测试的误匹配：它过去会把 `NativeGalaxyWorkspaceStore` 泛型声明误当成 `<NativeGalaxyWorkspace>` JSX，并把其后的上万行 App 当作 props。现在只截取精确自闭合 JSX opening；导航/失败关闭专项为 `11/11`，避免代码体积增长制造假回归。
+6. 冻结提交的新鲜验证为 focused Vitest 12 files `89/89`、Node broker/Host/三类 IPC/renderer boundary `75/75`、typecheck、production build（2,097 modules）、startup budget、Node syntax、diff check 与薄 UI 门禁全部通过。本节没有复用或冒充最终完整 Vitest、Rust、Server、E2E、安装、24 小时、多硬件、签名或灰度结果。
+7. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、canonical 规则或 `authorityEligible=false`；未读取真实玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.39 可再生电源昂贵探测与结算活动化（2026-09-01，开发候选）
+
+`e266044` 收敛 `simple_factory` 中此前每个内部模拟步都会重新解析全部 power source JSON/catalog，并在随后 display patch 与 ordinary settlement 中再次访问全部可再生电源的热点。结论严格限定为“`O(active expensive probes + active renewable settlement)`”；全局浮点汇总仍按持久顺序重放全部紧凑行，不能把该子阶段写成完整 `O(active)` 电力系统。
+
+1. session-only `PowerProbeRuntime` 只缓存 writer-closed 的风力、太阳能和地热静态 probe；燃料电站、蓄电池、能量枢纽与射线接收始终动态重探。缓存绑定 revision、factory topology Arc、catalog Arc、entity/source 数量和完整 planet wind/solar/geothermal profile signature。冷启动、命令/import、拓扑或目录变化、profile 变化、非空 MOD registry、malformed shape、索引漂移及精确 75% 稠密阈值都走独立 flat-full 路径。
+2. 暖拍只为动态 source 构造完整 probe，并跳过已证明不变的 renewable display patch 与 ordinary settlement 行；冷拍与任何失效拍仍会全量写回。低负载→高负载→低负载、断电→恢复、动态 fuel/ray 与静态 renewable 混合回归逐字比较 `powerOutputKw/powerInputKw/utilization/productionRate`，没有用“当前恰好相同”替代 writer 审计。
+3. 无论 indexed 还是 flat-full，最终 grid/class 汇总仍按全部 source 的持久顺序重放紧凑标量，保留 JavaScript 的 IEEE-754 左结合顺序。`1/5/60`、1/2/4/8 workers、同一 advance 内科研完成边界、planet profile、dense/fail-closed、ray、fuel、MOD/malformed/topology 和候选失败原子性均要求完整物化 bytes、canonical/domain hash 与旧 oracle 相同。
+4. runtime 只在完整 simulation candidate 与外层 revision commit 成功后安装；失败候选不会清空源 cache 或发布部分 wake。内存估算按 runtime COW、静态 baseline、动态 source slots、profile signature 和一次完整 legacy probe buffer 的候选峰值保守计入，不把 cache 隐藏在 summary 外。
+5. 第一版只省 JSON/catalog probe，16,385 sources × 9 steps 的整段 A/B 仅约快 0.4%，因此没有合入。闭合 display patch/settlement 后，五次 indexed/flat-full 分别为 `1,115,235/1,520,441`、`1,121,843/1,495,976`、`1,404,874/1,787,710`、`1,174,693/1,736,010`、`1,149,744/1,608,502 µs`，稳定改善约 21%～32%，无跨零。expensive probes 为 `16,393 / 147,465`，两边 compact replay 均为 `147,465`。这只是合成电力子阶段证据，不外推完整模拟秒或真实玩家存档。
+6. focused `power_probe_` 首轮为 `11 passed / 0 failed / 1 ignored`，低→高→低负载专项 `1/1`；Rust fmt 与 dsp-native-core all-target/all-feature strict clippy `-D warnings` 通过。独立只读复审判定 `P0=0 / P1=0 / P2=2 / GO`：两个 P2 分别是缺少“candidate cache 已变异后再失败”的自动回归，以及峰值内存少计 full/dense 的两份 `Vec<usize>` 与 candidate profile allocation。`83d7521` 随即增加 post-`Arc::make_mut` 失败注入，逐项证明源 revision、完整 bytes、canonical hash、runtime Arc 和 scan history 不变；同时补齐保守内存 lower-bound。修复后 focused 为 `12 passed / 0 failed / 1 ignored`，strict clippy 与 fmt 继续通过。ignored 项是显式手工性能基准，不计作功能通过；最终组合 Core 全量仍待冻结后执行。
+7. 本切片没有新增持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、Host/renderer 协议、package 1.2.3 或 `authorityEligible=false`；未读取真实玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.40 Windows 高并行 pure-idle 测试进程稳定化（2026-09-01，测试基础设施）
+
+`5c1b20c` 只隔离了 24.37 记录的默认并行 Core `STATUS_ACCESS_VIOLATION / STATUS_HEAP_CORRUPTION` 的第一个可复现放大器，不能把它写成整个高并行问题已关闭，也不把测试进程修复冒充产品性能优化。调查确认默认 28 个 libtest thread 会在一个 Windows 进程内同时运行几十个大型 `pure-idle-macro-v10` 合成结算；每个用例又建立自己的确定性 Rayon runtime，异常落点会随机表现为蓝图/BTree/JSON 等无关受害者。相关产品代码没有 `unsafe`、`static mut` 或环境变量写入，Windows 玩家 authority 本身也不会在同一 session 并行提交多份 pure-idle 候选。
+
+1. 先后否定了两类表面修复。共享双分片池在默认栈下仍于约 1.4 秒触发 `0xC0000374`；8 MiB 栈曾有两轮通过但第三轮再次 heap corruption；16 MiB 首轮也立即失败。因此不能把扩大栈或复用线程池作为可靠结论，也没有把这些复杂度提交到产品或测试 runtime。
+2. 最小修复只在 `cfg(test)` 下为 `advance_bounded_with_runtime(..., macro_v10=true)` 的完整 settlement baseline、三窗口/证书、候选提交与返回生命周期持有一个进程内 MutexGuard。普通 exact (`macro_v10=false`) 不经过门禁，release/production build 完全没有该字段、锁或分支；`deterministic_runtime.rs` 保持逐字不变。
+3. 原始 per-call `for_test` 建池行为加最小门禁后，无环境变量、28 test threads 的 macro v10 过滤集连续三轮均为 `65/65`、0 失败、0 崩溃，耗时 `61.89 / 61.58 / 61.56` 秒；完整 `pure_idle::tests` 为 `110 passed / 1 ignored / 0 failed`（61.97 秒）。单文件 rustfmt 与 diff check 通过。
+4. 后续冻结点的 bare 默认 28-thread 完整 Core 仍在所有已显示断言通过附近以 `STATUS_HEAP_CORRUPTION` 结束，因此全局门禁继续为红。受控的 `--test-threads=4` 可以稳定进入功能断言，并发现一条与可再生能源 warm-cache 新语义不符的旧测试期望：首轮 Core 为 `962 passed / 1 failed / 3 ignored`；`283b0206` 修正期望后该项 `1/1`、`planet_metric_` 全组 `15/15` 通过。它不抵消默认高并行进程仍崩溃的证据；第二个放大器和最终默认并行/串行 Core、workspace strict clippy 与 fmt 仍需在组合源码冻结后独立闭合。
+
+### 24.41 薄 UI 权威读取路由与 lineage 竞态闭合（2026-09-01，开发候选）
+
+`e1d1e172`、`f4cea0c0` 与 `09a09cd9` 把 Factory、Construction、Blueprint、Star/Stellar、Quantum、Command Palette 和 System Space Station 的直接读取统一收口到 main-owned Rust player-authority broker。这是权威边界修复，不改模拟公式，也不把 renderer 已经完全不持有 `GameState` 写成既成事实。
+
+1. 首轮独立审查发现 9 个 direct IPC 只在 `broker.ownsSession(sessionId)` 为真时走权威路由。一个已携带 `runId` 的请求如果恰逢 handoff，就可能退回 renderer-owned shadow。`f4cea0c0` 抽出 `routeNativeProjectionRead`：只要存在 player-authority `runId`，即使 `ownsSession=false`、broker 不可用或 lineage 失配，也只能失败关闭，shadow 调用数必须为零；无 `runId` 的旧 JavaScript 请求继续兼容。
+2. 横向二次审查没有停在“9/9 已接线”，又找到第 10 条同类遗漏：System Space Station 的 TypeScript 请求强制携带 `runId`，main 却仍只查 `ownsSession`，而且该 capability 没有进入 owner-lineage/registry-result fence。`09a09cd9` 将它接入同一 helper，并对 session/run、owner epoch 和 result registry 进行读前读后双重校验。全量枚举后没有第 11 条 tagged+shadow 直读遗漏。
+3. 行为回归不只检查源码字符串：它实际注入 `ownsSession=false`、broker undefined/throw、读取中 owner epoch 从 1 变 2、结果 run/registry 漂移与 untagged legacy shadow，逐项断言 broker/shadow 调用数和拒绝语义。修复后独立范围审查为 `P0=0 / P1=0 / GO`。
+4. 当前组合源码的新鲜前端完整测试为 `368 files passed / 13 skipped`、`2947 passed / 29 skipped / 0 failed`；修复第 10 条后的完整 native Node 边界为 `534 tests / 533 passed / 1 privilege-dependent skipped / 0 failed`。TypeScript 通过；production build 处理 `2097 modules`，startup 总 gzip `180777 B`、JavaScript `87089 B`、CSS `93688 B`、最大启动 JavaScript `58974 B`、menu `258325 B`、forbidden startup module `0`；薄 UI 自动门禁通过 `13` 个 App binding 和 `12` 个独立组件文件。最终 Rust/E2E/长跑仍必须在所有并发纵切冻结后统一执行。
+
+本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未读取玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.42 物流拥堵 O(active) 独立裁判与真实多 worker 证书（2026-09-01，开发候选）
+
+`118c86f4`、`ab444bf1` 和 `624bbeb1` 将本地/星际站点拥堵显示从每个模拟步扫全部等待/需求站，收敛为冷启全量、暖拍 `prior-active reset ∪ current route endpoints`、精确 75% 稠密回退。这一节只宣称拥堵 selector/updater 的活动化已建立可信证书，不将全部物流系统写成已经完全 `O(active)`。
+
+1. 首版合成证据展示 8,192 个休眠站的拥堵计算从 `8192 → 0` 行，1,024 站加 1 条活跃路由从 `1024 → 2` 行。独立审查没有把这个扫描数当成正确性：它发现旧 expected 与 product 共用 active ledger、peer cache 和 indexed runtime，而所谓 segmented-60 只是对同一循环重新分组，可能同源漏行而假绿，因此首轮认证为 No-Go。
+2. `ab444bf1` 改用 persisted-order serial flat oracle：expected 不调生产 selector、active ledger instance、peer bucket 或 `DeterministicRuntime`，并分别重建状态比较 entity bytes、完整 bytes、canonical、domain 和 material/conservation。回归进入真实 updater，覆盖拓扑 generation 变化、MOD/opaque、invalid shape、75% 稠密回退与本地 updater 失败原子性，并补计 `Arc<()>` 的 `2 × usize` 驻留估算。focused 为 `17/17`，strict Clippy、rustfmt 和 diff check 通过。
+3. 二次独立审查为 `P0=0 / P1=0 / P2=3 / GO`，但指出旧 1/2/4/8 夹具只有 1,024 行，低于 4,096 并行阈值，因此“多 worker”证据实际全部串行。`624bbeb1` 使用 4,353 个合法站点直接调用真实 production updater；1-worker 记录 `selected/observed=1/1`，2/4/8-worker 均要求 runtime 实际 observed 至少 2 个 worker，最终 entity bytes、完整 state bytes、canonical、domain 和 material 与 1-worker 严格相同。两条真实多 worker 门禁 `2/2`、全 congestion 专项 `19/19`，strict Clippy、rustfmt 和 diff check 通过。诊断只存在 `cfg(test)`，release 仍调用原 `indexed_try_map`，没有为测试改生产阈值、公式或提交顺序。
+4. 仍保留两个明确证据边界：flat oracle 与生产 ledger 仍共用底层路由 JSON 解码，所以该 oracle 专门证明 active-set 不漏行，不是第二套完整物流引擎；topology/MOD/invalid/75% 已走真实 updater，但 public advance + checkpoint reload 的全链路分段等价仍受 production-history/Campaign 调用边界阻断，按后续多秒 Exact 纵切单独修复，不用物料哈希相同掩盖完整状态不等价。
+
+本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未读取玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.43 多秒 Exact 三层纵切与耐久追赶账本（2026-09-01，开发候选）
+
+`be091b21`、`77e0d7a2` 与 `ac7ccf5a` 依次闭合 Core、Host/WAL 和 desktop/renderer 三层纵切：Windows 玩家权威在落后时可以把连续 `1..30` 个整秒作为一个 Exact 批次推进，只产生一条 WAL、一个 Core revision 和一次 checkpoint/ACK。它解决的是逐秒跨进程、落盘和投影开销，不改变一秒内部游戏规则，也不把未对齐、分数秒、超长窗口或 pure-idle 宏观尾段强行塞进批处理。
+
+1. 根因不是“Rust 不能一次算多秒”，而是旧的公开 `N × 1s` 调用边界还承担了一组游戏语义和私有账本提交。早期批处理候选只在最终秒执行部分 research、time-warp、orbital、Campaign、Speedrun 与 active tray 同步，并从最终公开 `productionHistory` 重建分层历史；这会让 Campaign 奖励不能供下一秒施工消费，也会丢失 checkpoint 绑定的 cold tier。另一方面，desktop 追赶积压仍逐秒调用 Host，使每个逾期秒各自付出 IPC、候选、WAL、checkpoint、ACK 和 renderer frame 成本。因此，安全优化必须同时证明“内部每秒边界逐字等价”和“外部耐久批次只提交一次”，不能只把 `simulationSeconds` 从 `1` 改为 `30`。
+2. Core 的 `be091b21` 把非最终整秒也提升为真实 Recorded boundary：按公开 1 秒顺序结算科研完成、time-warp pending 清理、轨道资格、生产历史采样、Campaign 指标/奖励、轨道合同辅助、Speedrun 和 active tray→planet tray；最终秒只由既有外层边界结算一次，因而没有 1 秒双采样。生产历史继续使用该秒候选库存与真实 `BeltRuntime` flow；10 秒 refresh、分数秒、未对齐时钟和大于 8 小时策略保持原规则。Campaign 奖励在同一秒提交后可被下一秒 construction 正常消费，多恒星/轨道等公开 v47 结果与 `N × 1s` 一致。
+3. 分层生产历史不再从最终 public base 猜回私有状态。候选从源 checkpoint sidecar 连续复制，逐个 Recorded 秒刷新，在最终 base 校验成功后，和 Campaign projection runtime 一起安装到同一成功 revision；冷启动 sidecar、失败候选、取消或后续证明失败都不会清空源 cold tier、推进源时钟或发布半份 runtime。公开 GameState bytes、canonical 与 material/conservation 证明保持不变，Host 只新增只读 history-clock accessor 来决定批次是否具备资格。
+4. Host 的 `77e0d7a2` 将 tick `sequence` 定义为本批最后一个已结算秒，批长只可由 durable ACK 推导为 `1..30`。一个批次固定 `baseRevision`，结果 revision 只加 `1`，WAL payload 明确为 Exact、无 command、simulation/wall 秒数相同；WAL、checkpoint 和 lease ACK 均再次对照同一个 pending tick。多秒批次在写 pending lease 前必须通过 history clock 对齐门禁；不对齐时失败关闭并保留源状态、lease 和 checkpoint，既有 1 秒兼容路径仍可工作。
+5. lease 链不再错误假设“sequence 增量必等于 revision 增量”：tick 可用一个 revision 覆盖多个秒，零时长 gameplay command 仍按 FIFO 各占一个 sequence/revision，macro 仍按其既有 revision span 前进。审查发现并修复了 batch 后创建 macro session 仍使用旧等式的问题；现在新 session 必须从当前 ACK 精确起步，历史 session 只接受单调且可证明位于 ACK 链内的起点。回归实际覆盖 `5s batch → macro` 与 `5s batch → command → macro`。
+6. 崩溃恢复逐一覆盖四个 durable 边界：仅 staged lease 时从旧 checkpoint 重新执行；WAL 已同步时按相同 command identity 重放而不重复推进；checkpoint 已发布时复用该 generation/root/revision 后只补 ACK；ACK 已写且 pending 已清空时按普通 startup-resume 返回同一 receipt。恢复绑定新的进程寿命 session identity，但不能改批长、run、sequence、revision、deadline 或 WAL purpose。一次 5 秒追赶始终只有一条 WAL 和一个 revision；失败前的候选 runtime、history sidecar 与公开源哈希不会部分提交。
+7. desktop 的 `ac7ccf5a` 只在 main-owned authority runtime 计算积压：以已 ACK 的 `nextDeadlineMs` 和一次冻结的 `dueThroughMs` 推导 due seconds，每批最多 30 秒，并把 request、base revision、base sequence、base checkpoint、deadline 和 pause 请求时刻封成不可变 `pendingTickBatch`。不确定响应只能重试原批次，不能根据更晚墙钟把同一 durable request 悄悄放大；成功后才一次前推 sequence/deadline，仍有积压则继续下一有界批次。
+8. 命令与暂停没有被追赶吞掉。已有 gameplay command 始终先于尚未开始的 tick 从 FIFO 泵出；tick 已成为 durable pending 后则保持其身份直到成功或进入 uncertain。暂停会冻结点击时刻，先用同一 `1..30` 批次机制精确排空该时刻之前已到期的秒，再提交零时长 durable pause；uncertain 重试仍使用原 pause timestamp。这样 backlog、pause、resume、命令和宏观结算不会借批处理重排。
+9. renderer 不再用旧的 `sequenceDelta === revisionDelta` 拒绝合法压缩帧。v1 authority clock 的压缩账本要求 sequence/revision 均单调、每个 revision 最多证明 30 个 sequence，并以 deadline 下界证明其中确有足够的 tick 秒；单 revision 多秒批次还要求 deadline 精确增加相同秒数。command/pause/resume 的单 sequence 零时长语义继续允许，schema v2 macro 继续保留 sequence 与 revision span 一致。非法跳跃、过短 deadline、revision 不前进却 sequence 前进、超过 30 倍压缩和回退全部失败关闭，renderer 仍只显示已确认 frame。
+10. 本轮独立只读审查在 Core 与 Host 最终修复点均为 `P0=0 / P1=0 / GO`；desktop 的 backlog/FIFO/pause/压缩账本在精确 deadline 下界修复后同样没有剩余 P0/P1。当前新鲜 focused 数字为：Core `38/38`（Exact batch `7/7`、multi-second `4/4`、one-second public history `1/1`、fractional/unaligned/long policy `1/1`、seeded cold tier `1/1`、production-history `24/24`）；Host library 全量 `224/224`，另行 focused player-authority `34/34`、lease `26/26`、SaveStore `45/45`（这些 focused 与全量有重叠，不相加冒充独立总数）；desktop broader Node `243/243`，相关 Vitest `77/77`，其中 authority clock `28/28`。Rust fmt、Host strict Clippy、TypeScript 与 scoped diff check 均通过。
+11. 上述只是三个冻结提交各自及当前 focused 的证据。组合完整 Rust、Vitest、native Node、Server、Ops、production build、E2E 和耐久矩阵正在最终源码冻结后重跑，尚不得计作通过或复用旧数字。默认 28-thread Core 仍会在 Windows 测试进程结束附近出现 `STATUS_HEAP_CORRUPTION`，24.40 的受控/串行结果不能把它改写为已关闭；在根因、默认并行重复通过和组合门禁闭合前，这项仍为明确 **No-Go**。
+12. 本纵切没有新增持久字段，也没有改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或公开存档迁移；`authorityEligible=false` 继续保持关闭。未读取或修改真实玩家存档，未连接生产，未部署、未打包发布、未签名，也没有执行 24 小时、多硬件、真实 Defender/磁盘故障、安装/覆盖升级或灰度。
+
+### 24.44 Exact 组合门禁回归闭合（2026-09-01，开发候选）
+
+本节记录 24.43 冻结后的正式串行 Rust 组合门禁，不用 focused 数字替代全量，也不删除首轮失败史。相关修复只改 `#[cfg(test)]` 测试夹具和解释性基线；多秒 Exact、Host/WAL 与 desktop 产品代码保持 24.43 的三个冻结提交不变。
+
+1. 首轮 `npm run test:native-core:serial` 实际执行 Core `982` 项，其中 `975 passed / 4 failed / 3 ignored`，因此当轮明确为 No-Go。两个失败来自旧 O(active) 分段夹具绕过 `simulation.rs` 的最终 production-history/Campaign/Speedrun 公开边界；另外两个失败是 `06dc1651` 将 whole-second Exact 从 `3 × 10s` 历史桶改为 `30 × 1s` 后，旧 fixed canonical hash 没有解释该合法历史变化。
+2. `ae6647ad` 让 material-delivery 与 planet-metric 分段夹具复用正式 Exact commit 尾边界。产品可达的 1 秒内部步继续逐字比较 public v47 bytes、canonical、domain 与 conservation；仅 test-only 的强制 10/30 秒 legacy 步长明确断言 `1 × 60s` 与 `6 × 10s / 2 × 30s` 的桶形、endpoint 和 `historyRecordedAt` 差异，然后只归一化 revision 与该已解释的 history 字段，其他公开状态、O(active) runtime、domain 和 conservation 均必须相同。49 个唯一 focused 用例覆盖 2/5/30、N×1、reload、1/2/4/8 worker 和失败原子性并全部通过。独立复审为 `P0=0 / P1=0 / P2=0 / GO`。
+3. `187e510e` 没有裸改两个 fixed hash。逐提交二分证明首个变化正是 `06dc1651`，其父提交到该提交的两个夹具都只把 `productionHistory` 从 3 个连续 10 秒桶改为 30 个连续 1 秒桶，`historyRecordedAt=30`、移除 history 后的完整公开状态、domain 与 material-conservation 全部不变。新门禁分别固定 history hash、without-history public hash、domain、conservation、完整 public/canonical 和 report，并在越过并行阈值的夹具上验证 1/2/4/8 与重复 8 worker 结果一致。独立复审同样为 `P0=0 / P1=0 / P2=0 / GO`。
+4. 最终同一冻结源码重新执行 `npm run test:native-core:serial`：Core `979 passed / 3 ignored / 0 failed`（434.65 秒），Host library `224/224`（31.32 秒），Host main `3/3`（0.02 秒），合计 `1206 passed / 3 explicitly ignored / 0 failed`。3 个 ignored 均为显式手工 release-mode 合成性能项，不计作功能通过，也不是失败隐藏。
+5. 该绿色结果只关闭受控串行组合门禁。24.40 记录的默认 28-thread Windows Core 测试进程 `STATUS_HEAP_CORRUPTION` 仍是独立 No-Go；不能用串行通过改写为已修复。24 小时、多硬件、Win10/11、真实 Defender/磁盘故障、安装/覆盖升级、签名与灰度也仍未执行。
+6. 本节不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未读取或修改真实玩家存档，未连接生产，未部署、未打包发布、未签名。
+
+### 24.45 戴森框架/壳面 Rust 权威纵切（2026-09-01，开发候选）
+
+本切片一次闭合“薄 UI → 最小语义命令 → Rust 规则推导 → player-authority WAL/checkpoint/ACK → 冷启动重放 → 新 revision 戴森投影”。它开放既有壳层的闭合框架、规划壳面和清除壳面，不开放创建/删除壳层、增删节点、壳层轨道几何或新增/删除太阳帆轨道，因此不能写成戴森完整几何已经迁移。
+
+1. renderer 只提交 `dysonPlans.intent`，正文严格只有 `kind/systemId/layerId`；不提交节点/框架/壳面数组、`nextId`、结构点、吸附帆或容量。TypeScript 在 exact session/run/revision/registry/恒星系投影上先做可用性与 no-op 判断；pending 或 retained old frame 时三个按钮全部锁死，ACK 后等待新投影，不乐观修改 renderer 状态。
+2. Rust 重新验证恒星系目录与解锁、`dyson_sphere_program`/`dyson_shell`、最多 8 层/每层 24 节点、有界框架/壳面目录、全部 opaque UTF-8 ID、节点端点、无向边唯一性、边界框架、半径/角度、结构/壳面计数和 JavaScript safe-integer 边界。MOD/未知/重复/越界/同值/夹带数组、生成 ID 冲突与 `nextId` 溢出全部失败关闭。
+3. 闭合顺序严格按节点角度稳定排序并连接相邻节点及首尾；框架工作量沿用 `ceil(radius/10000 × arc/45)`，最少 1。规划壳面先补框架，再按同一稳定边序生成壳面，容量为对应框架工作量 × 40。ID 严格从权威 `nextId` 依次产生；WAL 只保存原始小意图，在线提交和冷重放都由同一 Rust expansion 重新生成。
+4. 三个命令都调用现有 Rust `reconcile_plan`，只重派生节点/框架完成量与壳面吸附显示；`structurePoints`、`shellSails`、全局火箭/太阳帆及其他物料来源不增加。清除壳面只删除设计行，保留玩家已经获得的结构点和壳面帆总量；没有用“清零显示值”伪装物料守恒。
+5. Host 故障注入停在 WAL 已同步、checkpoint/ACK 尚未完成的边界。日志断言包含 opaque 意图而不含 `required/completedStructurePoints`、`sailCapacity`、`absorbedSails` 或 `nextId`；新进程从旧 checkpoint 重放后，revision、canonical SHA-256、4 个框架、4 个壳面、`nextId=108`、结构点 12 和壳面帆 80 与无故障提交逐字一致；相同 command ID 只返回 duplicate receipt，不执行第二次。
+6. 本轮新鲜验证：Rust Core 戴森相关 `25/25`，其中新增语义命令 `4/4`；Host WAL 冷恢复 `1/1`；TypeScript 通过；组件/命令/App focused Vitest `22/22`；desktop command broker `28/28`；Core+Host all-target strict Clippy `-D warnings`、Rust fmt 和 diff check 通过。完整组合 Rust/Vitest/Server/build/E2E 尚未在本切片冻结后重跑，不能复用 24.44 的数字冒充。
+7. 固定能力百分比暂不因三个按钮上调：戴森仍缺新建/删除层、节点与轨道的完整写面，更大的跨域权威/并行缺口也未改变。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 均保持不变；未读取玩家存档，未连接生产，未部署、未打包发布、未签名。
+
+### 24.46 戴森壳层与太阳帆轨道生命周期 Rust 权威纵切（2026-09-01，开发候选）
+
+本纵切紧接 24.45，一次开放空白层、标准层、壳层轨道几何、删除壳层，以及太阳帆轨道新增/删除。它仍不开放手工增删节点、逐节点连边或设计复制粘贴，因此不把戴森编辑器描述为全部完成。
+
+1. renderer 新增的壳层命令仍只写 `dysonPlans.intent`。新增空白/标准层只发送 `kind/systemId`；删除发送 `kind/systemId/layerId`；几何修改只额外发送最多三个规范叶值。Rust 从权威 `nextId` 生成层、8 个节点、8 个稳定环框架和科技允许时的 8 个壳面；renderer 不发送数组、名称、工作量、容量、完成量或物料计数。
+2. 标准层完全复刻既有稳定规则：半径随层序每次增加 4,000 m，奇数层倾角 18°，经度每层增加 24°，8 节点等分 45°；框架需求为 `ceil(radius/10000 × arc/45)`，壳面容量为框架需求 × 40。层几何修改由 Rust 重算全部框架需求及其第一边界对应的壳面容量，再用既有 `reconcile_plan` 重派生显示完成量。
+3. 删除层只删除设计目录并选择确定性 fallback active layer；`structurePoints` 与 `shellSails` 历史总量不降低、不增加。即使删除最后一层，历史物料仍留在该恒星系 plan，后续新建设计可重新分配，避免用删除 UI 静默改玩家收益。
+4. 太阳帆轨道使用独立 `dysonEngineering.intent`。新增轨道由 Rust 分配 ID、名称和规范轨道参数；第八条旧 JavaScript 默认公式会产生 54,000 m、超出公开 50,000 m 上限，原生路径明确封顶 50,000 m，避免创建后投影自身拒绝。删除时至少保留一条轨道，把 `sailsInOrbit/totalLaunched/totalExpired` 全部 checked-add 到持久顺序中的首个保留轨道，按当前恒星亮度和科研倍率重算该轨道功率，再从全部轨道重建全局 swarm 汇总；`receiverLoadKw` 等无关字段保持原值。旧 ejector target 不被偷偷改写，删除后指向失效轨道的发射器会按既有规则停机并要求玩家重选。
+5. Rust 在写前验证恒星系目录/解锁、`dyson_sphere_program`/`dyson_shell`/`dyson_swarm`、最多 8 层/8 轨道、safe integer、规范角度/半径、全局唯一轨道 ID、active membership、轨道物料闭环和全局 swarm 汇总。未知字段、renderer 夹带完整数组或计数、ID 碰撞、最后轨道删除、同值几何、锁定科技及汇总伪造全部在 disposable candidate 前失败关闭。
+6. WAL 仍只保存小语义 marker。新增 Host `AfterWal` 故障用例在移除含 100 帆的活动轨道后故意丢失响应；新进程冷恢复与无故障提交得到相同 revision、canonical SHA-256 和公开 v47，120 在轨帆、220 累计发射、55 累计过期完整保留，活动轨道切到 fallback，`receiverLoadKw` 保持 123。WAL 正文不含 `sailsInOrbit/totalLaunched/totalExpired/generationKw`，duplicate command ID 不会再次合并。
+7. 本切片新鲜 focused 结果为 Rust semantic Core `8/8`、Host 冷恢复 `1/1`、组件/命令/App Vitest `24/24`、desktop broker `29/29`；TypeScript、production build（2,097 modules）、startup budget、Native thin-UI AST 门禁、workspace all-target/all-feature strict Clippy、Rust fmt 与 diff check均通过。完整 Core/Host/Vitest/Server/E2E、24 小时、多硬件、安装/覆盖升级、签名与灰度仍需冻结后单独执行。
+8. 本切片不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议版本，`authorityEligible=false` 保持不变；没有读取或修改真实玩家存档，没有连接生产、部署、打包发布或签名。固定四目标百分比等节点编辑等下一块闭合后统一复审，不按新增行数临时抬高。
+
+### 24.47 戴森节点与手工框架 Rust 权威纵切（2026-09-01，开发候选）
+
+本纵切关闭 24.46 明确保留的手工节点编辑缺口：轨道画布可新增节点，依次选择两个节点可创建框架，选中节点可删除并级联清理相关设计。跨层设计复制粘贴仍未迁移，因此这里不把整个戴森编辑器写成全部完成。
+
+1. renderer 新增三种 `dysonPlans.intent`：`add-node` 只携带 `kind/systemId/layerId/angle`，`remove-node` 只再携带 `nodeId`，`connect-nodes` 只再携带两个端点 ID。命令必须来自当前 exact session/run/revision/registry/恒星系投影；loading 时可保留上一份已验证画面，但画布、节点和删除按钮全部锁死。renderer 不发送节点/框架/壳面数组、`nextId`、结构需求、完成量、容量或物料数字。
+2. 角度在 UI 边界按既有规则四舍五入至 0.1° 并归一化到 `[0,360)`；Rust 再次验证规范角度、科技、系统解锁、层 membership、每层最多 24 个节点和任意两节点最短角距至少 5°。节点 ID 从全恒星系已验证的权威 ID 集与 `nextId` 稳定分配，跨系统碰撞、溢出、缺字段、额外字段、未知/MOD 目标和畸形目录全部在 disposable candidate 中失败关闭。
+3. 手工框架要求两个不同且同层的现有节点，不允许重复无向边；Rust 以权威层半径和端点夹角派生 `ceil(radius/10000 × arc/45)`、最少 1 的结构需求并稳定分配框架 ID。UI 只把“两点选择”当交互状态，ACK 前不画乐观框架，ACK 后等待新 revision 投影。
+4. 删除节点会同时删除所有以该节点为端点的框架，以及端点或边界引用这些框架的壳面；剩余框架需求、壳面容量、完成量和吸附显示继续经过既有 `reconcile_plan` 重派生。该操作只修改设计目录，`structurePoints`、`shellSails`、全局火箭/太阳帆和其他物料来源不降低也不增加；删除已完成设计不能凭空退款或销毁玩家历史总量。
+5. Core 回归从 4 节点预置层开始，依次新增 45° 节点、建立两条手工框架、补齐闭合壳面、删除新节点，并验证稳定 ID/`nextId`、剩余 `4/3/3` 个节点/框架/壳面、无悬空引用、物料总量不变；反向重复边和距离 3° 的节点必须原子拒绝且源状态逐字不变。
+6. Host `AfterWal` 故障用例在 WAL 已同步、checkpoint/ACK 尚未完成时删除一个连接两边和两壳面的节点。日志只有 `remove-node` 与目标 ID，不含结构需求、吸附帆或 `nextId`；冷重启重放后与无故障提交具有相同 revision、canonical SHA-256 和公开 v47，重复 command ID 返回 duplicate receipt，不再次级联处理。
+7. 本轮新鲜 focused 结果为 Rust Dyson `30/30`（其中 `dyson_plan_command` `6/6`）、Host Dyson/冷恢复 `4/4`、组件/命令/App Vitest `27/27`、desktop broker `29/29`。TypeScript、production build（2,097 modules；startup gzip `180,776 B`）、startup budget、Native thin-UI AST 门禁、workspace all-target/all-feature strict Clippy 与 Rust fmt 均通过。完整 Core/Host/Vitest/Server/E2E、默认高并行稳定性、24 小时、多硬件、安装/覆盖升级、签名和灰度仍是独立门禁。
+8. 本切片不新增持久字段，不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议，`authorityEligible=false` 保持关闭；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。固定四目标百分比留到跨层设计复制及下一轮统一能力审计，不按新增代码行数临时抬高。
+
+### 24.48 戴森设计复制/粘贴 Rust 权威纵切（2026-09-01，开发候选）
+
+本纵切关闭 24.47 保留的跨层设计复制缺口。它没有把旧 `DysonLayerTemplate` 搬进新的 IPC：renderer 的剪贴板只保留一个短来源引用，Rust 在粘贴 revision 上从权威状态读取并复制设计，因而不会把浏览器缓存的完整结构当作可信输入。
+
+1. 原生工具栏的“复制”只记录当前 exact frame 的 `sourceSystemId/sourceLayerId/显示名`；“粘贴”发送严格字段集 `kind/systemId/sourceSystemId/sourceLayerId`。clipboard 只存在组件内存中，session/run/registry 改变会清空；切换恒星系时可保留以支持跨系复制。loading、retained-old、pending、科技锁定或目标 8 层已满时粘贴锁死，ACK 前不乐观插入任何设计行。
+2. Rust 重新验证目标与来源系统都存在于当前 catalog、都已探索解锁，目标具备 `dyson_sphere_program`，来源壳面非空时还必须具备 `dyson_shell`。所有恒星系 plan 先完整验证，层/节点/框架/壳面 ID 形成全局碰撞集；来源层缺失、悬空端点/边界、重复无向边、超限目录、未知字段、夹带模板数组、目标层上限、ID/`nextId` 溢出都在 disposable candidate 内失败关闭。
+3. 新层沿用来源名称并追加“副本”、半径、倾角、经度、节点角度、框架拓扑和壳面边界。Rust 按来源持久顺序为层、全部节点、全部框架、全部壳面重新分配独立 ID；框架需求只用新层权威半径和节点夹角重新计算，壳面容量从新边界框架需求 checked-add 派生，不能从 renderer 或来源缓存照抄派生数字。
+4. 新节点和框架的 `completedStructurePoints`、新壳面的 `absorbedSails` 全部从 0 开始。目标 plan 粘贴前的 `structurePoints/shellSails` 分别写入新层 `structureAllocationFloor/shellAllocationFloor`，因此目标历史剩余不会立刻填充副本；来源与目标的历史物料总量都不变。该语义保持旧版合法复制行为，同时把模板验证和 ID/工作量推导迁到 Rust 唯一权威。
+5. Core 跨恒星系回归先从来源生成闭合框架/壳面，再粘贴到已有 7 结构点、5 壳面帆的目标；正常与重复构造结果逐字一致，新副本为 `1/4/4/4` 个层/节点/框架/壳面，全部进度为 0，allocation floor 为 `7/5`，来源和新 ID 完全不交叉，`nextId` 稳定。缺少壳科技或命令夹带 `nodes` 数组必须原子拒绝且源状态不变。
+6. Host `AfterWal` 用例把三节点/三框架/三壳面设计跨系粘贴后故意丢失响应。WAL 只有 `paste-layer` 与来源引用，不含结构需求、吸附量或 `nextId`；冷启动重放与无故障提交得到相同 revision、canonical SHA-256、独立 ID、目标历史总量及零施工进度，相同 command ID 只返回 duplicate receipt。
+7. 本轮新鲜 focused 为 Rust Dyson `31/31`（其中 `dyson_plan_command` `7/7`）、Host Dyson/冷恢复 `5/5`、组件/命令/App Vitest `28/28`、desktop broker `29/29`。TypeScript、production build（2,097 modules；startup gzip `180,780 B`）、startup budget、Native thin-UI AST 门禁、workspace all-target/all-feature strict Clippy 与 Rust fmt 均通过；完整组合 Rust/Vitest/native/server/E2E、默认高并行稳定性、24 小时、多硬件、安装/升级、签名与灰度仍是独立门禁。
+8. 本切片不新增持久字段，不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议，`authorityEligible=false` 保持关闭；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。戴森编辑器的既有玩家设计写面至此已具备 Rust 权威路径，但“完整薄 UI”与“Rust 唯一全游戏权威”仍取决于其他 workspace/命令域，不能由本切片代替。
+
+### 24.49 特殊物流接口生命周期 Rust 权威纵切（2026-09-01，开发候选）
+
+本纵切一次关闭物资配送枢纽与轨道货运终端在原生薄检查器中的写面缺口，并把微型黑洞销毁账本补进同 revision 只读界面。目标是让一个按钮从 renderer 最小意图贯穿 Rust 守恒、Host WAL、冷启动恢复和 durable ACK，而不是仅把旧 JavaScript 修改函数重新接回桌面壳。
+
+1. 物资配送枢纽命令严格只有一个 `changedEntities` marker：`materialDeliverySlot.intent = { slotIndex, mode, itemId, confirmed: true }`；轨道货运终端严格只有 `orbitalCargoPort.clearIntent = { portIndex, confirmed: true }`。renderer 不提交线路 ID、退款数量、施工库存、实体 `inputs`、`deliveryItemIds` 或上传账本，额外字段、未确认、跨行星、锁定/MOD/未知物品、畸形 3/4 口目录和 no-op 全部失败关闭。
+2. Rust 只遍历目标实体的 incident belt 索引，按目标接口筛选输入线路。每条线路重新验证 ID、目标口、等级、并联数量和内置传送带目录；删除后按实际等级/并联数 checked-add 到施工库存。最多扫描 16,384 条相邻线路，展开 patch 最多 65,536 项，不对几十万条全局线路做 renderer 侧搜索。
+3. 配送枢纽写入规范 3 槽状态，并按持久槽位顺序去重重建 `deliveryItemIds`。变更后不再被任一槽使用的缓存会按旧游戏取整规则退回活动行星托盘；物流无人机/运输船回便携舰队。轨道终端清空一个端口后，如果相同物品仍绑定在其他口则保留共享缓存；最后一个绑定清除时才退款。`orbitalCargoBinding/progress/totalUploaded` 及无关库存保持不变，杜绝“清接口顺便重复领取已上传物资”。
+4. 破坏性界面动作先出现 `AccessibleDialog`，确认内容绑定 session/run/revision/entity/port；pending 或身份漂移时对话框关闭且不提交。App 再次核对原生 authority、命令 FIFO、活动行星、单实体选择和 command source revision，随后只把短 marker 交给 main-owned broker。界面等待 durable ACK 和新投影，不乐观修改接口、线路或库存。
+5. 语义 marker 由同一 Rust expansion 同时服务正常提交和 WAL 重放。Host `AfterWal` 用例在日志同步、checkpoint/ACK 尚未完成时强制丢失响应；新进程从旧检查点恢复后，与无故障执行得到相同 revision、canonical SHA-256、完整公开 v47、托盘退款、施工退款、接口状态和线路集合。相同 command ID 只返回 duplicate。短 WAL 不保存已删除线路 ID，因此冷恢复回执保守返回空 `changedBeltIds` 并设置 `topologyDirty=true`，状态守恒与 UI 刷新都不依赖猜测旧 ID。
+6. 微型黑洞控制仍沿用原有 Rust pause intent；本轮只在同 revision 薄检查器公开三个端口的 `currentItemId/totalDestroyed` 只读账本。十进制大数通过 `QuantityValue` 展示，不转成不安全 JavaScript number；任一端口索引、十进制串或物品目录畸形时整块账本失败关闭，不从 legacy GameState 补读。
+7. 本轮新鲜 focused 结果：Rust Core `3/3`、Host WAL 冷恢复 `1/1`、组件/命令/App/command-source Vitest `43/43`、desktop broker `30/30`。TypeScript 通过；production build 为 2,098 modules，startup gzip `180,778 B`；startup budget 与 Native thin-UI AST 门禁通过。workspace all-target/all-feature strict Clippy 首轮因新增函数的一处显式 lifetime 报错，删除多余 lifetime 后复跑通过；Rust fmt 和 diff check 通过。`npm run test:changed` 的 Windows 包装器因直接 `execFileSync("npm")` 而未启动 Vitest，等价的明确 Vitest 命令已独立得到上述 `43/43`；完整组合 Rust/Vitest/native/server/E2E 尚未在该切片冻结后重跑，不复用 24.44 或其他提交的数字冒充。
+8. 这次关闭的是“特殊物流接口的玩家写面”，不是全部物流 `O(active)` 或全游戏 Rust 权威完成声明。固定四目标百分比留给下一次统一源码审计，不以按钮数或新增行数临时上调。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均不变；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。
+
+### 24.50 银河出口/终局管理 Rust 权威纵切（2026-09-01，开发候选）
+
+本纵切把原生 Galaxy 页从只读摘要扩展为可用的银河出口管理入口，并把超大型出口建筑的暂停/启动接入同 revision 原生检查器。它不把 renderer 重新变成游戏权威：界面只发短语义意图，Rust 从当前 v47 状态推导真实扣料、储备、进度、等级、奖励和累计账本，再通过既有 player-authority WAL/checkpoint/ACK 原子提交。
+
+1. `galaxy-account-workspace-v1` 增加有界 `galacticExports` 投影：固定四个内置项目及物料绑定、输入模式、自动调度、25%/50%/100% 节流、项目开关/优先级、256 位十进制累计账本，以及按 topology 汇总的出口建筑总数/运行数/暂停数。投影不包含实体 ID、托盘、量子库存、建筑输入输出、线路、活动批次正文或可由 renderer 回写的奖励结果；Node renderer boundary 与 TypeScript store 会逐字段复验固定项目数量、唯一 ID、物料绑定、计数闭合和 session/run/revision/registry lineage。
+2. 玩家可达的顶层 marker 只有 `galacticExports.intent`，严格支持 `set-auto-dispatch`、`set-dispatch-throttle`、`set-project-enabled`、`set-project-priority` 和 `manual-dispatch`；建筑 marker 只有单实体 `galacticExporter.pauseIntent`。额外字段、MOD registry、锁定科技、旧 revision、非法模式、未知项目、同值修改、跨行星/非内置建筑、畸形实体和超 JavaScript 安全整数请求全部失败关闭。renderer 不发送 patch、实际交付量、库存行、信用、评分、等级或线路脏集合。
+3. 手动交付只携带项目 ID 与请求上限。Rust 按当前内置目录、项目等级和储备重新扫描权威物料所有者，先从建筑输出再从活动行星托盘扣除可用量，并由既有银河出口公式更新本级/累计交付、信用、评分和等级。合成回归以 500 建筑输出 + 400 托盘、储备 120、请求 1,000 为例，只实际交付 780，托盘剩余 120、建筑输出归零、信用增加 9,360；预验证前后 canonical SHA-256 不变。实体建筑模式不开放这条 legacy 手动扣料命令，只允许与模式无关的项目优先级和同实体暂停控制。
+4. live apply 与 cold WAL replay 共用同一 Rust expansion。WAL 只保存 `manual-dispatch/projectId/requestedAmount` 或暂停目标，不保存 `totalDelivered`、`galacticCredits`、实际扣料实体 ID 或 renderer 推导结果。`AfterWal` 故障专项证明无故障提交与新进程冷恢复具有同 revision、完整公开状态和 canonical SHA-256；相同 command ID 重试只返回 duplicate receipt，不会第二次消耗库存。手动/全局命令的 compact receipt 不暴露大批实体 ID，统一令 `topologyDirty=true` 触发有界读模型重取；直接暂停建筑时只返回该一个实体 ID。
+5. 原生 Galaxy 薄 UI 新增“银河出口”页。保留旧 projection 等待新 revision 时仍可阅读，但所有写按钮只在 exact frame 上启用；手动物料消耗必须经过 `AccessibleDialog` 二次确认，pending、session/run/revision/status 漂移会清除确认。出口建筑检查器同样只发送暂停目标，App 再次核对活动行星、单实体选择、command source 和最新 revision。UI 不乐观修改库存、进度或奖励，durable 命令完成后等待下一份 Rust 投影。
+6. 新增测试覆盖顶层设置、手动守恒扣料、建筑启停、MOD/畸形/旧 revision 原子拒绝、固定项目与物料绑定漂移、重复项目、compact receipt、renderer 派生 ID 伪造、组件二次确认和 Host `AfterWal` 冷恢复。完整 Core 串行矩阵为 `1024 passed / 3 explicitly ignored / 0 failed`（893.36 秒），Host library 串行为 `230/230`（50.83 秒）；3 个 ignored 仍是显式手工 release 性能项。默认 workspace 并行 Core 在 Windows 压力测试结束附近触发 allocator abort/`STATUS_HEAP_CORRUPTION`，因此默认高并行门禁仍为 No-Go，不能用串行绿色掩盖；内部 1/2/4/8 worker 确定性矩阵在串行测试进程内继续通过。
+7. 最终组合门禁为：TypeScript 通过；完整 Vitest `371` files 通过、`13` files 条件跳过，`2981 passed / 29 skipped / 0 failed`；fresh Release Host 后 native/desktop `549 passed / 1 Windows symlink privilege skip / 0 failed`；Server/API/SQLite `389/2` 加 station `4/4`；Ops `56/6`；完整 Chromium `433/27/0`（460 项，7.4 分钟）；durable WAL E2E `7/7`。production build 为 2,099 modules，startup gzip `180,774 B`、JavaScript `87,086 B`、CSS `93,688 B`、menu `258,324 B`、forbidden startup modules `0`，Native thin-UI boundary 为 13 个 App bindings / 12 个专用组件文件。
+8. 失败史完整保留：首次完整 Vitest 为 `2980/29/1`，唯一失败是 Galaxy 组件为确认框引入 `useRef`，违反该页不得拥有组件内 IPC/read-state 引用的架构合同；移除非必要焦点引用后 focused `16/16`、最终全量如上。首次 strict Clippy 还报告两个手工范围模式和一个可省略 lifetime，机械修复后 workspace all-target/all-feature `-D warnings` 通过。测试代理的 `127.0.0.1:65534` 拒绝连接是既有离线 API 条件噪声，不是 E2E 失败。
+9. 该切片关闭的是“内置银河出口玩家管理写面”，不代表 productive pure-idle/offline/time-warp、MOD 银河项目、全部终局活动、完整 Rust 唯一权威或默认并行稳定性已经关闭。固定能力百分比本轮不按代码行数临时上调；24 小时、多硬件/Win10/11、真实 Defender/磁盘故障、安装/覆盖升级、签名和灰度仍是发布 No-Go。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 不变；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。
+
+### 24.51 纯挂机时间预算主进程权威纵切（2026-09-01，开发候选）
+
+本纵切一次关闭“renderer 自报纯挂机结算时长”的权威缺口。renderer 在启动时只报告它所观察到的当前 revision 与有效倍率，后续推进和结束均为无参数意图；实际可结算墙钟、模拟预算、session/operation ID 和恢复时的原预算全部由 Electron main 根据 durable lease deadline 与同一进程单调时钟生成。Rust Host 仍是唯一 durable stage/WAL/checkpoint/ACK 权威。
+
+1. main 以 `nextDeadlineMs - 1000` 作为已经结算到的墙钟下界，只结算主进程时钟确认的正增量，并按有效倍率得到模拟毫秒。单次模拟预算继续封顶 30 天；无新增墙钟返回可重试 busy，时钟异常或回退失败关闭，不能用 renderer 参数把存档推进到未来。
+2. start 请求严格为 `{expectedRevision,effectiveMultiplier}`，advance/finish 严格为空对象。旧的 `simulationMilliseconds/wallMilliseconds` 字段以及任何额外字段都会在 broker 边界拒绝；preload 不再暴露带预算的 advance 调用。main 同时生成不可复用的 macro session/operation ID，renderer 既不能选择 ID，也不能重放另一轮的预算。
+3. active multiplier 进入 main-owned session 生命周期：首次 durable ACK 后安装，finish 后清除；启动恢复必须从 Host 已持久化的 simulation/wall budget 得到一个整除且合法的倍率，缺半份、零值、越界或无 active session 的恢复预算全部拒绝。uncertain 重试复用 pending 中冻结的身份、预算和倍率，不重新采时或放大同一操作。
+4. renderer controller 只用本地时钟决定“何时再问 main”，不再决定“结算多少”。收到 receipt 后仍校验 simulation/wall 比例、30 天边界、revision 连续性和 lineage；恢复时接受且仅接受 main/Host 返回的原 durable receipt。这样 renderer 卡顿、系统休眠、DevTools 注入或旧 UI 参数都不能改变权威结算量。
+5. 新鲜专项结果为 macro broker/runtime/renderer boundary Node `121/121`，controller Vitest `21/21`；完整 `npm run test:native` 为 `551 passed / 1 Windows symlink privilege skip / 0 failed`。TypeScript、production build（2,099 modules；startup gzip `180,779 B`、JavaScript `87,091 B`、CSS `93,688 B`、最大启动 JavaScript `58,974 B`、menu `258,330 B`、forbidden startup modules `0`）和 diff check 通过。3 天、1 Hz 的合成序列连续完成 `259,200` 次 main-owned advance，身份与预算均无碰撞或漂移。
+6. 完整 fast Vitest 首轮必须保留为 No-Go：`2933 passed / 29 skipped / 48 failed`。48 个失败均集中在既有 `nativeCoreDifferential.test.ts`；本纵切没有修改该文件、Rust 模拟或 JavaScript 精确模拟。重新构建 release Host 后结果不变，排除了旧二进制。诊断把 JavaScript oracle 改成逐秒边界时，该文件为 `21 passed / 29 failed / 1 skipped`，其中 ordinary mining 与 handcraft 两个 focused 为 `2/2`，但 quiescent/research/power/construction/logistics 等仍证明 Rust 一次长 Exact 调用与连续 1 秒公开调用存在跨领域边界差异。诊断改动已完整撤销，没有靠修改 oracle 掩盖产品问题。
+7. 下一大块固定为“完整领域 Exact 批次公开边界确定性”：先建立 `1 × 60s == 60 × 1s` 的红测矩阵，再把科研、全局进度/手搓、power metrics、Campaign、施工、量子、物流补给和托盘同步等每秒公开边界收进 Rust 的同一内部 helper。既有代码注释和 24.43 合同已经要求小于等于 8 小时的整秒 Exact 与逐秒提交一致，因此不允许通过放宽差分测试、丢弃字段或只改固定哈希来关闭该门禁。
+8. 本切片不新增持久字段，不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议；`authorityEligible=false` 继续关闭。固定四目标百分比暂不因控制面收口上调，productive pure-idle/offline/time-warp 仍须在下一大块确定性门禁通过后才能计入完成。未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。
+
+### 24.52 Exact 压缩 revision 公开逐秒边界确定性收口（2026-09-01，开发候选）
+
+本纵切关闭 24.51 留下的 P0：一个 Rust `Exact` 长请求虽然只产生一个 durable revision，但在小于等于 8 小时的对齐整秒范围内，公开玩法结果必须与连续 N 次一秒调用完全一致。此次没有通过放宽哈希或忽略历史字段来消除失败；先修正差分 oracle 的比较对象，再修复真实存在的 quiescent 快路径缺口。
+
+1. 差分 oracle 现在明确区分两种语义：旧 JavaScript 单次长调用继续保留为兼容诊断；原生 player-authority 压缩 revision 则与同样的 N 个 JavaScript 一秒公开边界比较。强制 full-scan 对照也按相同边界运行，因此活动索引和原生实现不能借由不同采样频率互相掩盖。
+2. 生产/科研/电力/施工/Campaign/量子/本地与星际物流等非空工厂路径此前已经在 Rust 内部按逐秒公开边界执行。最终定位到的产品缺陷位于空工厂 quiescent 快路径：一次 60 秒调用只写一条生产历史，并把银河出口滚动窗口锚点写成与 60 次一秒调用不同的值。
+3. quiescent 路径现把原有时钟、银河出口窗口与活动行星指标更新抽成单个公开边界 helper。满足“历史时钟对齐、正整数、最多 8 小时”的 `Exact` 请求会重放 N 个轻量一秒边界，并在每个边界记录公开 production history 与刷新私有分层统计；revision 仍只在所有边界和校验成功后增加一次。小数、未对齐和大于 8 小时的兼容请求继续使用旧 1/10/30 秒外层采样策略。
+4. 新增 quiescent `2/30/60` 秒一批与逐秒的公开字节、canonical、守恒、revision、分层历史一致性回归；畸形历史导致后段失败时，源 revision、公开字节、canonical 与 sidecar 必须全部不变。差分矩阵另直接核对 endgame、productionHistory、powerGridMetrics 与 research 投影。
+5. 最终 `nativeCoreDifferential.test.ts` 为 `50 passed / 1 opt-in long test skipped / 0 failed`；完整 fast Vitest 为 371 files（358 通过、13 条件跳过）、`2981 passed / 29 skipped / 0 failed`。24.51 首轮 `2933/29/48` 仍保留为发现问题的失败证据，不被最终绿色覆盖。
+6. Rust focused 新回归 `2/2`；workspace 串行全量为 Core `1026 passed / 3 explicitly ignored / 0 failed`、Host library `230/230`、Host binary `3/3`。三个 ignored 均为既有手工 release 性能项。Windows native/desktop 为 `551 passed / 1 Windows symlink privilege skip / 0 failed`；typecheck、workspace all-target/all-feature strict Clippy、Rust fmt、diff check 均通过。
+7. production build 为 2,099 modules；startup 总 gzip `180,781 B`、JavaScript `87,093 B`、CSS `93,688 B`、最大启动 JavaScript `58,974 B`、menu `258,330 B`，forbidden startup modules `0`；Native thin-UI boundary 为 13 个 App bindings / 12 个专用组件文件。
+8. 该修复使 player-authority 的短时 exact catch-up 具备跨领域公开边界确定性，但不自动宣称 Windows 原生离线生命周期、24 小时、多硬件或默认高并行稳定性已经完成。固定口径在本纵切提交后更新为 `Rust 唯一权威约 86% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 90% / 可放心发布成熟度约 60%`。下一大块把应用关闭期间的离线时间接入 main/Rust 权威结算，而不是回到 renderer Worker。
+9. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。
+
+### 24.53 Rust 原生离线宏观结算与耐久检查点纵切（2026-09-01，开发候选）
+
+本纵切完成 Windows 离线结算的核心、Host 和 Node 主进程边界，不再把时间扭曲会话的一秒探针私有信用直接复用于关机离线时间。新增独立 wire mode `offline-macro-v1`：每次只针对一个已经发布的 `normal-main` 检查点执行一次 1× 离线结算，先做 30 秒精确校准，再让闭合物料账本决定可证明收益；无法证明的尾段冻结，不能复制火箭、太阳帆、建筑施工、出口或合同交付。
+
+1. Rust 离线结算要求普通、未暂停、时间扭曲关闭且没有残留时间预算；simulation/wall 必须严格相等。它复用已经验证的生产、手搓、科研、施工、戴森、银河出口与合同闭合账本，但使用独立算法版本，不持久化或继承任何纯挂机时间扭曲校准缓存、session credit 或 multiplier。
+2. 可再生电力证书新增离线权威分支：仍要求每个电网在精确窗口稳定、没有有限燃料和储能来源且供电闭合，只是不再错误要求存在时间扭曲控制器。有限/无限资源、预填火箭、多恒星系目标、可再生供电施工和 durable replay 均有专项。
+3. Host 新增单一原子入口 `coreCommitOfflineSettlement`。调用方只提交已验证的 generation/root/revision/registry identity 和主进程当前时钟；Rust 从已发布 manifest 的 `savedAt` 计算完整秒数，封顶 30 天。renderer 不能自报离线秒数，也不能选择 command ID。
+4. command ID 只由源检查点 generation/revision/savedAt 派生。若进程在 WAL 同步后、检查点发布前退出，冷启动会找到同一 WAL operation 并复用其中冻结的原预算，不重新采时、不重复支付。少于一秒时只返回只读 no-op；成功后只发布一个新的 checkpoint generation。
+5. 当前新鲜 focused 结果为：纯挂机完整模块 `122 passed / 1 explicit ignore / 0 failed`，离线专项目标另为 `4/4`，Host 离线耐久 `3/3`，Node Host/renderer boundary `55/55`，Vitest native core `23/23`；typecheck、workspace all-target/all-feature strict Clippy 与 Rust fmt 已通过。组合全量、production build 和 E2E 仍须在最终冻结提交上重跑，不能复用 24.52 的数字。
+6. 该纵切还不是玩家可见的完整启动链：`StartMenu` 当前仍在原生 session 建立前调用 JavaScript Worker，Electron IPC/preload 也尚未把匹配的 native 主检查点导出并交还启动加载器。下一大块必须完成 main-owned 启动协调、检查点身份匹配、结算结果流式导出、失败回退与重复启动回归；在此之前不得宣称 Windows 客户端已实际使用本算法。
+7. 固定能力口径暂更新为 `Rust 唯一权威约 87% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 91% / 可放心发布成熟度约 60%`。上调来自一条闭合的离线领域与耐久恢复事务，不来自代码行数；发布成熟度不变，因为产品启动接线、组合全量、24 小时、多硬件、安装/升级、签名与灰度仍未关闭。
+8. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；没有读取或修改真实玩家存档，没有连接生产，没有部署、打包发布或签名。
+
+### 24.54 主进程权威启动采用与有界候选传输（2026-09-02，开发候选）
+
+本纵切关闭 24.53 明确留下的产品接线缺口：Windows 普通主存档在玩家选择“快速离线结算”后，开始菜单现在会优先尝试 Rust `offline-macro-v1` 候选；任何身份、字节、状态、时间或会话关闭门禁不成立时，都从原始 `DeferredLoadedGame` 无损回退既有 JavaScript Worker。Rust 候选始终是只读分支，不会在浏览器验证和公开保存前替换源检查点，因此失败、取消或窗口销毁不能产生半次离线收益。
+
+1. 入口只允许 `normal-main` 的当前 primary、GameState v47、未暂停、非速通且至少离线一整秒；玩家显式选择“精确”时继续使用原 Worker，不偷偷改变旧模式。renderer 请求固定为 8 个证明字段：session、generation、root hash、revision、registry fingerprint、canonical SHA-256、domain SHA-256 和 `macro-v1`。墙钟、导出 ID、文件路径和离线秒数均由 main/Host 生成，额外字段在 preload 与 Node registry 两层提前拒绝。
+2. main 先恢复固定 `normal-main` 检查点，并要求 generation/root/revision/registry、`savedAt`、零 WAL 与浏览器当前状态完全一致；随后以 Rust shadow 打开同一检查点，再核对 canonical/domain、活动行星、实体/线路数量和 elapsedSeconds。任何 mismatch 都关闭临时 session 并回退，不能把“差不多同一个存档”当成相邻 revision。
+3. Host 新增只读 `corePrepareOfflineSettlementExport`。候选在私有 Core 副本完成一次 1× 离线结算和 v47 envelope 流式导出；源 session 的 checkpoint、WAL、revision 和规范哈希保持不变。候选使用 main 生成的一次性 export ID，结果中的 ID 必须逐字匹配；临时文件只在固定 native root 的 `exports` 下按该 ID 打开和清理。
+4. main→preload 使用 MessagePort 发送最多 256 MiB 的正文，固定 1 MiB 分块；每块必须按连续 offset ACK，结束时再以 SHA-256 ACK。无候选的零字节结果也必须完成终态 ACK，避免 postMessage 后立即关口造成竞态。preload 只预分配一个精确大小的 `Uint8Array`，边收边计算 SHA-256 与公开 FNV-1a transfer checksum，不在 renderer 堆积 chunk 数组；当前 Electron bridge 最终交给应用时仍可能发生一次结构化克隆，因此这是有界传输，不冒充共享内存零拷贝。
+5. renderer 对流式正文继续执行可信 envelope、state checksum、FNV、byte length、canonical/domain、revision、registry、`savedAt`、elapsedSeconds 与候选 summary 全链验证。游戏离线封顶同步修正为公开规则：基础 7 天，加 `continuum_simulation` 每级 1 天，最多 30 天；缺少该科研按 0 级处理，字段存在但畸形则失败关闭。Host 的 durable 提交路径和只读候选路径共用这一上限，不再无条件按 30 天。
+6. StartMenu 只在全部验证并确认 source session 安全关闭后采用候选；取消发生在原生计算期间时，计算结束后丢弃候选，原存档、`savedAt` 和离线时长均不变。采用后仍调用既有 `finalizeDeferredOfflineGame`，以 Rust 返回的精确 sourceSavedAt/settledSeconds 添加一次 returning reward；不会再跑 Worker 或重复发奖。原生不可用、候选冻结、校验失败、Host/IPC/流损坏或关闭结果不确定都会走原 Worker。
+7. 离线报告不伪造精度：没有宏观尾段时标为 exact；存在守恒但冻结的尾段时标为 approximate，最大误差诚实记为 100%，因为某个无法证明的子系统可能完全少产，但不会凭空多产火箭、太阳帆、施工、出口或合同交付。
+8. 当前组合源码的新鲜门禁包括完整 fast Vitest `2989 passed / 29 skipped / 0 failed`、Windows native/desktop `567 passed / 1 Windows symlink privilege skip / 0 failed`、Rust workspace 串行 `1270 passed / 3 explicitly ignored / 0 failed`（Core `1031/3/0`、Host library `236/0/0`、Host binary `3/0/0`）、新增启动传输专项 `10/10` 与 fresh Release Host 只读候选集成 `1/1`，以及 typecheck、workspace all-target/all-feature strict Clippy、Rust fmt、production build、startup budget、Native thin-UI boundary 与 diff check。完整 Chromium、durable E2E、desktop pack/install/覆盖升级、24 小时、多硬件、Defender/磁盘、签名和灰度仍未在本纵切上执行。
+9. 该纵切使 Windows 产品启动链真正消费 Rust 离线候选，因此固定能力口径更新为 `Rust 唯一权威约 89% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 92% / 可放心发布成熟度约 60%`。剩余开发重点转向非离线的最后玩家写面、默认多核提交覆盖和 24 小时组合稳定性；发布成熟度不因代码接通而上调。
+10. 本切片不新增持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、公开 canonical 规则或 `authorityEligible=false`；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。
+
+### 24.55 Rust 权威自动布局、拖动与位置增量索引（2026-09-02，开发候选）
+
+本纵切关闭两个仍会让 renderer 旧状态参与 Windows 工厂写入的真实入口：自动布局与普通建筑拖动。目标不是把 JavaScript 算出的坐标换一种方式提交，而是让 renderer 只表达玩家意图或最终手势，让 Rust 从当前 durable revision 独占验证、展开、提交和恢复。
+
+1. 原生自动布局新增紧凑 marker `factoryAutoLayout/intent`，只接受 `apply + all/selection + entityIds`。选择上限为 4,096，ID 必须唯一、well-formed、无控制字符且每项不超过 512 UTF-8 bytes；未知键、跨行星实体、锁定或不可移动的空选择、畸形位置和非内置/MOD 目录均在 durable stage 前失败关闭。
+2. Rust 从活动行星、持久实体顺序、building catalog 和 resident belt columns 推导有向层级、空间障碍与最终坐标。稳定顺序使用 UTF-8 字节比较，不依赖 HashMap 迭代、线程调度或 renderer 节点顺序。WAL 只保存短意图，不保存可能达到数万行的展开坐标；live、generic cold replay 和故障恢复都重新确定性展开。
+3. 自动布局的 live/cold receipt 固定为空 `changedEntityIds/changedBeltIds` 且 `topologyDirty=true`。下一份有界 viewport 投影负责刷新画布，因此 receipt 不需要复制全部变化 ID；Host `AfterStage` 专项证明源 checkpoint 不变、WAL marker 无 `position` 且小于 1 KiB，恢复后位置与无故障提交逐字一致，相同 command ID 幂等。
+4. 原生普通拖动只有在 exact frame/command binding 可用且没有 pending mutation 时开放。手势开始时冻结 session/run/revision、行星和源坐标；期间 revision 前进时，只有同 lineage/planet 且所有源位置和锁定状态仍相同时才能安全重基。最终提交最多 4,096 个目标，只包含实际变化的有限 X/Y；界面立即恢复临时 React Flow 坐标，等待 durable Rust 投影安装最终位置，不保留第二份乐观权威。
+5. `CoreState` 的实体标量列改为 `Arc<Vec<T>>` 写时复制。纯位置命令不再调用全量 `rebuild_indexes()`：只复制 X/Y 列、重新解析变化实体行、验证 ID/planet/topology，并仅重建受影响行星的 viewport spatial index；实体 ID/planet/kind/building/recipe/resource/stored/machine/miner 列、全局 entity/belt map、symbol table、belt columns/dynamics 和 simulation static cache 继续共享源 `Arc`。任何候选失败都不能发布部分列、索引或 revision。
+6. Web/PWA 完整保留既有 JavaScript 布局、拖动与撤销路径。原生自动布局 undo 明确关闭，因为现有 renderer undo 栈会保存旧 GameState 并形成第二权威；durable Rust undo/redo 必须作为独立语义命令设计。当前 Rust 位置命令也不替 renderer 猜测“禁止重叠”偏好，后续需要用完整活动行星索引在 Rust 侧证明，而不能用截断 viewport 代替。
+7. 新鲜 focused 为 Core 自动布局 `2/2`、位置 COW/索引 `1/1`、Host durable recovery `1/1`，相关 Vitest 最终定向桶 `19/19`（此前组合定向桶 `34/34`）。完整 Rust workspace 串行为 `1274 passed / 3 explicitly ignored / 0 failed`：Core `1034/3/0`（433.49 秒）、Host library `237/0/0`（35.59 秒）、Host binary `3/0/0`。三个 ignored 均为显式手工 release 性能项。
+8. 最终完整 fast Vitest 为 376 files 通过、13 files 条件跳过，`3002 passed / 29 skipped / 0 failed`（70.13 秒）；首次全量为 `3001/29/1`，唯一失败是旧架构测试仍断言 native 拖动关闭，只更新为新 Rust 权威合同后复跑通过。完整 native/desktop 为 `567 passed / 1 Windows symlink privilege skip / 0 failed`。typecheck、workspace all-target/all-feature strict Clippy、Rust fmt、diff check 和 production build 全部通过。
+9. production build 为 2,102 modules；startup 总 gzip `180,782 B`、JavaScript `87,094 B`、CSS `93,688 B`、最大 startup JavaScript `58,974 B`、menu `258,715 B`、forbidden startup modules `0`；Native thin-UI boundary 为 13 个 App bindings / 12 个专用组件文件。本轮未执行 Chromium、durable E2E、desktop pack/install/升级、24 小时、多硬件、Defender/磁盘、签名和灰度，这些不复用旧结果。
+10. 固定能力口径更新为 `Rust 唯一权威约 90% / 完整薄 UI 约 98% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 93% / 可放心发布成熟度约 60%`。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、canonical 规则和 `authorityEligible=false` 均不变；未读取玩家存档，未连接生产，未部署、打包发布或签名。
+
+## 25. 剩余全部工作一次性收口计划（2026-09-02 重基线）
+
+> 审计基线：`ac13404c57ee14ba1eff34b76c8c02c7b24116ee`
+>
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
+>
+> 分支：`codex/windows-native-plan-completion`
+>
+> 状态：停止继续零散功能开发，先完成本节审计与计划冻结。本节只修改文档，不连接生产、不处理真实玩家存档、不打包、不签名、不部署。
+
+本节取代此前所有“下一小块做什么”的临时清单，成为后续唯一剩余工作计划。总体四目标能力加权进度仍为约 `93%`，不会因为把剩余工作拆细而倒退。为防止以后再出现百分比分母变化，本节另建立固定的 **100 个剩余工作单位**；后续只报告这 100 个单位完成了多少。除非用户明确新增范围，否则分母不再扩大。
+
+“一次性全部做完”在这里指一个连续开发战役：按依赖顺序完成整张剩余代码表，中途不为每个小提交重复跑完整 Rust、完整 Vitest、完整 E2E 或打包。开发期间仍必须运行与当前改动直接相关的红测、绿测、编译和格式检查，否则会把错误堆到最后；所有代码冻结后只做一次集中全量门禁。若集中门禁发现问题，只运行定位所需的定向测试，修复完成后再对新的冻结 SHA 做一次最终完整矩阵。
+
+### 25.1 审计结论与不再变化的口径
+
+当前代码已经完成大量高价值基础设施，但“计划全部完成”为 false。以下证据直接来自冻结源码，而不是旧报告推断：
+
+1. `DomainCoverage::implemented_beta_scope()` 仍将 `pure_idle_macro`、`offline_and_time_warp` 和 `authority_eligible` 设为 false；生产 Host 只有在 `authorityEligible=true` 时才允许玩家权威租约。测试 override 不能代替产品覆盖证明。
+2. `SaveDirtyPages` 当前只有 entity page、belt page 和两类 topology 标记；五个 base domain 在每次增量检查点仍全部序列化、计算 checksum/SHA 后才能比较复用。因此“实际只写脏页”已经成立，但“活动 revision 不扫描/编码清洁 base 域”尚未成立。
+3. renderer 已经消费主要 Rust 薄投影，但原生权威下仍明确关闭或隐藏一批玩家入口：移动端壳、durable undo/redo、批量升级/增加/回收、连续批量拉线、生产区域、部分特殊库存拖放、星图勘探/殖民/改名/备注、主云档写入以及部分 MOD/内容包动作。
+4. 当前投影使用最多 1 MiB 的 MessagePort 二进制块、ACK 与哈希，内存有界但仍是 clone/transfer 流水线，不是共享内存零拷贝。是否值得引入共享环形缓冲必须由 Gate C 数据决定，不能为了“原生感”先做复杂化。
+5. 稳态内置物流已经大量使用活动集合和反向唤醒，但自然稠密、拓扑重建、opaque/MOD、部分库存键解析、全局统计/指标和不完整 writer proof 仍会全扫。真正目标必须表述为：**稳定稀疏内置网络 O(active + changed)，稠密和不可证明网络确定性退化 O(all)**，不承诺数学上永不全扫。
+6. 原生多核已经覆盖解析、固定 prepare、部分探针、历史和线路准备；共享 inventory/production/Dyson 写回、线路冲突提交、完整物流 commit 和宏观结算仍有串行阶段。此前物料冲突组件并行原型只有约 0.2% 理论占比且增加复杂度，已正确拒绝，后续不得为了完成百分比无证据复活。
+7. Rust 运行时没有通用 mmap/LRU 冷页层；精确推进仍需对部分通用 JSON 记录做解析。现有 SoA、`Arc<str>`、resident indexes 和 COW 已降低常驻量，但不等于 WIN-480 完成。
+8. 24 小时、多硬件、Defender/磁盘、安装/覆盖升级、Authenticode 和灰度需要真实环境或发布权限。它们属于发布门禁，不算代码欠账，也不能由本机自动化文字替代。
+
+### 25.2 范围边界与完成定义
+
+本次连续开发范围保持以下边界：
+
+- 公开格式继续为 GameState v47、envelope v2、cloud schema v8、SQLite layout v3；没有新增持久字段就不升级版本。
+- Web/PWA/Android 保留 JavaScript 权威和兼容导入导出；Windows 原生优化不得改变它们的玩法结果。
+- 不降低生产/物流结算频率，不限制实体/线路数量，不删除 MOD 数据，不以少产、延迟、隐藏数字或自动回档换性能。
+- 不修改真实玩家存档，不连接生产服务器，不自行上传云档、切换下载页、签名或部署。
+- WIN-490 的 Tauri/Qt/纯原生外壳重写仍是条件项：只有完整薄 UI 后实测 Electron 固定开销超过全进程树 15%，且原型净收益覆盖输入法、无障碍、更新和 GPU 风险时才启动；否则它不是“未完成代码”，不计入下面 100 单位。
+
+代码开发完成必须同时满足：
+
+1. 下面 25.3 的 100 个剩余工作单位全部实现并具备定向回归；
+2. 所有仍由 native ownership 显式禁用的持久玩法操作，要么迁移为 Rust 语义命令，要么经评审确定为纯设备偏好并移出 GameState；不能靠读取旧 renderer `gameRef` 恢复按钮；
+3. 普通 Windows 原生候选具备完整 coverage candidate，但正式 `authorityEligible` 仍由 25.7 的 Gate C/长跑/多硬件发布证据控制；
+4. renderer 与 Simulation Worker 在 Rust 权威运行期间不长期持有第二份完整工厂对象图；故障回退通过同 revision durable checkpoint/v47 重新打开，而不是保留可写镜像；
+5. 最终集中测试和本机性能 Gate 全绿；外部门禁未执行时状态只能是“代码完成、发布 No-Go”，不能写成稳定版完成。
+
+### 25.3 固定 100 单位剩余代码表
+
+| 编号 | 工作包 | 单位 | 主要交付 | 完成判据 |
+| --- | --- | ---: | --- | --- |
+| BASE-500 | 自动化覆盖清单与边界守卫 | 3 | 从 Rust coverage、renderer native 禁用面、Host capability 和公开保存入口生成机器可读清单 | 新增/删除入口时测试必须同步；不存在靠手工文档遗漏的写面 |
+| AUTH-510 | 实时/纯挂机/离线/时间扭曲统一覆盖 | 15 | 同一 Rust 规则核心、闭合物料账本、可取消/恢复宏观窗口和 coverage candidate | 1×、8×、12×、15×、16×及离线分段一致；没有无来源终端结果；所有玩家可达域有证书或精确有界路径 |
+| WRITE-520 | 桌面剩余玩家写面 | 16 | durable undo/redo、批量升级/增加/回收、批量线路、区域、特殊库存和星图动作 | native ownership 下不再因缺 Rust 命令禁用这些持久玩法；失败原子且冷恢复幂等 |
+| MOBILE-530 | 完整移动/触摸薄 UI | 6 | MobileGameShell 消费 Rust 投影并提交同一语义命令 | 原生权威不再隐藏移动壳；触摸放置、选择、拉线、返回栈和旋转均无旧 GameState 写入 |
+| MOD-540 | 数据定义内容包与自定义建筑原生闭环 | 10 | 完整 catalog schema、展示、端口、配方、建筑/线路命令和 fail-closed 脚本边界 | 当前支持的数据型 MOD 可运行、显示、保存和恢复；未知脚本型扩展明确阻止晋升而不丢数据 |
+| SAVE-550 | 真正按域脏页保存与可取消合并 | 8 | base 五域 dirty generation、精确 changed systems、可取消 compaction、磁盘预算 | 清洁 base 域不序列化；ACK 前不清脏；故障保留最后 generation |
+| CLOUD-560 | 原生流式导入/导出/主云交接 | 7 | v46/v47 有界适配、流式 gzip、主进程文件/网络背压、native cloud conflict handoff | renderer 不持完整正文；取消/未知网络不自动覆盖或重传；模拟服务器往返哈希一致 |
+| ACTIVE-570 | 剩余 writer-closed 活动网络 | 10 | 残余库存键、power/global writer、material hub/MOD 目录、指标与拓扑事件总线 | 稳定稀疏内置档为 O(active+changed)，独立 flat oracle 严格一致；稠密/opaque 退化有计数 |
+| PAR-580 | 全领域确定性原生并行 | 10 | 行星/系统/连通分量事件缓冲、稳定合并、宏观结算分区、自适应线程 | 1/2/4/8/最大线程完整状态逐字一致，默认路径有端到端净收益且内存不超预算 |
+| STATS-590 | 全领域事件统计与诊断 | 5 | 生产/消耗/物流/功率/戴森/空间站事件桶和精确失效 | 采样边界不重扫全部记录；1 秒/1 分/10 分/1 小时 sidecar 可恢复且公开 v47 字节不变 |
+| PROJ-600 | 订阅式增量投影与 Gate C | 4 | 分频道订阅、背压合并、关闭即释放、IPC 占比测量；共享内存条件决策 | UI 只持当前视图/工作区；IPC+编码+安装低于帧预算 20%，否则再实现共享环形缓冲 |
+| RENDER-610 | Canvas/GPU 渲染终态 | 3 | 静态几何/动态遥测分离、OffscreenCanvas 或经证据选择的 GPU 批绘、上下文恢复 | P95/P99、长任务、DOM 数和输入延迟达标；上下文丢失不改权威状态 |
+| MEMORY-620 | 冷页、解析和分配预算 | 2 | mmap/LRU 或等价有界冷页、typed hot columns、scratch 复用、全进程计量 | 热推进不重复解析无变化 JSON；缓存有字节上限；30 分钟无持续正斜率 |
+| OWNER-630 | Rust 单所有者切换与懒回退 | 1 | 接管后释放 renderer/Worker 全状态，故障时从同 revision durable 数据重开 | 无双写、无静默回档、无第二份长期完整对象图 |
+| OBS-640 | 最终基准/故障编排器 | 0* | 复用现有脚本并补齐场景清单、JSON 报告和失败证据保留 | 作为各工作包验收代码随包完成，不单独增加百分比分母 |
+| **合计** |  | **100** |  |  |
+
+`OBS-640` 标为 0 单位并非不做，而是测试/观测成本已经分摊进每个工作包，避免完成业务代码后又突然扩大分母。
+
+#### BASE-500：机器可验证的完整性清单
+
+1. 从 `DomainCoverage`、Host hello capabilities、projection type、App native 分支和所有 `rejectLegacy...WhileNative` 调用生成一份排序稳定的 JSON/Markdown 清单。
+2. 每项必须标注 `read / intent / durable / local-preference / deliberately-unsupported`，以及 Web 和 Windows owner。
+3. CI/测试在新增 GameState writer、命令或工作区时要求清单同步；`deliberately-unsupported` 必须包含原因和数据保护行为。
+4. 清单是 AUTH-510 与 OWNER-630 的晋升输入，不能只靠人工把三个 boolean 改成 true。
+
+#### AUTH-510：统一宏观结算与覆盖候选
+
+1. 把现有 exact、`pure-idle-macro-v10`、`offline-macro-v1` 和 main-owned time-warp 预算收敛为同一阶段表；差异只能是时间来源、倍率和允许的宏观证书，不能复制规则实现。
+2. 为普通生产、科研、施工、火箭、太阳帆、银河出口、合同、手搓、有限矿和量子边界建立统一流量账本。无法证明的局部子图可以冻结，但不得让与它无依赖的闭合子图一起变成 0；不允许把一秒探针终端结果按倍率复制。
+3. 每个宏观 session 保存算法版本、source revision、预算、已消费窗口和必要私有 credit；取消、保存失败、Host 重启或 ACK 不确定只恢复原预算，不重复支付。
+4. `pure_idle_macro` 与 `offline_and_time_warp` 由覆盖清单和测试证据生成 candidate 状态。普通构建的 `authorityEligible` 仍关闭；只有 25.7 Gate C 产物可生成可晋升候选，renderer 无开关可绕过。
+5. 必测：无限/有限资源，多恒星系火箭/帆，断电/低供电/堵塞/库存耗尽，建筑制造量子供料，8×/12×/15×/16×，单段/多段/checkpoint/reload/取消/重启，以及源存档 hash 原子性。
+
+#### WRITE-520：剩余桌面写面一次收口
+
+按一个统一命令框架实现，不再为每个按钮发明独立重试机制：
+
+1. 修正当前选择工具栏总开关：原生 `selection auto-layout` 使用已完成的 Rust 短意图；升级、线路升级、批量增加、批量回收各用 Rust 重新推导价格、上限、关联线路和退款。
+2. 连续/批量拉线只在 renderer 保存几何候选，最终一次提交有界语义列表；Rust 按当前 revision 重新选择 tier、端口、材料、稳定顺序和原子失败。自动选级与特殊端口必须走目录能力，不能复用旧 draft GameState。
+3. durable undo/redo 保存“可逆语义命令 + source/result revision + precondition hash”，不保存完整 GameState。只撤销本 session 已确认操作；跨重启、跨导入或无法证明逆操作时明确截断历史。
+4. Canvas region/bookmark/持久视角等逐字段判断：设备偏好移出 GameState，本来属于存档的区域/书签使用 Rust 叶命令。位置重叠偏好由 Rust 完整活动行星索引验证，不能用截断 viewport 判断。
+5. 补齐当前明确关闭的特殊交互：站点/量子/建筑间库存拖放、永久丢弃二次确认、施工库存删除、喷涂模块拆卸、批量量子接入与采集器模式切换。
+6. 补齐星图的勘探、殖民、改名、备注和旅行；时间/随机/奖励均由 main/Rust 权威生成。
+7. 每种命令统一覆盖 old revision、ABA session/run、MOD/目录漂移、响应丢失、五个 durable fault boundary、cold WAL replay 和重复 command ID。
+
+#### MOBILE-530：移动端不再是第二套游戏
+
+1. MobileGameShell 改为消费与桌面相同的 native read models，不接收完整 `GameState`。
+2. 触摸放置、拖动、选择、连接、蓝图、检查器和工作区路由复用 WRITE-520 命令；移动层只拥有手势和导航状态。
+3. 手势期间 revision 漂移按桌面相同规则重基或取消；pointer capture、长按 timer 和 overlay 在 lineage 变化时全部释放。
+4. DOM/触摸 E2E 同时覆盖窄屏、旋转、后台恢复和系统返回键。
+
+#### MOD-540：自定义建筑的可证明原生能力
+
+1. 扩充规范 catalog snapshot，包含当前命令需要但 Rust 仍以 built-in 常量代替的 stack limit、端口、燃料、展示、解锁、配方输入输出、线路和特殊能力字段。
+2. 模拟热路径从 registry-backed typed tables 读取数据型 MOD；未知字段原样往返，注册表 fingerprint 漂移使旧投影/命令失效。
+3. 工厂节点、托盘、建筑制造、蓝图和自动布局支持数据型自定义建筑；布局按目录声明的端口/尺寸/锁定语义，而不是检测 `mod:` 前缀后整体拒绝。
+4. 任意脚本执行、原生代码注入或没有规范 schema 的扩展不在本次安全范围内：存档继续可读/导出，Windows 原生晋升失败关闭，并提示用 Web/JavaScript 权威运行。
+5. 用最小合成内容包覆盖新增、更新、禁用、缺失、ID 冲突、自定义建筑托盘显示、配方生产、线路和保存重载；不得提交真实玩家 MOD 或存档。
+
+#### SAVE-550 与 CLOUD-560：持久化闭环
+
+1. 为 Core/Logistics/Dyson/Statistics/Unknown 五个 base domain 增加独立 dirty generation；所有 writer 必须通过集中 API 标脏，debug/test 下另用最终结构 hash 审计漏标。
+2. 清洁 base 域直接复用已验证 metadata，不序列化、不重新 SHA；entity/belt page、topology 和 system IDs 继续独立。
+3. compaction 分为可取消的 scan/copy 和不可取消的短 publish；新 checkpoint 到来可取消前者，publish 与活动 transaction 互斥。回收只删除不被 active/fallback generation 引用的 chunk。
+4. 原生导入流支持 current v47 和明确兼容的 v46 适配；旧版本字段以有界迁移器逐段生成，不把完整正文交给 renderer。导出/gzip/checksum/长度/SHA 使用固定 buffer。
+5. 主云上传由 main 读取只读导出文件或有界流并实施背压；renderer 只看到进度、revision 和摘要。网络未知保留本地候选与幂等 token，等待人工重试，不自动覆盖远端。
+6. 云恢复/冲突选择先安全关闭活动 authority session，再把验证后的新档作为新 lineage 打开；失败继续保留旧 session/checkpoint，不混合两个 revision。
+7. 开发验证只使用本地 mock API/临时目录；生产云往返留给 25.7 授权门禁。
+
+#### ACTIVE-570：把剩余稀疏热点变成事件网络
+
+1. 以 writer manifest 为入口，统一实体库存、托盘、线路、站点、路线、量子、施工、电力、科研和戴森变更事件；各 runtime 只能消费已证明的 event key。
+2. 去除稳定稀疏路径对全部库存 key/route group/entity 的选择扫描；活动队列按持久 row 排序，达到 75% 或 writer 不闭合时退化旧 oracle。
+3. planet metrics 用稳定分块和补偿/定点规范消除每拍全实体标量折叠前，先证明公开 IEEE-754 字节不变；若无法保持字节，保留折叠并把它诚实列为串行成本，不用近似累计。
+4. production history、power source、global research/Dyson recipe、material-delivery 与 MOD 目录分别建立 wake/invalidate 条件；拓扑变化允许一次 O(all) 重建，稳定 revision 不允许无原因重复重建。
+5. A/B oracle 必须真正绕过 indexed selector，从 flat persistent order 独立执行；报告 selected/visited/wake/dense/fallback/skip，而不是只报最快耗时。
+
+#### PAR-580：只并行能够稳定合并的真实工作
+
+1. 先用最终大档 profile 固定串行占比，按行星、恒星系、线路连通分量或无共享库存生产网络生成私有事件缓冲。
+2. worker 只读 source snapshot；共享库存、浮点合计、公平分配和 ID allocator 在固定 barrier 按稳定键提交。工作窃取只能改变完成时间，不能改变事件顺序。
+3. 将 exact、pure-idle/offline calibration、宏观证书准备和统计事件生成接入同一进程生命周期线程池；禁止每个测试/请求建立临时 Rayon 池。
+4. 小批量、强耦合或串行比例高时自动单线程；只有端到端中位净收益、P95 不退化且全进程内存增量在预算内才启用并行阶段。
+5. 不重新实现此前 0.2% 的冲突组件原型，除非新的 profile 证明其占比至少达到合入阈值。
+
+#### STATS-590、PROJ-600 与 RENDER-610：把 Rust 结果便宜地显示出来
+
+1. 每个权威阶段产生有界统计事件，直接更新 1 秒/1 分/10 分/1 小时桶；工作区查询只分页读取桶，关闭后释放详情 cache。
+2. 投影 broker 改为显式 subscription：viewport topology、telemetry、belt geometry/flow、inventory、workspace 和 notification 分频道；中间遥测可合并，command ACK、库存和 topology 事件不可丢。
+3. 先测当前 MessagePort 的 encode + transfer + validate + install 占比。若 P95 低于总帧 20% 且内存有界，保留简单实现；超过门槛才实现版本化 shared-memory ring，并保留 bounded MessagePort fallback。
+4. 渲染层把静态几何与动态流量分离，优先使用已有 Canvas batch 的 OffscreenCanvas worker 扩展；只有 Canvas P95/P99/长任务仍不达标才引入 WebGL2/WebGPU。React/DOM 只保留交互、选中和无障碍节点。
+5. GPU/Canvas context 丢失、RDP、缩放、DPI 和多显示器恢复只重建显示缓存，不触碰 revision 或存档。
+
+#### MEMORY-620 与 OWNER-630：最终内存所有权
+
+1. 把热路径仍需解析的通用 JSON 叶逐步迁入 typed columns；不变原始字段继续 `Arc<str>` 往返，未知域不复制整图。
+2. 冷 checkpoint/chunk 使用 mmap 或等价只读分页 reader，并用显式 LRU/字节预算统计 OS page cache 与进程 Private Bytes；收益不足或增加文件锁风险时保留流式 reader，不为完成标签强上 mmap。
+3. scratch/arena/temporary vectors 设容量上限并跨步复用；候选失败后不得把峰值 buffer 留在 session cache。
+4. authority handoff 成功后销毁 renderer/Simulation Worker 完整工厂对象和 legacy undo history，只保留薄投影、设备偏好和同 revision durable proof。
+5. JavaScript 回退改为显式暂停后从当前 Rust v47/checkpoint 重新打开；不能在后台长期养一份可写 GameState，也不能在 Host 故障时跳回旧 revision。
+
+### 25.4 一次性实施顺序
+
+后续严格按以下六个大波次推进。每个波次可以包含多个小提交以便审查和回滚，但不在波次之间重复跑完整套件：
+
+| 波次 | 工作包 | 前置与目的 | 开发期允许的验证 |
+| --- | --- | --- | --- |
+| A：覆盖冻结 | BASE-500、AUTH-510 | 先定义所有权与宏观语义，避免后续 UI/并行建立在错误覆盖上 | 新增红测、模块 focused、`cargo check`、相关 typecheck |
+| B：玩家功能闭环 | WRITE-520、MOBILE-530、MOD-540 | 一次补齐所有 native 禁用的持久玩法面 | 每类命令 Core/Host/renderer 定向测试；不跑完整 Vitest/Rust |
+| C：持久化与云边界 | SAVE-550、CLOUD-560、MEMORY-620 | 让活动 revision、导入导出和冷页不制造完整副本 | 临时目录故障注入、focused save/import/cloud、内存下界测试 |
+| D：模拟热路径 | ACTIVE-570、PAR-580、STATS-590 | 在语义和 writer 已冻结后做活动化与并行 | 独立 flat oracle、1/2/4/8 focused hash、合成 profile；不跑全仓库 |
+| E：薄 UI 与单所有者 | PROJ-600、RENDER-610、OWNER-630 | 消除第二状态并把投影/渲染成本压进 Gate C | 投影/组件/MessagePort/renderer focused、短场景进程树采样 |
+| F：代码冻结 | 文档、清单、release candidate metadata | 冻结一个 SHA，停止功能修改 | fmt、diff、清单一致性；随后进入 25.6 集中测试 |
+
+任何波次发现必须改变 GameState/envelope/cloud/SQLite schema，立即停止该波次并单独评审迁移；不能顺手升级格式。任何优化若使规范状态、物料守恒或同 revision 恢复分叉，直接回退该优化而不是放宽测试。
+
+### 25.5 开发期测试政策
+
+为落实“不要每做一点就全量测试”，开发阶段使用以下固定规则：
+
+- 每个产品修改先添加或更新能失败的最小合成回归，再运行该测试；修复后只复跑同一 focused 集合。
+- Rust 跨模块修改允许运行目标 crate/模块测试和 `cargo check`；TypeScript 跨边界修改允许运行相关 Vitest 文件和 `npm run typecheck`。typecheck 可在大波次末运行，不要求每次保存都跑。
+- `cargo test --workspace`、完整 `vitest run`、`npm run test:native`、server、Playwright、production build、desktop pack 和真实长跑在 A～E 波次全部禁止例行重复。
+- 格式化可以机械执行；strict Clippy 只在 Rust 大波次结束和最终冻结执行，不为每个小函数重复。
+- 每个 focused 结果只证明对应工作包，不写成完整发布门禁；失败史、修复原因和是否只改夹具必须保留。
+
+### 25.6 最终代码冻结后的集中测试矩阵
+
+集中测试只对一个明确冻结 SHA 执行，并按下列顺序运行；后一步只有前一步通过才开始，以免浪费最长门禁时间：
+
+1. **静态与格式**：`git diff --check`、`npm run typecheck`、`cargo fmt --all -- --check`、workspace all-target/all-feature strict Clippy `-D warnings`、许可证检查和 native thin-UI boundary。
+2. **完整规则单元**：启用 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest；Rust workspace 使用单 Cargo job、串行 libtest 跑 Core/Host/binary 全量。报告实际 passed/skipped/failed 和耗时，不复用 24.55 的 `3002/29/0` 或 `1274/3/0`。
+3. **桌面/服务边界**：`npm run test:native`、`npm run test:server`、`npm run test:ops`、备份/发布工具；symlink 权限 skip 单列，不能算通过。
+4. **构建**：fresh Release Host、`npm run build`、startup budget、forbidden module、bundle/菜单 gzip 和 source/Host 能力一致性。
+5. **浏览器与耐久 E2E**：完整 Chromium、durable WAL E2E、nightly Firefox/WebKit 兼容；使用 production preview 再跑保存/离线/纯挂机/云 mock 高风险场景。
+6. **确定性与故障**：1/2/4/8/最大线程，1/5/60/600 秒、8 小时/30 天，8×/12×/15×/16×，命令不同分包、Worker/Host 重启、五个 durable stage、取消、保存失败、磁盘预算和只读临时目录；全部比较完整公开 bytes、canonical/domain/守恒摘要。
+7. **性能与内存**：P50/P95/极限合成档和经授权的只读玩家档，分别测暂停、实时、纯挂机、建造、拉线、蓝图、保存、导出和 UI；记录全进程树 Private Bytes、峰值/稳态/斜率、Rust/renderer/Worker/GPU、模拟秒吞吐、IPC 占比、帧 P50/P95/P99 与 >50 ms 长任务。
+8. **Windows 制品**：`desktop:pack`、隔离 profile 启动、退出残留、文件清单/SHA、升级/卸载脚本的本地安全夹具。没有签名凭据时只生成明确 `NotSigned` 的开发候选，不冒充 release。
+9. **报告**：生成一份冻结 SHA 的 final development report、manifest、SHA256SUMS 和新老版本 A/B；首轮失败和修复后结果同时保留，不能只贴最终绿色。
+
+本机性能最低 Go 条件保持原计划：完整权威链路相对 JavaScript 至少 1.5×，IPC/编码/安装低于总帧 20%，组合峰值目标约 1.5～2.5 GB 或相对第一层再降至少 30%，30 分钟无持续正内存斜率，任何场景无静默回档和物料分叉。未达到时对应能力继续 No-Go，不通过降低玩法精度补数字。
+
+### 25.7 代码完成后仍需外部关闭的发布门禁
+
+这些门禁不占 25.3 的 100 个代码单位，但决定 `authorityEligible` 和稳定发布：
+
+1. Windows 10/11，低配/主流/高配至少三档 CPU、内存和 GPU；每档 A（JS）、B（shadow）、C（Rust 单权威）同 Build ID、同夹具、同场景。
+2. 每档 24 小时实时/纯挂机组合长跑，包含周期性建造、拉线、保存、工作区切换、前后台和 Host 重启；报告全进程树内存斜率与状态哈希。
+3. 真实 Defender 文件锁、磁盘满、只读目录、进程强杀、系统休眠/唤醒、RDP/GPU context loss、安装、覆盖升级和受支持降级导出。
+4. Authenticode 签名、installer/update feed、隔离 profile、旧版覆盖升级和卸载保留存档；凭据只由授权 Release Agent 使用。
+5. 测试账号的真实云 v47 往返和冲突恢复；不使用玩家账号或生产档，不直接操作数据库。
+6. 邀请 Beta → 5% → 25% → 100% 灰度，观察崩溃率、保存失败、恢复失败、差分和性能分布；任何异常只关闭原生能力，不回写或降级玩家 GameState。
+
+只有外部门禁全部通过，冻结构建才可以生成 `authorityEligible=true` 的正式证明。代码审计、测试 override、开发环境变量或 UI 开关均不得代替该证明。
+
+### 25.8 固定进度报告方式
+
+后续每次汇报同时给两组数字，永不混用：
+
+- **总体能力进度**：以本节建立时的 `93%` 为基线，只在 25.3 的工作包完整达到完成判据后上调；不会因拆细任务下调。
+- **剩余战役进度**：`已完成单位 / 100`。一个工作包只有代码、focused 回归和文档都闭合才计入全部单位；“写了一半”可以文字说明，但不虚报完成单位。
+- **发布成熟度**：保持独立 60% 基线，只有 25.6 的本机集中门禁和 25.7 的外部证据逐项完成才上调。代码行数、按钮数量和单项微基准不改变发布成熟度。
+
+本节计划冻结后，下一次开发从 BASE-500 和 AUTH-510 开始，连续推进至 F 波次代码冻结；在此之前不再临时插入新的“下一小块”或重复完整测试。若用户新增需求，必须明确说明它增加多少剩余单位并获得同意后才改变分母。
+
+## 26. 14 个工作包、6 个连续开发波次实施冻结（2026-09-02）
+
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
+>
+> 分支：`codex/windows-native-plan-completion`
+>
+> 冻结口径：本节记录的是 **100/100 代码工作单位已形成冻结候选**；25.6 的集中测试尚未完成前，不把它写成发布通过。25.7 的 24 小时、多硬件、签名、安装升级、真实云和灰度仍是外部门禁。
+
+本次严格保持 GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 1.2.3；没有连接生产、部署、签名、读取或修改真实玩家存档。`authority_eligible` 继续为 false，普通构建不能靠 renderer 开关或测试环境变量绕过发布证明。
+
+### 26.1 六个波次的冻结结果
+
+| 波次 | 工作包 | 冻结结果 | 对应提交/冻结动作 |
+| --- | --- | --- | --- |
+| A：覆盖冻结 | BASE-500、AUTH-510 | coverage、Host capability、玩家写面和宏观覆盖由机器清单共同约束；exact、pure-idle、offline/time-warp 使用同一 Rust 规则阶段与守恒候选 | `079465a6` |
+| B：玩家功能闭环 | WRITE-520、MOBILE-530、MOD-540 | 批量建筑/线路原子命令、剩余工作区动作、移动薄壳和声明式自定义建筑目录闭合；未知脚本型内容 fail closed 且不丢数据 | `d872b496`、`5a1a4fa7`、`c061c0ae`、`df7362d9` |
+| C：持久化与云边界 | SAVE-550、CLOUD-560、MEMORY-620 | base/实体/线路/拓扑分别记脏；durable ACK 后才清脏；v46/v47 原生流式导入、v47 流式导出、gzip/文件/云背压和有界冷页/分配预算闭合 | `2b7e313e` |
+| D：模拟热路径 | ACTIVE-570、PAR-580、STATS-590 | writer-closed 事件清单、活动/稠密退化诊断、独立 flat oracle、稳定事件排序与分区准备、稀疏生产历史索引和运行时统计 sidecar 闭合 | 本节冻结提交 |
+| E：薄 UI 与单所有者 | PROJ-600、RENDER-610、OWNER-630 | 持久分频道订阅、ACK/背压/哈希、静态/动态 Canvas 分层、OffscreenCanvas 有界队列，以及只从同 revision durable WAL 整进程重开的故障路径闭合 | 本节冻结提交 |
+| F：代码冻结 | 文档、清单、候选 metadata | 重新生成 `native/native-coverage-manifest.json`，固定实现状态与测试口径；功能修改停止，进入 25.6 集中矩阵 | 本节冻结提交 |
+
+### 26.2 固定 100 单位代码结算
+
+| 工作包 | 单位 | 冻结候选中的实际闭环 | 集中测试或外部证据仍要回答的问题 |
+| --- | ---: | --- | --- |
+| BASE-500 | 3 | 稳定生成 coverage/capability/write-surface manifest，29 个玩家写面均有 owner、kind、状态和数据保护原因 | 最终 SHA 上再次 verify，防止文档后漂移 |
+| AUTH-510 | 15 | ordinary 与宏观结算共用 Rust 规则和守恒摘要；无证明子图冻结而不复制终端物料；取消/恢复由 revision 和 durable budget 围栏 | 最终长差分、倍率/分段/故障完整矩阵 |
+| WRITE-520 | 16 | 桌面剩余批量、区域、特殊库存、星图和工作区持久动作均进入 Rust 有界语义命令；失败原子、重复 ID 幂等 | 完整 Host/renderer/WAL 故障矩阵 |
+| MOBILE-530 | 6 | `NativeMobileGameShell` 消费同一投影并提交同一命令，触摸层不持有可写 GameState | Chromium 窄屏、旋转、恢复和返回栈 E2E |
+| MOD-540 | 10 | catalog-backed 配方、端口、尺寸、堆叠、展示和建筑/线路语义；未知脚本型包阻止原生晋升但保留往返数据 | 全量最小内容包组合和安装环境验证 |
+| SAVE-550 | 8 | base 五域、实体页、线路页和拓扑分代记脏；清洁块复用 metadata；失败不清脏，commit ACK 后清除；compaction 可取消 | 磁盘满、只读目录、Defender 锁文件、强杀 |
+| CLOUD-560 | 7 | v46/v47 流式导入、v47 流式导出和 main-owned 有界云工件；renderer 不接收完整正文，未知网络保留幂等候选 | 本地 mock 全量与获授权测试账号真实往返 |
+| ACTIVE-570 | 10 | 14 个模拟扫描阶段写入确定性事件证据；稳定稀疏按活动键访问，75%/opaque/writer 未闭合时确定性退化并计数 | 最终极限合成档与只读获授权大档 A/B |
+| PAR-580 | 10 | 只读 snapshot 的稳定分片 prepare、固定键事件合并和自适应小批量单线程；无净收益的共享写冲突阶段保持串行 | 1/2/4/8/最大线程完整公开字节与端到端收益矩阵 |
+| STATS-590 | 5 | 生产历史使用 rate/inventory 稀疏索引和精确失效；查询有稳定游标，运行时执行诊断不进入 v47 公开字节 | 全量重载、时间桶和长跑失效验证 |
+| PROJ-600 | 4 | viewport/topology/telemetry/belt/inventory/workspace/notification 持久订阅；可靠频道有界排队，遥测只合并最新，安装完成才 ACK | 最终 UI Gate C 的真实 P95；超过 20% 才触发 shared-memory 方案 |
+| RENDER-610 | 3 | 静态拓扑与动态流量/选择分层；稠密图用 OffscreenCanvas；主线程与 worker 均只有一个在途和一个最新待处理帧 | production preview 的 P50/P95/P99、长任务、RDP/DPI/context-loss |
+| MEMORY-620 | 2 | typed 热列、共享原始记录、流式 reader、LRU/字节预算和 scratch 上限；没有为了标签强上会增加 Windows 文件锁风险的 mmap | 30 分钟全进程树 Private Bytes 斜率 |
+| OWNER-630 | 1 | 故障/不确定状态只在无在途事务且 checkpoint revision 匹配时允许 main 复核后整进程重启；不养旧 JS 镜像，不静默回档 | Host 强杀与 WAL 重开 E2E |
+| **合计** | **100/100** | **实现、定向回归和文档均已形成冻结候选** | **集中矩阵未完成前，发布状态仍为 No-Go** |
+
+这里的条件实现不是遗漏：MessagePort P95 未超过帧预算 20% 时，保留更简单的有界传输；Canvas 达标时不引入 WebGL/WebGPU；流式分页 reader 达标时不为“原生化”强上 mmap；不能证明并行有端到端净收益的共享写阶段继续确定性串行。只有集中测试用数据触发阈值，才重新打开对应代码包。
+
+### 26.3 波次 D/E 冻结前的新鲜定向证据
+
+1. Rust `factory_writer_events`：3/3；`production_history` 定向集合：28/28；提交后工厂执行证据：1/1。
+2. `cargo check -p dsp-native-core --all-targets` 与 `cargo clippy -p dsp-native-core --all-targets -- -D warnings` 均通过，Rust 已运行 `cargo fmt`。
+3. 投影订阅、operations boundary 和 durable restart：19/19；玩家 authority runtime 文件：62/62。
+4. Canvas、operations workspace、native core/renderer/mobile 集成：7 个 Vitest 文件、59/59；额外受影响定向集合：2 个文件、16/16。
+5. `npm run typecheck`、两个 Electron 入口 `node --check`、`git diff --check` 和重新生成后的 `npm run verify:native-coverage` 均通过。
+
+这些只是开发期 focused 证据，不能与 25.6 的完整通过数量合并。下一步在本节冻结提交上执行一次集中矩阵；若发现产品错误，保留首轮失败，修复后产生新的冻结 SHA，并只在最终 SHA 上重跑完整矩阵。
+
+### 26.4 首次集中矩阵失败与冻结修正
+
+首次冻结 SHA `65d798b518e7d2b939b6ac33d35715d92d466fdf` 的 Release Host 构建通过（单 Cargo job，release profile 3 分 32 秒），但开启 long differential 的完整 Vitest 首轮在 63.077 秒失败：394 个文件中 389 通过、5 失败；3,051 项中 2,968 通过、28 条件跳过、55 失败。
+
+失败没有被删除或改写为通过：
+
+1. 生产历史稀疏库存目录只记录启动时已有物料的实体。某行从空 `inputs/outputs` 变为有货后，目录没有随成功 revision 提交更新；10 秒库存刷新因此漏行。前四个差分场景首先产生 `productionHistory` 哈希分叉，测试在断言前未关闭 Host session，随后 45 项形成 `native core session limit has been reached` 级联错误。
+2. 修复增加独立于大型静态 topology 的小型 COW 库存目录：成功提交按严格有序的 changed row 增删；当前未提交长推进把累计 writer rows 与 resident 目录稳定合并；达到 75% 时确定性退化全扫。目录不进入 GameState、checkpoint 或 canonical bytes，也不会因每次 revision 更新而克隆整份工厂 topology。
+3. Rust 生产历史专项修复后为 29/29，strict Clippy 通过；重新构建 Release Host 后，完整 `nativeCoreDifferential.test.ts` 为 50/51，唯一失败是旧测试仍要求 `pureIdleMacro=false`，而波次 A 的机器覆盖清单已正确证明为 true。更新该架构断言后，content-pack 目标用例 1/1 通过。
+4. 其余 6 个首轮失败均为旧静态架构断言仍要求批量线路、库存删除/丢弃、移动端壳、暂停和 undo/redo 被禁用；产品功能已经在波次 B/E 迁入 Rust。断言改为验证新的 Rust batch、main-owned pause/history 和原生移动薄壳，相关 4 个文件最终 23/23。没有为通过测试重新打开旧 JavaScript 写入口。
+
+`65d798b5` 因上述真实回归不再是最终冻结 SHA。修正提交完成后，25.6 全部集中门禁从头在新 SHA 上执行；本节保留首轮失败数量和原因。
+
+### 26.5 第二次集中矩阵失败与 writer 闭环修正
+
+修正 SHA `700a24dc831f516a48c5a9a0a248642b0eb98cc1` 上，开启 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 已在 319.112 秒内通过：394 个文件全部通过；3,023 项通过、28 项条件跳过、0 项失败。随后 Rust workspace 全量在 Core 阶段运行 497.933 秒后停止：1,051 项通过、3 项忽略、5 项失败，因此 Host 与 binary 没有被冒充为已执行。
+
+五项失败逐项复现后分成两类，并保留如下修正依据：
+
+1. 三项旧测试仍要求带 registry fingerprint 的自动排版、声明式 MOD 蓝图入队和 MOD 捕获统一返回 `unsupported-blueprint-domain`。这与波次 B 已落地的数据型 catalog 能力冲突。测试现改为：完整数据型 catalog 必须成功，缺少目录定义仍以 `catalog-incomplete` 失败；脚本型/未知内容的 fail-closed 产品规则没有放宽。
+2. 一项是真实 writer 闭环回归。`LogisticsBufferRuntime` 冷启动会为全部 storage/splitter 物化旧版兼容的零值库存键，但共享 writer manifest 没有收到该阶段的实际访问行。1,024 行合成档中，第一次结算实际规范化 1,023 个仓库，却只上报另一个阶段的 1 行；长请求因 Campaign 全扫描看见 `iron_ingot: 0`，分段请求的稀疏库存扫描漏掉它，导致首个 `productionHistory` 样本不同。修正后 settlement 返回稳定有序的实际写入行：冷启动/稠密路径返回完整目录，休眠路径为空，稀疏路径只返回 wake queue；这些行进入统一 Inventory writer manifest，并新增 `1024 → 0 → 1` 行的回归断言。
+3. 最后一项是错误链断言仍匹配旧文案。当前分块读取器按“读取 chunk 上下文 → 缺失 record 根因”保留完整 `anyhow` 链；测试现在验证完整链和精确缺失 key，不改变损坏存档的拒绝行为。
+4. 修正后的 focused 集合为 6/6：物流写入行、60 秒单次/60 次 1 秒生产历史一致性、缺失 chunk，以及三项 MOD/排版/蓝图契约全部通过。完整矩阵仍必须在包含本节修正的新冻结 SHA 上从头运行，不能把这些 focused 结果拼成发布通过。
+
+### 26.6 第三次冻结的 Host 脏域审计失败与派生命令修正
+
+冻结 SHA `07ffd9f763b19fb7716544c8f9281b9fa7d4d9c6` 的静态门禁全部通过：TypeScript typecheck、Rust workspace all-target/all-feature strict Clippy、Rust fmt、125 个运行依赖许可证、13 个 App binding/12 个组件的薄 UI 边界和 native coverage 清单均为绿色。开启 long differential 的完整 Vitest 在 495.214 秒内通过：394 个文件，3,023 项通过、28 项条件跳过、0 项失败。
+
+Rust workspace 串行全量随后给出新的首轮证据：Core 为 1,056 项通过、3 项 ignored、0 项失败，耗时 452.45 秒；Host 在 40.55 秒内为 238 项通过、1 项失败、0 项 ignored，命令因此按设计停止，后续 binary 没有被冒充执行。唯一失败是 `construction_queue_cancel_is_idempotent_across_all_host_fault_boundaries`，错误为 checkpoint base-domain dirty audit 检出未登记 writer。
+
+根因是施工队列的 WAL 只持有有界意图，实际 `ConstructionQueueExpansion` 会在 Rust 内派生修改多个公开字段。既有 dirty 标记只看原始 `constructionQueue.intent` 并额外强制 Core；取消和补料还会修改属于 Logistics 域的 `portableFleet`，保存时却尝试复用旧 `base:logistics`。修正为每种派生计划显式声明实际触及的 v47 顶层字段，并统一交给已有 domain classifier：Cancel、Enqueue、Fund、Deploy、DirectDeploy 分别只标记各自的 construction、portableFleet、queue、version 和 allocator 字段。审计仍保持开启，并把错误信息补充为具体 domain ID。
+
+原失败测试修复后 1/1 通过；同一筛选下蓝图捕获、导入、入队、直接部署、施工部署和取消的全部 Host fault-boundary 场景为 6/6。该 focused 结果只允许形成新的冻结提交；25.6 集中矩阵仍需在新 SHA 上再次从头执行。
+
+## 27. 14 个工作包、6 个波次集中验收记录（2026-09-02）
+
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`；分支：`codex/windows-native-plan-completion`。本节是开发候选的集中验收记录，不是生产发布证明。版本仍为 package `1.2.3`，GameState v47、envelope v2、cloud schema v8、SQLite layout v3 均未升级；没有连接生产、部署、签名、修改真实玩家存档或云数据。
+
+### 27.1 代码结算
+
+14/14 工作包、6/6 波次的代码与定向回归已经形成一个冻结候选；剩余问题不再拆成新的开发波次，而只进入集中门禁或外部发布门禁。普通构建的 `authority_eligible` 仍为 `false`，不能由 UI 开关或环境变量绕过。
+
+集中前最后一个真实产品回归是大存档冷启动缓存过量：原先会在打开时同时常驻解析实体图、行星指标和 campaign 缓存，内存估算为 `204,737,068 B`，超过 `132,503,967 B` 门槛。修复采用惰性缓存而非降低门槛：原始实体记录超过 16 MiB 时冷启动只保留 typed 列、索引和 topology；第一次确实需要精确推进时才建立对应缓存。`memory-estimate-breakdown` 诊断标记同时记录各项字节，便于失败时定位，不进入公开存档字节。
+
+### 27.2 本次实际集中结果
+
+以下数字全部来自本次冻结候选重新运行，未复用旧报告：
+
+| 门禁 | 实际结果 |
+| --- | --- |
+| 完整 Vitest（`DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1`） | 381 文件通过、13 文件条件跳过；3,024 通过、28 跳过、0 失败；497.91 s |
+| Rust workspace 串行全量 | Core 1,056 通过、3 ignored、0 失败（452.85 s）；Host library 239 通过、0 失败；Host binary 3 通过、0 失败；doc 0/0 |
+| native/desktop Node 套件 | 588 项：587 通过、1 个 Windows symlink 权限条件跳过、0 失败（10.96 s） |
+| server/API | 主套件 391：389 通过、2 跳过、0 失败；station 4/4 |
+| ops/发布工具 | 62：56 通过、6 个 Linux-only 条件跳过、0 失败 |
+| backup 工具 | 2/2 通过、0 跳过、0 失败 |
+| typecheck / fmt / strict Clippy / licenses / coverage / thin-UI / diff | 全部通过；运行依赖许可证 125 项，thin-UI 为 13 个 App binding、12 个组件 |
+| production build | 2,107 modules；startup gzip 180,830 B（JS 87,091 B、CSS 93,739 B）；forbidden startup modules 0；仅保留既有大 FactoryRuntime 警告 |
+| Chromium / durable / nightly | Chromium 460：433 通过、27 跳过、0 失败（约 6.9 min）；durable WAL 7/7（48.2 s）；Firefox 1/1、WebKit 1/1（nightly 2/2，8.2 s） |
+
+### 27.3 线程、确定性和真实大存档
+
+- 合成线程矩阵 `artifacts/windows-native-completion/final-20260902/thread-matrix.json`：15/15 单元完成（1/2/4/8/auto × 3），输入、二进制均未变化，跨线程 canonical SHA 全部一致。中位 exact 时间为 1 线程 67.70 ms、2 线程 46.36 ms、4 线程 40.76 ms、8 线程 33.06 ms、auto 34.13 ms；相对 1 线程最高约 2.05×，峰值推进 Private Bytes 约 80.9–85.1 MiB。
+- 确定性矩阵 `artifacts/windows-native-completion/final-20260902/thread-determinism.json`：1/2/4/8 共 4/4；revision `3`，canonical `53a0779e…8768c0`、domain `9f8ef282…20dc9d`、守恒摘要 `7e4bf852…05af1a` 全部相同。
+- 真实只读存档 `D:/360安全浏览器下载/dsp-idle-save-2026-08-26.json`（44,167,989 B、45,904 entities、91,955 belts）full stress `artifacts/windows-native-completion/final-20260902/real-save-full-stress.json`：3/3 完成、exact/采样/durable/checkpoint/burst 全部通过，源文件和 Release Host SHA 全程不变。冷启动估算 `132,356,522 B`，低于 `132,503,967 B` 门槛；打开后 Private Bytes 约 170–172 MiB，打开瞬时峰值约 1.08 GiB（解析输入的短暂峰值，不能用“打开后常驻”数字替代）；exact native 600–696 ms，对应 JavaScript 1,701–1,861 ms，约 2.4–2.9×。这证明本机候选的内存预算和正确性，不等于所有 Windows 机器的 24 小时稳定性。
+
+### 27.4 本机候选制品与外部 No-Go
+
+完整 Chromium、durable WAL 和 nightly Firefox/WebKit 已在本次冻结候选通过；桌面 `desktop:dist` 也已用隔离的 dummy HTTPS 地址生成 unsigned 安装器、blockmap、`latest.yml`，并对 `win-unpacked` 完成 12 秒隔离 profile 冒烟（主进程响应、Rust Host 可见、临时 profile 隔离、残留进程 0）。制品目录为 `release-performance-edition/`，独立可测试 bundle 与逐文件 manifest 位于 `artifacts/windows-native-completion/final-20260902/`；Authenticode 状态为 `NotSigned`。
+
+仍未关闭且不能由本机自动化替代的门禁包括：Windows 10/11 三档硬件、Defender/真实磁盘满/只读目录/休眠唤醒/RDP/GPU context loss、24 小时组合长跑、正式 Authenticode 签名、安装覆盖升级/卸载保留、真实测试账号云往返和 Beta→灰度。Linux-only 的 6 个运维用例和 1 个 Windows symlink 权限用例是环境条件跳过，不应计作绿色。完成这些外部证据前，发布成熟度仍按 60% 记录，`authority_eligible=false` 保持关闭；候选只能作为本地开发测试版本。
+
+### 27.5 证据和保护规则
+
+首轮 5 个 Vitest、5 个 Rust、1 个 Host 脏域失败及其修复原因继续保留在 26.4–26.6；本节不删除失败史。纯挂机终端账本、排行榜 review queue、增量保存和惰性缓存均不通过迁移静默修正历史数据；候选失败、取消、保存失败或 Host 重启都保留原检查点和源哈希。任何后续发布工作必须从本节冻结 SHA 重新生成 manifest、SHA256SUMS 和 unsigned Windows bundle。
+
+### 27.6 最终交付索引
+
+最终 SHA、Build ID、制品逐文件 SHA、测试报告和旧版对比摘要统一写入 `artifacts/windows-native-completion/final-20260902/final-report.json` 与 `SHA256SUMS.txt`；可读说明见 `docs/releases/1.2.3-windows-native-complete-development-report-2026-09-02.md`。这些文件只描述本地开发候选，不构成发布授权。

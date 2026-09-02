@@ -62,7 +62,7 @@ import {
   Zap,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useHorizontalPan } from "../hooks/useHorizontalPan";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { ItemCatalogPicker, RecipeCatalogPicker } from "./CatalogPicker";
@@ -78,6 +78,14 @@ import {
   PURE_IDLE_REPLICATION_UNLOCK_TOTAL_LEVEL,
 } from "../game/endgame";
 import { getPureIdleReplicationReadiness } from "../game/pureIdleReplication";
+import type {
+  FactoryInspectorSummaryReadModel,
+  FactoryMultiSelectionSummaryReadModel,
+  FactoryRunStatusReadModel,
+  PlanetNavigationReadModel,
+  SelectedBeltReadModel,
+  SelectedEntityReadModel,
+} from "../game/factoryReadModels";
 import { analyzeBeltNetwork } from "../game/network";
 import { ACTIVITY_MATERIAL_IDS } from "../game/activity";
 import { getOrbitalCargoPortItems } from "../game/stationCargoTerminal";
@@ -382,32 +390,30 @@ export function ResourceRail({ game, onOpenCampaign, onOpenDysonPlanner, onPickT
   );
 }
 
-export function PlanetNavigator({ game, onPlanetChange }: { game: GameState; onPlanetChange: (planetId: PlanetId) => boolean }) {
+export function PlanetNavigator({ model, onPlanetChange }: { model: PlanetNavigationReadModel; onPlanetChange: (planetId: PlanetId) => boolean }) {
   const [collapsed, setCollapsed] = useState(false);
-  const activeSystemId = getPlanet(game.activePlanetId).systemId;
-  const visiblePlanets = useMemo(() => PLANET_LIST.filter((planet) => planet.systemId === activeSystemId &&
-    game.exploration.unlockedSystemIds.includes(planet.systemId)), [activeSystemId, game.exploration.unlockedSystemIds]);
-  const deviceCounts = useMemo(() => {
-    const counts = new Map<PlanetId, number>();
-    if (collapsed) return counts;
-    for (const entity of game.entities) {
-      counts.set(entity.planetId, (counts.get(entity.planetId) ?? 0) + entity.machineCount + entity.minerCount);
-    }
-    return counts;
-  }, [collapsed, game.entities]);
+  const visiblePlanets = useMemo(() => {
+    const rows = new Map(model.planets.rows.map((row) => [row.planetId, row] as const));
+    const activeSystemId = rows.get(model.activePlanetId)?.systemId;
+    if (!activeSystemId) return [];
+    return PLANET_LIST
+      .filter((planet) => planet.systemId === activeSystemId)
+      .flatMap((planet) => {
+        const row = rows.get(planet.id);
+        return row?.discovered ? [{ planet, row }] : [];
+      });
+  }, [model]);
   return (
     <nav className={`planet-navigator nodrag nopan${collapsed ? " planet-navigator--collapsed" : ""}`} aria-label="行星切换">
-      {!collapsed ? visiblePlanets.map((planet) => {
-        const active = game.activePlanetId === planet.id;
-        const unlocked = isPlanetColonized(game, planet.id);
-        const metrics = getPlanetMetrics(game, planet.id);
-        const deviceCount = deviceCounts.get(planet.id) ?? 0;
+      {!collapsed ? visiblePlanets.map(({ planet, row }) => {
+        const active = row.active;
+        const unlocked = row.colonized;
         return (
-          <button type="button" className={`${active ? "active" : ""}${unlocked ? "" : " locked"}`} aria-pressed={active} key={planet.id} disabled={!unlocked} onClick={() => onPlanetChange(planet.id)} title={unlocked ? `切换到${getPlanetDisplayName(game, planet.id)}` : "完成星际物流系统科技后开放"}>
+          <button type="button" className={`${active ? "active" : ""}${unlocked ? "" : " locked"}`} aria-pressed={active} key={planet.id} disabled={!unlocked} onClick={() => onPlanetChange(planet.id)} title={unlocked ? `切换到${row.displayName}` : "完成星际物流系统科技后开放"}>
             <i style={{ color: unlocked ? planet.color : undefined }}>{unlocked ? <Orbit size={15} /> : <LockKeyhole size={15} />}</i>
-            <span><strong>{getPlanetDisplayName(game, planet.id)}</strong><small>{unlocked ? `${planet.code} · ${planet.environment}` : "星图锁定 · 需要星际物流系统"}</small></span>
-            <em>{deviceCount}</em>
-            <b className={metrics.powerFactor < 0.999 ? "warning" : ""}>{Math.round(metrics.powerFactor * 100)}%</b>
+            <span><strong>{row.displayName}</strong><small>{unlocked ? `${row.code} · ${planet.environment}` : "星图锁定 · 需要星际物流系统"}</small></span>
+            <em>{row.deviceCount}</em>
+            <b className={row.powerFactor < 0.999 ? "warning" : ""}>{Math.round(row.powerFactor * 100)}%</b>
           </button>
         );
       }) : null}
@@ -421,7 +427,11 @@ export function PlanetNavigator({ game, onPlanetChange }: { game: GameState; onP
 type InspectorTab = "inspect" | "fabricate";
 
 interface InspectorPanelProps {
+  readOnly?: boolean;
   game: GameState;
+  inspectorReadModel: FactoryInspectorSummaryReadModel;
+  multiSelectionReadModel: FactoryMultiSelectionSummaryReadModel;
+  multiSelectedBelts: BeltConnection[];
   selectedEntities: FactoryEntity[];
   selectedEntity: FactoryEntity | null;
   selectedBelt: BeltConnection | null;
@@ -505,6 +515,300 @@ interface InspectorPanelProps {
   onOpenTutorial?: (sectionId?: string) => void;
 }
 
+type NumericItemRecord = Readonly<Record<string, number | undefined>>;
+
+function compareInspectorItemIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function completeInspectorItemRowsMatch(
+  record: NumericItemRecord,
+  rows: SelectedEntityReadModel["inputItems"],
+): boolean {
+  const entries = Object.entries(record)
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
+    .sort(([left], [right]) => compareInspectorItemIds(left, right));
+  return !rows.truncated && rows.totalCount === rows.rows.length &&
+    rows.rows.length === entries.length && rows.rows.every((row, index) => {
+      const entry = entries[index];
+      return entry?.[0] === row.itemId && entry[1] === row.amount;
+    });
+}
+
+function desktopEntitySummaryMatches(entity: FactoryEntity, row: SelectedEntityReadModel): boolean {
+  return row.entityId === entity.id && row.planetId === entity.planetId && row.kind === entity.kind &&
+    row.position.x === entity.position.x && row.position.y === entity.position.y &&
+    row.interactionLocked === entity.interactionLocked && row.buildingId === (entity.buildingId ?? null) &&
+    row.resourceId === (entity.resourceId ?? null) && row.recipeId === (entity.recipeId ?? null) &&
+    row.storedItemId === (entity.storedItemId ?? null) && row.fuelItemId === (entity.fuelItemId ?? null) &&
+    row.machineCount === entity.machineCount && row.minerCount === entity.minerCount &&
+    row.progress === entity.progress && row.utilization === entity.utilization &&
+    row.productionRate === entity.productionRate && row.powerFactor === (entity.powerFactor ?? null) &&
+    completeInspectorItemRowsMatch(entity.inputs as NumericItemRecord, row.inputItems) &&
+    completeInspectorItemRowsMatch(entity.outputs as NumericItemRecord, row.outputItems);
+}
+
+function desktopBeltSummaryMatches(belt: BeltConnection, row: SelectedBeltReadModel): boolean {
+  return row.beltId === belt.id && row.planetId === belt.planetId &&
+    row.sourceEntityId === belt.source && row.targetEntityId === belt.target &&
+    row.itemId === belt.itemId && row.lanes === belt.lanes && row.tier === belt.tier &&
+    row.sorterTier === belt.sorterTier && row.stackSize === (belt.stackSize ?? null) &&
+    row.priority === belt.priority && row.progress === belt.progress && row.lastFlow === belt.lastFlow &&
+    row.totalTransferred === (belt.totalTransferred ?? null) && row.congestion === (belt.congestion ?? null);
+}
+
+function rawInspectorItemRows(record: NumericItemRecord): Array<readonly [ItemId, number]> {
+  return Object.entries(record)
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
+    .sort(([left], [right]) => compareInspectorItemIds(left, right))
+    .map(([itemId, amount]) => [itemId as ItemId, amount] as const);
+}
+
+function readModelInspectorItemRows(
+  rows: SelectedEntityReadModel["inputItems"]["rows"],
+): Array<readonly [ItemId, number]> {
+  return rows.map((row) => [row.itemId as ItemId, row.amount] as const);
+}
+
+/**
+ * Display-only desktop binding for the bounded atomic factory projection.
+ * The App-level bridge owns session/revision/request-order validation. This
+ * final component additionally refuses a wrong planet, selection, truncated
+ * item ledger or any semantic drift from the full command-authority record.
+ */
+export function DesktopInspectorLiveSummary({ game, entity, belt, readModel }: {
+  game: GameState;
+  entity: FactoryEntity | null;
+  belt: BeltConnection | null;
+  readModel: FactoryInspectorSummaryReadModel;
+}) {
+  const validSource = readModel.source === "native-core"
+    ? Number.isSafeInteger(readModel.revision) && (readModel.revision ?? -1) >= 0
+    : readModel.source === "web-game-state" && readModel.revision === null;
+  const commonMatch = readModel.schema === "factory-read-model-v1" && validSource &&
+    readModel.activePlanetId === game.activePlanetId;
+  const displayEntity = commonMatch && entity && !belt && readModel.belt === null && readModel.entity &&
+    entity.planetId === game.activePlanetId && desktopEntitySummaryMatches(entity, readModel.entity)
+    ? readModel.entity
+    : null;
+  const displayBelt = commonMatch && !entity && belt && readModel.entity === null && readModel.belt &&
+    belt.planetId === game.activePlanetId && desktopBeltSummaryMatches(belt, readModel.belt)
+    ? readModel.belt
+    : null;
+  const source = displayEntity || displayBelt ? readModel.source : "web-game-state";
+  const revision = source === "native-core" ? readModel.revision : null;
+
+  if (entity) {
+    const progress = displayEntity?.progress ?? entity.progress;
+    const utilization = displayEntity?.utilization ?? entity.utilization;
+    const productionRate = displayEntity?.productionRate ?? entity.productionRate;
+    const powerFactor = displayEntity?.powerFactor ?? entity.powerFactor ?? getEntityPowerFactor(game, entity);
+    const inputRows = displayEntity
+      ? readModelInspectorItemRows(displayEntity.inputItems.rows)
+      : rawInspectorItemRows(entity.inputs as NumericItemRecord);
+    const outputRows = displayEntity
+      ? readModelInspectorItemRows(displayEntity.outputItems.rows)
+      : rawInspectorItemRows(entity.outputs as NumericItemRecord);
+    return <section
+      className="inspector-content desktop-inspector-live-summary"
+      aria-label="实时运行摘要"
+      data-factory-read-model-source={source}
+      data-factory-read-model-revision={revision ?? "web"}
+    >
+      <div className="inspector-identity"><i className="building-mark"><Gauge size={18} /></i><div><span>桌面薄读投影</span><strong>实时运行摘要</strong></div></div>
+      <dl className="metric-ledger">
+        <div><dt>建筑堆叠</dt><dd>×{displayEntity?.machineCount ?? entity.machineCount}</dd></div>
+        <div><dt>采集设备</dt><dd>×{displayEntity?.minerCount ?? entity.minerCount}</dd></div>
+        <div><dt>周期进度</dt><dd>{Math.round(progress * 100)}%</dd></div>
+        <div><dt>当前利用率</dt><dd>{Math.round(utilization * 100)}%</dd></div>
+        <div><dt>近期产出</dt><dd>{productionRate.toFixed(1)}/min</dd></div>
+        <div><dt>供电系数</dt><dd>{Math.round(powerFactor * 100)}%</dd></div>
+        {inputRows.length > 0 ? inputRows.map(([itemId, amount]) => <div key={`input-${itemId}`}><dt>输入 · {getItem(itemId).name}</dt><dd><QuantityValue value={amount} interactive={false} /></dd></div>) : <div><dt>输入缓存</dt><dd>暂无</dd></div>}
+        {outputRows.length > 0 ? outputRows.map(([itemId, amount]) => <div key={`output-${itemId}`}><dt>输出 · {getItem(itemId).name}</dt><dd><QuantityValue value={amount} interactive={false} /></dd></div>) : <div><dt>输出缓存</dt><dd>暂无</dd></div>}
+      </dl>
+    </section>;
+  }
+
+  if (belt) {
+    const itemId = (displayBelt?.itemId ?? belt.itemId) as ItemId;
+    const stackSize = displayBelt?.stackSize ?? belt.stackSize ?? 1;
+    const congestion = displayBelt?.congestion ?? belt.congestion ?? 0;
+    const totalTransferred = displayBelt?.totalTransferred ?? belt.totalTransferred ?? 0;
+    const priority = displayBelt?.priority ?? belt.priority;
+    return <section
+      className="inspector-content desktop-inspector-live-summary"
+      aria-label="实时线路摘要"
+      data-factory-read-model-source={source}
+      data-factory-read-model-revision={revision ?? "web"}
+    >
+      <div className="inspector-identity"><ItemMark itemId={itemId} /><div><span>桌面薄读投影</span><strong>{getItem(itemId).name}实时线路摘要</strong></div></div>
+      <dl className="metric-ledger">
+        <div><dt>传送带等级</dt><dd>Mk.{beltTierRoman((displayBelt?.tier ?? belt.tier) as BeltTier)}</dd></div>
+        <div><dt>并行线路</dt><dd>×{displayBelt?.lanes ?? belt.lanes}</dd></div>
+        <div><dt>分拣器等级</dt><dd>Mk.{displayBelt?.sorterTier ?? belt.sorterTier}</dd></div>
+        <div><dt>近期流量</dt><dd>{(displayBelt?.lastFlow ?? belt.lastFlow).toFixed(2)}/s</dd></div>
+        <div><dt>货物堆叠</dt><dd>×{stackSize}</dd></div>
+        <div><dt>线路优先级</dt><dd>{priority === 2 ? "高" : priority === 1 ? "标准" : "低"}</dd></div>
+        <div><dt>在途进度</dt><dd>{Math.round((displayBelt?.progress ?? belt.progress) * 100)}%</dd></div>
+        <div><dt>拥堵指数</dt><dd className={congestion > 0.8 ? "status-text status-text--blocked" : undefined}>{Math.round(congestion * 100)}%</dd></div>
+        <div><dt>累计运输</dt><dd><QuantityValue value={totalTransferred} interactive={false} /></dd></div>
+      </dl>
+    </section>;
+  }
+
+  return null;
+}
+
+function exactNativeMultiSelectionRows(
+  game: GameState,
+  entities: readonly FactoryEntity[],
+  belts: readonly BeltConnection[],
+  readModel: FactoryMultiSelectionSummaryReadModel,
+): boolean {
+  if (readModel.source !== "native-core" || !Number.isSafeInteger(readModel.revision) ||
+    (readModel.revision ?? -1) < 0 || readModel.schema !== "factory-read-model-v1" ||
+    readModel.activePlanetId !== game.activePlanetId || readModel.entityRows.truncated ||
+    readModel.beltRows.truncated || readModel.requestedEntityCount !== entities.length ||
+    readModel.requestedBeltCount !== belts.length ||
+    readModel.entityRows.totalCount !== readModel.entityRows.rows.length ||
+    readModel.beltRows.totalCount !== readModel.beltRows.rows.length ||
+    readModel.entityRows.rows.length !== entities.length || readModel.beltRows.rows.length !== belts.length) {
+    return false;
+  }
+  const entitiesById = new Map(entities.map((entity) => [entity.id, entity] as const));
+  const beltsById = new Map(belts.map((belt) => [belt.id, belt] as const));
+  if (entitiesById.size !== entities.length || beltsById.size !== belts.length) return false;
+  return readModel.entityRows.rows.every((row) => {
+    const entity = entitiesById.get(row.entityId);
+    return Boolean(entity && row.planetId === game.activePlanetId && row.powerFactor !== null &&
+      desktopEntitySummaryMatches(entity, row));
+  }) && readModel.beltRows.rows.every((row) => {
+    const belt = beltsById.get(row.beltId);
+    return Boolean(belt && row.planetId === game.activePlanetId && row.totalTransferred !== null &&
+      row.congestion !== null && desktopBeltSummaryMatches(belt, row));
+  });
+}
+
+function addMultiSelectionItemAmount(totals: Map<ItemId, number>, itemId: string, amount: number): void {
+  totals.set(itemId as ItemId, (totals.get(itemId as ItemId) ?? 0) + amount);
+}
+
+function sortedMultiSelectionItemTotals(totals: ReadonlyMap<ItemId, number>): Array<readonly [ItemId, number]> {
+  return [...totals]
+    .filter(([, amount]) => amount !== 0)
+    .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]) || compareInspectorItemIds(left[0], right[0]));
+}
+
+/** Pure display aggregate; all multi-select commands keep the full GameState. */
+export function DesktopMultiSelectionLiveSummary({ game, entities, belts, readModel }: {
+  game: GameState;
+  entities: readonly FactoryEntity[];
+  belts: readonly BeltConnection[];
+  readModel: FactoryMultiSelectionSummaryReadModel;
+}) {
+  const useNative = exactNativeMultiSelectionRows(game, entities, belts, readModel);
+  const source = useNative ? "native-core" : "web-game-state";
+  const inputTotals = new Map<ItemId, number>();
+  const outputTotals = new Map<ItemId, number>();
+  let equipmentCount = 0;
+  let entityWeight = 0;
+  let weightedProgress = 0;
+  let weightedUtilization = 0;
+  let weightedPowerFactor = 0;
+  let productionRate = 0;
+
+  if (useNative) {
+    for (const row of readModel.entityRows.rows) {
+      const weight = Math.max(1, row.machineCount + row.minerCount);
+      equipmentCount += row.machineCount + row.minerCount;
+      entityWeight += weight;
+      weightedProgress += row.progress * weight;
+      weightedUtilization += row.utilization * weight;
+      weightedPowerFactor += row.powerFactor! * weight;
+      productionRate += row.productionRate;
+      for (const item of row.inputItems.rows) addMultiSelectionItemAmount(inputTotals, item.itemId, item.amount);
+      for (const item of row.outputItems.rows) addMultiSelectionItemAmount(outputTotals, item.itemId, item.amount);
+    }
+  } else {
+    for (const entity of entities) {
+      const weight = Math.max(1, entity.machineCount + entity.minerCount);
+      equipmentCount += entity.machineCount + entity.minerCount;
+      entityWeight += weight;
+      weightedProgress += entity.progress * weight;
+      weightedUtilization += entity.utilization * weight;
+      weightedPowerFactor += getEntityPowerFactor(game, entity) * weight;
+      productionRate += entity.productionRate;
+      for (const [itemId, amount] of rawInspectorItemRows(entity.inputs as NumericItemRecord)) {
+        addMultiSelectionItemAmount(inputTotals, itemId, amount);
+      }
+      for (const [itemId, amount] of rawInspectorItemRows(entity.outputs as NumericItemRecord)) {
+        addMultiSelectionItemAmount(outputTotals, itemId, amount);
+      }
+    }
+  }
+
+  let beltFlow = 0;
+  let beltCongestion = 0;
+  let maxBeltCongestion = 0;
+  let beltProgress = 0;
+  let beltTransferred = 0;
+  let beltStackSize = 0;
+  if (useNative) {
+    for (const row of readModel.beltRows.rows) {
+      beltFlow += row.lastFlow;
+      beltCongestion += row.congestion!;
+      maxBeltCongestion = Math.max(maxBeltCongestion, row.congestion!);
+      beltProgress += row.progress;
+      beltTransferred += row.totalTransferred!;
+      beltStackSize += row.stackSize ?? 1;
+    }
+  } else {
+    for (const belt of belts) {
+      const congestion = belt.congestion ?? 0;
+      beltFlow += belt.lastFlow;
+      beltCongestion += congestion;
+      maxBeltCongestion = Math.max(maxBeltCongestion, congestion);
+      beltProgress += belt.progress;
+      beltTransferred += belt.totalTransferred ?? 0;
+      beltStackSize += belt.stackSize ?? 1;
+    }
+  }
+  const inputRows = sortedMultiSelectionItemTotals(inputTotals);
+  const outputRows = sortedMultiSelectionItemTotals(outputTotals);
+  const averageProgress = entityWeight > 0 ? weightedProgress / entityWeight : 0;
+  const averageUtilization = entityWeight > 0 ? weightedUtilization / entityWeight : 0;
+  const averagePowerFactor = entityWeight > 0 ? weightedPowerFactor / entityWeight : 1;
+  const beltCount = belts.length;
+
+  return <section
+    className="batch-control desktop-multi-selection-live-summary"
+    aria-label="选区实时动态摘要"
+    data-factory-read-model-source={source}
+    data-factory-read-model-revision={useNative ? readModel.revision : "web"}
+  >
+    <header><Gauge size={14} /><span>选区实时动态</span><strong>{entities.length} 节点 · {beltCount} 线路</strong></header>
+    <dl className="metric-ledger">
+      <div><dt>设备总数</dt><dd>{equipmentCount}</dd></div>
+      <div><dt>平均周期进度</dt><dd>{Math.round(averageProgress * 100)}%</dd></div>
+      <div><dt>平均利用率</dt><dd>{Math.round(averageUtilization * 100)}%</dd></div>
+      <div><dt>合计近期产出</dt><dd>{productionRate.toFixed(1)}/min</dd></div>
+      <div><dt>平均供电系数</dt><dd>{Math.round(averagePowerFactor * 100)}%</dd></div>
+      {inputRows.slice(0, 4).map(([itemId, amount]) => <div key={`multi-input-${itemId}`}><dt>输入合计 · {getItem(itemId).name}</dt><dd><QuantityValue value={amount} interactive={false} /></dd></div>)}
+      {outputRows.slice(0, 4).map(([itemId, amount]) => <div key={`multi-output-${itemId}`}><dt>输出合计 · {getItem(itemId).name}</dt><dd><QuantityValue value={amount} interactive={false} /></dd></div>)}
+      {inputRows.length > 4 ? <div><dt>其余输入物料</dt><dd>{inputRows.length - 4} 种</dd></div> : null}
+      {outputRows.length > 4 ? <div><dt>其余输出物料</dt><dd>{outputRows.length - 4} 种</dd></div> : null}
+      {beltCount > 0 ? <>
+        <div><dt>线路合计流量</dt><dd>{beltFlow.toFixed(2)}/s</dd></div>
+        <div><dt>平均线路拥堵</dt><dd>{Math.round(beltCongestion / beltCount * 100)}%</dd></div>
+        <div><dt>最高线路拥堵</dt><dd>{Math.round(maxBeltCongestion * 100)}%</dd></div>
+        <div><dt>平均在途进度</dt><dd>{Math.round(beltProgress / beltCount * 100)}%</dd></div>
+        <div><dt>平均货物堆叠</dt><dd>×{(beltStackSize / beltCount).toFixed(2)}</dd></div>
+        <div><dt>线路累计运输</dt><dd><QuantityValue value={beltTransferred} interactive={false} /></dd></div>
+      </> : null}
+    </dl>
+  </section>;
+}
+
 function EjectorOrbitTargetControl({ game, entities, onChange, batch = false }: {
   game: GameState;
   entities: FactoryEntity[];
@@ -533,9 +837,11 @@ function EjectorOrbitTargetControl({ game, entities, onChange, batch = false }: 
   </section>;
 }
 
-function MultiSelectionInspector({ game, entities, onRecipeChange, onEjectorOrbitChange, onInstallSprayCoater, onProliferatorConfiguration }: {
+function MultiSelectionInspector({ game, entities, belts, readModel, onRecipeChange, onEjectorOrbitChange, onInstallSprayCoater, onProliferatorConfiguration }: {
   game: GameState;
   entities: FactoryEntity[];
+  belts: BeltConnection[];
+  readModel: FactoryMultiSelectionSummaryReadModel;
   onRecipeChange: (entityIds: string[], recipeId: RecipeId) => void;
   onEjectorOrbitChange: (entityIds: string[], orbitId: string) => void;
   onInstallSprayCoater: (entityIds: string[]) => void;
@@ -575,6 +881,7 @@ function MultiSelectionInspector({ game, entities, onRecipeChange, onEjectorOrbi
   return (
     <div className="inspector-content multi-selection-inspector">
       <div className="inspector-identity"><i className="building-mark"><Layers3 size={18} /></i><div><span>画布多选</span><strong>已选择 {entities.length} 个节点</strong></div></div>
+      <DesktopMultiSelectionLiveSummary game={game} entities={entities} belts={belts} readModel={readModel} />
       <dl className="metric-ledger">
         <div><dt>设备总数</dt><dd>{equipmentCount}</dd></div>
         <div><dt>运行节点</dt><dd>{running}/{entities.length}</dd></div>
@@ -2087,7 +2394,82 @@ function InspectorLayoutControls({ preference, onChange }: {
   </section>;
 }
 
-export function InspectorPanel(props: InspectorPanelProps) {
+function NativeReadOnlyInspectorPanel(props: InspectorPanelProps) {
+  const inspectorProjectionReady = props.inspectorReadModel.source === "native-core" &&
+    Number.isSafeInteger(props.inspectorReadModel.revision) && (props.inspectorReadModel.revision ?? -1) >= 0 &&
+    props.inspectorReadModel.schema === "factory-read-model-v1" && (
+      props.selectedEntity && !props.selectedBelt && props.inspectorReadModel.belt === null &&
+        props.inspectorReadModel.entity !== null &&
+        props.inspectorReadModel.activePlanetId === props.selectedEntity.planetId &&
+        desktopEntitySummaryMatches(props.selectedEntity, props.inspectorReadModel.entity) ||
+      props.selectedBelt && !props.selectedEntity && props.inspectorReadModel.entity === null &&
+        props.inspectorReadModel.belt !== null &&
+        props.inspectorReadModel.activePlanetId === props.selectedBelt.planetId &&
+        desktopBeltSummaryMatches(props.selectedBelt, props.inspectorReadModel.belt)
+    );
+  const multipleSelection = props.selectedEntities.length + props.multiSelectedBelts.length > 1;
+  // The legacy GameState mirror deliberately does not follow an active-planet
+  // command after Rust becomes authoritative. Bind only the display helper's
+  // route check to the already verified projection identity; no gameplay data
+  // is copied from or written back to that mirror.
+  const projectionGame = inspectorProjectionReady &&
+      props.game.activePlanetId !== props.inspectorReadModel.activePlanetId
+    ? { ...props.game, activePlanetId: props.inspectorReadModel.activePlanetId as PlanetId }
+    : props.game;
+  const multiSelectionProjectionGame = props.game.activePlanetId !== props.multiSelectionReadModel.activePlanetId
+    ? { ...props.game, activePlanetId: props.multiSelectionReadModel.activePlanetId as PlanetId }
+    : props.game;
+  const multiSelectionProjectionReady = multipleSelection && exactNativeMultiSelectionRows(
+    multiSelectionProjectionGame,
+    props.selectedEntities,
+    props.multiSelectedBelts,
+    props.multiSelectionReadModel,
+  );
+
+  let content: ReactNode;
+  if (multipleSelection) {
+    content = multiSelectionProjectionReady ? (
+      <section
+        className="inspector-content native-read-only-multi-selection"
+        aria-label="Windows 原生只读多选摘要"
+        data-factory-read-model-source="native-core"
+        data-factory-read-model-revision={props.multiSelectionReadModel.revision}
+      >
+        <div className="inspector-identity"><i className="building-mark"><Layers3 size={18} /></i><div><span>Windows 原生只读</span><strong>{props.multiSelectionReadModel.requestedEntityCount} 个建筑 · {props.multiSelectionReadModel.requestedBeltCount} 条线路</strong></div></div>
+        <p>多选内容已由同 revision 的 Rust 投影确认；批量修改尚未接入原生命令，因此当前只显示数量，不提供旧 JavaScript 状态操作。</p>
+      </section>
+    ) : (
+      <section className="inspector-content native-read-only-unavailable" aria-label="Windows 原生检查器等待同步" role="status">
+        <strong>正在核对原生多选摘要</strong>
+        <p>当前 revision 尚未形成完整 Rust 投影，旧 JavaScript 状态不会显示，也不能操作。</p>
+      </section>
+    );
+  } else if (props.selectedEntity && inspectorProjectionReady) {
+    content = <DesktopInspectorLiveSummary game={projectionGame} entity={props.selectedEntity} belt={null} readModel={props.inspectorReadModel} />;
+  } else if (props.selectedBelt && inspectorProjectionReady) {
+    content = <DesktopInspectorLiveSummary game={projectionGame} entity={null} belt={props.selectedBelt} readModel={props.inspectorReadModel} />;
+  } else {
+    content = (
+      <section className="inspector-content native-read-only-unavailable" aria-label="Windows 原生只读检查器" role="status">
+        <strong>{props.selectedEntity || props.selectedBelt ? "正在核对原生检查摘要" : "请选择一个建筑或传送带"}</strong>
+        <p>这里只显示同 revision 的 Rust 运行摘要；制造、配置、回收和其他旧状态操作均已停用。</p>
+      </section>
+    );
+  }
+
+  return (
+    <aside className="inspector-panel native-read-only-inspector" data-native-authority-read-only="true">
+      <div className="panel-tabs" role="tablist" aria-label="Windows 原生只读检查器">
+        <button role="tab" aria-selected="true" className="active" type="button" disabled>
+          <CircuitBoard size={15} /> 检查器
+        </button>
+      </div>
+      {content}
+    </aside>
+  );
+}
+
+function EditableInspectorPanel(props: InspectorPanelProps) {
   const [layoutPreference, setLayoutPreference] = useState(readInspectorLayoutPreference);
   const updateLayoutPreference = (next: InspectorLayoutPreferenceV1) => {
     setLayoutPreference(next);
@@ -2105,7 +2487,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         </button>
       </div>
       {props.tab === "fabricate" ? <Fabricator game={props.game} focusItemId={props.fabricatorFocusItemId} onCraft={props.onCraft} onCraftItem={props.onCraftItem} onQueueCraftItem={props.onQueueCraftItem} onCancelCraftQueue={props.onCancelCraftQueue} /> : props.selectedEntities.length > 1 ? (
-        <MultiSelectionInspector game={props.game} entities={props.selectedEntities} onRecipeChange={props.onBatchRecipeChange} onEjectorOrbitChange={props.onBatchEjectorOrbitChange} onInstallSprayCoater={props.onBatchInstallSprayCoater} onProliferatorConfiguration={props.onBatchProliferatorConfiguration} />
+        <MultiSelectionInspector game={props.game} entities={props.selectedEntities} belts={props.multiSelectedBelts} readModel={props.multiSelectionReadModel} onRecipeChange={props.onBatchRecipeChange} onEjectorOrbitChange={props.onBatchEjectorOrbitChange} onInstallSprayCoater={props.onBatchInstallSprayCoater} onProliferatorConfiguration={props.onBatchProliferatorConfiguration} />
       ) : props.selectedEntity ? (
         <div className={`inspector-entity-shell${props.selectedEntity.interactionLocked ? " inspector-entity-shell--locked" : ""}`} style={layoutStyle} data-collapsed-sections={layoutPreference.collapsed.join(" ")}>
           {props.selectedEntity.interactionLocked ? <div className="inspector-lock-banner"><LockKeyhole size={16} /><span><strong>建筑已锁定</strong><small>模拟与物流继续运行，修改操作已禁用</small></span><button type="button" onClick={() => props.onEntityLockChange(props.selectedEntity!.id, false)}><Unlock size={16} />解锁</button></div> : null}
@@ -2119,6 +2501,12 @@ export function InspectorPanel(props: InspectorPanelProps) {
       ) : <InspectorEmpty game={props.game} onOpenTutorial={props.onOpenTutorial} />}
     </aside>
   );
+}
+
+export function InspectorPanel(props: InspectorPanelProps) {
+  return props.readOnly
+    ? <NativeReadOnlyInspectorPanel {...props} />
+    : <EditableInspectorPanel {...props} />;
 }
 
 export const CONSTRUCTION_BUILD_ORDER: Array<BuildingId | ConveyorBeltId> = [
@@ -2452,10 +2840,13 @@ export function BuildingPlacementCursor({ buildingId, count, x, y }: {
 
 export function HeaderControls({
   game,
+  runStatus,
   onReturnToMenu,
   onPauseToggle,
+  pauseControlAvailable = true,
   onOpenResources,
   onOpenInspector,
+  onOpenBlueprints,
   onOpenRecipes,
   onOpenTechnology,
   onOpenStatistics,
@@ -2464,17 +2855,22 @@ export function HeaderControls({
   onOpenGalaxy,
   onOpenCampaign,
   onOpenConstructionCenter,
+  constructionCenterVisible,
+  constructionCenterUnavailable = false,
   onOpenDysonPlanner,
   onOpenCommandPalette,
   activeWorkspace,
   showMobileUiSwitch = false,
   onMobileUiSwitch,
 }: {
-  game: GameState;
+  game: GameState | null;
+  runStatus: FactoryRunStatusReadModel;
   onReturnToMenu: () => void;
   onPauseToggle: () => void;
+  pauseControlAvailable?: boolean;
   onOpenResources: () => void;
   onOpenInspector: () => void;
+  onOpenBlueprints: () => void;
   onOpenRecipes: () => void;
   onOpenTechnology: () => void;
   onOpenStatistics: () => void;
@@ -2483,14 +2879,22 @@ export function HeaderControls({
   onOpenGalaxy: () => void;
   onOpenCampaign: () => void;
   onOpenConstructionCenter: () => void;
+  constructionCenterVisible?: boolean;
+  constructionCenterUnavailable?: boolean;
   onOpenDysonPlanner: () => void;
   onOpenCommandPalette: () => void;
-  activeWorkspace?: "settings" | "galaxy" | "campaign" | "construction-center" | "star-map" | "statistics" | "recipes" | "technology" | "dyson" | null;
+  activeWorkspace?: "settings" | "galaxy" | "campaign" | "construction-center" | "star-map" | "statistics" | "recipes" | "technology" | "blueprints" | "dyson" | null;
   showMobileUiSwitch?: boolean;
   onMobileUiSwitch?: () => void;
 }) {
   const [overflowOpen, setOverflowOpen] = useState(false);
-  const powerTone = game.metrics.powerFactor >= 0.999 ? "positive" : game.metrics.powerFactor > 0 ? "warning" : "negative";
+  const nativeAuthority = game === null;
+  const showConstructionCenter = constructionCenterVisible ?? Boolean(
+    game?.entities.some((entity) => entity.buildingId === "construction_center"),
+  );
+  const powerTone = game
+    ? game.metrics.powerFactor >= 0.999 ? "positive" : game.metrics.powerFactor > 0 ? "warning" : "negative"
+    : "warning";
   const runOverflowAction = (action: () => void) => {
     setOverflowOpen(false);
     action();
@@ -2502,10 +2906,17 @@ export function HeaderControls({
         <div><strong>DSP极简网络</strong></div>
       </div>
       <div className="header-metrics">
-        <div><Zap size={16} /><span>电网负载</span><strong><PowerValue valueKw={game.metrics.demandKw} /><small>/ <PowerValue valueKw={game.metrics.generationKw} /></small></strong></div>
-        <div className={`metric-tone metric-tone--${powerTone}`}><Power size={16} /><span>供电效率</span><strong>{Math.round(game.metrics.powerFactor * 100)}<small>%</small></strong></div>
-        <div><Factory size={16} /><span>生产通量</span><strong>{game.metrics.totalItemsPerMinute.toFixed(1)}<small>/min</small></strong></div>
-        <div><FlaskConical size={16} /><span>蓝 / 红 / 黄 / 紫 / 绿 / 白矩阵</span><strong><QuantityValue value={game.totalProduced.electromagnetic_matrix ?? 0} /><small> / <QuantityValue value={game.totalProduced.energy_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.structure_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.information_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.gravity_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.universe_matrix ?? 0} /></small></strong></div>
+        {game ? <>
+          <div><Zap size={16} /><span>电网负载</span><strong><PowerValue valueKw={game.metrics.demandKw} /><small>/ <PowerValue valueKw={game.metrics.generationKw} /></small></strong></div>
+          <div className={`metric-tone metric-tone--${powerTone}`}><Power size={16} /><span>供电效率</span><strong>{Math.round(game.metrics.powerFactor * 100)}<small>%</small></strong></div>
+          <div><Factory size={16} /><span>生产通量</span><strong>{game.metrics.totalItemsPerMinute.toFixed(1)}<small>/min</small></strong></div>
+          <div><FlaskConical size={16} /><span>蓝 / 红 / 黄 / 紫 / 绿 / 白矩阵</span><strong><QuantityValue value={game.totalProduced.electromagnetic_matrix ?? 0} /><small> / <QuantityValue value={game.totalProduced.energy_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.structure_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.information_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.gravity_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.universe_matrix ?? 0} /></small></strong></div>
+        </> : <>
+          <div data-native-header-status="factory-run-status-v1"><Power size={16} /><span>Rust 权威</span><strong>{runStatus.paused ? "已暂停" : "运行中"}</strong></div>
+          <div><Factory size={16} /><span>当前行星</span><strong>{runStatus.activePlanetId}</strong></div>
+          <div><BarChart3 size={16} /><span>状态版本</span><strong>revision {runStatus.revision ?? "-"}</strong></div>
+          <div className="metric-tone metric-tone--warning"><Zap size={16} /><span>功率与矩阵</span><strong>等待原生投影</strong></div>
+        </>}
       </div>
       <div className="header-actions">
         <button className="header-action--overflowable" type="button" onClick={onReturnToMenu} title="保存并返回主菜单" aria-label="保存并返回主菜单"><House size={17} /></button>
@@ -2514,9 +2925,10 @@ export function HeaderControls({
         </button>
         <button className={`header-action--overflowable${activeWorkspace === "galaxy" ? " active" : ""}`} type="button" onClick={onOpenGalaxy} title={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-label={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-pressed={activeWorkspace === "galaxy"}><Globe2 size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "campaign" ? " active" : ""}`} type="button" onClick={onOpenCampaign} title={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-label={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-pressed={activeWorkspace === "campaign"}><Flag size={17} /></button>
-        {game.entities.some((entity) => entity.buildingId === "construction_center") ? <button className={`header-action--overflowable${activeWorkspace === "construction-center" ? " active" : ""}`} type="button" onClick={onOpenConstructionCenter} title={activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-label={activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-pressed={activeWorkspace === "construction-center"}><Factory size={17} /></button> : null}
+        {showConstructionCenter ? <button className={`header-action--overflowable${activeWorkspace === "construction-center" ? " active" : ""}`} type="button" onClick={onOpenConstructionCenter} disabled={constructionCenterUnavailable} title={constructionCenterUnavailable ? "建筑制造中心当前不可用" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-label={constructionCenterUnavailable ? "建筑制造中心当前不可用" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-pressed={activeWorkspace === "construction-center"}><Factory size={17} /></button> : null}
         <button className={`header-action--overflowable${activeWorkspace === "star-map" ? " active" : ""}`} type="button" onClick={onOpenStarMap} title={activeWorkspace === "star-map" ? "星图已打开，再次点击返回工厂" : "打开星图"} aria-label={activeWorkspace === "star-map" ? "星图已打开，再次点击返回工厂" : "打开星图"} aria-pressed={activeWorkspace === "star-map"}><Telescope size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "statistics" ? " active" : ""}`} type="button" onClick={onOpenStatistics} title={activeWorkspace === "statistics" ? "生产统计已打开，再次点击返回工厂" : "打开生产统计"} aria-label={activeWorkspace === "statistics" ? "生产统计已打开，再次点击返回工厂" : "打开生产统计"} aria-pressed={activeWorkspace === "statistics"}><BarChart3 size={17} /></button>
+        <button className={`header-action--overflowable${activeWorkspace === "blueprints" ? " active" : ""}`} type="button" onClick={onOpenBlueprints} title={activeWorkspace === "blueprints" ? "蓝图工作区已打开，再次点击返回工厂" : "打开蓝图工作区"} aria-label={activeWorkspace === "blueprints" ? "蓝图工作区已打开，再次点击返回工厂" : "打开蓝图工作区"} aria-pressed={activeWorkspace === "blueprints"}><Layers3 size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "recipes" ? " active" : ""}`} type="button" onClick={onOpenRecipes} title={activeWorkspace === "recipes" ? "生产资料库已打开，再次点击返回工厂" : "打开生产资料库"} aria-label={activeWorkspace === "recipes" ? "生产资料库已打开，再次点击返回工厂" : "打开生产资料库"} aria-pressed={activeWorkspace === "recipes"}><BookOpen size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "technology" ? " active" : ""}`} type="button" onClick={onOpenTechnology} title={activeWorkspace === "technology" ? "科技树已打开，再次点击返回工厂" : "打开科技树"} aria-label={activeWorkspace === "technology" ? "科技树已打开，再次点击返回工厂" : "打开科技树"} aria-pressed={activeWorkspace === "technology"}><FlaskConical size={17} /></button>
         <button className="header-action--overflowable header-command-action" type="button" onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); onOpenCommandPalette(); }} title="打开命令面板（Ctrl/⌘+K）" aria-label="打开命令面板" aria-keyshortcuts="Control+K Meta+K"><Command size={17} /></button>
@@ -2527,18 +2939,19 @@ export function HeaderControls({
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenSettings)}><Settings size={15} />设置</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenGalaxy)}><Globe2 size={15} />银河网络</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenCampaign)}><Flag size={15} />主线任务</button>
-          {game.entities.some((entity) => entity.buildingId === "construction_center") ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心</button> : null}
+          {showConstructionCenter ? <button type="button" role="menuitem" disabled={constructionCenterUnavailable} onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心{constructionCenterUnavailable ? "（当前不可用）" : ""}</button> : null}
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStarMap)}><Telescope size={15} />星图</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStatistics)}><BarChart3 size={15} />生产统计</button>
+          <button type="button" role="menuitem" aria-pressed={activeWorkspace === "blueprints"} onClick={() => runOverflowAction(onOpenBlueprints)}><Layers3 size={15} />蓝图工作区</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenRecipes)}><BookOpen size={15} />生产资料库</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenTechnology)}><FlaskConical size={15} />科技树</button>
           <button type="button" role="menuitem" aria-pressed={activeWorkspace === "dyson"} onClick={() => runOverflowAction(onOpenDysonPlanner)}><Orbit size={15} />戴森球规划</button>
           {showMobileUiSwitch && onMobileUiSwitch ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onMobileUiSwitch)}><Sparkles size={15} />新版手机界面</button> : null}
         </div> : null}
-        <button className={`mobile-toggle${game.cargo ? " mobile-toggle--cargo" : ""}`} type="button" onClick={onOpenResources} title={game.cargo ? "物资已拿起，打开物资托盘放下" : "物资托盘"} aria-label={game.cargo ? "物资已拿起，打开物资托盘" : "打开物资托盘"}><PackageOpen size={17} /></button>
+        {game ? <button className={`mobile-toggle${game.cargo ? " mobile-toggle--cargo" : ""}`} type="button" onClick={onOpenResources} title={game.cargo ? "物资已拿起，打开物资托盘放下" : "物资托盘"} aria-label={game.cargo ? "物资已拿起，打开物资托盘" : "打开物资托盘"}><PackageOpen size={17} /></button> : null}
         <button className="mobile-toggle" type="button" onClick={onOpenInspector} title="检查器" aria-label="打开检查器"><PanelRight size={17} /></button>
-        <button type="button" onClick={onPauseToggle} title={`${game.paused ? "继续模拟" : "暂停模拟"}（Space）`} aria-label={game.paused ? "继续模拟" : "暂停模拟"} aria-keyshortcuts="Space">
-          {game.paused ? <Play size={17} /> : <Pause size={17} />}
+        <button type="button" onClick={onPauseToggle} disabled={!pauseControlAvailable} title={!pauseControlAvailable ? "Windows 原生暂停控制正在等待权威状态" : `${runStatus.paused ? "继续模拟" : "暂停模拟"}（Space）`} aria-label={!pauseControlAvailable ? "Windows 原生暂停控制暂不可用" : runStatus.paused ? "继续模拟" : "暂停模拟"} aria-keyshortcuts="Space">
+          {runStatus.paused ? <Play size={17} /> : <Pause size={17} />}
         </button>
       </div>
     </header>

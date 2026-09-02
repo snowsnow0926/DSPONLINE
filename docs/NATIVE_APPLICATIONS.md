@@ -1,5 +1,15 @@
 # 原生应用构建与更新
 
+> **Campaign / Galaxy 原生玩家壳边界（2026-09-01，开发候选）**：当前 Windows Host 新增 `native-core-campaign-workspace-projection-v1` 与 `native-core-galaxy-account-workspace-projection-v1` capability。preload 只接受 exact-key `{sessionId,runId,expectedRevision,expectedRegistryFingerprint}`；main 只把请求路由到当前 normal-main 玩家权威 broker，不允许回落到 renderer shadow 会话。返回分别受 256 KiB 与 64 KiB 硬预算，renderer boundary 拒绝截断、额外键、重复 ID、计数漂移和 lineage 漂移。
+>
+> 原生 Campaign 页只读固定目录标签与 Rust 进度，不接收 GameState；导航只发 UI locator。原生 Galaxy 页只接收 Rust 游戏摘要和单独的本地账户状态，可创建/切换身份、编辑资料并登录/退出云账号；恢复、导入、覆盖当前主档在 active authority 下显式不可用且没有写入口。Campaign 投影目前打开时仍做 `O(E+B)` Rust 扫描，预算收紧不等于查询计算免费。该切片不生成安装包、不改变签名/更新通道，也不放开 `authorityEligible`。
+
+> **轨道合同原生权威边界（2026-09-01，开发候选）**：Windows authority route 现在以 `orbital-contract-workspace-v1` 提供最多 4 个 offer、3 个 accepted、8 个 completed history、每合同 6 条 requirement 和 256 KiB 的有界投影。main projection broker 对 renderer 的 exact-key 请求内部附加 confirmed wall clock，Host 再用当前 exact-realtime lease 证明 session/run/registry；renderer bridge 与 TypeScript 请求类型均没有时间字段，也拿不到量子网络正文、奖励公式或完整 GameState。
+>
+> mutation broker 只接受 accept、deliver-quantum、claim、abandon 和 feature 五类语义。时钟在首次排队时采样并进入 SHA-256 command identity；FIFO 的 unknown-response retry 保留完全相同的请求、clock 和 command ID。跨上海午夜的旧 offer 会在 Rust 同步 clone 后 definite reject，源状态不变；pending 结束后 UI 强制重读同 revision 的新 main-clock projection，不会用一次“rollover-only 成功”掩盖拒绝。原生合同页不调用 legacy station writers，Web/PWA fallback 不变。
+>
+> 此能力不是完整空间站迁移：cargo-terminal binding、decorations、profile/public showcase 和 construction 按钮保持禁用，MOD/非内置 registry 失败关闭。GameState v47、公开 envelope/cloud/SQLite/package 均不升级，`authorityEligible=false`；本候选没有打包、签名、安装、部署或生产操作。
+
 > 2026-08-28 的全面性能开发候选继续保持 `1.2.3` 包版本，仅用作可并存的未签名诊断包，不代表覆盖稳定版。E18 + e503 整合运行时已冻结为 clean 提交 `f6923747c69b0be590a2b2e4c0681f1c41ecee75`，标准目录包 Build ID 为 `1.2.3+f6923747c69b`；75 个文件、413,286,323 B，可测 ZIP 为 157,799,939 B、SHA-256 `f3c3729b93a290cab861fc9caf8e0816080bd32f695a5d66dda26bc2d873b593`。此前 `460742f86483` 的 E18 clean 包只是历史性能基础，不能冒充整合态制品。若今后标准目录再次被安全软件锁住，`desktop/pack.cjs` 只会复用刚解压且经过身份检查的 Electron 分发，在 `release-performance-edition-fallback/win-unpacked` 重试；标准目录与 fallback 仍只能有一个被清单选中。
 
 > 冻结 E18 包及后续整合态沿用同一套可与稳定版并存的 1.2.3 **性能开发版**身份：appId/AppUserModelID 为 `com.dspidle.network.performance`，产品名为 `DSP极简网络 Windows 性能开发版`，默认输出为 `release-performance-edition/`，EXE 为 `dsp-idle-performance-edition.exe`。它在 AppData 使用固定独立的 `DSPidle2-Performance-Edition` userData 与 `Chromium` sessionData，不读取稳定版默认目录；本机存档、云会话、设置、窗口状态和原生私有存档因此初始为空。程序不会自动搬运旧数据，玩家若要测试旧档，必须先在稳定版导出 JSON/JSON.gz，再在性能版通过导入界面明确选择该文件。不要把稳定版数据目录直接覆盖到性能版目录，也不要反向覆盖。
@@ -172,7 +182,7 @@ node scripts/create-native-update-manifests.mjs `
   --android-certificate-sha256 <公开证书指纹>
 ```
 
-生成器没有默认发布域名，必须传入 `--base-url` 或设置 `DSP_NATIVE_UPDATE_BASE_URL`。Windows 的 `latest.yml`、安装程序和 blockmap 由 `npm run desktop:release` 整理到 `release/update-feed/desktop/<channel>/`。Android JSON 与 APK 整理到 `release/update-feed/android/`。这些命令只生成待发布目录，不上传服务器。
+生成器没有默认发布域名，必须传入 `--base-url` 或设置 `DSP_NATIVE_UPDATE_BASE_URL`。Windows 的 `latest.yml`、安装程序和 blockmap 由 `npm run desktop:release` 写入本次唯一成功的 `release-performance-edition/` 或 `release-performance-edition-fallback/`，对应更新清单位于该目录的 `update-feed/desktop/<channel>/`。Android JSON 与 APK 整理到 `release/update-feed/android/`。这些命令只生成待发布目录，不上传服务器。
 
 ## 6. CI 与发布门禁
 

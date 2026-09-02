@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -10,7 +11,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use sha2::{Digest, Sha256};
 
-use crate::exact_realtime_lease::ExactRealtimeLease;
+use crate::disk_budget::{
+    DiskBudgetOutcome, DiskBudgetStatus, DiskSpaceProbe, SystemDiskSpaceProbe, require_write_budget,
+};
+use crate::exact_realtime_lease::{
+    ExactRealtimeCheckpoint, ExactRealtimeLease, ExactRealtimeLeasePhase,
+    ExactRealtimeLeasePurpose, player_authority_command_request_sha256,
+    player_authority_pause_target,
+};
 
 const MAX_SLOT_BYTES: usize = 64;
 const MAX_KEY_BYTES: usize = 512;
@@ -19,6 +27,21 @@ const MAX_BATCH_RECORDS: usize = 8;
 const MAX_WAL_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_WAL_ENTRIES: usize = 4_096;
+const MAX_STATISTICS_SIDECAR_BYTES: u64 = 8 * 1024 * 1024;
+const STATISTICS_SIDECAR_FORMAT_VERSION: u16 = 1;
+const STATISTICS_SIDECAR_FILE: &str = "statistics-history-v1.json";
+const PLAYER_AUTHORITY_CATALOG_SCHEMA_VERSION: u16 = 1;
+const PLAYER_AUTHORITY_CATALOG_KIND: &str = "native-core-player-authority-recovery-catalog-v1";
+const PLAYER_AUTHORITY_CATALOG_FILE: &str = "player-authority-catalog-v1.json";
+const MAX_PLAYER_AUTHORITY_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PLAYER_AUTHORITY_CATALOG_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+const PLAYER_AUTHORITY_COMMAND_RECEIPT_SCHEMA_VERSION: u16 = 1;
+const PLAYER_AUTHORITY_COMMAND_RECEIPT_KIND: &str =
+    "native-core-player-authority-command-change-receipt-v1";
+const PLAYER_AUTHORITY_COMMAND_RECEIPT_FILE: &str = "player-authority-command-receipt-v1.json";
+const MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_IDS: usize = 65_536;
+const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const WAL_FRAME_HEADER_BYTES: u64 = 8;
 const DEFAULT_RETAIN_GENERATIONS: usize = 2;
 const SAVE_SLOTS: [&str; 2] = ["normal-main", "speedrun-main"];
@@ -53,6 +76,69 @@ pub(crate) fn json_values_bitwise_equal(left: &Value, right: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+/// Stable structural digest for authority request identity. Unlike the public
+/// GameState canonical hash, this keeps JSON numeric categories and IEEE-754
+/// signed zero distinct so an idempotency key cannot be reused with subtly
+/// different command bytes.
+pub(crate) fn json_value_bitwise_sha256(value: &Value) -> String {
+    fn update_length(hasher: &mut Sha256, length: usize) {
+        hasher.update(u64::try_from(length).unwrap_or(u64::MAX).to_le_bytes());
+    }
+
+    fn update(hasher: &mut Sha256, value: &Value) {
+        match value {
+            Value::Null => hasher.update([0]),
+            Value::Bool(false) => hasher.update([1]),
+            Value::Bool(true) => hasher.update([2]),
+            Value::Number(number) if number.is_f64() => {
+                hasher.update([3]);
+                hasher.update(
+                    number
+                        .as_f64()
+                        .expect("floating JSON number")
+                        .to_bits()
+                        .to_le_bytes(),
+                );
+            }
+            Value::Number(number) if number.as_u64().is_some() => {
+                hasher.update([4]);
+                hasher.update(number.as_u64().unwrap().to_le_bytes());
+            }
+            Value::Number(number) => {
+                hasher.update([5]);
+                hasher.update(number.as_i64().expect("signed JSON number").to_le_bytes());
+            }
+            Value::String(text) => {
+                hasher.update([6]);
+                update_length(hasher, text.len());
+                hasher.update(text.as_bytes());
+            }
+            Value::Array(values) => {
+                hasher.update([7]);
+                update_length(hasher, values.len());
+                for value in values {
+                    update(hasher, value);
+                }
+            }
+            Value::Object(object) => {
+                hasher.update([8]);
+                update_length(hasher, object.len());
+                let mut keys = object.keys().collect::<Vec<_>>();
+                keys.sort_unstable();
+                for key in keys {
+                    update_length(hasher, key.len());
+                    hasher.update(key.as_bytes());
+                    update(hasher, &object[key]);
+                }
+            }
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    update(&mut hasher, value);
+    hex::encode(hasher.finalize())
 }
 
 fn json_numbers_bitwise_equal(left: &Number, right: &Number) -> bool {
@@ -95,7 +181,20 @@ impl<R: Read> Read for Sha256CountingReader<R> {
         let bytes = self.inner.read(buffer)?;
         if bytes > 0 {
             self.digest.update(&buffer[..bytes]);
-            self.bytes_read = self.bytes_read.saturating_add(bytes as u64);
+            self.bytes_read = self
+                .bytes_read
+                .checked_add(u64::try_from(bytes).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "native byte counter length overflowed",
+                    )
+                })?)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "native byte counter overflowed",
+                    )
+                })?;
         }
         Ok(bytes)
     }
@@ -121,8 +220,20 @@ impl Sha256CountingWriter {
 
 impl Write for Sha256CountingWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let bytes = u64::try_from(buffer.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "native byte counter length overflowed",
+            )
+        })?;
+        let next = self.bytes_written.checked_add(bytes).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "native byte counter overflowed",
+            )
+        })?;
         self.digest.update(buffer);
-        self.bytes_written = self.bytes_written.saturating_add(buffer.len() as u64);
+        self.bytes_written = next;
         Ok(buffer.len())
     }
 
@@ -217,6 +328,12 @@ pub struct SaveCommitResult {
     pub wal_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SaveCompactionResult {
+    pub removed_generations: usize,
+    pub cancelled: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveRecoveryResult {
@@ -233,6 +350,91 @@ pub struct SaveRecoveryResult {
     pub wal_first_revision: Option<u64>,
     pub wal_last_revision: Option<u64>,
     pub wal_entry_count: usize,
+}
+
+/// A disposable diagnostics cache bound to one exact authoritative
+/// generation. It deliberately lives outside `SaveManifest.records`; a stale
+/// or damaged file is a cache miss, never a reason to reject the save.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StatisticsSidecarPayload {
+    format_version: u16,
+    checkpoint_format_version: u16,
+    slot: String,
+    generation: u64,
+    revision: u64,
+    root_hash: String,
+    state_version: u16,
+    mode: String,
+    base_checksum: String,
+    registry_fingerprint: String,
+    history: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StatisticsSidecarEnvelope {
+    payload: StatisticsSidecarPayload,
+    checksum: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayerAuthorityCatalogPayload {
+    schema_version: u16,
+    kind: String,
+    slot: String,
+    mode: String,
+    state_version: u16,
+    run_id: String,
+    registry_fingerprint: String,
+    catalog_byte_length: u64,
+    catalog_sha256: String,
+    /// Exact, strictly normalized UTF-8 JSON bytes. Keeping the payload as a
+    /// string avoids the several-fold expansion of a JSON byte array while
+    /// retaining a byte length and digest that are checked before parsing.
+    catalog_payload_utf8: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayerAuthorityCatalogEnvelope {
+    payload: PlayerAuthorityCatalogPayload,
+    checksum: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PlayerAuthorityCommandChangeReceipt {
+    pub command_id: String,
+    pub command_request_sha256: String,
+    pub base_revision: u64,
+    pub revision: u64,
+    pub sequence: u64,
+    pub checkpoint: ExactRealtimeCheckpoint,
+    pub changed_entity_ids: Vec<String>,
+    pub changed_belt_ids: Vec<String>,
+    pub topology_dirty: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayerAuthorityCommandReceiptPayload {
+    schema_version: u16,
+    kind: String,
+    slot: String,
+    mode: String,
+    state_version: u16,
+    run_id: String,
+    registry_fingerprint: String,
+    receipt: PlayerAuthorityCommandChangeReceipt,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayerAuthorityCommandReceiptEnvelope {
+    payload: PlayerAuthorityCommandReceiptPayload,
+    checksum: String,
 }
 
 /// Identity of a checkpoint that was fully verified from the published
@@ -313,6 +515,8 @@ pub enum CommitFaultPoint {
     #[cfg(test)]
     CorruptManifestBeforeReadback,
     #[cfg(test)]
+    TransientReconciliationReadbackFailure,
+    #[cfg(test)]
     WalMaintenanceIoFailure,
     #[cfg(test)]
     MutateWalAfterSuperblockPublish,
@@ -323,6 +527,11 @@ struct InvalidPublishedGeneration {
     generation: u64,
     revision: u64,
     reason: String,
+}
+
+#[derive(Clone, Debug)]
+struct UncertainPublication {
+    identity: PublishedCheckpointIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -341,6 +550,11 @@ pub struct SaveStore {
     temporary_namespace: String,
     transactions: HashMap<String, SaveTransaction>,
     verified_manifests: RefCell<HashMap<String, SaveManifest>>,
+    uncertain_publications: HashMap<String, UncertainPublication>,
+    disk_space_probe: Arc<dyn DiskSpaceProbe>,
+    last_disk_budget_status: Cell<DiskBudgetStatus>,
+    #[cfg(test)]
+    transient_reconciliation_failures: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -367,8 +581,64 @@ impl Drop for TemporaryPathGuard {
     }
 }
 
+struct ExactLengthWriter<'a> {
+    inner: &'a mut File,
+    remaining: u64,
+}
+
+impl ExactLengthWriter<'_> {
+    fn finish(self) -> anyhow::Result<()> {
+        if self.remaining != 0 {
+            bail!("native compatibility export wrote fewer bytes than preflighted");
+        }
+        Ok(())
+    }
+}
+
+impl Write for ExactLengthWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let requested = u64::try_from(buffer.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "native compatibility export buffer length overflowed",
+            )
+        })?;
+        if requested > self.remaining {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "native compatibility export exceeded its preflighted byte length",
+            ));
+        }
+        let written = self.inner.write(buffer)?;
+        self.remaining = self
+            .remaining
+            .checked_sub(written as u64)
+            .expect("bounded export write cannot exceed remaining bytes");
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl SaveStore {
     pub fn open(root: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Self::open_with_probe(root, Arc::new(SystemDiskSpaceProbe))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_disk_space_probe(
+        root: impl AsRef<Path>,
+        disk_space_probe: Arc<dyn DiskSpaceProbe>,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_probe(root, disk_space_probe)
+    }
+
+    fn open_with_probe(
+        root: impl AsRef<Path>,
+        disk_space_probe: Arc<dyn DiskSpaceProbe>,
+    ) -> anyhow::Result<Self> {
         let root = root.as_ref();
         ensure_save_root(root)?;
         let root_identity = require_direct_directory(root, "native save root")?;
@@ -404,11 +674,594 @@ impl SaveStore {
             temporary_namespace: format!("{}-{opened_at:032x}", std::process::id()),
             transactions: HashMap::new(),
             verified_manifests: RefCell::new(HashMap::new()),
+            uncertain_publications: HashMap::new(),
+            disk_space_probe,
+            last_disk_budget_status: Cell::new(DiskBudgetStatus::NotChecked),
+            #[cfg(test)]
+            transient_reconciliation_failures: HashSet::new(),
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Returns an opaque binding for one CoreRegistry session in this exact
+    /// SaveStore lifetime. The store lifetime owns the root lock, and its
+    /// namespace includes the process identity and open timestamp, so a
+    /// predictable `core-1` after process restart cannot silently inherit a
+    /// player-authority lease from the previous writer.
+    pub(crate) fn player_authority_session_binding(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<String> {
+        if session_id.is_empty()
+            || session_id.len() > 128
+            || !session_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            bail!("native player-authority session ID is invalid")
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"dsp-native-player-authority-session-v1\0");
+        digest.update(self.temporary_namespace.as_bytes());
+        digest.update(b"\0");
+        digest.update(session_id.as_bytes());
+        Ok(format!("pas-{}", hex::encode(digest.finalize())))
+    }
+
+    fn require_disk_budget_in_directory(
+        &self,
+        directory: &Path,
+        write_bytes: u64,
+    ) -> anyhow::Result<()> {
+        match require_write_budget(self.disk_space_probe.as_ref(), directory, write_bytes) {
+            Ok(DiskBudgetOutcome::Verified { .. }) => {
+                self.last_disk_budget_status.set(DiskBudgetStatus::Verified);
+                Ok(())
+            }
+            Ok(DiskBudgetOutcome::Unsupported { .. }) => {
+                self.last_disk_budget_status
+                    .set(DiskBudgetStatus::Unsupported);
+                Ok(())
+            }
+            Err(error) => {
+                self.last_disk_budget_status.set(DiskBudgetStatus::Failed);
+                Err(error)
+            }
+        }
+    }
+
+    fn require_disk_budget_for_path(&self, path: &Path, write_bytes: u64) -> anyhow::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("native disk budget target has no parent"))?;
+        self.require_disk_budget_in_directory(parent, write_bytes)
+    }
+
+    fn atomic_write_new_budgeted(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+        if !reject_existing_path_redirect(path, "immutable native target")? {
+            self.require_disk_budget_for_path(path, u64::try_from(bytes.len())?)?;
+        }
+        atomic_write_new(path, bytes, &self.next_temporary_name()?)
+    }
+
+    pub(crate) fn atomic_replace_budgeted(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+        self.require_disk_budget_for_path(path, u64::try_from(bytes.len())?)?;
+        atomic_replace(path, bytes, &self.next_temporary_name()?)
+    }
+
+    #[cfg(test)]
+    fn last_disk_budget_status(&self) -> DiskBudgetStatus {
+        self.last_disk_budget_status.get()
+    }
+
+    /// Best-effort callers must ignore every error from this method. The
+    /// sidecar is not part of the save transaction and is published only after
+    /// the authoritative generation has already been acknowledged.
+    pub(crate) fn write_statistics_sidecar(
+        &self,
+        slot: &str,
+        generation: u64,
+        revision: u64,
+        root_hash: &str,
+        history: Value,
+    ) -> anyhow::Result<()> {
+        let manifest = self
+            .recover_manifest(slot)?
+            .ok_or_else(|| anyhow!("native statistics sidecar checkpoint is missing"))?;
+        if manifest.generation != generation
+            || manifest.revision != revision
+            || manifest.root_hash != root_hash
+        {
+            bail!("native statistics sidecar checkpoint identity is stale");
+        }
+        let payload = StatisticsSidecarPayload {
+            format_version: STATISTICS_SIDECAR_FORMAT_VERSION,
+            checkpoint_format_version: manifest.format_version,
+            slot: manifest.slot.clone(),
+            generation: manifest.generation,
+            revision: manifest.revision,
+            root_hash: manifest.root_hash.clone(),
+            state_version: manifest.state_version,
+            mode: manifest.mode.clone(),
+            base_checksum: manifest.base_checksum.clone(),
+            registry_fingerprint: manifest.registry_fingerprint.clone(),
+            history,
+        };
+        let envelope = StatisticsSidecarEnvelope {
+            checksum: sha256_hex(&serde_json::to_vec(&payload)?),
+            payload,
+        };
+        let bytes = serde_json::to_vec(&envelope)?;
+        if bytes.len() as u64 > MAX_STATISTICS_SIDECAR_BYTES {
+            bail!("native statistics sidecar exceeds its byte budget");
+        }
+        let path = self.statistics_sidecar_path(slot)?;
+        self.atomic_replace_budgeted(&path, &bytes)?;
+        sync_directory(&self.slot_dir(slot)?)?;
+        Ok(())
+    }
+
+    /// Persists the immutable catalog required to reopen a fenced native core
+    /// after process restart. It is private recovery metadata, not part of the
+    /// GameState, cloud envelope, lease schema, or public save manifest.
+    pub(crate) fn write_player_authority_recovery_catalog(
+        &self,
+        run_id: &str,
+        checkpoint: &ExactRealtimeCheckpoint,
+        registry_fingerprint: &str,
+        catalog: Value,
+    ) -> anyhow::Result<()> {
+        validate_authority_run_id(run_id)?;
+        validate_fingerprint(registry_fingerprint)?;
+        if let Some(lease) = self.read_exact_realtime_lease()?
+            && (lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+                || lease.phase != ExactRealtimeLeasePhase::Prepared
+                || lease.run_id != run_id
+                || lease.slot != "normal-main"
+                || lease.mode != "normal"
+                || lease.registry_fingerprint != registry_fingerprint
+                || lease.checkpoint != *checkpoint
+                || lease.acknowledged.checkpoint != *checkpoint
+                || lease.pending_tick.is_some()
+                || lease.pending_command.is_some()
+                || lease.pending_advance.is_some())
+        {
+            bail!("native player-authority recovery catalog lease identity conflicts")
+        }
+        let published = self
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main player-authority checkpoint is missing"))?;
+        if published.slot != "normal-main"
+            || published.mode != "normal"
+            || published.state_version != 47
+            || published.registry_fingerprint != registry_fingerprint
+            || published.generation != checkpoint.generation
+            || published.root_hash != checkpoint.root_hash
+            || published.revision != checkpoint.revision
+        {
+            bail!("native player-authority recovery catalog checkpoint is stale")
+        }
+        if catalog.get("registryFingerprint").and_then(Value::as_str) != Some(registry_fingerprint)
+        {
+            bail!("native player-authority recovery catalog fingerprint conflicts")
+        }
+        let catalog_bytes = serde_json::to_vec(&catalog)?;
+        if catalog_bytes.is_empty()
+            || catalog_bytes.len() > MAX_PLAYER_AUTHORITY_CATALOG_PAYLOAD_BYTES
+        {
+            bail!("native player-authority recovery catalog payload exceeds its byte budget")
+        }
+        let catalog_payload_utf8 = String::from_utf8(catalog_bytes.clone())
+            .context("encode native player-authority recovery catalog as UTF-8")?;
+        let payload = PlayerAuthorityCatalogPayload {
+            schema_version: PLAYER_AUTHORITY_CATALOG_SCHEMA_VERSION,
+            kind: PLAYER_AUTHORITY_CATALOG_KIND.to_owned(),
+            slot: published.slot,
+            mode: published.mode,
+            state_version: published.state_version,
+            run_id: run_id.to_owned(),
+            registry_fingerprint: registry_fingerprint.to_owned(),
+            catalog_byte_length: u64::try_from(catalog_bytes.len())?,
+            catalog_sha256: sha256_hex(&catalog_bytes),
+            catalog_payload_utf8,
+        };
+        let envelope = PlayerAuthorityCatalogEnvelope {
+            checksum: sha256_hex(&serde_json::to_vec(&payload)?),
+            payload,
+        };
+        let bytes = serde_json::to_vec(&envelope)?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_PLAYER_AUTHORITY_CATALOG_BYTES {
+            bail!("native player-authority recovery catalog exceeds its byte budget")
+        }
+        let directory = self.player_authority_recovery_directory()?;
+        let path = directory.join(PLAYER_AUTHORITY_CATALOG_FILE);
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            validate_save_regular_file_type(
+                metadata.file_type(),
+                "native player-authority catalog",
+            )?;
+        }
+        self.atomic_replace_budgeted(&path, &bytes)?;
+        sync_directory(&directory)?;
+        if fs::read(&path)? != bytes {
+            bail!("native player-authority recovery catalog readback differs")
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_player_authority_recovery_catalog(
+        &self,
+        lease: &ExactRealtimeLease,
+        published: &PublishedCheckpointIdentity,
+    ) -> anyhow::Result<Value> {
+        let resumable_phase = lease.phase == ExactRealtimeLeasePhase::Prepared
+            || matches!(
+                lease.phase,
+                ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
+            ) && (lease.pending_tick.is_some()
+                || lease.pending_command.is_some()
+                || lease.startup_resume_enabled);
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority || !resumable_phase {
+            bail!("native player-authority recovery catalog lease purpose is invalid")
+        }
+        let published_is_acknowledged = published.generation
+            == lease.acknowledged.checkpoint.generation
+            && published.root_hash == lease.acknowledged.checkpoint.root_hash
+            && published.revision == lease.acknowledged.checkpoint.revision;
+        let published_is_pending_command = lease.pending_command.as_ref().is_some_and(|pending| {
+            let phase_is_authorized = match player_authority_pause_target(&pending.command) {
+                Some(true) => lease.phase == ExactRealtimeLeasePhase::Active,
+                Some(false) => lease.phase == ExactRealtimeLeasePhase::Paused,
+                None => lease.phase == ExactRealtimeLeasePhase::Active,
+            };
+            phase_is_authorized && published.revision == pending.expected_revision
+        });
+        let published_is_pending_tick = lease.pending_tick.as_ref().is_some_and(|pending| {
+            lease.phase == ExactRealtimeLeasePhase::Active
+                && published.revision == pending.expected_revision
+        });
+        let published_is_pending_advance = lease.pending_advance.as_ref().is_some_and(|pending| {
+            lease.phase == ExactRealtimeLeasePhase::Active
+                && published.revision == pending.expected_revision
+        });
+        if lease.slot != "normal-main"
+            || lease.mode != "normal"
+            || published.slot != lease.slot
+            || published.mode != lease.mode
+            || published.state_version != 47
+            || published.registry_fingerprint != lease.registry_fingerprint
+            || !(published_is_acknowledged
+                || published_is_pending_tick
+                || published_is_pending_command
+                || published_is_pending_advance)
+        {
+            bail!("native player-authority recovery lease/checkpoint publication conflicts")
+        }
+        validate_authority_run_id(&lease.run_id)?;
+        validate_fingerprint(&lease.registry_fingerprint)?;
+        let directory = self.player_authority_recovery_directory()?;
+        let path = directory.join(PLAYER_AUTHORITY_CATALOG_FILE);
+        let metadata = fs::symlink_metadata(&path)?;
+        validate_save_regular_file_type(metadata.file_type(), "native player-authority catalog")?;
+        if metadata.len() == 0 || metadata.len() > MAX_PLAYER_AUTHORITY_CATALOG_BYTES {
+            bail!("native player-authority recovery catalog size is invalid")
+        }
+        let file = File::open(&path)?;
+        validate_save_regular_file_type(
+            file.metadata()?.file_type(),
+            "native player-authority catalog",
+        )?;
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len())?);
+        file.take(MAX_PLAYER_AUTHORITY_CATALOG_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        let after = fs::symlink_metadata(&path)?;
+        validate_save_regular_file_type(after.file_type(), "native player-authority catalog")?;
+        if bytes.len() as u64 != metadata.len()
+            || bytes.len() as u64 > MAX_PLAYER_AUTHORITY_CATALOG_BYTES
+            || after.len() != metadata.len()
+        {
+            bail!("native player-authority recovery catalog changed while reading")
+        }
+        let envelope = serde_json::from_slice::<PlayerAuthorityCatalogEnvelope>(&bytes)?;
+        if envelope.payload.schema_version != PLAYER_AUTHORITY_CATALOG_SCHEMA_VERSION
+            || envelope.payload.kind != PLAYER_AUTHORITY_CATALOG_KIND
+            || envelope.payload.slot != lease.slot
+            || envelope.payload.mode != lease.mode
+            || envelope.payload.state_version != published.state_version
+            || envelope.payload.run_id != lease.run_id
+            || envelope.payload.registry_fingerprint != lease.registry_fingerprint
+            || envelope.checksum != sha256_hex(&serde_json::to_vec(&envelope.payload)?)
+        {
+            bail!("native player-authority recovery catalog integrity is invalid")
+        }
+        let catalog_bytes = envelope.payload.catalog_payload_utf8.as_bytes();
+        if catalog_bytes.is_empty()
+            || catalog_bytes.len() > MAX_PLAYER_AUTHORITY_CATALOG_PAYLOAD_BYTES
+            || envelope.payload.catalog_byte_length != u64::try_from(catalog_bytes.len())?
+            || envelope.payload.catalog_sha256 != sha256_hex(catalog_bytes)
+        {
+            bail!("native player-authority recovery catalog payload integrity is invalid")
+        }
+        let catalog = serde_json::from_slice::<Value>(catalog_bytes)?;
+        if serde_json::to_vec(&catalog)? != catalog_bytes
+            || catalog.get("registryFingerprint").and_then(Value::as_str)
+                != Some(lease.registry_fingerprint.as_str())
+        {
+            bail!("native player-authority recovery catalog payload is not normalized")
+        }
+        Ok(catalog)
+    }
+
+    /// Persists the exact invalidation receipt after the command checkpoint
+    /// is published but before its lease ACK. A failure therefore leaves the
+    /// command pending and retryable; an ACK can never outlive its receipt.
+    pub(crate) fn write_player_authority_command_change_receipt(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+        receipt: &PlayerAuthorityCommandChangeReceipt,
+    ) -> anyhow::Result<()> {
+        let current = self.require_exact_realtime_lease()?;
+        if &current != expected_lease {
+            bail!("native player-authority command receipt lease changed")
+        }
+        let pending = current.pending_command.as_ref().ok_or_else(|| {
+            anyhow!("native player-authority command receipt has no pending command")
+        })?;
+        let pause_target = player_authority_pause_target(&pending.command);
+        let phase_is_authorized = match pause_target {
+            Some(true) => current.phase == ExactRealtimeLeasePhase::Active,
+            Some(false) => current.phase == ExactRealtimeLeasePhase::Paused,
+            None => current.phase == ExactRealtimeLeasePhase::Active,
+        };
+        validate_player_authority_command_change_receipt(receipt)?;
+        if current.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || !phase_is_authorized
+            || !current.startup_resume_enabled
+            || current.pending_tick.is_some()
+            || pending.command_id != receipt.command_id
+            || pending.request_sha256 != receipt.command_request_sha256
+            || pending.base_revision != receipt.base_revision
+            || pending.expected_revision != receipt.revision
+            || pending.sequence != receipt.sequence
+        {
+            bail!("native player-authority command receipt identity conflicts")
+        }
+        let published = self
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main command receipt checkpoint is missing"))?;
+        if published.slot != "normal-main"
+            || published.mode != "normal"
+            || published.state_version != 47
+            || published.registry_fingerprint != current.registry_fingerprint
+            || published.generation != receipt.checkpoint.generation
+            || published.root_hash != receipt.checkpoint.root_hash
+            || published.revision != receipt.checkpoint.revision
+        {
+            bail!("native player-authority command receipt checkpoint is stale")
+        }
+        let payload = PlayerAuthorityCommandReceiptPayload {
+            schema_version: PLAYER_AUTHORITY_COMMAND_RECEIPT_SCHEMA_VERSION,
+            kind: PLAYER_AUTHORITY_COMMAND_RECEIPT_KIND.to_owned(),
+            slot: "normal-main".to_owned(),
+            mode: "normal".to_owned(),
+            state_version: 47,
+            run_id: current.run_id,
+            registry_fingerprint: current.registry_fingerprint,
+            receipt: receipt.clone(),
+        };
+        let envelope = PlayerAuthorityCommandReceiptEnvelope {
+            checksum: sha256_hex(&serde_json::to_vec(&payload)?),
+            payload,
+        };
+        let bytes = serde_json::to_vec(&envelope)?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES {
+            bail!("native player-authority command receipt exceeds its byte budget")
+        }
+        let directory = self.player_authority_recovery_directory()?;
+        let path = directory.join(PLAYER_AUTHORITY_COMMAND_RECEIPT_FILE);
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            validate_save_regular_file_type(
+                metadata.file_type(),
+                "native player-authority command receipt",
+            )?;
+        }
+        self.atomic_replace_budgeted(&path, &bytes)?;
+        sync_directory(&directory)?;
+        if fs::read(&path)? != bytes {
+            bail!("native player-authority command receipt readback differs")
+        }
+        Ok(())
+    }
+
+    /// Reads only the receipt for the currently acknowledged latest command.
+    /// A stale sidecar left behind by a later tick is deliberately ignored by
+    /// callers and can never make that tick look like a topology mutation.
+    pub(crate) fn read_player_authority_command_change_receipt(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+    ) -> anyhow::Result<PlayerAuthorityCommandChangeReceipt> {
+        let current = self.require_exact_realtime_lease()?;
+        if &current != expected_lease {
+            bail!("native player-authority acknowledged receipt lease changed")
+        }
+        if current.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || !matches!(
+                current.phase,
+                ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
+            )
+            || !current.startup_resume_enabled
+            || current.pending_tick.is_some()
+            || current.pending_command.is_some()
+            || current.acknowledged.command_id.as_deref()
+                != current.acknowledged.last_player_command_id.as_deref()
+        {
+            bail!("native player-authority lease has no latest acknowledged command receipt")
+        }
+        let command_id = current
+            .acknowledged
+            .last_player_command_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("native player-authority acknowledged command ID is missing"))?;
+        let command_base_revision =
+            current.acknowledged.command_base_revision.ok_or_else(|| {
+                anyhow!("native player-authority acknowledged command base is missing")
+            })?;
+        let command_request_sha256 = current
+            .acknowledged
+            .command_request_sha256
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow!("native player-authority acknowledged command hash is missing")
+            })?;
+        let directory = self.player_authority_recovery_directory()?;
+        let path = directory.join(PLAYER_AUTHORITY_COMMAND_RECEIPT_FILE);
+        let metadata = fs::symlink_metadata(&path)?;
+        validate_save_regular_file_type(
+            metadata.file_type(),
+            "native player-authority command receipt",
+        )?;
+        if metadata.len() == 0 || metadata.len() > MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES {
+            bail!("native player-authority command receipt size is invalid")
+        }
+        let file = File::open(&path)?;
+        validate_save_regular_file_type(
+            file.metadata()?.file_type(),
+            "native player-authority command receipt",
+        )?;
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len())?);
+        file.take(MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        let after = fs::symlink_metadata(&path)?;
+        validate_save_regular_file_type(
+            after.file_type(),
+            "native player-authority command receipt",
+        )?;
+        if bytes.len() as u64 != metadata.len()
+            || bytes.len() as u64 > MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_BYTES
+            || after.len() != metadata.len()
+        {
+            bail!("native player-authority command receipt changed while reading")
+        }
+        let envelope = serde_json::from_slice::<PlayerAuthorityCommandReceiptEnvelope>(&bytes)?;
+        if envelope.payload.schema_version != PLAYER_AUTHORITY_COMMAND_RECEIPT_SCHEMA_VERSION
+            || envelope.payload.kind != PLAYER_AUTHORITY_COMMAND_RECEIPT_KIND
+            || envelope.payload.slot != "normal-main"
+            || envelope.payload.mode != "normal"
+            || envelope.payload.state_version != 47
+            || envelope.payload.run_id != current.run_id
+            || envelope.payload.registry_fingerprint != current.registry_fingerprint
+            || envelope.checksum != sha256_hex(&serde_json::to_vec(&envelope.payload)?)
+        {
+            bail!("native player-authority command receipt integrity is invalid")
+        }
+        let receipt = envelope.payload.receipt;
+        validate_player_authority_command_change_receipt(&receipt)?;
+        if receipt.command_id != command_id
+            || receipt.command_request_sha256 != command_request_sha256
+            || receipt.base_revision != command_base_revision
+            || receipt.revision != current.acknowledged.revision
+            || receipt.sequence != current.acknowledged.sequence
+            || receipt.checkpoint != current.acknowledged.checkpoint
+        {
+            bail!("native player-authority command receipt does not match its durable ACK")
+        }
+        let published = self
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main command receipt checkpoint is missing"))?;
+        if published.slot != "normal-main"
+            || published.mode != "normal"
+            || published.state_version != 47
+            || published.registry_fingerprint != current.registry_fingerprint
+            || published.generation != receipt.checkpoint.generation
+            || published.root_hash != receipt.checkpoint.root_hash
+            || published.revision != receipt.checkpoint.revision
+        {
+            bail!("native player-authority acknowledged command receipt is stale")
+        }
+        Ok(receipt)
+    }
+
+    fn player_authority_recovery_directory(&self) -> anyhow::Result<PathBuf> {
+        let authority = self.root.join("authority");
+        ensure_direct_directory(&authority, &self.root, "native authority directory")?;
+        let normal = authority.join("normal-main");
+        ensure_direct_directory(
+            &normal,
+            &authority,
+            "native normal-main authority directory",
+        )?;
+        Ok(normal)
+    }
+
+    /// Reads a disposable cache fail-open. Corruption, stale identity,
+    /// unsupported formats and I/O failures all return `None`; callers retain
+    /// the history rebuilt from public v47 fields.
+    pub(crate) fn read_statistics_sidecar(
+        &self,
+        slot: &str,
+        generation: u64,
+        revision: u64,
+        root_hash: &str,
+    ) -> Option<Value> {
+        self.read_statistics_sidecar_checked(slot, generation, revision, root_hash)
+            .ok()
+            .flatten()
+    }
+
+    fn read_statistics_sidecar_checked(
+        &self,
+        slot: &str,
+        generation: u64,
+        revision: u64,
+        root_hash: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        let manifest = self
+            .recover_manifest(slot)?
+            .ok_or_else(|| anyhow!("native statistics sidecar checkpoint is missing"))?;
+        if manifest.generation != generation
+            || manifest.revision != revision
+            || manifest.root_hash != root_hash
+        {
+            bail!("native statistics sidecar requested identity is stale");
+        }
+        let path = self.statistics_sidecar_path(slot)?;
+        if !reject_existing_path_redirect(&path, "native statistics sidecar")? {
+            return Ok(None);
+        }
+        let file = File::open(&path)?;
+        let length = file.metadata()?.len();
+        if length == 0 || length > MAX_STATISTICS_SIDECAR_BYTES {
+            bail!("native statistics sidecar byte length is invalid");
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(length)?);
+        file.take(MAX_STATISTICS_SIDECAR_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != length {
+            bail!("native statistics sidecar changed during read");
+        }
+        let envelope = serde_json::from_slice::<StatisticsSidecarEnvelope>(&bytes)
+            .context("decode native statistics sidecar")?;
+        if sha256_hex(&serde_json::to_vec(&envelope.payload)?) != envelope.checksum {
+            bail!("native statistics sidecar checksum is invalid");
+        }
+        let payload = envelope.payload;
+        if payload.format_version != STATISTICS_SIDECAR_FORMAT_VERSION
+            || payload.checkpoint_format_version != manifest.format_version
+            || payload.slot != manifest.slot
+            || payload.generation != manifest.generation
+            || payload.revision != manifest.revision
+            || payload.root_hash != manifest.root_hash
+            || payload.state_version != manifest.state_version
+            || payload.mode != manifest.mode
+            || payload.base_checksum != manifest.base_checksum
+            || payload.registry_fingerprint != manifest.registry_fingerprint
+        {
+            bail!("native statistics sidecar identity is stale");
+        }
+        Ok(Some(payload.history))
     }
 
     /// Publishes a bounded native-generated compatibility export under the
@@ -417,7 +1270,8 @@ impl SaveStore {
     pub fn publish_export<T>(
         &self,
         export_id: &str,
-        write: impl FnOnce(&mut File) -> anyhow::Result<T>,
+        expected_bytes: u64,
+        write: impl FnOnce(&mut dyn Write) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         validate_export_id(export_id)?;
         let export_root = self.fixed_directory(&self.root.join("exports"), "native export root")?;
@@ -429,23 +1283,28 @@ impl SaveStore {
             bail!("native export identity already exists");
         }
         self.fixed_directory(&export_root, "native export root")?;
+        self.require_disk_budget_in_directory(&export_root, expected_bytes)?;
+        let mut temporary_guard = TemporaryPathGuard::new(temporary.clone());
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)?;
-        let result = match write(&mut file) {
-            Ok(result) => result,
-            Err(error) => {
-                drop(file);
-                let _ = fs::remove_file(&temporary);
-                return Err(error.context("stream native compatibility export"));
-            }
+        temporary_guard.arm();
+        let result = {
+            let mut writer = ExactLengthWriter {
+                inner: &mut file,
+                remaining: expected_bytes,
+            };
+            let result = write(&mut writer).context("stream native compatibility export")?;
+            writer.finish()?;
+            result
         };
         file.sync_all()?;
         drop(file);
         self.fixed_directory(&export_root, "native export root")?;
         fs::rename(&temporary, &final_path)?;
         sync_directory(&export_root)?;
+        drop(temporary_guard);
         Ok(result)
     }
 
@@ -495,6 +1354,45 @@ impl SaveStore {
         validate_fingerprint(registry_fingerprint)?;
         self.require_exact_realtime_checkpoint_mutation(
             expected_lease,
+            slot,
+            mode,
+            state_version,
+            registry_fingerprint,
+            revision,
+            saved_at_ms,
+        )?;
+        self.begin_internal(
+            slot,
+            mode,
+            state_version,
+            base_checksum,
+            registry_fingerprint,
+            revision,
+            saved_at_ms,
+            Some(expected_lease.clone()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn begin_player_authority_checkpoint(
+        &mut self,
+        slot: &str,
+        mode: &str,
+        state_version: u16,
+        base_checksum: &str,
+        registry_fingerprint: &str,
+        revision: u64,
+        saved_at_ms: u64,
+        expected_lease: &ExactRealtimeLease,
+        authority_session_id: &str,
+    ) -> anyhow::Result<SaveBeginResult> {
+        validate_slot(slot)?;
+        validate_mode(mode)?;
+        validate_hex_identity(base_checksum, "base checksum")?;
+        validate_fingerprint(registry_fingerprint)?;
+        self.require_player_authority_checkpoint_mutation(
+            expected_lease,
+            authority_session_id,
             slot,
             mode,
             state_version,
@@ -658,15 +1556,37 @@ impl SaveStore {
             .remove(transaction_id)
             .ok_or_else(|| anyhow!("unknown native save transaction"))?;
         if let Some(expected_lease) = transaction.exact_realtime_checkpoint_lease.as_ref() {
-            self.require_exact_realtime_checkpoint_mutation(
-                expected_lease,
-                &transaction.slot,
-                &transaction.mode,
-                transaction.state_version,
-                &transaction.registry_fingerprint,
-                transaction.revision,
-                transaction.saved_at_ms,
-            )?;
+            match expected_lease.purpose()? {
+                ExactRealtimeLeasePurpose::Experiment => {
+                    self.require_exact_realtime_checkpoint_mutation(
+                        expected_lease,
+                        &transaction.slot,
+                        &transaction.mode,
+                        transaction.state_version,
+                        &transaction.registry_fingerprint,
+                        transaction.revision,
+                        transaction.saved_at_ms,
+                    )?;
+                }
+                ExactRealtimeLeasePurpose::PlayerAuthority => {
+                    let authority_session_id = expected_lease
+                        .authority_session_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority checkpoint binding is missing")
+                        })?;
+                    self.require_player_authority_checkpoint_mutation(
+                        expected_lease,
+                        authority_session_id,
+                        &transaction.slot,
+                        &transaction.mode,
+                        transaction.state_version,
+                        &transaction.registry_fingerprint,
+                        transaction.revision,
+                        transaction.saved_at_ms,
+                    )?;
+                }
+            }
         } else {
             // Re-check at the publication boundary. A generic transaction may
             // have been admitted before the durable lease was prepared.
@@ -722,6 +1642,13 @@ impl SaveStore {
         let generations_root = generation_dir
             .parent()
             .ok_or_else(|| anyhow!("native generation has no parent"))?;
+        // Check against the already-trusted parent before creating the new
+        // generation directory. A rejected manifest must not leave an empty
+        // generation behind and consume a generation number.
+        self.require_disk_budget_in_directory(
+            generations_root,
+            u64::try_from(manifest_bytes.len())?,
+        )?;
         ensure_direct_directory(
             &generation_dir,
             generations_root,
@@ -756,11 +1683,24 @@ impl SaveStore {
                 } else {
                     "superblock-b.json"
                 });
+        self.require_disk_budget_for_path(
+            &superblock_target,
+            u64::try_from(superblock_bytes.len())?,
+        )?;
         atomic_replace(
             &superblock_target,
             &superblock_bytes,
             &self.next_temporary_name()?,
         )?;
+        // Keep the exact transaction-to-manifest binding across any error
+        // after pointer replacement. Core reconciliation may consume it only
+        // after a fresh disk scan proves this complete manifest is current.
+        self.uncertain_publications.insert(
+            transaction.id.clone(),
+            UncertainPublication {
+                identity: PublishedCheckpointIdentity::from(&manifest),
+            },
+        );
         // From this point on the on-disk authority may be newer than the
         // in-process cache, even if a following durability or readback step
         // reports an error. Never allow a retry to observe the old cached
@@ -771,6 +1711,13 @@ impl SaveStore {
         sync_directory(&self.slot_dir(&transaction.slot)?)?;
         if fault == CommitFaultPoint::AfterSuperblockPublish {
             bail!("injected failure after superblock publish");
+        }
+
+        #[cfg(test)]
+        if fault == CommitFaultPoint::TransientReconciliationReadbackFailure {
+            self.transient_reconciliation_failures
+                .insert(transaction.id.clone());
+            bail!("injected transient checkpoint readback failure");
         }
 
         #[cfg(test)]
@@ -844,6 +1791,7 @@ impl SaveStore {
         self.verified_manifests
             .borrow_mut()
             .insert(transaction.slot.clone(), manifest.clone());
+        self.uncertain_publications.remove(transaction_id);
         let total_uncompressed_bytes = manifest
             .records
             .values()
@@ -861,6 +1809,39 @@ impl SaveStore {
             wal_maintenance_pending: wal_maintenance.pending,
             wal_bytes: wal_maintenance.bytes,
         })
+    }
+
+    /// Reconciles a response lost after superblock replacement. Transactions
+    /// without a post-publication marker are never upgraded to success. A
+    /// marked transaction is accepted only when a fresh scan proves its full
+    /// manifest is still the latest authenticated publication.
+    pub(crate) fn reconcile_uncertain_publication(
+        &mut self,
+        transaction_id: &str,
+    ) -> anyhow::Result<Option<PublishedCheckpointIdentity>> {
+        let Some(expected) = self.uncertain_publications.get(transaction_id).cloned() else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        if self
+            .transient_reconciliation_failures
+            .remove(transaction_id)
+        {
+            bail!("injected transient uncertain checkpoint reconciliation failure");
+        }
+        let actual = self
+            .scan_published_manifests(&expected.identity.slot)?
+            .pop()
+            .ok_or_else(|| anyhow!("uncertain native checkpoint publication is missing"))?;
+        let actual_identity = PublishedCheckpointIdentity::from(&actual);
+        if actual_identity != expected.identity {
+            bail!("uncertain native checkpoint publication identity changed");
+        }
+        self.verified_manifests
+            .borrow_mut()
+            .insert(actual.slot.clone(), actual.clone());
+        self.uncertain_publications.remove(transaction_id);
+        Ok(Some(actual_identity))
     }
 
     pub fn recover(&self, slot: &str) -> anyhow::Result<Option<SaveRecoveryResult>> {
@@ -995,6 +1976,37 @@ impl SaveStore {
         Ok(records)
     }
 
+    /// Provides a generation-pinned, pull-based record reader. The manifest
+    /// is verified once and each decoded chunk is returned only when the core
+    /// asks for it, avoiding the previous full `BTreeMap<String, Vec<u8>>`
+    /// allocation during normal startup.
+    pub fn with_record_reader_at<T>(
+        &self,
+        slot: &str,
+        generation: u64,
+        root_hash: &str,
+        consume: impl FnOnce(
+            Vec<String>,
+            &mut dyn FnMut(&str) -> anyhow::Result<Vec<u8>>,
+        ) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let manifest = self
+            .recover_manifest(slot)?
+            .ok_or_else(|| anyhow!("native save slot is missing"))?;
+        if manifest.generation != generation || manifest.root_hash != root_hash {
+            bail!("native save generation changed during streamed readback");
+        }
+        let keys = manifest.records.keys().cloned().collect::<Vec<_>>();
+        let mut read = |key: &str| {
+            validate_key(key)?;
+            let metadata = manifest.records.get(key).ok_or_else(|| {
+                anyhow!("native save record disappeared during streamed readback")
+            })?;
+            self.read_verified_chunk(slot, metadata)
+        };
+        consume(keys, &mut read)
+    }
+
     pub fn append_wal(
         &self,
         slot: &str,
@@ -1040,6 +2052,69 @@ impl SaveStore {
             revision,
             command_id,
         )?;
+        self.append_wal_internal(slot, base_revision, revision, command_id, payload, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn append_wal_idempotent_player_authority(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+        authority_session_id: &str,
+        slot: &str,
+        base_revision: u64,
+        revision: u64,
+        command_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<WalAppendResult> {
+        self.require_player_authority_pending_wal_mutation(
+            expected_lease,
+            authority_session_id,
+            slot,
+            &expected_lease.registry_fingerprint,
+            base_revision,
+            revision,
+            command_id,
+        )?;
+        if let Some(pending) = expected_lease.pending_command.as_ref() {
+            let object = payload
+                .as_object()
+                .ok_or_else(|| anyhow!("native player-authority command WAL is not an object"))?;
+            let registry_fingerprint = object
+                .get("registry")
+                .and_then(Value::as_object)
+                .and_then(|registry| registry.get("fingerprint"))
+                .and_then(Value::as_str);
+            let simulation_seconds = object.get("simulationSeconds").and_then(Value::as_f64);
+            let wall_seconds = object.get("wallSeconds").and_then(Value::as_f64);
+            let command = object
+                .get("command")
+                .filter(|value| value.is_object())
+                .ok_or_else(|| anyhow!("native player-authority command WAL patch is missing"))?;
+            if object.get("kind").and_then(Value::as_str) != Some("stable-operation-v1")
+                || object.get("baseStateRevision").and_then(Value::as_u64)
+                    != Some(pending.base_revision)
+                || object.get("resultStateRevision").and_then(Value::as_u64)
+                    != Some(pending.expected_revision)
+                || simulation_seconds.map(f64::to_bits) != Some(0.0_f64.to_bits())
+                || wall_seconds.map(f64::to_bits) != Some(0.0_f64.to_bits())
+                || object.get("advanceMode").and_then(Value::as_str) != Some("exact")
+                || registry_fingerprint != Some(expected_lease.registry_fingerprint.as_str())
+                || !json_values_bitwise_equal(command, &pending.command)
+            {
+                bail!(
+                    "native player-authority command WAL payload is not the staged zero-time event"
+                )
+            }
+            if player_authority_command_request_sha256(
+                &expected_lease.run_id,
+                &pending.command_id,
+                pending.base_revision,
+                command,
+            )? != pending.request_sha256
+            {
+                bail!("native player-authority command WAL request digest conflicts")
+            }
+        }
         self.append_wal_internal(slot, base_revision, revision, command_id, payload, true)
     }
 
@@ -1141,12 +2216,13 @@ impl SaveStore {
         let frame = encode_wal_frame(&encoded)?;
         ensure_wal_append_budget(scan.identity.bytes, scan.entries.len(), frame.len())?;
         let wal_bytes = if wal_path.exists() {
+            self.require_disk_budget_for_path(&wal_path, u64::try_from(frame.len())?)?;
             let mut file = OpenOptions::new().append(true).open(&wal_path)?;
             file.write_all(&frame)?;
             file.sync_all()?;
             file.metadata()?.len()
         } else {
-            atomic_write_new(&wal_path, &frame, &self.next_temporary_name()?)?;
+            self.atomic_write_new_budgeted(&wal_path, &frame)?;
             frame.len() as u64
         };
         Ok(WalAppendResult {
@@ -1308,7 +2384,7 @@ impl SaveStore {
             });
         }
         let path = self.wal_path(slot)?;
-        atomic_replace(&path, &[], &self.next_temporary_name()?)?;
+        self.atomic_replace_budgeted(&path, &[])?;
         Ok(WalMaintenanceResult {
             pending: false,
             bytes: 0,
@@ -1316,6 +2392,27 @@ impl SaveStore {
     }
 
     pub fn compact(&self, slot: &str, retain_generations: usize) -> anyhow::Result<usize> {
+        Ok(self
+            .compact_cancellable(slot, retain_generations, |_, _| false)?
+            .removed_generations)
+    }
+
+    /// Plans compaction without changing durable state, then publishes the
+    /// already-decided generation removals only after the two superblocks are
+    /// proven byte-identical to the planning snapshot. Content-addressed
+    /// chunks do not need a copy pass; the directory/manifest scan is the
+    /// cancellable equivalent. The callback is invoked only during that
+    /// read-only phase. Once it returns false for the final item, publication
+    /// is intentionally short and non-cancellable.
+    pub fn compact_cancellable<F>(
+        &self,
+        slot: &str,
+        retain_generations: usize,
+        mut should_cancel: F,
+    ) -> anyhow::Result<SaveCompactionResult>
+    where
+        F: FnMut(usize, usize) -> bool,
+    {
         validate_slot(slot)?;
         self.require_generic_mutation_unfenced(slot)?;
         if self
@@ -1325,19 +2422,26 @@ impl SaveStore {
         {
             bail!("native save compaction cannot run while a transaction is active");
         }
+        let pointer_snapshot = self.published_pointer_snapshot(slot)?;
         let retain_generations = retain_generations.max(DEFAULT_RETAIN_GENERATIONS);
         let verified = self.scan_published_manifests(slot)?;
         let Some(active) = verified.last() else {
-            return Ok(0);
+            return Ok(SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: false,
+            });
         };
         let generations_root = self.slot_subdirectory(slot, "generations")?;
-        let mut generations = self.generation_directories(slot)?;
+        let generations = self.generation_directories(slot)?;
 
         // Compaction is destructive. If only the active pointer can be fully
         // verified, keep every generation rather than guessing that a nearby
         // numeric directory is a healthy fallback.
         if verified.len() < DEFAULT_RETAIN_GENERATIONS {
-            return Ok(0);
+            return Ok(SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: false,
+            });
         }
 
         let mut protected = verified
@@ -1355,8 +2459,15 @@ impl SaveStore {
             }
             protected.insert(*generation);
         }
-        let mut removed = 0;
-        for (generation, path) in generations.drain(..) {
+        let total = generations.len();
+        let mut removable = Vec::new();
+        for (index, (generation, path)) in generations.into_iter().enumerate() {
+            if should_cancel(index, total) {
+                return Ok(SaveCompactionResult {
+                    removed_generations: 0,
+                    cancelled: true,
+                });
+            }
             if protected.contains(&generation) || generation == active.generation {
                 continue;
             }
@@ -1364,12 +2475,55 @@ impl SaveStore {
                 bail!("native generation cleanup escaped its root");
             }
             require_direct_directory(&path, "native generation cleanup target")?;
+            removable.push(path);
+        }
+        if should_cancel(total, total) {
+            return Ok(SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: true,
+            });
+        }
+
+        // Publication begins here. A checkpoint transaction or a changed
+        // superblock invalidates the read-only plan instead of allowing it to
+        // remove data from another revision.
+        if self
+            .transactions
+            .values()
+            .any(|transaction| transaction.slot == slot)
+        {
+            bail!("native save compaction was superseded by an active transaction");
+        }
+        if self.published_pointer_snapshot(slot)? != pointer_snapshot {
+            return Ok(SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: true,
+            });
+        }
+        let mut removed = 0;
+        for path in removable {
             fs::remove_dir_all(path)?;
             removed += 1;
         }
         sync_directory(&generations_root)?;
         self.collect_unreferenced_chunks(slot)?;
-        Ok(removed)
+        Ok(SaveCompactionResult {
+            removed_generations: removed,
+            cancelled: false,
+        })
+    }
+
+    fn published_pointer_snapshot(&self, slot: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let slot_dir = self.slot_dir(slot)?;
+        let mut snapshot = Vec::with_capacity(2);
+        for name in ["superblock-a.json", "superblock-b.json"] {
+            match fs::read(slot_dir.join(name)) {
+                Ok(bytes) => snapshot.push((name.to_owned(), bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("read native save pointer snapshot"),
+            }
+        }
+        Ok(snapshot)
     }
 
     fn collect_unreferenced_chunks(&self, slot: &str) -> anyhow::Result<()> {
@@ -1685,7 +2839,7 @@ impl SaveStore {
             return self.verify_reused_chunk(&path, hash, bytes.len() as u64);
         }
         let compressed = zstd::stream::encode_all(bytes, 3)?;
-        atomic_write_new(&path, &compressed, &self.next_temporary_name()?)?;
+        self.atomic_write_new_budgeted(&path, &compressed)?;
         Ok(ChunkMetadata {
             hash,
             compressed_hash: sha256_hex(&compressed),
@@ -1771,6 +2925,12 @@ impl SaveStore {
     fn wal_path(&self, slot: &str) -> anyhow::Result<PathBuf> {
         let path = self.slot_subdirectory(slot, "wal")?.join("active.wal");
         reject_existing_path_redirect(&path, "native save WAL")?;
+        Ok(path)
+    }
+
+    fn statistics_sidecar_path(&self, slot: &str) -> anyhow::Result<PathBuf> {
+        let path = safe_child(&self.slot_dir(slot)?, STATISTICS_SIDECAR_FILE)?;
+        reject_existing_path_redirect(&path, "native statistics sidecar")?;
         Ok(path)
     }
 
@@ -2107,6 +3267,18 @@ fn validate_fingerprint(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_authority_run_id(value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+    {
+        bail!("native player-authority recovery run ID is invalid")
+    }
+    Ok(())
+}
+
 fn validate_command_id(value: &str) -> anyhow::Result<()> {
     if value.is_empty()
         || value.len() > 128
@@ -2119,9 +3291,72 @@ fn validate_command_id(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_player_authority_command_change_receipt(
+    receipt: &PlayerAuthorityCommandChangeReceipt,
+) -> anyhow::Result<()> {
+    validate_command_id(&receipt.command_id)?;
+    if receipt.command_request_sha256.len() != 64
+        || !receipt
+            .command_request_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("native player-authority command receipt request hash is invalid")
+    }
+    if receipt.base_revision > MAX_JAVASCRIPT_SAFE_INTEGER
+        || receipt.revision > MAX_JAVASCRIPT_SAFE_INTEGER
+        || receipt.sequence == 0
+        || receipt.sequence > MAX_JAVASCRIPT_SAFE_INTEGER
+        || receipt.revision
+            != receipt.base_revision.checked_add(1).ok_or_else(|| {
+                anyhow!("native player-authority command receipt revision overflow")
+            })?
+        || receipt.checkpoint.revision != receipt.revision
+        || receipt.checkpoint.generation == 0
+        || receipt.checkpoint.generation > MAX_JAVASCRIPT_SAFE_INTEGER
+        || receipt.checkpoint.root_hash.len() != 64
+        || !receipt
+            .checkpoint
+            .root_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("native player-authority command receipt revision/checkpoint is invalid")
+    }
+    let total_ids = receipt
+        .changed_entity_ids
+        .len()
+        .checked_add(receipt.changed_belt_ids.len())
+        .ok_or_else(|| anyhow!("native player-authority command receipt ID count overflow"))?;
+    if total_ids > MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_IDS {
+        bail!("native player-authority command receipt contains too many IDs")
+    }
+    for (label, ids) in [
+        ("entity", &receipt.changed_entity_ids),
+        ("belt", &receipt.changed_belt_ids),
+    ] {
+        for id in ids {
+            if id.is_empty() || id.len() > 512 || id.contains('\0') {
+                bail!("native player-authority command receipt {label} ID is invalid")
+            }
+        }
+        if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            bail!("native player-authority command receipt {label} IDs are not strictly ordered")
+        }
+    }
+    Ok(())
+}
+
 fn validate_hex_identity(value: &str, label: &str) -> anyhow::Result<()> {
     if value.len() < 8 || value.len() > 128 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("{label} is invalid")
+    }
+    Ok(())
+}
+
+fn validate_save_regular_file_type(file_type: fs::FileType, label: &str) -> anyhow::Result<()> {
+    if file_type.is_symlink() || !file_type.is_file() {
+        bail!("{label} path is not a direct regular file")
     }
     Ok(())
 }
@@ -2524,7 +3759,56 @@ pub(crate) fn sync_directory(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disk_budget::DiskSpaceQuery;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    #[derive(Clone, Debug)]
+    enum ProbeReply {
+        Available(u64),
+        Unsupported,
+        Failure,
+    }
+
+    #[derive(Debug)]
+    struct ScriptedDiskSpaceProbe {
+        replies: Mutex<VecDeque<ProbeReply>>,
+        fallback: Mutex<ProbeReply>,
+    }
+
+    impl ScriptedDiskSpaceProbe {
+        fn available() -> Self {
+            Self {
+                replies: Mutex::new(VecDeque::new()),
+                fallback: Mutex::new(ProbeReply::Available(u64::MAX)),
+            }
+        }
+
+        fn replace_replies(&self, replies: impl IntoIterator<Item = ProbeReply>) {
+            *self.replies.lock().unwrap() = replies.into_iter().collect();
+        }
+
+        fn set_fallback(&self, reply: ProbeReply) {
+            *self.fallback.lock().unwrap() = reply;
+        }
+    }
+
+    impl DiskSpaceProbe for ScriptedDiskSpaceProbe {
+        fn query_available_bytes(&self, _directory: &Path) -> anyhow::Result<DiskSpaceQuery> {
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| self.fallback.lock().unwrap().clone());
+            match reply {
+                ProbeReply::Available(bytes) => Ok(DiskSpaceQuery::Available(bytes)),
+                ProbeReply::Unsupported => Ok(DiskSpaceQuery::Unsupported),
+                ProbeReply::Failure => bail!("injected disk space query failure"),
+            }
+        }
+    }
 
     fn begin(store: &mut SaveStore, revision: u64) -> String {
         store
@@ -2591,6 +3875,364 @@ mod tests {
             b"stable-data"
         );
         assert_eq!(fs::read_dir(outside).unwrap().count(), 1);
+    }
+
+    fn seed_statistics_checkpoint(store: &mut SaveStore, revision: u64) -> SaveCommitResult {
+        let transaction = begin(store, revision);
+        store
+            .put(&transaction, "base", Some("{\"version\":47}"))
+            .unwrap();
+        store.commit(&transaction).unwrap()
+    }
+
+    fn open_with_scripted_disk_probe(root: &Path) -> (SaveStore, Arc<ScriptedDiskSpaceProbe>) {
+        let probe = Arc::new(ScriptedDiskSpaceProbe::available());
+        let store = SaveStore::open_with_disk_space_probe(root, probe.clone()).unwrap();
+        (store, probe)
+    }
+
+    fn assert_same_checkpoint(left: &SaveRecoveryResult, right: &SaveRecoveryResult) {
+        assert_eq!(left.slot, right.slot);
+        assert_eq!(left.generation, right.generation);
+        assert_eq!(left.revision, right.revision);
+        assert_eq!(left.root_hash, right.root_hash);
+        assert_eq!(left.record_keys, right.record_keys);
+    }
+
+    #[test]
+    fn low_space_chunk_and_wal_writes_leave_transaction_and_checkpoint_unchanged() {
+        let root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(root.path());
+        seed_statistics_checkpoint(&mut store, 1);
+        let baseline = store.recover("normal-main").unwrap().unwrap();
+
+        let transaction_id = begin(&mut store, 2);
+        let transaction_before = store.transactions[&transaction_id].records.clone();
+        probe.set_fallback(ProbeReply::Available(
+            crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES,
+        ));
+        let value = "a different immutable chunk";
+        let error = store
+            .put(&transaction_id, "changed", Some(value))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_eq!(store.last_disk_budget_status(), DiskBudgetStatus::Failed);
+        assert_eq!(
+            store.transactions[&transaction_id].records,
+            transaction_before
+        );
+        assert!(
+            !store
+                .chunk_path("normal-main", &sha256_hex(value.as_bytes()))
+                .unwrap()
+                .exists()
+        );
+        assert_same_checkpoint(&store.recover("normal-main").unwrap().unwrap(), &baseline);
+        assert!(store.abort(&transaction_id));
+
+        let wal_path = store.wal_path("normal-main").unwrap();
+        let error = store
+            .append_wal(
+                "normal-main",
+                baseline.revision,
+                baseline.revision + 1,
+                "low-space-wal",
+                serde_json::json!({"paused": true}),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert!(!wal_path.exists());
+        assert_same_checkpoint(&store.recover("normal-main").unwrap().unwrap(), &baseline);
+
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        store
+            .append_wal(
+                "normal-main",
+                baseline.revision,
+                baseline.revision + 1,
+                "durable-wal-frame",
+                serde_json::json!({"paused": true}),
+            )
+            .unwrap();
+        let wal_before = fs::read(&wal_path).unwrap();
+        probe.set_fallback(ProbeReply::Available(
+            crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES,
+        ));
+        let error = store
+            .append_wal(
+                "normal-main",
+                baseline.revision + 1,
+                baseline.revision + 2,
+                "blocked-second-wal-frame",
+                serde_json::json!({"paused": false}),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
+        let active = store.read_wal("normal-main", baseline.revision).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].command_id, "durable-wal-frame");
+    }
+
+    #[test]
+    fn low_space_manifest_or_superblock_never_replaces_the_old_checkpoint() {
+        let root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(root.path());
+        seed_statistics_checkpoint(&mut store, 1);
+        let baseline = store.recover("normal-main").unwrap().unwrap();
+        let transaction_id = begin(&mut store, 2);
+        probe.set_fallback(ProbeReply::Available(
+            crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES,
+        ));
+        let error = store.commit(&transaction_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_same_checkpoint(&store.recover("normal-main").unwrap().unwrap(), &baseline);
+        assert!(!store.transactions.contains_key(&transaction_id));
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        let retry = begin(&mut store, 2);
+        store
+            .put(&retry, "retry", Some("after-freeing-space"))
+            .unwrap();
+        let committed = store.commit(&retry).unwrap();
+        assert!(committed.generation > baseline.generation);
+
+        let second_root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(second_root.path());
+        seed_statistics_checkpoint(&mut store, 1);
+        let baseline = store.recover("normal-main").unwrap().unwrap();
+        let transaction_id = begin(&mut store, 2);
+        probe.replace_replies([
+            ProbeReply::Available(u64::MAX),
+            ProbeReply::Available(crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES),
+        ]);
+        let error = store.commit(&transaction_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_same_checkpoint(&store.recover("normal-main").unwrap().unwrap(), &baseline);
+        assert!(!store.transactions.contains_key(&transaction_id));
+        let next_generation = store.generation_dir("normal-main", 2).unwrap();
+        assert!(next_generation.join("manifest.json").exists());
+        let superblock = store
+            .slot_dir("normal-main")
+            .unwrap()
+            .join("superblock-a.json");
+        assert!(!superblock.exists());
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        let retry = begin(&mut store, 2);
+        store
+            .put(&retry, "retry", Some("after-freeing-space"))
+            .unwrap();
+        let committed = store.commit(&retry).unwrap();
+        assert!(committed.generation > baseline.generation);
+    }
+
+    #[test]
+    fn sidecar_and_export_low_space_fail_before_replacing_or_creating_files() {
+        let root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(root.path());
+        let checkpoint = seed_statistics_checkpoint(&mut store, 1);
+        store
+            .write_statistics_sidecar(
+                &checkpoint.slot,
+                checkpoint.generation,
+                checkpoint.revision,
+                &checkpoint.root_hash,
+                serde_json::json!({"samples": [1]}),
+            )
+            .unwrap();
+        let sidecar = store.statistics_sidecar_path("normal-main").unwrap();
+        let sidecar_before = fs::read(&sidecar).unwrap();
+        probe.set_fallback(ProbeReply::Available(
+            crate::disk_budget::MINIMUM_FREE_SPACE_RESERVE_BYTES,
+        ));
+        let error = store
+            .write_statistics_sidecar(
+                &checkpoint.slot,
+                checkpoint.generation,
+                checkpoint.revision,
+                &checkpoint.root_hash,
+                serde_json::json!({"samples": [2]}),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert_eq!(fs::read(&sidecar).unwrap(), sidecar_before);
+
+        let invoked = Cell::new(false);
+        let error = store
+            .publish_export("low-space-export", 7, |writer| {
+                invoked.set(true);
+                writer.write_all(b"blocked")?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::disk_budget::LOW_SPACE_ERROR)
+        );
+        assert!(!invoked.get());
+        let export_root = root.path().join("exports");
+        assert!(!export_root.join("low-space-export.part").exists());
+        assert!(!export_root.join("low-space-export.json").exists());
+
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        let error = store
+            .publish_export("short-export", 8, |writer| {
+                writer.write_all(b"short")?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("wrote fewer bytes"));
+        assert!(!export_root.join("short-export.part").exists());
+        assert!(!export_root.join("short-export.json").exists());
+    }
+
+    #[test]
+    fn unsupported_probe_is_reported_but_query_failure_and_u64_overflow_fail_closed() {
+        let root = tempdir().unwrap();
+        let (mut store, probe) = open_with_scripted_disk_probe(root.path());
+        probe.set_fallback(ProbeReply::Unsupported);
+        seed_statistics_checkpoint(&mut store, 1);
+        assert_eq!(
+            store.last_disk_budget_status(),
+            DiskBudgetStatus::Unsupported
+        );
+        assert!(store.recover("normal-main").unwrap().is_some());
+
+        probe.set_fallback(ProbeReply::Failure);
+        let error = store
+            .require_disk_budget_in_directory(store.root(), 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("query native disk free space"));
+        assert_eq!(store.last_disk_budget_status(), DiskBudgetStatus::Failed);
+
+        probe.set_fallback(ProbeReply::Available(u64::MAX));
+        let error = store
+            .require_disk_budget_in_directory(store.root(), u64::MAX)
+            .unwrap_err();
+        assert!(error.to_string().contains("byte calculation overflowed"));
+        assert_eq!(store.last_disk_budget_status(), DiskBudgetStatus::Failed);
+    }
+
+    #[test]
+    fn statistics_sidecar_round_trip_is_bound_to_one_checkpoint() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let first = seed_statistics_checkpoint(&mut store, 1);
+        let history = serde_json::json!({"formatVersion":1,"samples":[{"elapsedSeconds":1}]});
+        store
+            .write_statistics_sidecar(
+                &first.slot,
+                first.generation,
+                first.revision,
+                &first.root_hash,
+                history.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.read_statistics_sidecar(
+                &first.slot,
+                first.generation,
+                first.revision,
+                &first.root_hash,
+            ),
+            Some(history)
+        );
+
+        let second = seed_statistics_checkpoint(&mut store, 2);
+        assert!(
+            store
+                .read_statistics_sidecar(
+                    &second.slot,
+                    second.generation,
+                    second.revision,
+                    &second.root_hash,
+                )
+                .is_none()
+        );
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn statistics_sidecar_corruption_and_size_overflow_are_fail_open() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let checkpoint = seed_statistics_checkpoint(&mut store, 1);
+        store
+            .write_statistics_sidecar(
+                &checkpoint.slot,
+                checkpoint.generation,
+                checkpoint.revision,
+                &checkpoint.root_hash,
+                serde_json::json!({"samples":[]}),
+            )
+            .unwrap();
+        let path = store.statistics_sidecar_path("normal-main").unwrap();
+        fs::write(&path, b"corrupt diagnostics cache").unwrap();
+        assert!(
+            store
+                .read_statistics_sidecar(
+                    &checkpoint.slot,
+                    checkpoint.generation,
+                    checkpoint.revision,
+                    &checkpoint.root_hash,
+                )
+                .is_none()
+        );
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().revision, 1);
+
+        File::create(&path)
+            .unwrap()
+            .set_len(MAX_STATISTICS_SIDECAR_BYTES + 1)
+            .unwrap();
+        assert!(
+            store
+                .read_statistics_sidecar(
+                    &checkpoint.slot,
+                    checkpoint.generation,
+                    checkpoint.revision,
+                    &checkpoint.root_hash,
+                )
+                .is_none()
+        );
+        let oversized = serde_json::json!({
+            "blob": "x".repeat(MAX_STATISTICS_SIDECAR_BYTES as usize)
+        });
+        assert!(
+            store
+                .write_statistics_sidecar(
+                    &checkpoint.slot,
+                    checkpoint.generation,
+                    checkpoint.revision,
+                    &checkpoint.root_hash,
+                    oversized,
+                )
+                .is_err()
+        );
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().revision, 1);
     }
 
     #[test]
@@ -3039,6 +4681,50 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_compaction_scan_leaves_every_generation_and_chunk_untouched() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        for revision in 1..=4 {
+            let tx = begin(&mut store, revision);
+            store
+                .put(&tx, "base", Some(&format!("revision-{revision}")))
+                .unwrap();
+            store.commit(&tx).unwrap();
+        }
+        let before = store
+            .generation_directories("normal-main")
+            .unwrap()
+            .into_iter()
+            .map(|(generation, _)| generation)
+            .collect::<Vec<_>>();
+        let chunks_root = store.slot_subdirectory("normal-main", "chunks").unwrap();
+        let chunks_before = fs::read_dir(&chunks_root).unwrap().count();
+
+        let result = store
+            .compact_cancellable("normal-main", 2, |index, _| index >= 1)
+            .unwrap();
+
+        assert_eq!(
+            result,
+            SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: true,
+            }
+        );
+        assert_eq!(
+            store
+                .generation_directories("normal-main")
+                .unwrap()
+                .into_iter()
+                .map(|(generation, _)| generation)
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(fs::read_dir(chunks_root).unwrap().count(), chunks_before);
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().revision, 4);
+    }
+
+    #[test]
     fn compaction_cannot_collect_chunks_owned_by_an_active_transaction() {
         let root = tempdir().unwrap();
         let mut store = SaveStore::open(root.path()).unwrap();
@@ -3173,6 +4859,18 @@ mod tests {
 
     #[test]
     fn authority_wal_signed_zero_retry_conflicts_without_mutating_durable_data() {
+        assert_eq!(
+            json_value_bitwise_sha256(&serde_json::json!({"a": 1, "b": 2})),
+            json_value_bitwise_sha256(&serde_json::json!({"b": 2, "a": 1}))
+        );
+        assert_ne!(
+            json_value_bitwise_sha256(&serde_json::json!(-0.0)),
+            json_value_bitwise_sha256(&serde_json::json!(0.0))
+        );
+        assert_ne!(
+            json_value_bitwise_sha256(&serde_json::json!(0)),
+            json_value_bitwise_sha256(&serde_json::json!(0.0))
+        );
         assert!(!json_values_bitwise_equal(
             &serde_json::json!(0),
             &serde_json::json!(0.0)
@@ -3691,7 +5389,7 @@ mod tests {
         create_directory_redirect(&exports, export_outside.path());
         let invoked = Cell::new(false);
         let error = export_store
-            .publish_export("must-not-escape", |file| {
+            .publish_export("must-not-escape", 7, |file| {
                 invoked.set(true);
                 file.write_all(b"escaped")?;
                 Ok(())

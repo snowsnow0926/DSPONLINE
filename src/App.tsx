@@ -23,8 +23,8 @@ import {
   type OnSelectionChangeParams,
   type SnapGrid,
 } from "@xyflow/react";
-import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { Activity, AlertTriangle, ArrowUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Focus, Map as MapIcon, PanelRightClose, Route, Satellite, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
+import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
+import { Activity, AlertTriangle, ArrowUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Focus, Map as MapIcon, PanelRightClose, RefreshCw, Route, Satellite, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
 import {
   ConstructionDock,
   HeaderControls,
@@ -40,12 +40,30 @@ import { CanvasMiniMap, type CanvasMiniMapHandle } from "./components/CanvasMini
 import { BlueprintWorkspace, CanvasRegionEditor, CanvasRegionLayer, CanvasSelectionTools, PendingBlueprintLayer, SelectionToolbar, type CanvasRegionRectangle, type CanvasRegionResizeHandle } from "./components/BlueprintWorkspace";
 import { CanvasInteractionOverlay, type CanvasClickConnectionPreview, type CanvasConnectionPreviewTone } from "./components/CanvasInteractionOverlay";
 import { GAME_DIALOG_CLOSED_EVENT, useGameDialog } from "./components/GameDialogProvider";
-import type { StarMapBatchActionResult } from "./components/StarMapWorkspace";
+import type {
+  StarMapBatchActionResult,
+  StarMapIndustryReadRequest,
+  StarMapNativeReadStatus,
+} from "./components/StarMapWorkspace";
 import { RecipeFocusPanel } from "./components/RecipeFocusPanel";
+import { FactoryRunStatus } from "./components/FactoryRunStatus";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
+import { NativeResourceRail } from "./components/NativeResourceRail";
+import { NativeConstructionDock } from "./components/NativeConstructionDock";
+import {
+  NativeBlueprintWorkspace,
+  type NativeBlueprintImportSubmitOutcome,
+} from "./components/NativeBlueprintWorkspace";
+import { NativeConstructionCenterWorkspace } from "./components/NativeConstructionCenterWorkspace";
+import {
+  NativeFactoryInspectorPanel,
+  type NativeStationConfigurationUiAction,
+} from "./components/NativeFactoryInspectorPanel";
+import { createNativeRendererShellState } from "./game/nativeRendererShell";
 import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
 import { MobileGameShell } from "./components/mobile/MobileGameShell";
+import { NativeMobileGameShell } from "./components/mobile/NativeMobileGameShell";
 import { usePerformanceMonitor } from "./hooks/usePerformanceMonitor";
 import { useStableEventCallback } from "./hooks/useStableEventCallback";
 import { MobilePlacementBar, MobileSelectionContextBar, type MobileCanvasMode } from "./components/mobile/MobileFactoryPanels";
@@ -274,17 +292,45 @@ import type { CanvasLineEndpoint } from "./game/canvasLineBatch";
 import { createCanvasRenderSnapshot, reconcileCanvasRenderSnapshot, type CanvasRenderSnapshot } from "./game/canvasRenderSnapshot";
 import { createCanvasNodeSemanticRevisionToken, isCanvasNodeSemanticRevisionApplied } from "./game/canvasNodeSemanticRevision";
 import { planFactoryAutoLayout } from "./game/layout";
+import { createNativeFactoryAutoLayoutCommand } from "./game/nativeFactoryAutoLayoutCommands";
+import { createNativeFactoryBatchCommand } from "./game/nativeFactoryBatchCommands";
+import { createNativeFactoryBeltBatchCommand } from "./game/nativeFactoryBeltBatchCommands";
+import {
+  createNativeWorkspaceActionCommand,
+  type NativeWorkspaceActionIntent,
+} from "./game/nativeWorkspaceActionCommands";
+import { createNativeFactoryPositionCommand } from "./game/nativeFactoryPositionCommands";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
 import { getCampaignTask, getCampaignTaskRequirements, selectCampaignTask, syncCampaignProgress, type CampaignNavigation } from "./game/campaign";
 import { inspectSaveInWorker } from "./game/saveInspection";
 import { clearGameSlotVerified, clearSaveSnapshotVerified, clearSaveSnapshotsVerified, exportGame, getSaveSummariesInWorker, getSaveSlotSummaries, getSaveSnapshotSummaries, loadGameSlotFromPersistence, loadSaveSnapshotFromPersistence, repairSave, SAVE_KEY, saveGame, saveGameSnapshotVerified, saveGameSlotVerified, saveGameVerified, saveGameVerifiedFromEnvelopeTransfer, serializeEnvelopeInWorker, type LoadedGame, type OfflineReport, type SaveGameResult, type SaveInspection, type SaveSlotId, type SaveSnapshotSummary } from "./game/storage";
 import { runAutomaticPerformanceReport, type AutomaticPerformanceReport } from "./game/benchmark";
-import { importBlueprintExchange, parseBlueprintExchange, serializeBlueprintExchange } from "./game/blueprintExchange";
+import {
+  BLUEPRINT_LIBRARY_MAX_ROWS,
+  importBlueprintExchange,
+  parseBlueprintExchange,
+  serializeBlueprintExchange,
+} from "./game/blueprintExchange";
 import { exportBinaryFile, exportTextFile } from "./game/fileExport";
 import { compressSaveTextToGzipBlob } from "./game/saveFileCodec";
 import { alignToDevicePixel } from "./game/displayPixels";
-import { getDesktopBridge, type DesktopNativeSaveCommitResult } from "./desktop";
+import {
+  getDesktopBridge,
+  type DesktopNativeCampaignLocator,
+  type DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
+  type DesktopNativeCoreOrbitalContractWorkspaceProjectionResult,
+  type DesktopNativeCoreOperationsAlertRow,
+  type DesktopNativeCoreOperationsWorkspaceProjectionRequest,
+  type DesktopNativeCoreOperationsWorkspaceProjectionResult,
+  type DesktopNativeOperationsSettingIntentRequest,
+  type DesktopNativeOrbitalContractIntent,
+  type DesktopNativeSystemSpaceStationIntent,
+  type DesktopNativePlayerAuthorityHandoffRequest,
+  type DesktopNativePlayerAuthorityHandoffResult,
+  type DesktopNativePlayerAuthorityHistoryStatus,
+  type DesktopNativeSaveCommitResult,
+} from "./desktop";
 import { NATIVE_APP_STATE_EVENT } from "./nativeApp";
 import { createContentPackTemplate, parseContentPack, type ModValidationResult } from "./game/mods";
 import { importWithRecovery } from "./game/dynamicImportRecovery";
@@ -308,7 +354,7 @@ import { createSecondUnipolarVeinPackage, previewSecondUnipolarVein } from "./ga
 import { trackAnalyticsEvent } from "./game/analytics";
 import { isSpaceStationFeatureEnabled } from "./game/spaceStationFeature";
 import { CLOUD_AUTO_SYNC_INTERVAL_MS, CloudApiError, compareCloudSaveSummary, fetchCloudPublicStatus, hasCloudAuthentication, markCloudSaveSynchronized, readCloudAutoSyncStatus, refreshCloudSaveMetadata, resumeCloudSession, summarizeCloudPayload, uploadCloudSave, writeCloudAutoSyncStatus } from "./game/cloud";
-import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
+import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, FontScale, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, MaterialDeliverySlotMode, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProductionHistorySample, ProliferatorMode, ProliferatorTier, RecipeFocusMode, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
 import type { SimulationCheckpointStateChunk, SimulationChunkedSaveWriteAck, SimulationChunkedSaveWriteRequest, SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroFinalEnvelopeResult, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
 import type { AuthoritativeSaveEnvelopeTransfer } from "./game/authoritativeSaveSerializationProtocol";
@@ -344,8 +390,10 @@ import {
   createSimulationProjectionStateIndex,
   hydrateSimulationProjection,
   mergeSimulationProjections,
+  createStatisticsHistoryReadModel,
   type SimulationProjection,
   type SimulationProjectionStateIndex,
+  type StatisticsHistoryReadModel,
 } from "./game/simulationProjection";
 import { applySimulationStateDelta, readExperimentalSimulationDeltaMode } from "./game/simulationDelta";
 import {
@@ -378,13 +426,445 @@ import {
 } from "./game/simulationRuntimeRecoveryPersistenceClient";
 import type { SimulationRuntimeStartupRecoveryBinding } from "./game/simulationRuntimeStartupRecovery";
 import { replaySimulationRuntimeStartupInWorker } from "./game/simulationRuntimeStartupRecoveryClient";
-import { clearLocalSaveRawPayloadCache, commitLocalSaveInternalRecords, getLocalSaveBackend, getLocalSaveRawCacheSize, getLocalSaveWriterStatus, getPrimaryLocalSaveRecoveryIdentity, listLocalSaveCatalogs, readLocalSavePayload, subscribeLocalSaveStorageStatus, subscribeLocalSaveWriterStatus, takeOverLocalSaveWriter } from "./game/localSaveStore";
+import {
+  acquireLocalSaveNativeAuthorityHandoff,
+  clearLocalSaveRawPayloadCache,
+  commitLocalSaveInternalRecords,
+  getLocalSaveBackend,
+  getLocalSaveRawCacheSize,
+  getLocalSaveWriterStatus,
+  getPrimaryLocalSaveRecoveryIdentity,
+  inspectLocalSaveNativeAuthorityHandoff,
+  listLocalSaveCatalogs,
+  readLocalSavePayload,
+  releaseLocalSaveNativeAuthorityHandoff,
+  subscribeLocalSaveStorageStatus,
+  subscribeLocalSaveWriterStatus,
+  takeOverLocalSaveWriter,
+} from "./game/localSaveStore";
 import { registerCurrentTabTakeoverHandler } from "./game/localSaveTakeover";
+import type {
+  LocalSaveNativeAuthorityCheckpoint,
+  LocalSaveNativeAuthorityLeaseReceipt,
+  LocalSaveWriterFence,
+} from "./game/localSaveAuthorityLease";
+import {
+  isLocalSaveNativeAuthorityLease,
+  reconcileLocalSaveNativeAuthorityHandoff,
+} from "./game/localSaveAuthorityLease";
 import { resolveLargeSaveAutosavePolicy, type LargeSaveAutosavePolicy } from "./game/largeSaveAutosavePolicy";
+import { classifyNativePlayerAuthorityPreTransferCancel } from "./game/nativePlayerAuthorityRendererHandoff";
 import { clearChunkedSaveJournal, prepareChunkedSaveJournalContext, type PersistChunkedSaveResult } from "./game/chunkedSaveJournal";
 import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure } from "./game/chunkedSaveJournalClient";
 import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransaction } from "./game/nativeSave";
 import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController";
+import {
+  evaluateNativeAuthorityPersistenceBoundary,
+  nativeAuthorityReplacementBlockedMessage,
+  verifyNativeAuthorityArtifactLineage,
+  verifyNativeAuthorityCheckpointArtifact,
+  verifyNativeAuthorityCheckpointReceipt,
+  type NativeAuthorityPersistenceBoundary,
+  type NativeAuthorityRuntimeObservation,
+} from "./game/nativeAuthorityPersistenceBoundary";
+import {
+  canResumeLegacyInteractionAfterAwait,
+  createNativeAuthorityInteractionEpoch,
+  reconcileNativeAuthorityInteractionEpoch,
+} from "./game/nativeAuthorityInteractionEpoch";
+import {
+  canContinueLegacyAuthorityAsyncLease,
+  createLegacyAuthorityAsyncLeaseFence,
+  issueLegacyAuthorityAsyncLease,
+  reconcileLegacyAuthorityAsyncLeaseFence,
+  type LegacyAuthorityAsyncLeaseToken,
+} from "./game/legacyAuthorityAsyncLease";
+import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
+import {
+  NativeFactoryInventoryStore,
+  createNativePlayerAuthorityFactoryInventorySource,
+  selectNativeFactoryInventoryFrame,
+  type NativeFactoryInventoryIdentity,
+} from "./game/nativeFactoryInventoryStore";
+import {
+  NativeConstructionInventoryStore,
+  createNativePlayerAuthorityConstructionInventorySource,
+  selectNativeConstructionInventoryFrame,
+} from "./game/nativeConstructionInventoryStore";
+import {
+  NativeBlueprintWorkspaceStore,
+  NATIVE_BLUEPRINT_PAGE_ROWS,
+  createNativePlayerAuthorityBlueprintWorkspaceSource,
+  nativeBlueprintDirectDeploySelectionBindingMatchesFrame,
+  nativeBlueprintEnqueueSelectionBindingMatchesFrame,
+  nativeBlueprintRecipeOverrideBindingMatchesFrame,
+  nativeConstructionQueueCancelBindingMatchesFrame,
+  nativeConstructionQueueDeployBindingMatchesFrame,
+  nativeConstructionQueueFundBindingMatchesFrame,
+  selectNativeBlueprintDeleteBinding,
+  selectNativeBlueprintTransformBinding,
+  selectNativeBlueprintWorkspaceFrame,
+  type NativeBlueprintDeleteBinding,
+  type NativeBlueprintDirectDeploySelectionBinding,
+  type NativeBlueprintEnqueueSelectionBinding,
+  type NativeBlueprintMirror,
+  type NativeBlueprintRecipeOverrideBinding,
+  type NativeBlueprintRenameIdentity,
+  type NativeBlueprintRotation,
+  type NativeBlueprintTransformBinding,
+  type NativeConstructionQueueCancelBinding,
+  type NativeConstructionQueueDeployBinding,
+  type NativeConstructionQueueFundBinding,
+  type NativeConstructionQueueFundScope,
+} from "./game/nativeBlueprintWorkspaceStore";
+import {
+  prepareNativeBlueprintRenameIntentCommand,
+} from "./game/nativeBlueprintRenameIntentCommands";
+import {
+  acknowledgeNativeBlueprintRename,
+  conflictNativeBlueprintRename,
+  reconcileNativeBlueprintRename,
+  settleNativeBlueprintRenameFailure,
+  type NativeBlueprintRenamePendingIdentity,
+  type NativeBlueprintRenameResolution,
+  type NativeBlueprintRenameSubmitOutcome,
+} from "./game/nativeBlueprintRenameWorkflow";
+import { useNativeBlueprintDeleteCommandTransaction } from "./game/useNativeBlueprintDeleteCommandTransaction";
+import {
+  readVerifiedNativeBlueprintCaptureContext,
+  type NativeBlueprintCaptureSelectionBinding,
+  type NativeBlueprintCaptureSupportReason,
+} from "./game/nativeBlueprintCaptureContext";
+import { useNativeBlueprintCaptureCommandTransaction } from "./game/useNativeBlueprintCaptureCommandTransaction";
+import {
+  readVerifiedNativeBlueprintImportContext,
+  type NativeBlueprintImportSupportReason,
+} from "./game/nativeBlueprintImportContext";
+import {
+  useNativeBlueprintImportCommandTransaction,
+  type NativeBlueprintImportConfirmation,
+} from "./game/useNativeBlueprintImportCommandTransaction";
+import {
+  readVerifiedNativeBlueprintExportContext,
+  type NativeBlueprintExportBinding,
+  type NativeBlueprintExportSupportReason,
+} from "./game/nativeBlueprintExportContext";
+import {
+  readVerifiedNativeBlueprintDirectDeployContext,
+  type NativeBlueprintDirectDeploySupportReason,
+} from "./game/nativeBlueprintDirectDeployContext";
+import { useNativeBlueprintDirectDeployCommandTransaction } from "./game/useNativeBlueprintDirectDeployCommandTransaction";
+import {
+  readVerifiedNativeBlueprintEnqueueContext,
+  type NativeBlueprintEnqueueSupportReason,
+} from "./game/nativeBlueprintEnqueueContext";
+import { useNativeBlueprintEnqueueCommandTransaction } from "./game/useNativeBlueprintEnqueueCommandTransaction";
+import { useNativeBlueprintRecipeOverrideCommandTransaction } from "./game/useNativeBlueprintRecipeOverrideCommandTransaction";
+import { useNativeBlueprintTransformCommandTransaction } from "./game/useNativeBlueprintTransformCommandTransaction";
+import { useNativeConstructionQueueCancelCommandTransaction } from "./game/useNativeConstructionQueueCancelCommandTransaction";
+import { useNativeConstructionQueueDeployCommandTransaction } from "./game/useNativeConstructionQueueDeployCommandTransaction";
+import { useNativeConstructionQueueFundCommandTransaction } from "./game/useNativeConstructionQueueFundCommandTransaction";
+import {
+  createNativeProjectedOrdinaryBuildingPlacementCommand,
+  readVerifiedNativeConstructionPlacementContext,
+  type NativeConstructionPlacementSupportReason,
+} from "./game/nativeConstructionPlacement";
+import {
+  createNativeProjectedOrdinaryBuildingRemovalCommand,
+  readVerifiedNativeConstructionRemovalContext,
+  type NativeConstructionRemovalSupportReason,
+} from "./game/nativeConstructionRemoval";
+import {
+  createNativeProjectedOrdinaryBeltPlacementCommand,
+  readVerifiedNativeConstructionBeltPlacementContext,
+} from "./game/nativeConstructionBeltPlacement";
+import {
+  createNativeProjectedOrdinaryBeltRemovalCommand,
+  readVerifiedNativeConstructionBeltRemovalContext,
+} from "./game/nativeConstructionBeltRemoval";
+import {
+  createNativeProjectedOrdinaryBeltLaneCommand,
+  readVerifiedNativeConstructionBeltLaneContext,
+} from "./game/nativeConstructionBeltLane";
+import {
+  createNativeProjectedOrdinaryBuildingStackCommand,
+  readVerifiedNativeConstructionStackContext,
+  type NativeConstructionStackSupportReason,
+} from "./game/nativeConstructionStackContext";
+import {
+  NativeTechnologyWorkspaceStore,
+  createNativePlayerAuthorityTechnologyProjectionSource,
+  selectNativeTechnologyWorkspaceFrame,
+  type NativeTechnologyWorkspaceIdentity,
+} from "./game/nativeTechnologyWorkspaceStore";
+import {
+  createWebTechnologyWorkspaceReadModel,
+  selectNativeTechnologyWorkspaceReadModel,
+} from "./game/technologyWorkspaceReadModel";
+import {
+  NativeRecipeWorkspaceStore,
+  createNativePlayerAuthorityRecipeWorkspaceProjectionSource,
+  selectNativeRecipeWorkspaceFrame,
+  type NativeRecipeWorkspaceIdentity,
+} from "./game/nativeRecipeWorkspaceStore";
+import {
+  DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
+  NATIVE_STELLAR_PAGE_ROWS,
+  NativeStellarWorkspaceStore,
+  createNativePlayerAuthorityStellarProjectionSource,
+  selectNativePlayerAuthorityStellarQuantumReadModel,
+  selectNativeStarMapWorkspaceReadModel,
+  type NativeStellarIndustrySelector,
+} from "./game/nativeStellarWorkspaceStore";
+import {
+  NativeStarMapCatalogStore,
+  createNativePlayerAuthorityStarMapCatalogSource,
+  selectNativeStarMapCatalogFrame,
+} from "./game/nativeStarMapCatalogStore";
+import {
+  NativeDysonWorkspaceStore,
+  createNativePlayerAuthorityDysonWorkspaceSource,
+  selectNativeDysonWorkspaceFrame,
+} from "./game/nativeDysonWorkspaceStore";
+import {
+  NativeStatisticsWorkspaceStore,
+  createNativePlayerAuthorityStatisticsWorkspaceSource,
+  selectNativeStatisticsWorkspaceAuthorityFrames,
+  selectNativeStatisticsWorkspaceFrame,
+  type NativeStatisticsWorkspaceIdentity,
+} from "./game/nativeStatisticsWorkspaceStore";
+import {
+  NativeCampaignWorkspaceStore,
+  NativeGalaxyWorkspaceStore,
+  createNativePlayerAuthorityCampaignWorkspaceSource,
+  createNativePlayerAuthorityGalaxyWorkspaceSource,
+  selectNativeCampaignGalaxyWorkspaceAuthorityFrames,
+  selectNativeCampaignWorkspaceFrame,
+  selectNativeGalaxyWorkspaceFrame,
+  type NativeCampaignGalaxyWorkspaceIdentity,
+} from "./game/nativeCampaignGalaxyWorkspaceStore";
+import type {
+  NativeSystemSpaceStationWorkspaceFetchProjection,
+  NativeSystemSpaceStationWorkspaceIdentity,
+} from "./game/nativeSystemSpaceStationWorkspaceStore";
+import {
+  createNativeProjectedInteractionLockCommandFromReadModels,
+  createNativeProjectedPlanetRoleCommand,
+  createNativeProjectedStationLimitsCommand,
+  createNativeProjectedStationMinimumLoadCommand,
+  createNativeProjectedStationPriorityCommand,
+  createNativeProjectedStationRoutePolicyCommand,
+  createNativeProjectedStationWarperBudgetCommand,
+} from "./game/nativeProjectedPlayerCommands";
+import { createNativeProjectedBeltPriorityCommand } from "./game/nativeProjectedBeltCommands";
+import { createNativeProjectedBlackHolePausedCommand } from "./game/nativeProjectedBlackHoleCommands";
+import {
+  createNativeProjectedEnergyExchangerModeCommand,
+  createNativeProjectedEntityPowerPriorityCommand,
+  createNativeProjectedFuelItemCommand,
+  createNativeProjectedSplitterDistributionModeCommand,
+  type NativeProjectedEnergyExchangerMode,
+  type NativeProjectedEntityConfigurationBinding,
+  type NativeProjectedSplitterDistributionMode,
+} from "./game/nativeProjectedEntityConfigurationCommands";
+import {
+  createConfirmedNativeMaterialDeliverySlotCommand,
+  createConfirmedNativeOrbitalCargoPortClearCommand,
+} from "./game/nativeProjectedSpecialInputPortCommands";
+import {
+  createNativeProjectedGalacticExporterPauseCommand,
+  createNativeProjectedGalacticExportCommand,
+  type NativeProjectedGalacticExportIntent,
+} from "./game/nativeProjectedGalacticExportCommands";
+import {
+  type NativeProjectedEntityRecipeBinding,
+} from "./game/nativeProjectedEntityRecipeCommands";
+import { useNativeEntityRecipeCommandTransaction } from "./game/useNativeEntityRecipeCommandTransaction";
+import {
+  createNativeProjectedEjectorOrbitCommand,
+  createNativeProjectedTimeWarpRequestedMultiplierCommand,
+  readNativeProjectedEjectorOrbitFrame,
+  type NativeProjectedEjectorOrbitFrame,
+  type NativeProjectedEjectorOrbitIdentity,
+  type NativeProjectedTimeWarpControllerBinding,
+} from "./game/nativeProjectedTimeWarpEjectorCommands";
+import {
+  createNativeProjectedStationFleetAdjustmentCommand,
+  createNativeProjectedStationScalarCommand,
+  createNativeProjectedStationSlotLimitsCommand,
+  createNativeProjectedStationSlotItemCommand,
+  createNativeProjectedStationSlotMinimumLoadCommand,
+  createNativeProjectedStationSlotModeCommand,
+  createNativeProjectedStationSlotPriorityCommand,
+  createNativeProjectedStationSlotRoutePolicyCommand,
+  createNativeProjectedStationSlotWarperBudgetCommand,
+  createNativeProjectedStationWarperInventoryAdjustmentCommand,
+  selectNativeProjectedStationConfigurationBinding,
+  type NativeProjectedStationConfigurationBinding,
+} from "./game/nativeProjectedStationConfigurationCommands";
+import { createNativeProjectedQuantumItemCapacityCommand } from "./game/nativeProjectedQuantumCommands";
+import {
+  createNativeProjectedCargoReturnCommand,
+  createNativeProjectedCargoToEntityInputCommand,
+  createNativeProjectedEntityInventoryStowCommand,
+  createNativeProjectedEntityInventoryTakeCommand,
+  createNativeProjectedProductionBufferLimitCommand,
+  createNativeProjectedTrayItemLimitCommand,
+  createNativeProjectedTrayTakeCommand,
+  createNativeProjectedTrayToEntityInputCommand,
+} from "./game/nativeProjectedFactoryInventoryCommands";
+import {
+  createNativeProjectedCancelResearchCommand,
+  createNativeProjectedInfiniteResearchAutomationCommand,
+  createNativeProjectedPauseResearchCommand,
+  createNativeProjectedRemoveQueuedTechnologyCommand,
+  createNativeProjectedResumeResearchCommand,
+  createNativeProjectedSelectInfiniteResearchCommand,
+  createNativeProjectedSelectTechnologyCommand,
+  createNativeProjectedTechnologyLayoutCommand,
+} from "./game/nativeProjectedTechnologyCommands";
+import { createNativeProjectedActivePlanetCommand } from "./game/nativeProjectedPlanetNavigationCommands";
+import { createNativeProjectedManualMineCommand } from "./game/nativeProjectedManualMiningCommands";
+import {
+  createNativeProjectedRecipeFocusItemCommand,
+  createNativeProjectedRecipeFocusModeCommand,
+  createNativeProjectedRecipeFocusPositionCommand,
+} from "./game/nativeProjectedRecipeFocusCommands";
+import {
+  PLANET_VIEWPORT_NATIVE_BASE_FIELDS,
+  createNativeProjectedPlanetViewportCommand,
+  selectNativePlanetViewportReadModel,
+} from "./game/nativePlanetViewportReadModel";
+import {
+  createNativeProjectedDysonActiveLayerCommand,
+  createNativeProjectedDysonActiveOrbitCommand,
+  createNativeProjectedDysonAddLayerCommand,
+  createNativeProjectedDysonAddNodeCommand,
+  createNativeProjectedDysonAddOrbitCommand,
+  createNativeProjectedDysonAutoConnectCommand,
+  createNativeProjectedDysonClearShellCommand,
+  createNativeProjectedDysonConnectNodesCommand,
+  createNativeProjectedDysonLayerGeometryCommand,
+  createNativeProjectedDysonLaunchEnabledCommand,
+  createNativeProjectedDysonLaunchModeCommand,
+  createNativeProjectedDysonLaunchThrottleCommand,
+  createNativeProjectedDysonOrbitGeometryCommand,
+  createNativeProjectedDysonPasteLayerCommand,
+  createNativeProjectedDysonPlanShellCommand,
+  createNativeProjectedDysonRemoveLayerCommand,
+  createNativeProjectedDysonRemoveNodeCommand,
+  createNativeProjectedDysonRemoveOrbitCommand,
+  type NativeProjectedDysonLayerGeometry,
+  type NativeProjectedDysonOrbitGeometry,
+} from "./game/nativeProjectedDysonCommands";
+import {
+  RECIPE_WORKSPACE_PROJECTION_LIMITS,
+  createWebRecipeWorkspaceReadModel,
+  recipeWorkspaceSelectorsEqual,
+  selectNativeRecipeWorkspaceReadModel,
+  type RecipeWorkspaceSelector,
+} from "./game/recipeWorkspaceReadModel";
+import {
+  createCommandPaletteNativeEntityFocusPlan,
+  createCommandPaletteEntitySearchSelector,
+  selectNativeCommandPaletteEntitySearchReadModel,
+  type CommandPaletteNativeEntityTarget,
+} from "./game/commandPaletteEntitySearchReadModel";
+import {
+  NativeCommandPaletteEntitySearchStore,
+  createNativePlayerAuthorityCommandPaletteEntitySearchSource,
+  selectNativeCommandPaletteEntitySearchFrame,
+  type NativeCommandPaletteEntitySearchIdentity,
+} from "./game/nativeCommandPaletteEntitySearchStore";
+import {
+  RECIPE_FOCUS_NATIVE_BASE_FIELDS,
+  createWebRecipeFocusReadModel,
+  selectNativeRecipeFocusReadModel,
+} from "./game/recipeFocusReadModel";
+import {
+  collectCanvasDragMembers,
+  collectCanvasSelectionBeltIds,
+  selectFactoryCanvasRows,
+  selectNativeAuthoritativeFactoryCanvasFrame,
+  type FactoryCanvasRows,
+} from "./game/nativeFactoryCanvasFrame";
+import {
+  createNativeFactoryInteractionPinRequest,
+  createWebFactoryInteractionRows,
+  selectFactoryConnectionReadState,
+  selectFactoryInteractionRows,
+  selectNativeAuthoritativeFactoryInteractionRows,
+  selectNativeFactorySelectionRelatedEntityIds,
+  type FactoryInteractionRows,
+} from "./game/nativeFactoryInteractionFrame";
+import { selectNativeAuthoritativeFactoryWorkspaceFrame } from "./game/nativeFactoryWorkspaceFrame";
+import { selectNativeConstructionCenterWorkspaceFrame } from "./game/nativeConstructionCenterWorkspace";
+import {
+  nativeConstructionCenterIdentityMatchesFrame,
+  type NativeConstructionCenterBatchBuildingTargetStockSubmission,
+  type NativeConstructionCenterFrameIdentity,
+  type NativeConstructionCenterIntentKind,
+  type NativeConstructionCenterPendingIdentity,
+  type NativeConstructionCenterTargetStockSubmission,
+} from "./game/nativeConstructionCenterIntent";
+import {
+  createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand,
+  createNativeConstructionAutomationEnabledIntentCommand,
+  createNativeConstructionAutomationQuantumSupplyIntentCommand,
+  createNativeConstructionAutomationTargetStockIntentCommand,
+} from "./game/nativeConstructionAutomationIntentCommands";
+import {
+  FACTORY_READ_MODEL_LIMITS,
+  FACTORY_READ_MODEL_SCHEMA,
+  type FactoryConstructionHeadlineReadModel,
+  type FactoryConstructionWorkspaceReadModel,
+  type FactoryRunStatusReadModel,
+  type FactoryViewportBoundsReadModel,
+  type FactoryViewportReadModel,
+  type NativeFactoryProjectionIdentity,
+  type PlanetNavigationReadModel,
+} from "./game/factoryReadModels";
+import {
+  factoryViewportProvesWholePlanet,
+  selectFactoryConstructionHeadlineReadModel,
+  selectFactoryConstructionWorkspaceReadModel,
+  selectFactoryInspectorSummaryReadModel,
+  selectFactoryMultiSelectionSummaryReadModel,
+  selectFactoryPlanetNavigationReadModel,
+  selectFactoryRunStatusReadModel,
+  selectFactorySelectionToolbarReadModel,
+  selectFactoryViewportReadModel,
+} from "./game/nativeFactoryThinViewBridge";
+import {
+  NativePlayerAuthorityClockController,
+  createNativePlayerAuthorityProjectionSource,
+  selectActiveNativePlayerAuthorityFrame,
+  selectBoundNativePlayerAuthorityFrame,
+  selectNativePlayerAuthorityMacroStatus,
+  selectNativePlayerAuthorityWorkspaceFrames,
+} from "./game/nativePlayerAuthorityClock";
+import { NativePlanetNavigationDiscoveryStore } from "./game/nativePlanetNavigationDiscoveryStore";
+import {
+  evaluateNativePlanetTransition,
+  nativePlanetRouteRequiresBootstrap,
+  retainNativePlanetRouteIdentity,
+} from "./game/nativePlanetNavigationReconciliation";
+import {
+  createNativePlayerAuthorityCommandSource,
+  type NativePlayerAuthorityCommandReceipt,
+  type NativePlayerAuthorityCommandSource,
+} from "./game/nativePlayerAuthorityCommandSource";
+import {
+  NativePlayerAuthorityMacroController,
+  createNativePlayerAuthorityMacroController,
+} from "./game/nativePlayerAuthorityMacroController";
+import {
+  createPlanetNavigationReadModel,
+  createWebFactoryConstructionHeadlineReadModel,
+  createWebFactoryConstructionWorkspaceReadModel,
+  createWebFactoryRunStatusReadModel,
+  createWebFactoryViewportReadModel,
+} from "./game/webFactoryReadModelAdapter";
 import { createNativeCoreRevisionProof } from "./game/nativeCoreProof";
 import { readWindowsNativeCoreBetaEnabled, writeWindowsNativeCoreBetaEnabled } from "./game/nativeCoreBetaSettings";
 import type {
@@ -429,6 +909,7 @@ import {
   nodeIsInsideConnectionViewport,
   resolveNodeConnectionPresentation,
   type CanvasViewportSize,
+  type CanvasWorldRectangle,
   type ConnectionViewportBounds,
   type LatestFramePublisher,
 } from "./game/canvasConnectionPresentation";
@@ -472,7 +953,7 @@ import {
   setCanvasPointerEdgeVelocity,
   stopCanvasPointerMotion as stopCanvasPointerMotionSession,
 } from "./hooks/canvasPointerMotion";
-import { readBlueprintAllowOverlapPreference, readCanvasDetailPreference, readCanvasInteractionDetailPreference, readCanvasOverlapPreference, readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readFactoryAlertsPreference, readFullRealtimeSimulationPreference, readLargeSaveAutosaveThrottlePreference, readMemoryAutoPauseEnabledPreference, readMemoryAutoPauseThresholdPreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, readAllowEditsDuringSavePreference, writeBlueprintAllowOverlapPreference, writeCanvasDetailPreference, writeCanvasInteractionDetailPreference, writeCanvasOverlapPreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeFactoryAlertsPreference, writeFullRealtimeSimulationPreference, writeLargeSaveAutosaveThrottlePreference, writeMemoryAutoPauseEnabledPreference, writeMemoryAutoPauseThresholdPreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, writeAllowEditsDuringSavePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
+import { readBlueprintAllowOverlapPreference, readCanvasDetailPreference, readCanvasInteractionDetailPreference, readCanvasOverlapPreference, readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readFactoryAlertsPreference, readFontScalePreference, readFullRealtimeSimulationPreference, readLargeSaveAutosaveThrottlePreference, readMemoryAutoPauseEnabledPreference, readMemoryAutoPauseThresholdPreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, readAllowEditsDuringSavePreference, writeBlueprintAllowOverlapPreference, writeCanvasDetailPreference, writeCanvasInteractionDetailPreference, writeCanvasOverlapPreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeFactoryAlertsPreference, writeFontScalePreference, writeFullRealtimeSimulationPreference, writeLargeSaveAutosaveThrottlePreference, writeMemoryAutoPauseEnabledPreference, writeMemoryAutoPauseThresholdPreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, writeAllowEditsDuringSavePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
 
 type InspectorTab = "inspect" | "fabricate";
 
@@ -614,6 +1095,20 @@ function selectCanvasFitRecoveryNodes(nodes: readonly FactoryFlowNode[]): Factor
 
 const EMPTY_FACTORY_FLOW_NODES: FactoryFlowNode[] = [];
 const EMPTY_FACTORY_FLOW_EDGES: FactoryFlowEdge[] = [];
+const NATIVE_FACTORY_VIEWPORT_OVERSCAN_PX = 512;
+
+function getNativeFactoryViewportBounds(
+  rectangle: CanvasWorldRectangle,
+  zoom: number,
+): FactoryViewportBoundsReadModel {
+  const overscan = NATIVE_FACTORY_VIEWPORT_OVERSCAN_PX / Math.max(0.3, zoom);
+  return {
+    minX: Math.min(rectangle.left, rectangle.right) - overscan,
+    minY: Math.min(rectangle.top, rectangle.bottom) - overscan,
+    maxX: Math.max(rectangle.left, rectangle.right) + overscan,
+    maxY: Math.max(rectangle.top, rectangle.bottom) + overscan,
+  };
+}
 
 // These panels perform the remaining large-save scans. Ignore callback
 // identity churn (handlers use refs or stable command closures), while still
@@ -684,19 +1179,27 @@ export function RuntimeRenderProfile({ id, children }: { id: string; children: R
  * window while preserving immediate updates whenever the simulation is
  * paused or the player is actively inspecting an object.
  */
-function useThrottledRuntimeShellGame(game: GameState, immediate = false): GameState {
+function useThrottledRuntimeShellGame(game: GameState, immediate = false, enabled = true): GameState {
   const [snapshot, setSnapshot] = useState(game);
   const latestRef = useRef(game);
+  const enabledRef = useRef(enabled);
   const timerRef = useRef<number | null>(null);
-  latestRef.current = game;
-  const cargoChanged = snapshot.cargo?.itemId !== game.cargo?.itemId ||
+  const enabledChanged = enabledRef.current !== enabled;
+  enabledRef.current = enabled;
+  if (enabled) latestRef.current = game;
+  const cargoChanged = enabled && (snapshot.cargo?.itemId !== game.cargo?.itemId ||
     snapshot.cargo?.amount !== game.cargo?.amount ||
     snapshot.cargo?.origin?.kind !== game.cargo?.origin?.kind ||
-    snapshot.cargo?.origin?.id !== game.cargo?.origin?.id;
-  const publishImmediately = immediate || cargoChanged;
+    snapshot.cargo?.origin?.id !== game.cargo?.origin?.id);
+  const publishImmediately = enabled && (enabledChanged || immediate || cargoChanged);
   const trailingDelayMs = isLargeRuntimeState(game) ? 2_000 : 750;
 
   useEffect(() => {
+    if (!enabled) {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+      return;
+    }
     if (publishImmediately) {
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
       timerRef.current = null;
@@ -712,7 +1215,7 @@ function useThrottledRuntimeShellGame(game: GameState, immediate = false): GameS
       // the whole trailing refresh into one main-thread task.
       startTransition(() => setSnapshot(latestRef.current));
     }, trailingDelayMs);
-  }, [game, publishImmediately, trailingDelayMs]);
+  }, [enabled, game, publishImmediately, trailingDelayMs]);
 
   useEffect(() => () => {
     if (timerRef.current !== null) {
@@ -720,7 +1223,7 @@ function useThrottledRuntimeShellGame(game: GameState, immediate = false): GameS
       timerRef.current = null;
     }
   }, []);
-  return publishImmediately ? game : snapshot;
+  return enabled && publishImmediately ? game : snapshot;
 }
 
 // Run-log visibility is a presentation preference. Keep safety-critical
@@ -823,6 +1326,199 @@ interface InteractionBurst {
 const FLOW_GRID = 20;
 const FACTORY_FLOW_SNAP_GRID: SnapGrid = [FLOW_GRID, FLOW_GRID];
 const HISTORY_LIMIT = 40;
+
+function nativePlacementBlockedMessage(reason: NativeConstructionPlacementSupportReason): string {
+  switch (reason) {
+    case "unknown-building": return "Rust 内容目录中没有这个建筑；本次放置未执行";
+    case "missing-construction-definition": return "这个建筑没有可核对的施工定义；本次放置未执行";
+    case "technology-locked": return "建造科技尚未解锁；本次放置未执行";
+    case "unsupported-building-kind": return "该条目不是普通建筑；请使用对应的专用建造功能";
+    case "unsupported-building-domain": return "这个建筑会同时修改其他系统，原生安全命令尚未覆盖";
+    case "unsupported-active-planet": return "当前行星不允许放置这种普通建筑";
+    case "inventory-empty": return "施工库存已经用完；本次放置未执行";
+    case "next-id-exhausted": return "建筑 ID 已达到安全上限；请导出备份并联系存档救援";
+  }
+}
+
+function nativeBlueprintEnqueueBlockedMessage(reason: NativeBlueprintEnqueueSupportReason): string {
+  switch (reason) {
+    case "queue-full": return "待建施工已经达到 100 条安全上限；请先完成或取消一些订单";
+    case "next-id-exhausted": return "施工订单 ID 已达到安全上限；请导出备份并联系存档救援";
+    case "queue-id-collision": return "施工订单 ID 与现有记录冲突；存档未改变，请先导出备份检查";
+    case "unsupported-blueprint-domain": return "这份蓝图包含资源锚点、特殊建筑或模组语义，当前原生安全入队暂不接管";
+    case "unsupported-active-planet": return "当前行星不支持这份普通蓝图；本次入队未执行";
+    case "unsupported-existing-queue-domain": return "现有待建队列含尚未证明的历史语义；为避免破坏订单，本次入队已安全拒绝";
+    case "version-conflict": return "蓝图不可变版本与现有记录冲突；存档未改变，请先导出备份检查";
+  }
+}
+
+function nativeBlueprintCaptureBlockedMessage(reason: NativeBlueprintCaptureSupportReason): string {
+  switch (reason) {
+    case "selection-conflict": return "所选建筑已经变化或包含重复 ID；存档未改变，请重新选择";
+    case "unsupported-active-planet": return "当前行星不支持普通蓝图捕获；本次复制未执行";
+    case "unsupported-blueprint-domain": return "选区包含资源点、特殊建筑或尚未证明的模组语义；本次复制未执行";
+    case "catalog-incomplete": return "Rust 内容目录无法完整证明这个选区；为保护存档，本次复制已拒绝";
+    case "position-overlap": return "选区内建筑位置无法形成合法 ordinary 蓝图；本次复制未执行";
+    case "library-full": return "蓝图库已达到安全上限；请先删除不用的蓝图";
+    case "next-id-exhausted": return "蓝图 ID 已达到安全上限；请导出备份并联系存档救援";
+  }
+}
+
+function nativeBlueprintImportBlockedMessage(reason: NativeBlueprintImportSupportReason): string {
+  switch (reason) {
+    case "invalid-exchange": return "蓝图交换文本无效；Rust 未写入任何蓝图";
+    case "unsupported-active-planet": return "当前行星不支持这份普通蓝图；本次导入未执行";
+    case "unsupported-blueprint-domain": return "交换文件包含特殊建筑、资源锚点、外部端口或尚未支持的模组语义";
+    case "catalog-incomplete": return "Rust 内容目录无法完整证明交换文件中的设备、物品或配方";
+    case "position-overlap": return "交换文件内建筑位置重叠；本次导入未执行";
+    case "library-full": return "蓝图库已达到 64 条安全上限；请先删除不用的蓝图";
+    case "next-id-exhausted": return "蓝图 ID 已达到安全上限；请导出备份并联系存档救援";
+    case "serialized-budget-exceeded": return "导入后的标准蓝图或耐久命令超过 1 MiB 安全上限";
+  }
+}
+
+function nativeBlueprintExportBlockedMessage(reason: NativeBlueprintExportSupportReason): string {
+  switch (reason) {
+    case "version-conflict": return "蓝图行 revision 已变化；请重新选中后再导出";
+    case "unsupported-active-planet": return "当前行星不支持这份普通蓝图的原生导出";
+    case "unsupported-blueprint-domain": return "这份蓝图包含原生导出尚未接管的特殊或模组语义";
+    case "catalog-incomplete": return "Rust 内容目录无法完整证明这份蓝图；本次没有生成下载文件";
+    case "position-overlap": return "蓝图内建筑位置重叠；本次没有生成下载文件";
+    case "serialized-budget-exceeded": return "标准蓝图交换文本超过 1 MiB 安全上限；本次没有生成下载文件";
+  }
+}
+
+function nativeBlueprintDirectDeployBlockedMessage(
+  reason: NativeBlueprintDirectDeploySupportReason,
+): string {
+  switch (reason) {
+    case "next-id-exhausted": return "建筑或线路 ID 已达到安全上限；请导出备份并联系存档救援";
+    case "unsupported-blueprint-domain": return "这份蓝图包含特殊建筑、资源锚点、外部端口或尚未证明的模组语义，当前不能直接部署";
+    case "unsupported-active-planet": return "当前行星不支持这份 ordinary 蓝图；本次直接部署未执行";
+    case "insufficient-construction-materials": return "Rust 施工库存不足；可以改用“加入待建施工”后再补充材料";
+    case "position-overlap": return "这个落点与现有建筑重叠；存档未改变，请选择其他空白位置";
+    case "version-conflict": return "蓝图行 revision 或不可变版本发生冲突；存档未改变，请重新选择蓝图";
+    case "catalog-incomplete": return "Rust 内容目录无法完整证明这份蓝图；为保护材料，本次直接部署已拒绝";
+  }
+}
+
+function nativeRemovalBlockedMessage(reason: NativeConstructionRemovalSupportReason): string {
+  switch (reason) {
+    case "entity-not-found": return "这栋建筑已经不存在；本次回收未执行";
+    case "invalid-entity": return "建筑记录不完整；本次回收未执行";
+    case "not-active-planet": return "建筑已不在当前行星；本次回收未执行";
+    case "interaction-locked": return "建筑已锁定，请先解锁再回收";
+    case "missing-building-id": return "该节点不是可回收的普通建筑";
+    case "unknown-building": return "Rust 内容目录中没有这个建筑；本次回收未执行";
+    case "missing-construction-definition": return "这个建筑没有可核对的施工返还定义；本次回收未执行";
+    case "unsupported-building-kind": return "矿机或物流站需要专用回收流程；本次回收未执行";
+    case "unsupported-building-domain": return "这个建筑同时关联其他系统，原生安全回收尚未覆盖";
+    case "entity-kind-mismatch": return "建筑类型与目录不一致；本次回收未执行";
+    case "invalid-machine-count": return "建筑堆叠数量无效；本次回收未执行";
+    case "empty-machine-stack": return "建筑堆叠已经为空；本次回收未执行";
+    case "spray-coater-installed": return "请先拆除喷涂模块，再回收整栋建筑";
+    case "buffered-material": return "建筑仍有输入或输出物资，请先清空缓存";
+    case "incident-belt": return "建筑仍连接传送带，请先拆线再回收";
+    case "construction-queue-reference": return "建筑仍被施工任务引用，暂不能回收";
+    case "blueprint-pruning-required": return "回收会触发蓝图历史清理，当前安全命令暂不执行";
+    case "invalid-construction-inventory": return "施工库存记录无效；本次回收未执行";
+    case "refund-overflow": return "返还后数量会超过安全上限；请先导出备份并联系存档救援";
+  }
+}
+
+function nativeBeltPlacementBlockedMessage(reason: string): string {
+  switch (reason) {
+    case "unsupported-active-planet": return "当前行星不支持普通传送带；本次线路未建立";
+    case "invalid-lanes": return "并联数量必须是 1–4096 的整数；本次线路未建立";
+    case "unsupported-belt-tier": return "当前只支持明确选择 Mk.I、Mk.II 或 Mk.III 传送带";
+    case "missing-construction-definition": return "Rust 内容目录中缺少这一级传送带；本次线路未建立";
+    case "technology-locked": return "这一级传送带科技尚未解锁；本次线路未建立";
+    case "unknown-item": return "Rust 内容目录中没有这项物资；本次线路未建立";
+    case "insufficient-inventory": return "施工托盘中的同级传送带不足；本次线路未建立";
+    case "same-endpoint": return "线路不能连接同一栋建筑";
+    case "source-not-found":
+    case "target-not-found": return "线路端点已变化；本次线路未建立";
+    case "not-active-planet": return "线路两端已不在当前行星；本次线路未建立";
+    case "interaction-locked": return "线路端点包含已锁定建筑；本次线路未建立";
+    case "unsupported-source-domain":
+    case "unsupported-target-domain": return "该端点属于特殊物流系统，当前只开放普通物品端口";
+    case "source-not-configured": return "输出端当前没有配置这项物资；本次线路未建立";
+    case "target-not-configured": return "输入端当前没有配置这项物资；本次线路未建立";
+    case "matching-route-exists": return "相同起点、终点和物资的线路已经存在";
+    case "next-id-exhausted":
+    case "next-id-collision": return "线路 ID 无法安全分配；请导出备份并联系存档救援";
+    case "invalid-default-settings": return "传送带默认设置无法由 Rust 安全确认；本次线路未建立";
+    default: return "Rust 暂不支持这条线路；存档和施工库存均未改变";
+  }
+}
+
+function nativeBeltRemovalBlockedMessage(reason: string): string {
+  switch (reason) {
+    case "unsupported-active-planet": return "当前行星不支持普通传送带回收";
+    case "belt-not-found": return "这条传送带已经不存在；本次回收未执行";
+    case "invalid-belt": return "传送带记录不完整；本次回收未执行";
+    case "not-active-planet": return "传送带已不在当前行星；本次回收未执行";
+    case "unsupported-belt-domain": return "特殊端口线路需要专用回收流程；本次回收未执行";
+    case "unsupported-belt-tier": return "当前只支持回收内置 Mk.I、Mk.II、Mk.III 传送带";
+    case "missing-construction-definition": return "Rust 内容目录无法证明这一级传送带的返还";
+    case "source-not-found":
+    case "target-not-found": return "线路端点已经变化；本次回收未执行";
+    case "unsupported-source-domain":
+    case "unsupported-target-domain": return "线路连接特殊物流系统，当前安全回收保持关闭";
+    case "invalid-construction-inventory": return "施工托盘记录无效；本次回收未执行";
+    case "refund-overflow": return "返还后数量会超过安全上限；请先导出备份";
+    default: return "Rust 暂不支持回收这条线路；存档和施工库存均未改变";
+  }
+}
+
+function nativeBeltLaneBlockedMessage(reason: string): string {
+  switch (reason) {
+    case "invalid-target-lanes": return "并联数量必须是正整数；本次调整未执行";
+    case "unsupported-active-planet": return "当前行星不支持普通传送带调整";
+    case "belt-not-found": return "这条传送带已经不存在；本次调整未执行";
+    case "invalid-belt": return "传送带记录不完整；本次调整未执行";
+    case "not-active-planet": return "传送带已不在当前行星；本次调整未执行";
+    case "unsupported-item": return "线路物料不在当前 Rust 内容目录中";
+    case "unsupported-belt-domain": return "特殊端口线路需要专用调整流程";
+    case "unsupported-belt-tier": return "当前只支持内置 Mk.I、Mk.II、Mk.III 线路";
+    case "missing-construction-definition": return "Rust 内容目录无法证明这一级传送带的材料映射";
+    case "unchanged-lanes": return "目标并联数量与当前相同";
+    case "target-lanes-exceed-limit": return "并联数量已达到安全上限";
+    case "source-not-found":
+    case "target-not-found": return "线路端点已经变化；本次调整未执行";
+    case "unsupported-source-domain":
+    case "unsupported-target-domain": return "线路连接特殊物流系统，普通调整保持关闭";
+    case "invalid-construction-inventory": return "施工托盘记录无效；本次调整未执行";
+    case "insufficient-construction": return "施工托盘中的同级传送带不足";
+    case "refund-overflow": return "返还后数量会超过安全上限；请先导出备份";
+    default: return "Rust 暂不支持调整这条线路；存档和施工库存均未改变";
+  }
+}
+
+function nativeStackBlockedMessage(reason: NativeConstructionStackSupportReason): string {
+  switch (reason) {
+    case "invalid-target-count": return "目标堆叠数量无效；本次调整未执行";
+    case "entity-not-found": return "这栋建筑已经不存在；本次调整未执行";
+    case "invalid-entity": return "建筑记录不完整；本次调整未执行";
+    case "not-active-planet": return "建筑已不在当前行星；本次调整未执行";
+    case "interaction-locked": return "建筑已锁定，请先解锁再调整堆叠";
+    case "missing-building-id": return "该节点不是可调整堆叠的普通建筑";
+    case "unknown-building": return "Rust 内容目录中没有这个建筑；本次调整未执行";
+    case "missing-construction-definition": return "这个建筑没有可核对的施工定义；本次调整未执行";
+    case "unsupported-building-kind":
+    case "unsupported-building-domain": return "该建筑需要专用堆叠流程；本次调整未执行";
+    case "entity-kind-mismatch": return "建筑类型与 Rust 目录不一致；本次调整未执行";
+    case "invalid-current-count":
+    case "empty-machine-stack": return "当前建筑堆叠数量无效；本次调整未执行";
+    case "unchanged-target": return "目标数量与当前堆叠相同";
+    case "stack-limit": return "已经达到这类建筑的当前堆叠上限";
+    case "catalog-incomplete": return "Rust 内容目录不足以证明这次堆叠安全；本次调整未执行";
+    case "invalid-construction-inventory": return "施工托盘记录无效；本次调整未执行";
+    case "inventory-insufficient": return "施工托盘中的同类建筑不足；本次调整未执行";
+    case "refund-overflow": return "减少堆叠后的返还会超过安全上限；请先导出备份";
+    default: return "Rust 暂不支持这次堆叠调整；存档和施工库存均未改变";
+  }
+}
 
 function pureIdleProgressLabel(progress: PureIdleMacroProgress): string {
   if (progress.phase === "preparing-power") return "正在准备权威供电快照";
@@ -937,16 +1633,24 @@ function beltHeatColor(utilization: number): string {
 
 const RecipeWorkspace = lazy(() => importWithRecovery(() => import("./components/RecipeWorkspace"), "生产资料库模块").then((module) => ({ default: module.RecipeWorkspace })));
 const StatisticsWorkspace = lazy(() => importWithRecovery(() => import("./components/StatisticsWorkspace"), "生产统计模块").then((module) => ({ default: module.StatisticsWorkspace })));
+const NativeStatisticsWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeStatisticsWorkspace"), "原生生产统计模块").then((module) => ({ default: module.NativeStatisticsWorkspace })));
 const StarMapWorkspace = lazy(() => importWithRecovery(() => import("./components/StarMapWorkspace"), "星图模块").then((module) => ({ default: module.StarMapWorkspace })));
+const NativeStarMapWorkspace = lazy(() => importWithRecovery(() => import("./components/StarMapWorkspace"), "原生星图模块").then((module) => ({ default: module.NativeStarMapWorkspace })));
 const DysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./components/DysonPlannerWorkspace"), "戴森规划模块").then((module) => ({ default: module.DysonPlannerWorkspace })));
+const NativeDysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./components/DysonPlannerWorkspace"), "原生戴森规划模块").then((module) => ({ default: module.NativeDysonPlannerWorkspace })));
 const OfflineReportWorkspace = lazy(() => importWithRecovery(() => import("./components/OfflineReportWorkspace"), "离线报告模块").then((module) => ({ default: module.OfflineReportWorkspace })));
 const OperationsWorkspace = lazy(() => importWithRecovery(() => import("./components/OperationsWorkspace"), "运营中心模块").then((module) => ({ default: module.OperationsWorkspace })));
+const NativeOperationsWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeOperationsWorkspace"), "原生运营中心模块").then((module) => ({ default: module.NativeOperationsWorkspace })));
 const TechnologyWorkspace = lazy(() => importWithRecovery(() => import("./components/TechnologyWorkspace"), "科技树模块").then((module) => ({ default: module.TechnologyWorkspace })));
 const CampaignWorkspace = lazy(() => importWithRecovery(() => import("./components/CampaignWorkspace"), "主线任务模块").then((module) => ({ default: module.CampaignWorkspace })));
 const GalaxyWorkspace = lazy(() => importWithRecovery(() => import("./components/GalaxyWorkspace"), "银河工作区模块").then((module) => ({ default: module.GalaxyWorkspace })));
+const NativeCampaignWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeCampaignWorkspace"), "原生主线任务模块").then((module) => ({ default: module.NativeCampaignWorkspace })));
+const NativeGalaxyWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeGalaxyWorkspace"), "原生银河账户模块").then((module) => ({ default: module.NativeGalaxyWorkspace })));
 const ConstructionCenterWorkspace = lazy(() => importWithRecovery(() => import("./components/ConstructionCenterWorkspace"), "建筑制造中心模块").then((module) => ({ default: module.ConstructionCenterWorkspace })));
 const SystemSpaceStationWorkspace = lazy(() => importWithRecovery(() => import("./components/SystemSpaceStationWorkspace"), "空间站模块").then((module) => ({ default: module.SystemSpaceStationWorkspace })));
+const NativeSystemSpaceStationWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeSystemSpaceStationWorkspace"), "原生空间站模块").then((module) => ({ default: module.NativeSystemSpaceStationWorkspace })));
 const OrbitalStationWorkspace = lazy(() => importWithRecovery(() => import("./components/OrbitalStationWorkspace"), "全星系空间站模块").then((module) => ({ default: module.OrbitalStationWorkspace })));
+const NativeOrbitalContractWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeOrbitalContractWorkspace"), "原生轨道合同模块").then((module) => ({ default: module.NativeOrbitalContractWorkspace })));
 
 // Content packs must be active before save migration reads any modded IDs.
 const INITIAL_CONTENT_PACK_REGISTRY = loadContentPackRegistry();
@@ -1163,6 +1867,7 @@ interface SimulationSubmission {
   requestBytes: number;
   multicore: MulticoreSimulationOptions | undefined;
   approximate: boolean;
+  authorityLease: LegacyAuthorityAsyncLeaseToken;
   durableIntent?: SimulationRuntimeDurableOperationIntent;
   requiresCheckpointBarrier?: boolean;
 }
@@ -1291,9 +1996,9 @@ function minerPlacementHint(buildingId: BuildingId): string {
   return "采矿机需要部署在固体资源矿脉上";
 }
 
-export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }: { initialLoad: LoadedGame; onReturnToMenu: () => void; onOpenReleaseNotes: () => void }) {
+export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, onReleaseNativeRendererState }: { initialLoad: LoadedGame; onReturnToMenu: () => void; onOpenReleaseNotes: () => void; onReleaseNativeRendererState: (releasedLoad: LoadedGame) => void }) {
   usePlayerPresence();
-  const { isEnglish } = useAppLocale();
+  const { isEnglish, locale: appLocale, setLocale: setAppLocale } = useAppLocale();
   const gameDialog = useGameDialog();
   const compactLayout = useCompactLayout();
   const coarsePointer = useCoarsePointer();
@@ -1301,7 +2006,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [productionRefreshPreference, setProductionRefreshPreference] = useProductionRefreshPreference();
   const [endgameExtremeMode, setEndgameExtremeMode] = useState(readEndgameExtremeMode);
   const [canvasPerformanceFeatures, setCanvasPerformanceFeatures] = useState(readCanvasPerformanceFeatures);
-  const [loaded] = useState(initialLoad);
+  const [loaded, setLoaded] = useState(initialLoad);
   const [game, setGame] = useState(loaded.state);
   const [largeSaveAutosaveProtection, setLargeSaveAutosaveProtection] = useState(readLargeSaveAutosaveThrottlePreference);
   const [allowEditsDuringSave, setAllowEditsDuringSave] = useState(readAllowEditsDuringSavePreference);
@@ -1335,6 +2040,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return subscribeLocalSaveStorageStatus(refresh);
   }, [game.mode]);
   const [themeMode, setThemeMode] = useState(() => readThemePreference() ?? loaded.state.settings.theme);
+  const [nativeFontScale, setNativeFontScale] = useState<FontScale>(() => readFontScalePreference() ?? loaded.state.settings.fontScale);
   const [connectionPointSize, setConnectionPointSize] = useState<ConnectionPointSize>(readConnectionPointSize);
   useEffect(() => { writeConnectionPointSize(connectionPointSize); }, [connectionPointSize]);
   const [connectionHitArea, setConnectionHitArea] = useState<ConnectionHitArea>(readConnectionHitArea);
@@ -1382,6 +2088,62 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [productionLineFocus, setProductionLineFocus] = useState<(ProductionLineLocation & { itemId: ItemId; activeIndex: number }) | null>(null);
   const [copiedBeltConfigurationId, setCopiedBeltConfigurationId] = useState<string | null>(null);
   const [placement, setPlacement] = useState<BuildingId | null>(null);
+  const [nativePlacementBuildingId, setNativePlacementBuildingId] = useState<string | null>(null);
+  const [nativePlacementContextPending, setNativePlacementContextPending] = useState(false);
+  const nativePlacementContextPendingRef = useRef(false);
+  const nativePlacementIntentRef = useRef({ buildingId: null as string | null, generation: 0 });
+  const [nativeBlueprintEnqueuePlacement, setNativeBlueprintEnqueuePlacement] = useState<NativeBlueprintEnqueueSelectionBinding | null>(null);
+  const nativeBlueprintEnqueuePlacementRef = useRef<NativeBlueprintEnqueueSelectionBinding | null>(null);
+  const nativeBlueprintEnqueueGenerationRef = useRef(0);
+  const [nativeBlueprintEnqueueContextPending, setNativeBlueprintEnqueueContextPending] = useState(false);
+  const nativeBlueprintEnqueueContextPendingRef = useRef(false);
+  const nativeBlueprintEnqueueCanvasSubmitRef = useRef<(
+    position: Readonly<{ x: number; y: number }>,
+    screenPoint: Readonly<{ x: number; y: number }>,
+  ) => void>(() => undefined);
+  const [nativeBlueprintDirectDeployPlacement, setNativeBlueprintDirectDeployPlacement] =
+    useState<NativeBlueprintDirectDeploySelectionBinding | null>(null);
+  const nativeBlueprintDirectDeployPlacementRef =
+    useRef<NativeBlueprintDirectDeploySelectionBinding | null>(null);
+  const nativeBlueprintDirectDeployGenerationRef = useRef(0);
+  const [nativeBlueprintDirectDeployContextPending, setNativeBlueprintDirectDeployContextPending] =
+    useState(false);
+  const nativeBlueprintDirectDeployContextPendingRef = useRef(false);
+  const nativeBlueprintDirectDeployCanvasSubmitRef = useRef<(
+    position: Readonly<{ x: number; y: number }>,
+    screenPoint: Readonly<{ x: number; y: number }>,
+  ) => void>(() => undefined);
+  const [nativeBlueprintCaptureContextPending, setNativeBlueprintCaptureContextPending] =
+    useState(false);
+  const nativeBlueprintCaptureContextPendingRef = useRef(false);
+  const nativeBlueprintCaptureRequestGenerationRef = useRef(0);
+  const nativeBlueprintCaptureSelectionRef =
+    useRef<NativeBlueprintCaptureSelectionBinding | null>(null);
+  const [nativeBlueprintImportContextPending, setNativeBlueprintImportContextPending] =
+    useState(false);
+  const nativeBlueprintImportContextPendingRef = useRef(false);
+  const nativeBlueprintImportRequestGenerationRef = useRef(0);
+  const [nativeBlueprintImportConfirmation, setNativeBlueprintImportConfirmation] =
+    useState<NativeBlueprintImportConfirmation | null>(null);
+  const [nativeBlueprintExportContextPending, setNativeBlueprintExportContextPending] =
+    useState(false);
+  const nativeBlueprintExportContextPendingRef = useRef(false);
+  const nativeBlueprintExportRequestGenerationRef = useRef(0);
+  const [nativeRemovalContextPending, setNativeRemovalContextPending] = useState(false);
+  const nativeRemovalContextPendingRef = useRef(false);
+  const nativeRemovalRequestGenerationRef = useRef(0);
+  const [nativeBeltLaneContextPending, setNativeBeltLaneContextPending] = useState(false);
+  const nativeBeltLaneContextPendingRef = useRef(false);
+  const nativeBeltLaneRequestGenerationRef = useRef(0);
+  const [nativeStackContextPending, setNativeStackContextPending] = useState(false);
+  const nativeStackContextPendingRef = useRef(false);
+  const nativeStackRequestGenerationRef = useRef(0);
+  const [nativeBeltPlacementTier, setNativeBeltPlacementTier] = useState<BeltTier | null>(null);
+  const nativeBeltPlacementTierRef = useRef<BeltTier | null>(null);
+  nativeBeltPlacementTierRef.current = nativeBeltPlacementTier;
+  const [nativeBeltPlacementContextPending, setNativeBeltPlacementContextPending] = useState(false);
+  const nativeBeltPlacementContextPendingRef = useRef(false);
+  const nativeBeltPlacementRequestGenerationRef = useRef(0);
   const [beltTier, setBeltTier] = useState<BeltTier>(1);
   const [beltTierMode, setBeltTierMode] = useState<BeltTierMode>("auto");
   const [placementCount, setPlacementCount] = useState<PlacementCount>(1);
@@ -1404,18 +2166,50 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [autoLayoutUndo, setAutoLayoutUndo] = useState<AutoLayoutUndoSnapshot | null>(null);
   const [technologyOpen, setTechnologyOpen] = useState(false);
   const [statisticsOpen, setStatisticsOpen] = useState(false);
+  const [statisticsHistory, setStatisticsHistory] = useState<readonly ProductionHistorySample[] | null>(null);
+  const statisticsHistoryRecordedAtRef = useRef<number | null>(null);
   const [authorityWorkspaceSync, setAuthorityWorkspaceSync] = useState<"statistics" | "dyson" | null>(null);
   const [statisticsFocusTab, setStatisticsFocusTab] = useState<StatisticsTab | null>(null);
   const [recipesOpen, setRecipesOpen] = useState(false);
+  const [recipeWorkspaceSelector, setRecipeWorkspaceSelector] = useState<RecipeWorkspaceSelector>(() => ({
+    itemIds: Object.keys(ITEMS).slice(0, RECIPE_WORKSPACE_PROJECTION_LIMITS.itemRows) as ItemId[],
+    selectedItemId: loaded.state.recipeFocus.itemId ?? "iron_ore",
+  }));
   const [starMapOpen, setStarMapOpen] = useState(false);
+  const [starMapIndustryReadRequest, setStarMapIndustryReadRequest] = useState<StarMapIndustryReadRequest>({
+    systemId: null,
+    planetId: null,
+    routeFilter: "all",
+    query: "",
+  });
   const [systemSpaceStationOpen, setSystemSpaceStationOpen] = useState(false);
   const [systemSpaceStationId, setSystemSpaceStationId] = useState<StarSystemId | null>(null);
   const [orbitalStationOpen, setOrbitalStationOpen] = useState(false);
   const [orbitalStationInitialTab, setOrbitalStationInitialTab] = useState<StationTab | undefined>();
   const [blueprintsOpen, setBlueprintsOpen] = useState(false);
+  const [nativeBlueprintSelectedId, setNativeBlueprintSelectedId] = useState<string | null>(null);
+  const [nativeBlueprintLibraryCursor, setNativeBlueprintLibraryCursor] = useState(0);
+  const [nativeBlueprintQueueCursor, setNativeBlueprintQueueCursor] = useState(0);
+  const [nativeBlueprintRenamePendingIdentity, setNativeBlueprintRenamePendingIdentity] = useState<
+    NativeBlueprintRenamePendingIdentity | null
+  >(null);
+  const [nativeBlueprintRenameResolution, setNativeBlueprintRenameResolution] = useState<
+    NativeBlueprintRenameResolution | null
+  >(null);
+  const nativeBlueprintRenameSubmissionSequenceRef = useRef(0);
+  const nativeBlueprintRenameUncertainCommandRef = useRef<Readonly<{
+    submissionId: number;
+    source: NativePlayerAuthorityCommandSource;
+    command: SimulationCommandPatch;
+  }> | null>(null);
   const [dysonPlannerOpen, setDysonPlannerOpen] = useState(false);
+  const [nativeDysonSelectedSystemId, setNativeDysonSelectedSystemId] = useState<string | null>(null);
   const [operationsOpen, setOperationsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandPaletteEntitySearchRequest, setCommandPaletteEntitySearchRequest] = useState({
+    query: "",
+    cursor: 0,
+  });
   const [campaignOpen, setCampaignOpen] = useState(false);
   const [galaxyOpen, setGalaxyOpen] = useState(false);
   const [galaxyFocusTab, setGalaxyFocusTab] = useState<"ranking" | "speedrun" | "cloud" | "account" | null>(null);
@@ -1492,10 +2286,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const canvasStackMembershipRef = useRef<ReadonlyMap<string, string>>(new Map());
   const canvasNodeCommitStartedAtRef = useRef(0);
   const canvasDragStopCountRef = useRef(0);
+  const factoryGestureEpochRef = useRef(0);
+  const nodeDragGestureEpochRef = useRef<number | null>(null);
   const multiDragStartRef = useRef<{
     primaryId: string;
     primaryPosition: { x: number; y: number };
     members: Array<{ id: string; position: { x: number; y: number } }>;
+    nativeIdentity: null | {
+      sessionId: string;
+      runId: string;
+      planetId: PlanetId;
+      revision: number;
+    };
   } | null>(null);
   const canvasNodeLayoutFrameRef = useRef<number | null>(null);
   const [highlightedTaskId, setHighlightedTaskId] = useState<CampaignTaskId | null>(null);
@@ -1511,11 +2313,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [, setHistoryRevision] = useState(0);
   const [nodes, setNodes, onNodesChange] = useNodesState<FactoryFlowNode>([]);
   useEffect(() => installRuntimeLongTaskDiagnostics(), []);
-  const panelGame = useThrottledRuntimeShellGame(game,
-    operationsOpen || mobilePanel !== null ||
-    selectedEntityIds.length > 0 || selectedBeltId !== null || selectedBeltIds.length > 0 ||
-    placement !== null || blueprintPlacementId !== null || connectionDraft !== null,
-  );
   useLayoutEffect(() => {
     recordActiveRuntimeTransitionPhase("react-layout-commit", {
       paused: game.paused,
@@ -1537,12 +2334,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
   }, [canvasRenderSnapshot.runtimeRevision, game.paused, nodes.length]);
   const [notice, setNotice] = useState<string | null>(null);
-  const windowsNativeCoreAvailable = Boolean(getDesktopBridge());
+  const desktopBridge = getDesktopBridge();
+  const windowsNativeCoreAvailable = Boolean(desktopBridge);
   const [windowsNativeCoreBetaEnabled, setWindowsNativeCoreBetaEnabled] = useState(() =>
     windowsNativeCoreAvailable && readWindowsNativeCoreBetaEnabled());
   const [windowsNativeCoreBetaStatus, setWindowsNativeCoreBetaStatus] = useState<
     "disabled" | "awaiting-checkpoint" | "hashing" | "shadow-active" | "native-ready" | "diverged" | "unavailable" | "failed"
   >(() => windowsNativeCoreAvailable && readWindowsNativeCoreBetaEnabled() ? "awaiting-checkpoint" : "disabled");
+  const [nativeAuthorityHandoffQuiescing, setNativeAuthorityHandoffQuiescing] = useState(false);
   const [factoryAlertProjection, setFactoryAlertProjection] = useState<FactoryAlertProjection>(EMPTY_FACTORY_ALERT_PROJECTION);
   const factoryAlertsGenerationRef = useRef(0);
   const acceptFactoryAlertProjection = useCallback((projection: FactoryAlertProjection | undefined, generation: number | undefined) => {
@@ -1583,11 +2382,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const runtimeUiRequiresEveryProjectionRef = useRef(false);
   runtimeUiNeedsImmediateGameRef.current = game.paused || operationsOpen || mobilePanel !== null ||
     selectedEntityIds.length > 0 || selectedBeltId !== null || selectedBeltIds.length > 0 ||
-    placement !== null || blueprintPlacementId !== null || connectionDraft !== null;
+    placement !== null || nativePlacementBuildingId !== null || nativeBlueprintEnqueuePlacement !== null ||
+    nativeBlueprintDirectDeployPlacement !== null ||
+    blueprintPlacementId !== null || connectionDraft !== null;
   // An open dock can consume the existing trailing summary. Only an active
   // entity/belt interaction must observe every large record projection.
   runtimeUiRequiresEveryProjectionRef.current = selectedEntityIds.length > 0 || selectedBeltId !== null ||
-    selectedBeltIds.length > 0 || placement !== null || blueprintPlacementId !== null || connectionDraft !== null;
+    selectedBeltIds.length > 0 || placement !== null || nativePlacementBuildingId !== null ||
+    nativeBlueprintEnqueuePlacement !== null || nativeBlueprintDirectDeployPlacement !== null ||
+    blueprintPlacementId !== null || connectionDraft !== null;
   const pendingRuntimeGamePublicationRef = useRef<GameState | null>(null);
   const pendingRuntimeGamePublicationTimerRef = useRef<number | null>(null);
   const runtimeGamePublicationInFlightRef = useRef<GameState | null>(null);
@@ -1661,9 +2464,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     kind?: RuntimePersistenceKind,
   ) => Promise<SaveGameResult>>(() => Promise.resolve({ success: false, message: "未就绪", code: "unavailable" }));
   const stateWithSimulationDebtRef = useRef<(state: GameState) => GameState>((state) => state);
-  const isCurrentPrimarySaveSourceRef = useRef<(
-    expected: NonNullable<typeof controlledReturnCommitRef.current>,
-  ) => boolean>(() => false);
   const returnToMenuSaveInFlightRef = useRef(false);
   const lastCanvasPublishedGameRef = useRef(game);
   const canvasRenderSnapshotRef = useRef(canvasRenderSnapshot);
@@ -1698,6 +2498,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const regionPointerRef = useRef<{ pointerId: number; start: { x: number; y: number } } | null>(null);
   const regionResizeRef = useRef<{
     pointerId: number;
+    element: HTMLButtonElement;
     region: CanvasRegion;
     handle: CanvasRegionResizeHandle;
     start: { x: number; y: number };
@@ -1718,6 +2519,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const suppressConnectionClickTimerRef = useRef(0);
   const viewportRef = useRef<CanvasViewport>({ ...initialViewport });
   const pendingPlanetViewportRef = useRef(new Map<PlanetId, { viewport: CanvasViewport; timer: number }>());
+  const [pendingNativePlanetChange, setPendingNativePlanetChange] = useState<{
+    readonly sessionId: string;
+    readonly acceptedRevision: number;
+    readonly previousPlanetId: PlanetId;
+    readonly planetId: PlanetId;
+    readonly leavingViewport: CanvasViewport;
+    readonly destinationViewport: CanvasViewport;
+    readonly reducedMotion: boolean;
+  } | null>(null);
   const viewportOnlyGameStateRef = useRef<GameState | null>(null);
   const canvasSizeRef = useRef<{ width: number; height: number } | null>(null);
   const canvasPointerMotionRef = useRef(createCanvasPointerMotionSession());
@@ -1748,6 +2558,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const lineFindTraceCacheRef = useRef<{ planetId: PlanetId; revision: number; traces: Map<string, ReturnType<typeof analyzeEntityLineTrace>> } | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const simulationWorkerRef = useRef<Worker | null>(null);
+  const statisticsReadModelRequestRef = useRef<{
+    id: number;
+    promise: Promise<StatisticsHistoryReadModel>;
+    resolve: (readModel: StatisticsHistoryReadModel) => void;
+    reject: (error: Error) => void;
+  } | null>(null);
   const simulationWorkerDisabledRef = useRef(false);
   const durableSimulationRuntimeEnabled = isDurableSimulationRuntimeEnabled();
   const contentPackRuntimeSnapshotRef = useRef<ContentPackRuntimeSnapshot>(createContentPackRuntimeSnapshot(INITIAL_CONTENT_PACK_REGISTRY));
@@ -1791,12 +2607,39 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // after the install response has made the Worker ready to advance.
   const deferredDurableUiSubmissionRef = useRef<DeferredDurableUiSubmission | null>(null);
   const dispatchDurableUiCommandRef = useRef<() => void>(() => undefined);
+  // Schema v2 deliberately carries no authority identity. Keep a render-fed
+  // boolean ref so stable player-edit and scheduler callbacks can fail closed
+  // without ever probing a macro frame for session/run/operation IDs.
+  const nativePlayerAuthorityMacroReadOnlyRef = useRef(false);
   const durablePrimarySaveInFlightRef = useRef(false);
   // The stable 1.0.43-compatible coordinator also needs the player-edit lock
   // while its verified primary write is in flight. Keep a depth instead of a
   // boolean because lifecycle/manual/autosave requests may briefly overlap;
   // the fail-safe lock must remain active until the last verified write ends.
   const verifiedPrimarySaveInFlightDepthRef = useRef(0);
+  // A Rust-owned checkpoint is an independent single-writer transaction. It
+  // must reject renderer commands even when the legacy "edit while saving"
+  // preference is enabled, because there is no JavaScript state to rebase.
+  const nativeAuthorityCheckpointInFlightRef = useRef(false);
+  const nativeAuthorityHandoffRef = useRef<{
+    handoffId: string;
+    sessionId: string;
+    runId: string;
+    phase: "prepared" | "browser-fenced" | "native-active";
+    publicWriterFence: LocalSaveWriterFence;
+    settledDeadlineMs: number;
+    checkpoint: LocalSaveNativeAuthorityCheckpoint | null;
+    receipt: LocalSaveNativeAuthorityLeaseReceipt | null;
+  } | null>(null);
+  const lastCancelledNativeAuthorityHandoffRef = useRef<{
+    handoffId: string;
+    sessionId: string;
+    runId: string;
+  } | null>(null);
+  // Memory/lifecycle callbacks are intentionally stable and may run between
+  // React renders. Keep the latest fail-closed ownership decision available
+  // without consulting the stale JavaScript mirror.
+  const nativeAuthorityPersistenceProtectedRef = useRef(false);
   const memoryWorkloadForState = useCallback((state: GameState): MemoryWorkload => ({
     serializedBytes: persistedPrimaryBytes,
     entityCount: state.entities.length,
@@ -1808,6 +2651,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     stationCount: state.entities.length >= 10_000 ? 10_000 : 0,
   }), [persistedPrimaryBytes]);
   const pauseForMemoryPressure = useCallback((reason: string) => {
+    if (nativeAuthorityPersistenceProtectedRef.current) {
+      setNotice(`检测到内存压力：${reason}。Windows 原生权威未被 JavaScript 假暂停；已停止本次旧存档写入，请等待原生恢复或重试`);
+      return;
+    }
     if (memoryGuardPausedRef.current || gameRef.current.paused) return;
     memoryGuardPausedRef.current = true;
     // Memory protection is not a recovery operation. Preserve the exact
@@ -1842,6 +2689,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     writeAllowEditsDuringSavePreference(enabled);
   }, []);
   const rejectPlayerStateEditDuringPrimarySave = useCallback((): boolean => {
+    if (nativePlayerAuthorityMacroReadOnlyRef.current) {
+      setNotice("Windows 原生宏观结算正在推进权威状态；当前画面只读，本次操作未应用");
+      return true;
+    }
+    if (nativeAuthorityCheckpointInFlightRef.current) {
+      setNotice("Windows 原生权威正在创建 durable 检查点；本次操作未应用");
+      return true;
+    }
     if (durableWorkerRecoveryInFlightRef.current) {
       setNotice("正在从 durable recovery 精确重建模拟 Worker，请稍候");
       return true;
@@ -1866,9 +2721,2291 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // distinguish a real unmount from that ordinary dependency turnover.
   const lifecycleSaveEffectGenerationRef = useRef(0);
   const simulationStateRevisionRef = useRef(durableSimulationRuntimeEnabled ? loaded.runtimeRecovery?.stateRevision ?? 0 : 0);
+  const nativeCoreProjectionSessionId = windowsNativeCoreBetaControllerRef.current.snapshot().authority.sessionId;
+  const nativePlayerAuthorityClockRef = useRef<NativePlayerAuthorityClockController | null>(null);
+  if (nativePlayerAuthorityClockRef.current === null) {
+    nativePlayerAuthorityClockRef.current = new NativePlayerAuthorityClockController(desktopBridge);
+  }
+  const nativePlayerAuthorityClock = nativePlayerAuthorityClockRef.current;
+  const nativePlayerAuthorityClockSnapshot = useSyncExternalStore(
+    nativePlayerAuthorityClock.subscribe,
+    nativePlayerAuthorityClock.getSnapshot,
+    nativePlayerAuthorityClock.getSnapshot,
+  );
+  const nativePlayerAuthorityClockSupported = Boolean(
+    desktopBridge &&
+    typeof desktopBridge.getNativePlayerAuthorityState === "function" &&
+    typeof desktopBridge.onNativePlayerAuthorityState === "function",
+  );
+  // The main process may have recovered a Rust-owned lease before React ever
+  // mounts. Fail closed until the first trusted broker pull says whether that
+  // lease exists; otherwise the renderer could briefly start a second Worker
+  // and enqueue an old JavaScript save during startup.
+  const nativePlayerAuthorityBootstrapPending = nativePlayerAuthorityClockSupported &&
+    nativePlayerAuthorityClockSnapshot.availability !== "ready";
+  useEffect(() => {
+    const current = nativePlayerAuthorityClock.getSnapshot();
+    if (current.currentFrame === null) {
+      nativePlayerAuthorityClock.bindSession(nativeCoreProjectionSessionId);
+    }
+  }, [nativeCoreProjectionSessionId, nativePlayerAuthorityClock]);
+  useEffect(() => {
+    nativePlayerAuthorityClock.start();
+    return () => nativePlayerAuthorityClock.stop();
+  }, [nativePlayerAuthorityClock]);
+  const nativePlayerAuthoritySessionId = nativePlayerAuthorityClockSnapshot.currentFrame?.schemaVersion === 2 &&
+    nativePlayerAuthorityClockSnapshot.expectedSessionId === null
+    ? null
+    : nativePlayerAuthorityClockSnapshot.expectedSessionId ?? nativeCoreProjectionSessionId;
+  const nativePlayerAuthorityBoundFrame = selectBoundNativePlayerAuthorityFrame(
+    nativePlayerAuthorityClockSnapshot,
+    nativePlayerAuthoritySessionId,
+  );
+  const nativePlayerAuthorityActiveFrame = selectActiveNativePlayerAuthorityFrame(
+    nativePlayerAuthorityClockSnapshot,
+    nativePlayerAuthoritySessionId,
+  );
+  const nativePlayerAuthorityMacroStatus = selectNativePlayerAuthorityMacroStatus(
+    nativePlayerAuthorityClockSnapshot,
+    nativePlayerAuthoritySessionId,
+  );
+  const nativePlayerAuthorityRuntimeDetected = nativePlayerAuthorityBoundFrame !== null ||
+    nativePlayerAuthorityMacroStatus !== null;
+  const nativePlayerAuthorityOwnsRuntime = nativePlayerAuthorityBootstrapPending ||
+    nativePlayerAuthorityRuntimeDetected || nativeAuthorityHandoffQuiescing;
+  const effectiveUiFontScale = nativePlayerAuthorityOwnsRuntime ? nativeFontScale : game.settings.fontScale;
+  const panelGame = useThrottledRuntimeShellGame(
+    game,
+    !nativePlayerAuthorityOwnsRuntime && (
+      operationsOpen || mobilePanel !== null ||
+      selectedEntityIds.length > 0 || selectedBeltId !== null || selectedBeltIds.length > 0 ||
+      placement !== null || nativePlacementBuildingId !== null || nativeBlueprintEnqueuePlacement !== null ||
+      nativeBlueprintDirectDeployPlacement !== null ||
+      blueprintPlacementId !== null || connectionDraft !== null
+    ),
+    !nativePlayerAuthorityOwnsRuntime,
+  );
+  const nativePlayerAuthorityOwnsRuntimeRef = useRef(false);
+  nativePlayerAuthorityOwnsRuntimeRef.current = nativePlayerAuthorityOwnsRuntime;
+  const nativePlayerAuthorityOwnershipEpochRef = useRef(
+    createNativeAuthorityInteractionEpoch(nativePlayerAuthorityOwnsRuntime),
+  );
+  nativePlayerAuthorityOwnershipEpochRef.current = reconcileNativeAuthorityInteractionEpoch(
+    nativePlayerAuthorityOwnershipEpochRef.current,
+    nativePlayerAuthorityOwnsRuntime,
+  );
+  const legacyAuthorityAsyncLeaseFenceRef = useRef(createLegacyAuthorityAsyncLeaseFence(
+    nativePlayerAuthorityBootstrapPending
+      ? "bootstrap-pending"
+      : nativePlayerAuthorityRuntimeDetected || nativeAuthorityHandoffQuiescing ? "native" : "javascript",
+  ));
+  legacyAuthorityAsyncLeaseFenceRef.current = reconcileLegacyAuthorityAsyncLeaseFence(
+    legacyAuthorityAsyncLeaseFenceRef.current,
+    nativePlayerAuthorityBootstrapPending
+      ? "bootstrap-pending"
+      : nativePlayerAuthorityRuntimeDetected || nativeAuthorityHandoffQuiescing ? "native" : "javascript",
+  );
+  const nativePlayerAuthorityMacroReadOnly = nativePlayerAuthorityMacroStatus !== null;
+  nativePlayerAuthorityMacroReadOnlyRef.current = nativePlayerAuthorityMacroReadOnly;
+  const readNativeAuthorityRuntimeObservation = useCallback((): NativeAuthorityRuntimeObservation => {
+    const controllerSnapshot = windowsNativeCoreBetaControllerRef.current?.snapshot();
+    const clockSnapshot = nativePlayerAuthorityClock.getSnapshot();
+    const sessionId = clockSnapshot.currentFrame?.schemaVersion === 2 && clockSnapshot.expectedSessionId === null
+      ? null
+      : controllerSnapshot?.authority.sessionId ?? clockSnapshot.expectedSessionId;
+    const macro = selectNativePlayerAuthorityMacroStatus(clockSnapshot, sessionId);
+    if (macro) return { kind: "macro", sessionId, runId: null, revision: macro.revision };
+    const active = selectActiveNativePlayerAuthorityFrame(clockSnapshot, sessionId);
+    if (active) {
+      return { kind: "active", sessionId: active.sessionId, runId: active.runId, revision: active.revision };
+    }
+    const bound = selectBoundNativePlayerAuthorityFrame(clockSnapshot, sessionId);
+    if (bound) {
+      return { kind: "bound-paused", sessionId: bound.sessionId, runId: bound.runId, revision: bound.revision };
+    }
+    return { kind: "inactive", sessionId: null, runId: null, revision: null };
+  }, [nativePlayerAuthorityClock]);
+  const readNativeAuthorityPersistenceBoundary = useCallback((): NativeAuthorityPersistenceBoundary => {
+    if (nativeAuthorityHandoffRef.current && nativeAuthorityHandoffRef.current.phase !== "native-active") {
+      return {
+        protected: true,
+        runtimeKind: "bound-paused",
+        checkpointToken: null,
+        canExportAuthoritativeV47: false,
+        reason: "native-authority-handoff-quiescing",
+      };
+    }
+    const clockSnapshot = nativePlayerAuthorityClock.getSnapshot();
+    if (nativePlayerAuthorityClockSupported && clockSnapshot.availability !== "ready") {
+      return {
+        protected: true,
+        runtimeKind: "bootstrap-pending",
+        checkpointToken: null,
+        canExportAuthoritativeV47: false,
+        reason: "native-authority-bootstrap-pending",
+      };
+    }
+    return evaluateNativeAuthorityPersistenceBoundary(
+      windowsNativeCoreBetaControllerRef.current!.snapshot(),
+      readNativeAuthorityRuntimeObservation(),
+    );
+  }, [nativePlayerAuthorityClock, nativePlayerAuthorityClockSupported, readNativeAuthorityRuntimeObservation]);
+  const issueLegacyJavaScriptAuthorityLease = useCallback(
+    (): LegacyAuthorityAsyncLeaseToken | null => {
+      // The main-owned clock can change before React has reconciled this
+      // render-time generation fence. Consult the live persistence boundary
+      // first so an event delivered in that narrow window cannot start fresh
+      // JavaScript work under a stale generation.
+      if (nativeAuthorityHandoffQuiescing) return null;
+      if (readNativeAuthorityPersistenceBoundary().protected) return null;
+      return issueLegacyAuthorityAsyncLease(legacyAuthorityAsyncLeaseFenceRef.current);
+    },
+    [nativeAuthorityHandoffQuiescing, readNativeAuthorityPersistenceBoundary],
+  );
+  const legacyJavaScriptAuthorityLeaseIsCurrent = useCallback(
+    (token: LegacyAuthorityAsyncLeaseToken | null): boolean =>
+      canContinueLegacyAuthorityAsyncLease(token, legacyAuthorityAsyncLeaseFenceRef.current) &&
+      !nativeAuthorityHandoffQuiescing &&
+      !readNativeAuthorityPersistenceBoundary().protected,
+    [nativeAuthorityHandoffQuiescing, readNativeAuthorityPersistenceBoundary],
+  );
+  const refreshNativeAuthorityPersistenceBoundary = useCallback(async (): Promise<NativeAuthorityPersistenceBoundary> => {
+    await nativePlayerAuthorityClock.refresh();
+    return readNativeAuthorityPersistenceBoundary();
+  }, [nativePlayerAuthorityClock, readNativeAuthorityPersistenceBoundary]);
+  nativeAuthorityPersistenceProtectedRef.current = readNativeAuthorityPersistenceBoundary().protected;
+  const nativePlayerAuthorityCommandBindingRef = useRef<{
+    key: string;
+    source: NativePlayerAuthorityCommandSource;
+  } | null>(null);
+  const nativePlayerAuthorityCommandInFlightRef = useRef(false);
+  const nativeEntityRecipeProjectionTargetEntityIdRef = useRef<string | null>(null);
+  const nativeManualMiningLastAttemptedFrameKeyRef = useRef<string | null>(null);
+  const nativePlayerAuthorityPauseInFlightRef = useRef(false);
+  const [nativePlayerAuthorityCommandPending, setNativePlayerAuthorityCommandPending] = useState(false);
+  const [nativePlayerAuthorityHistory, setNativePlayerAuthorityHistory] = useState<
+    DesktopNativePlayerAuthorityHistoryStatus | null
+  >(null);
+  const [nativeAuthorityDurableRestartPending, setNativeAuthorityDurableRestartPending] = useState(false);
+  const currentNativeAuthorityFrame = nativePlayerAuthorityClockSnapshot.currentFrame;
+  const nativeAuthorityDurableRestartRevision = currentNativeAuthorityFrame && (
+    currentNativeAuthorityFrame.schemaVersion === 1
+      ? ["uncertain", "pause-uncertain", "resume-uncertain", "faulted"].includes(
+        currentNativeAuthorityFrame.phase,
+      )
+      : ["macro-uncertain", "faulted"].includes(currentNativeAuthorityFrame.phase)
+  ) ? currentNativeAuthorityFrame.revision : null;
+  const restartNativeAuthorityFromDurable = useCallback(async () => {
+    const restart = desktopBridge?.restartNativePlayerAuthorityFromDurable;
+    const expectedRevision = nativeAuthorityDurableRestartRevision;
+    if (!restart || expectedRevision === null || nativeAuthorityDurableRestartPending) return;
+    if (!window.confirm(
+      `将关闭并重新启动 Windows 性能版，从 Rust 已落盘的不早于 revision ${expectedRevision} 的检查点恢复。不会读取旧 JavaScript 镜像，是否继续？`,
+    )) return;
+    setNativeAuthorityDurableRestartPending(true);
+    try {
+      const result = await restart({ expectedRevision });
+      if (result.schemaVersion !== 1 || result.accepted !== true ||
+          result.recoveryMode !== "rust-durable-reconcile" ||
+          result.minimumRevision !== expectedRevision) {
+        throw new Error("原生 durable 重启回执不一致");
+      }
+      setNotice(`已确认 revision ${expectedRevision} 的 Rust durable 恢复边界，应用正在安全重启`);
+    } catch (error) {
+      setNativeAuthorityDurableRestartPending(false);
+      setNotice(error instanceof Error
+        ? `${error.message}；仍保持 Rust 权威暂停，未切回旧 JavaScript 镜像`
+        : "原生 durable 重启失败；仍保持 Rust 权威暂停，未切回旧 JavaScript 镜像");
+    }
+  }, [desktopBridge, nativeAuthorityDurableRestartPending, nativeAuthorityDurableRestartRevision]);
+  const [nativeConstructionCenterPendingIdentity, setNativeConstructionCenterPendingIdentity] = useState<
+    NativeConstructionCenterPendingIdentity | null
+  >(null);
+  if (!nativePlayerAuthorityActiveFrame) {
+    nativePlayerAuthorityCommandBindingRef.current = null;
+  } else {
+    const commandFrameKey = JSON.stringify([
+      nativePlayerAuthorityActiveFrame.sessionId,
+      nativePlayerAuthorityActiveFrame.runId,
+      nativePlayerAuthorityActiveFrame.revision,
+      nativePlayerAuthorityActiveFrame.acknowledgedSequence,
+      nativePlayerAuthorityActiveFrame.nextSequence,
+      nativePlayerAuthorityActiveFrame.nextDeadlineMs,
+    ]);
+    if (nativePlayerAuthorityCommandBindingRef.current?.key !== commandFrameKey) {
+      const source = createNativePlayerAuthorityCommandSource(
+        desktopBridge,
+        nativePlayerAuthorityActiveFrame,
+      );
+      nativePlayerAuthorityCommandBindingRef.current = source
+        ? { key: commandFrameKey, source }
+        : null;
+    }
+  }
+  const nativePlayerAuthorityCommandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+  useEffect(() => {
+    const source = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const readHistory = desktopBridge?.getNativePlayerAuthorityHistoryStatus;
+    if (!nativePlayerAuthorityOwnsRuntime || !source || !readHistory || nativePlayerAuthorityCommandPending) {
+      if (!nativePlayerAuthorityOwnsRuntime) setNativePlayerAuthorityHistory(null);
+      return;
+    }
+    let cancelled = false;
+    void readHistory({ sessionId: source.sessionId }).then((status) => {
+      const current = nativePlayerAuthorityCommandBindingRef.current?.source;
+      if (!cancelled && current?.sessionId === source.sessionId &&
+          current.baseRevision === status.revision) {
+        setNativePlayerAuthorityHistory(status);
+      }
+    }).catch(() => {
+      if (!cancelled) setNativePlayerAuthorityHistory(null);
+    });
+    return () => { cancelled = true; };
+  }, [
+    desktopBridge,
+    nativePlayerAuthorityActiveFrame?.revision,
+    nativePlayerAuthorityCommandPending,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  const nativePlayerAuthorityMacroDisplay = useMemo(() => {
+    const status = nativePlayerAuthorityMacroStatus;
+    if (!status) return null;
+    const progressLabel = (progress: number | null, budget: number | null) => budget === null
+      ? "等待权威预算"
+      : `${progress === null ? "待确认" : progress.toLocaleString("zh-CN")} / ${budget.toLocaleString("zh-CN")} ms`;
+    return Object.freeze({
+      phase: status.phase,
+      simulationProgress: progressLabel(
+        status.simulationProgressMilliseconds,
+        status.simulationBudgetMilliseconds,
+      ),
+      wallProgress: progressLabel(
+        status.wallProgressMilliseconds,
+        status.wallBudgetMilliseconds,
+      ),
+      deadlineMilliseconds: status.nextDeadlineMs,
+      deadline: `${status.nextDeadlineMs.toLocaleString("zh-CN")} ms`,
+      pausedReason: status.pausedReason,
+    });
+  }, [nativePlayerAuthorityMacroStatus]);
+  const nativeFactoryThinViewStoreRef = useRef<NativeFactoryThinViewStore | null>(null);
+  if (nativeFactoryThinViewStoreRef.current === null) {
+    nativeFactoryThinViewStoreRef.current = new NativeFactoryThinViewStore();
+  }
+  const nativeFactoryThinViewStore = nativeFactoryThinViewStoreRef.current;
+  const nativeFactoryThinViewSnapshot = useSyncExternalStore(
+    nativeFactoryThinViewStore.subscribe,
+    nativeFactoryThinViewStore.getSnapshot,
+    nativeFactoryThinViewStore.getSnapshot,
+  );
+  const nativeFactoryInventoryStoreRef = useRef<NativeFactoryInventoryStore | null>(null);
+  if (nativeFactoryInventoryStoreRef.current === null) {
+    nativeFactoryInventoryStoreRef.current = new NativeFactoryInventoryStore();
+  }
+  const nativeFactoryInventoryStore = nativeFactoryInventoryStoreRef.current;
+  const nativeFactoryInventorySnapshot = useSyncExternalStore(
+    nativeFactoryInventoryStore.subscribe,
+    nativeFactoryInventoryStore.getSnapshot,
+    nativeFactoryInventoryStore.getSnapshot,
+  );
+  const nativeConstructionInventoryStoreRef = useRef<NativeConstructionInventoryStore | null>(null);
+  if (nativeConstructionInventoryStoreRef.current === null) {
+    nativeConstructionInventoryStoreRef.current = new NativeConstructionInventoryStore();
+  }
+  const nativeConstructionInventoryStore = nativeConstructionInventoryStoreRef.current;
+  const nativeConstructionInventorySnapshot = useSyncExternalStore(
+    nativeConstructionInventoryStore.subscribe,
+    nativeConstructionInventoryStore.getSnapshot,
+    nativeConstructionInventoryStore.getSnapshot,
+  );
+  const nativeBlueprintWorkspaceStoreRef = useRef<NativeBlueprintWorkspaceStore | null>(null);
+  if (nativeBlueprintWorkspaceStoreRef.current === null) {
+    nativeBlueprintWorkspaceStoreRef.current = new NativeBlueprintWorkspaceStore();
+  }
+  const nativeBlueprintWorkspaceStore = nativeBlueprintWorkspaceStoreRef.current;
+  const nativeBlueprintWorkspaceSnapshot = useSyncExternalStore(
+    nativeBlueprintWorkspaceStore.subscribe,
+    nativeBlueprintWorkspaceStore.getSnapshot,
+    nativeBlueprintWorkspaceStore.getSnapshot,
+  );
+  // Once main proves that it owns this exact native session, its durable Rust
+  // revision becomes the projection clock. A concurrently advancing legacy JS
+  // mirror must never overwrite that revision. Uncertain/faulted phases retain
+  // the last confirmed frame but do not issue another native read.
+  const factoryThinViewExpectedRevision = nativePlayerAuthorityBoundFrame?.revision ??
+    nativePlayerAuthorityMacroStatus?.revision ??
+    simulationStateRevisionRef.current;
+  const nativePlanetNavigationDiscoveryStoreRef = useRef<NativePlanetNavigationDiscoveryStore | null>(null);
+  if (nativePlanetNavigationDiscoveryStoreRef.current === null) {
+    nativePlanetNavigationDiscoveryStoreRef.current = new NativePlanetNavigationDiscoveryStore();
+  }
+  const nativePlanetNavigationDiscoveryStore = nativePlanetNavigationDiscoveryStoreRef.current;
+  const nativePlanetNavigationDiscoverySnapshot = useSyncExternalStore(
+    nativePlanetNavigationDiscoveryStore.subscribe,
+    nativePlanetNavigationDiscoveryStore.getSnapshot,
+    nativePlanetNavigationDiscoveryStore.getSnapshot,
+  );
+  const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+  const nativeThinWorkspaceAuthorityFrames = useMemo(
+    () => selectNativePlayerAuthorityWorkspaceFrames(
+      nativePlayerAuthorityClockSnapshot,
+      nativePlayerAuthoritySessionId,
+    ),
+    [nativePlayerAuthorityClockSnapshot, nativePlayerAuthoritySessionId],
+  );
+  const nativeTechnologyWorkspaceIdentity = useMemo<NativeTechnologyWorkspaceIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeTechnologyWorkspaceReadIdentity = useMemo<NativeTechnologyWorkspaceIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeTechnologyWorkspaceStoreRef = useRef<NativeTechnologyWorkspaceStore | null>(null);
+  if (nativeTechnologyWorkspaceStoreRef.current === null) {
+    nativeTechnologyWorkspaceStoreRef.current = new NativeTechnologyWorkspaceStore();
+  }
+  const nativeTechnologyWorkspaceStore = nativeTechnologyWorkspaceStoreRef.current;
+  const nativeTechnologyWorkspaceSnapshot = useSyncExternalStore(
+    nativeTechnologyWorkspaceStore.subscribe,
+    nativeTechnologyWorkspaceStore.getSnapshot,
+    nativeTechnologyWorkspaceStore.getSnapshot,
+  );
+  const nativeTechnologyWorkspaceSource = useMemo(() => nativeTechnologyWorkspaceReadIdentity
+    ? createNativePlayerAuthorityTechnologyProjectionSource(
+        desktopBridge,
+        nativeTechnologyWorkspaceReadIdentity,
+      )
+    : null, [desktopBridge, nativeTechnologyWorkspaceReadIdentity]);
+  const nativeTechnologyWorkspaceFrame = useMemo(() => nativeTechnologyWorkspaceIdentity
+    ? selectNativeTechnologyWorkspaceFrame(
+        nativeTechnologyWorkspaceSnapshot,
+        nativeTechnologyWorkspaceIdentity,
+      )
+    : null, [nativeTechnologyWorkspaceIdentity, nativeTechnologyWorkspaceSnapshot]);
+  const nativeTechnologyWorkspaceReadModel = useMemo(
+    () => selectNativeTechnologyWorkspaceReadModel(nativeTechnologyWorkspaceFrame, {
+      enabled: Boolean(nativeTechnologyWorkspaceIdentity),
+      sessionId: nativeTechnologyWorkspaceIdentity?.sessionId ?? null,
+      runId: nativeTechnologyWorkspaceIdentity?.runId ?? null,
+      expectedRevision: nativeTechnologyWorkspaceFrame?.revision ??
+        nativeTechnologyWorkspaceIdentity?.revision ?? factoryThinViewExpectedRevision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      nativeTechnologyWorkspaceFrame,
+      nativeTechnologyWorkspaceIdentity,
+      recipeWorkspaceRegistryFingerprint,
+    ],
+  );
+  const nativeTechnologyWorkspaceReadStatus = nativeTechnologyWorkspaceFrame &&
+      nativeTechnologyWorkspaceIdentity && nativeTechnologyWorkspaceSnapshot.status === "ready" &&
+      nativeTechnologyWorkspaceFrame.revision === nativeTechnologyWorkspaceIdentity.revision
+    ? "ready" as const
+    : nativeTechnologyWorkspaceFrame
+      ? nativeTechnologyWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : "loading" as const
+      : !nativeTechnologyWorkspaceIdentity || nativeTechnologyWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeTechnologyWorkspaceSnapshot.status === "empty"
+          ? "empty" as const
+          : "loading" as const;
+  const webTechnologyWorkspaceReadModel = useMemo(
+    () => technologyOpen && !nativePlayerAuthorityBoundFrame
+      ? createWebTechnologyWorkspaceReadModel(game)
+      : null,
+    [game, nativePlayerAuthorityBoundFrame, technologyOpen],
+  );
+  const technologyWorkspaceReadModel = nativePlayerAuthorityBoundFrame
+    ? nativeTechnologyWorkspaceReadModel
+    : webTechnologyWorkspaceReadModel;
+  const nativeTechnologyCommandProjection = nativeTechnologyWorkspaceReadModel?.source === "native-core" &&
+      nativeTechnologyWorkspaceReadStatus === "ready" &&
+      nativeTechnologyWorkspaceReadModel.revision === nativeTechnologyWorkspaceIdentity?.revision
+    ? nativeTechnologyWorkspaceFrame?.projection ?? null
+    : null;
+  const updateRecipeWorkspaceSelector = useCallback((selector: RecipeWorkspaceSelector) => {
+    setRecipeWorkspaceSelector((current) => recipeWorkspaceSelectorsEqual(current, selector)
+      ? current
+      : { itemIds: [...selector.itemIds], selectedItemId: selector.selectedItemId });
+  }, []);
+  const nativeRecipeWorkspaceStoreRef = useRef<NativeRecipeWorkspaceStore | null>(null);
+  if (nativeRecipeWorkspaceStoreRef.current === null) {
+    nativeRecipeWorkspaceStoreRef.current = new NativeRecipeWorkspaceStore();
+  }
+  const nativeRecipeWorkspaceStore = nativeRecipeWorkspaceStoreRef.current;
+  const nativeRecipeWorkspaceSnapshot = useSyncExternalStore(
+    nativeRecipeWorkspaceStore.subscribe,
+    nativeRecipeWorkspaceStore.getSnapshot,
+    nativeRecipeWorkspaceStore.getSnapshot,
+  );
+  const nativeRecipeWorkspaceIdentity = useMemo<NativeRecipeWorkspaceIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeRecipeWorkspaceReadIdentity = useMemo<NativeRecipeWorkspaceIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeRecipeWorkspaceSource = useMemo(() => nativeRecipeWorkspaceReadIdentity
+    ? createNativePlayerAuthorityRecipeWorkspaceProjectionSource(
+        desktopBridge,
+        nativeRecipeWorkspaceReadIdentity,
+      )
+    : null, [desktopBridge, nativeRecipeWorkspaceReadIdentity]);
+  const nativeStatisticsWorkspaceStoreRef = useRef<NativeStatisticsWorkspaceStore | null>(null);
+  if (nativeStatisticsWorkspaceStoreRef.current === null) {
+    nativeStatisticsWorkspaceStoreRef.current = new NativeStatisticsWorkspaceStore();
+  }
+  const nativeStatisticsWorkspaceStore = nativeStatisticsWorkspaceStoreRef.current;
+  const nativeStatisticsWorkspaceSnapshot = useSyncExternalStore(
+    nativeStatisticsWorkspaceStore.subscribe,
+    nativeStatisticsWorkspaceStore.getSnapshot,
+    nativeStatisticsWorkspaceStore.getSnapshot,
+  );
+  const nativeCampaignWorkspaceStoreRef = useRef<NativeCampaignWorkspaceStore | null>(null);
+  if (nativeCampaignWorkspaceStoreRef.current === null) {
+    nativeCampaignWorkspaceStoreRef.current = new NativeCampaignWorkspaceStore();
+  }
+  const nativeCampaignWorkspaceStore = nativeCampaignWorkspaceStoreRef.current;
+  const nativeCampaignWorkspaceSnapshot = useSyncExternalStore(
+    nativeCampaignWorkspaceStore.subscribe,
+    nativeCampaignWorkspaceStore.getSnapshot,
+    nativeCampaignWorkspaceStore.getSnapshot,
+  );
+  const nativeGalaxyWorkspaceStoreRef = useRef<NativeGalaxyWorkspaceStore | null>(null);
+  if (nativeGalaxyWorkspaceStoreRef.current === null) {
+    nativeGalaxyWorkspaceStoreRef.current = new NativeGalaxyWorkspaceStore();
+  }
+  const nativeGalaxyWorkspaceStore = nativeGalaxyWorkspaceStoreRef.current;
+  const nativeGalaxyWorkspaceSnapshot = useSyncExternalStore(
+    nativeGalaxyWorkspaceStore.subscribe,
+    nativeGalaxyWorkspaceStore.getSnapshot,
+    nativeGalaxyWorkspaceStore.getSnapshot,
+  );
+  const nativeStatisticsWorkspaceAuthorityFrames = useMemo(
+    () => selectNativeStatisticsWorkspaceAuthorityFrames(
+      nativePlayerAuthorityClockSnapshot,
+      nativePlayerAuthoritySessionId,
+    ),
+    [nativePlayerAuthorityClockSnapshot, nativePlayerAuthoritySessionId],
+  );
+  const nativeStatisticsWorkspaceIdentity = useMemo<NativeStatisticsWorkspaceIdentity | null>(() => {
+    const frame = nativeStatisticsWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeStatisticsWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeStatisticsWorkspaceReadIdentity = useMemo<NativeStatisticsWorkspaceIdentity | null>(() => {
+    const frame = nativeStatisticsWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeStatisticsWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeStatisticsWorkspaceSource = useMemo(() => nativeStatisticsWorkspaceReadIdentity
+    ? createNativePlayerAuthorityStatisticsWorkspaceSource(desktopBridge, nativeStatisticsWorkspaceReadIdentity)
+    : null, [desktopBridge, nativeStatisticsWorkspaceReadIdentity]);
+  const nativeStatisticsWorkspaceFrame = useMemo(() => nativeStatisticsWorkspaceIdentity
+    ? selectNativeStatisticsWorkspaceFrame(nativeStatisticsWorkspaceSnapshot, nativeStatisticsWorkspaceIdentity)
+    : null, [nativeStatisticsWorkspaceIdentity, nativeStatisticsWorkspaceSnapshot]);
+  const nativeStatisticsWorkspaceReadStatus = nativeStatisticsWorkspaceFrame &&
+      nativeStatisticsWorkspaceIdentity && nativeStatisticsWorkspaceSnapshot.status === "ready" &&
+      nativeStatisticsWorkspaceFrame.revision === nativeStatisticsWorkspaceIdentity.revision
+    ? "ready" as const
+    : nativeStatisticsWorkspaceFrame
+      ? nativeStatisticsWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : "loading" as const
+      : !nativeStatisticsWorkspaceIdentity ||
+          nativeStatisticsWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeStatisticsWorkspaceSnapshot.status === "empty"
+          ? "empty" as const
+          : "loading" as const;
+  const nativeSystemSpaceStationIdentity = useMemo<NativeSystemSpaceStationWorkspaceIdentity | null>(() => {
+    const frame = nativePlayerAuthorityActiveFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null && systemSpaceStationId ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      revision: frame.revision,
+      registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      systemId: systemSpaceStationId,
+    }) : null;
+  }, [
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+    recipeWorkspaceRegistryFingerprint,
+    systemSpaceStationId,
+  ]);
+  const nativeSystemSpaceStationFetchProjection = useMemo<NativeSystemSpaceStationWorkspaceFetchProjection | null>(() => {
+    const readProjection = desktopBridge?.getNativeCoreSystemSpaceStationWorkspaceProjection;
+    if (typeof readProjection !== "function") return null;
+    return async (request, signal) => {
+      if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+      const projection = await readProjection(request);
+      if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+      return projection;
+    };
+  }, [desktopBridge]);
+  const nativeOrbitalContractIdentity = useMemo<DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest | null>(() => {
+    const frame = nativePlayerAuthorityActiveFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      expectedRevision: frame.revision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+    }) : null;
+  }, [
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeOrbitalContractFetchProjection = useMemo<((
+    request: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
+  ) => Promise<DesktopNativeCoreOrbitalContractWorkspaceProjectionResult>) | null>(() => {
+    const readProjection = desktopBridge?.getNativeCoreOrbitalContractWorkspaceProjection;
+    return typeof readProjection === "function" ? readProjection : null;
+  }, [desktopBridge]);
+  const nativeCampaignGalaxyAuthorityFrames = useMemo(
+    () => selectNativeCampaignGalaxyWorkspaceAuthorityFrames(
+      nativePlayerAuthorityClockSnapshot,
+      nativePlayerAuthoritySessionId,
+    ),
+    [nativePlayerAuthorityClockSnapshot, nativePlayerAuthoritySessionId],
+  );
+  const nativeCampaignGalaxyIdentity = useMemo<NativeCampaignGalaxyWorkspaceIdentity | null>(() => {
+    const frame = nativeCampaignGalaxyAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativeCampaignGalaxyAuthorityFrames,
+    nativePlayerAuthorityOwnsRuntime,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeCampaignGalaxyReadIdentity = useMemo<NativeCampaignGalaxyWorkspaceIdentity | null>(() => {
+    const frame = nativeCampaignGalaxyAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativeCampaignGalaxyAuthorityFrames,
+    nativePlayerAuthorityOwnsRuntime,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeCampaignWorkspaceSource = useMemo(() => nativeCampaignGalaxyReadIdentity
+    ? createNativePlayerAuthorityCampaignWorkspaceSource(desktopBridge, nativeCampaignGalaxyReadIdentity)
+    : null, [desktopBridge, nativeCampaignGalaxyReadIdentity]);
+  const nativeCampaignWorkspaceFrame = useMemo(() => nativeCampaignGalaxyIdentity
+    ? selectNativeCampaignWorkspaceFrame(nativeCampaignWorkspaceSnapshot, nativeCampaignGalaxyIdentity)
+    : null, [nativeCampaignGalaxyIdentity, nativeCampaignWorkspaceSnapshot]);
+  const nativeCampaignWorkspaceReadStatus = nativeCampaignWorkspaceFrame &&
+      nativeCampaignGalaxyIdentity && nativeCampaignWorkspaceSnapshot.status === "ready" &&
+      nativeCampaignWorkspaceFrame.revision === nativeCampaignGalaxyIdentity.revision
+    ? "ready" as const
+    : nativeCampaignWorkspaceFrame
+      ? nativeCampaignWorkspaceSnapshot.status === "unavailable" ? "unavailable" as const : "loading" as const
+      : !nativeCampaignGalaxyIdentity || nativeCampaignWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeCampaignWorkspaceSnapshot.status === "empty" ? "empty" as const : "loading" as const;
+  const nativeOperationsIdentity = useMemo<DesktopNativeCoreOperationsWorkspaceProjectionRequest | null>(() => {
+    const frame = nativePlayerAuthorityActiveFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      expectedRevision: frame.revision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+    }) : null;
+  }, [nativePlayerAuthorityActiveFrame, nativePlayerAuthorityOwnsRuntime, recipeWorkspaceRegistryFingerprint]);
+  const nativeOperationsFetchProjection = useMemo<((
+    request: DesktopNativeCoreOperationsWorkspaceProjectionRequest,
+  ) => Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>) | null>(() => {
+    const readProjection = desktopBridge?.getNativeCoreOperationsWorkspaceProjection;
+    return typeof readProjection === "function" ? readProjection : null;
+  }, [desktopBridge]);
+  const nativeOperationsSubscribeProjection = useMemo(() => {
+    const subscribe = desktopBridge?.subscribeNativeCoreProjection;
+    return typeof subscribe === "function" ? subscribe : null;
+  }, [desktopBridge]);
+  const nativeOperationsFetchProjectionDiagnostics = useMemo(() => {
+    const readDiagnostics = desktopBridge?.getNativeProjectionSubscriptionDiagnostics;
+    return typeof readDiagnostics === "function" ? readDiagnostics : null;
+  }, [desktopBridge]);
+  const nativeOperationsCommitSetting = useMemo<((
+    request: DesktopNativeOperationsSettingIntentRequest,
+  ) => Promise<unknown>) | null>(() => {
+    const commitIntent = desktopBridge?.commitNativeOperationsSettingIntent;
+    return typeof commitIntent === "function" ? commitIntent : null;
+  }, [desktopBridge]);
+  const nativeGalaxyWorkspaceSource = useMemo(() => nativeCampaignGalaxyReadIdentity
+    ? createNativePlayerAuthorityGalaxyWorkspaceSource(desktopBridge, nativeCampaignGalaxyReadIdentity)
+    : null, [desktopBridge, nativeCampaignGalaxyReadIdentity]);
+  const nativeGalaxyWorkspaceFrame = useMemo(() => nativeCampaignGalaxyIdentity
+    ? selectNativeGalaxyWorkspaceFrame(nativeGalaxyWorkspaceSnapshot, nativeCampaignGalaxyIdentity)
+    : null, [nativeCampaignGalaxyIdentity, nativeGalaxyWorkspaceSnapshot]);
+  const nativeGalaxyWorkspaceReadStatus = nativeGalaxyWorkspaceFrame &&
+      nativeCampaignGalaxyIdentity && nativeGalaxyWorkspaceSnapshot.status === "ready" &&
+      nativeGalaxyWorkspaceFrame.revision === nativeCampaignGalaxyIdentity.revision
+    ? "ready" as const
+    : nativeGalaxyWorkspaceFrame
+      ? nativeGalaxyWorkspaceSnapshot.status === "unavailable" ? "unavailable" as const : "loading" as const
+      : !nativeCampaignGalaxyIdentity || nativeGalaxyWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeGalaxyWorkspaceSnapshot.status === "empty" ? "empty" as const : "loading" as const;
+  const nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      revision: frame.revision,
+      registryFingerprint: recipeWorkspaceRegistryFingerprint,
+    }) : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeFactoryInventoryReadIdentity = useMemo<NativeFactoryInventoryIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeFactoryInventorySource = useMemo(() => nativeFactoryInventoryReadIdentity
+    ? createNativePlayerAuthorityFactoryInventorySource(desktopBridge, nativeFactoryInventoryReadIdentity)
+    : null, [desktopBridge, nativeFactoryInventoryReadIdentity]);
+  const nativeFactoryInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
+    ? selectNativeFactoryInventoryFrame(nativeFactoryInventorySnapshot, nativeFactoryInventoryIdentity)
+    : null, [nativeFactoryInventoryIdentity, nativeFactoryInventorySnapshot]);
+  const nativeFactoryInventoryFrameRef = useRef(nativeFactoryInventoryFrame);
+  nativeFactoryInventoryFrameRef.current = nativeFactoryInventoryFrame;
+  const nativeConstructionInventorySource = useMemo(() => nativeFactoryInventoryReadIdentity
+    ? createNativePlayerAuthorityConstructionInventorySource(desktopBridge, nativeFactoryInventoryReadIdentity)
+    : null, [desktopBridge, nativeFactoryInventoryReadIdentity]);
+  const nativeConstructionInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
+    ? selectNativeConstructionInventoryFrame(nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity)
+    : null, [nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity]);
+  const nativeBlueprintWorkspaceSource = useMemo(() => nativeFactoryInventoryReadIdentity
+    ? createNativePlayerAuthorityBlueprintWorkspaceSource(desktopBridge, nativeFactoryInventoryReadIdentity)
+    : null, [desktopBridge, nativeFactoryInventoryReadIdentity]);
+  const nativeBlueprintWorkspaceFrame = useMemo(() => nativeFactoryInventoryIdentity
+    ? selectNativeBlueprintWorkspaceFrame(
+        nativeBlueprintWorkspaceSnapshot,
+        nativeFactoryInventoryIdentity,
+        nativeBlueprintSelectedId,
+        nativeBlueprintLibraryCursor,
+        nativeBlueprintQueueCursor,
+      )
+    : null, [
+    nativeBlueprintLibraryCursor,
+    nativeBlueprintQueueCursor,
+    nativeBlueprintSelectedId,
+    nativeBlueprintWorkspaceSnapshot,
+    nativeFactoryInventoryIdentity,
+  ]);
+  const nativeInventoryLineageCurrent = Boolean(nativeFactoryInventoryIdentity &&
+    nativeFactoryInventoryReadIdentity &&
+    nativeFactoryInventoryIdentity.sessionId === nativeFactoryInventoryReadIdentity.sessionId &&
+    nativeFactoryInventoryIdentity.runId === nativeFactoryInventoryReadIdentity.runId &&
+    nativeFactoryInventoryIdentity.revision === nativeFactoryInventoryReadIdentity.revision &&
+    nativeFactoryInventoryIdentity.registryFingerprint === nativeFactoryInventoryReadIdentity.registryFingerprint);
+  const nativeFactoryInventoryWritesEnabled = nativeInventoryLineageCurrent &&
+    nativeFactoryInventoryFrame?.revision === nativeFactoryInventoryReadIdentity?.revision;
+  const nativeConstructionInventoryWritesEnabled = nativeInventoryLineageCurrent &&
+    nativeConstructionInventoryFrame?.revision === nativeFactoryInventoryReadIdentity?.revision;
+  const nativeBlueprintWorkspaceWritesEnabled = nativeInventoryLineageCurrent &&
+    nativeBlueprintWorkspaceFrame?.revision === nativeFactoryInventoryReadIdentity?.revision;
+  const nativeBlueprintTransformBinding = useMemo(
+    () => selectNativeBlueprintTransformBinding(nativeBlueprintWorkspaceFrame),
+    [nativeBlueprintWorkspaceFrame],
+  );
+  const nativeBlueprintDeleteBinding = useMemo(
+    () => selectNativeBlueprintDeleteBinding(nativeBlueprintWorkspaceFrame),
+    [nativeBlueprintWorkspaceFrame],
+  );
+  const nativeBlueprintWorkspaceFrameRef = useRef(nativeBlueprintWorkspaceFrame);
+  const nativeBlueprintWorkspaceIdentityRef = useRef(nativeFactoryInventoryIdentity);
+  const nativeBlueprintRenamePendingIdentityRef = useRef(nativeBlueprintRenamePendingIdentity);
+  const blueprintsOpenRef = useRef(blueprintsOpen);
+  nativeBlueprintWorkspaceFrameRef.current = nativeBlueprintWorkspaceFrame;
+  nativeBlueprintWorkspaceIdentityRef.current = nativeFactoryInventoryIdentity;
+  nativeBlueprintRenamePendingIdentityRef.current = nativeBlueprintRenamePendingIdentity;
+  blueprintsOpenRef.current = blueprintsOpen;
+  useEffect(() => {
+    const pending = nativeBlueprintRenamePendingIdentityRef.current;
+    if (!pending) return;
+    const reconciled = reconcileNativeBlueprintRename(pending, {
+      ownsRuntime: nativePlayerAuthorityOwnsRuntime,
+      commandPending: nativePlayerAuthorityCommandPending ||
+        nativePlayerAuthorityCommandInFlightRef.current,
+      activeIdentity: nativePlayerAuthorityActiveFrame?.sessionId &&
+        nativePlayerAuthorityActiveFrame.runId
+        ? {
+          sessionId: nativePlayerAuthorityActiveFrame.sessionId,
+          runId: nativePlayerAuthorityActiveFrame.runId,
+        }
+        : null,
+      latestIdentity: nativeFactoryInventoryIdentity,
+      frame: nativeBlueprintWorkspaceFrame,
+    });
+    if (reconciled.pending !== pending) {
+      nativeBlueprintRenamePendingIdentityRef.current = reconciled.pending;
+      setNativeBlueprintRenamePendingIdentity(reconciled.pending);
+    }
+    if (reconciled.resolution) {
+      setNativeBlueprintRenameResolution(reconciled.resolution);
+      setNotice("蓝图名称已由新的 Rust 权威投影精确确认");
+    } else if (reconciled.pending?.phase === "conflict" && pending.phase !== "conflict") {
+      setNotice("蓝图重命名的 lineage、durable ACK 或目标行投影发生冲突；界面保持锁定并停止猜测");
+    }
+  }, [
+    nativeBlueprintWorkspaceFrame,
+    nativeFactoryInventoryIdentity,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityCommandPending,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    const pending = nativeBlueprintRenamePendingIdentity;
+    const entry = nativeBlueprintRenameUncertainCommandRef.current;
+    if (!pending || pending.phase !== "uncertain" || !entry ||
+        entry.submissionId !== pending.submissionId) {
+      if (entry && (!pending || pending.phase !== "uncertain" ||
+          entry.submissionId !== pending.submissionId)) {
+        nativeBlueprintRenameUncertainCommandRef.current = null;
+      }
+      return;
+    }
+
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    let retryDelayMs = 250;
+    let reconciliationAttempts = 0;
+    const scheduleRetry = () => {
+      if (cancelled) return;
+      if (reconciliationAttempts >= 8) {
+        setNotice("蓝图重命名的只读对账暂不可用；已停止轮询，将在权威状态变化后继续，绝不会重发命令");
+        return;
+      }
+      retryTimer = window.setTimeout(runReconciliation, retryDelayMs);
+      retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
+    };
+    const runReconciliation = () => {
+      if (cancelled) return;
+      reconciliationAttempts += 1;
+      void entry.source.reconcileCommand(entry.command).then((outcome) => {
+        if (cancelled) return;
+        const current = nativeBlueprintRenamePendingIdentityRef.current;
+        if (!current || current.phase !== "uncertain" ||
+            current.submissionId !== entry.submissionId) return;
+        if (outcome.status === "committed") {
+          const acknowledged = acknowledgeNativeBlueprintRename(
+            current,
+            entry.submissionId,
+            outcome.receipt,
+          );
+          nativeBlueprintRenameUncertainCommandRef.current = null;
+          nativeBlueprintRenamePendingIdentityRef.current = acknowledged;
+          setNativeBlueprintRenamePendingIdentity(acknowledged);
+          setNotice(acknowledged.phase === "awaiting-projection"
+            ? `蓝图重命名已由 main 的只读耐久回执确认；等待 revision ${outcome.receipt.revision.toLocaleString("zh-CN")} 精确投影`
+            : "蓝图重命名只读回执与原提交不一致；界面保持锁定");
+          void nativePlayerAuthorityClockRef.current?.refresh().catch(() => undefined);
+          return;
+        }
+        if (outcome.status === "not-committed") {
+          const settled = settleNativeBlueprintRenameFailure(
+            current,
+            entry.submissionId,
+            "definite-failure",
+          );
+          nativeBlueprintRenameUncertainCommandRef.current = null;
+          nativeBlueprintRenamePendingIdentityRef.current = settled.pending;
+          setNativeBlueprintRenamePendingIdentity(settled.pending);
+          if (settled.resolution) setNativeBlueprintRenameResolution(settled.resolution);
+          setNotice("main 已确认蓝图重命名没有提交；原草稿已恢复，可以再次编辑");
+          return;
+        }
+        if (outcome.status === "conflict") {
+          const conflicted = conflictNativeBlueprintRename(current, entry.submissionId, "ack-missing");
+          nativeBlueprintRenameUncertainCommandRef.current = null;
+          nativeBlueprintRenamePendingIdentityRef.current = conflicted;
+          setNativeBlueprintRenamePendingIdentity(conflicted);
+          setNotice("蓝图重命名的只读耐久回执发生 revision 冲突；界面保持锁定并停止猜测");
+          return;
+        }
+        scheduleRetry();
+      }).catch(() => {
+        if (cancelled) return;
+        const current = nativeBlueprintRenamePendingIdentityRef.current;
+        if (!current || current.phase !== "uncertain" ||
+            current.submissionId !== entry.submissionId) return;
+        const conflicted = conflictNativeBlueprintRename(current, entry.submissionId, "ack-missing");
+        nativeBlueprintRenameUncertainCommandRef.current = null;
+        nativeBlueprintRenamePendingIdentityRef.current = conflicted;
+        setNativeBlueprintRenamePendingIdentity(conflicted);
+        setNotice("蓝图重命名的只读回执未通过边界校验；界面保持锁定并停止猜测");
+      });
+    };
+    runReconciliation();
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [
+    nativeBlueprintRenamePendingIdentity,
+    nativePlayerAuthorityActiveFrame?.revision,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityCommandPending,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  const nativePlacementLabel = useMemo(() => nativeBlueprintDirectDeployPlacement
+    ? "蓝图直接部署"
+    : nativeBlueprintEnqueuePlacement
+      ? "蓝图待建施工"
+    : nativePlacementBuildingId
+      ? getConstructionDefinition(nativePlacementBuildingId)?.name ?? nativePlacementBuildingId
+      : null, [nativeBlueprintDirectDeployPlacement, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId]);
+  const nativeStellarWorkspaceStoreRef = useRef<NativeStellarWorkspaceStore | null>(null);
+  if (nativeStellarWorkspaceStoreRef.current === null) {
+    nativeStellarWorkspaceStoreRef.current = new NativeStellarWorkspaceStore();
+  }
+  const nativeStellarWorkspaceStore = nativeStellarWorkspaceStoreRef.current;
+  const nativeStellarWorkspaceSnapshot = useSyncExternalStore(
+    nativeStellarWorkspaceStore.subscribe,
+    nativeStellarWorkspaceStore.getSnapshot,
+    nativeStellarWorkspaceStore.getSnapshot,
+  );
+  const nativeStarMapCatalogStoreRef = useRef<NativeStarMapCatalogStore | null>(null);
+  if (nativeStarMapCatalogStoreRef.current === null) {
+    nativeStarMapCatalogStoreRef.current = new NativeStarMapCatalogStore();
+  }
+  const nativeStarMapCatalogStore = nativeStarMapCatalogStoreRef.current;
+  const nativeStarMapCatalogSnapshot = useSyncExternalStore(
+    nativeStarMapCatalogStore.subscribe,
+    nativeStarMapCatalogStore.getSnapshot,
+    nativeStarMapCatalogStore.getSnapshot,
+  );
+  const nativeDysonWorkspaceStoreRef = useRef<NativeDysonWorkspaceStore | null>(null);
+  if (nativeDysonWorkspaceStoreRef.current === null) {
+    nativeDysonWorkspaceStoreRef.current = new NativeDysonWorkspaceStore();
+  }
+  const nativeDysonWorkspaceStore = nativeDysonWorkspaceStoreRef.current;
+  const nativeDysonWorkspaceSnapshot = useSyncExternalStore(
+    nativeDysonWorkspaceStore.subscribe,
+    nativeDysonWorkspaceStore.getSnapshot,
+    nativeDysonWorkspaceStore.getSnapshot,
+  );
+  const nativeStellarIndustrySelector = useMemo<NativeStellarIndustrySelector>(() => ({
+    ...starMapIndustryReadRequest,
+    planetCursor: 0,
+    planetLimit: NATIVE_STELLAR_PAGE_ROWS,
+    stationCursor: 0,
+    stationLimit: NATIVE_STELLAR_PAGE_ROWS,
+    routeCursor: 0,
+    routeLimit: NATIVE_STELLAR_PAGE_ROWS,
+  }), [starMapIndustryReadRequest]);
+  const updateStarMapIndustryReadRequest = useCallback((request: StarMapIndustryReadRequest) => {
+    setStarMapIndustryReadRequest((current) => current.systemId === request.systemId &&
+        current.planetId === request.planetId && current.routeFilter === request.routeFilter &&
+        current.query === request.query
+      ? current
+      : { ...request });
+  }, []);
+  const nativeStellarProjectionIdentity = useMemo(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeStellarProjectionReadIdentity = useMemo(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeStellarProjectionSource = useMemo(() => nativeStellarProjectionReadIdentity
+    ? createNativePlayerAuthorityStellarProjectionSource(desktopBridge, nativeStellarProjectionReadIdentity)
+    : null, [desktopBridge, nativeStellarProjectionReadIdentity]);
+  const nativeStarMapCatalogSource = useMemo(() => nativeStellarProjectionReadIdentity
+    ? createNativePlayerAuthorityStarMapCatalogSource(desktopBridge, nativeStellarProjectionReadIdentity)
+    : null, [desktopBridge, nativeStellarProjectionReadIdentity]);
+  const nativeStarMapCatalogFrame = useMemo(() => nativeStellarProjectionIdentity
+    ? selectNativeStarMapCatalogFrame(nativeStarMapCatalogSnapshot, nativeStellarProjectionIdentity)
+    : null, [nativeStarMapCatalogSnapshot, nativeStellarProjectionIdentity]);
+  const nativeStarMapCatalogStatus: StarMapNativeReadStatus = !nativePlayerAuthorityBoundFrame ||
+      nativeStarMapCatalogFrame?.revision === nativeStellarProjectionIdentity?.revision
+    ? "ready"
+    : nativeStarMapCatalogFrame
+      ? "loading"
+    : !nativeStellarProjectionIdentity || !nativeStarMapCatalogSource ||
+        nativeStarMapCatalogSnapshot.status === "unavailable"
+      ? "unavailable"
+      : "loading";
+  const nativeStarMapWorkspaceReadModel = useMemo(() => nativeStellarProjectionIdentity
+    ? selectNativeStarMapWorkspaceReadModel(
+        nativeStellarWorkspaceSnapshot,
+        nativeStellarProjectionIdentity,
+        nativeStellarIndustrySelector,
+      )
+    : null, [
+    nativeStellarIndustrySelector,
+    nativeStellarProjectionIdentity,
+    nativeStellarWorkspaceSnapshot,
+  ]);
+  const nativeStarMapWorkspaceReadStatus: StarMapNativeReadStatus = !nativePlayerAuthorityBoundFrame ||
+      nativeStarMapWorkspaceReadModel?.revision === nativeStellarProjectionIdentity?.revision
+    ? "ready"
+    : nativeStarMapWorkspaceReadModel
+      ? "loading"
+    : !nativeStellarProjectionIdentity || !nativeStellarProjectionSource ||
+        nativeStellarWorkspaceSnapshot.overview.status === "unavailable" ||
+        nativeStellarWorkspaceSnapshot.industry.status === "unavailable"
+      ? "unavailable"
+      : "loading";
+  const nativeStellarQuantumReadModel = useMemo(() => nativeStellarProjectionIdentity
+    ? selectNativePlayerAuthorityStellarQuantumReadModel(
+        nativeStellarWorkspaceSnapshot,
+        nativeStellarProjectionIdentity,
+        DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
+      )
+    : null, [
+    nativeStellarProjectionIdentity,
+    nativeStellarWorkspaceSnapshot,
+  ]);
+  const nativeStellarQuantumReadStatus: StarMapNativeReadStatus = !nativePlayerAuthorityBoundFrame ||
+      nativeStellarQuantumReadModel?.revision === nativeStellarProjectionIdentity?.revision
+    ? "ready"
+    : nativeStellarQuantumReadModel
+      ? "loading"
+    : !nativeStellarProjectionIdentity || !nativeStellarProjectionSource ||
+        nativeStellarWorkspaceSnapshot.quantum.status === "unavailable"
+      ? "unavailable"
+      : "loading";
+  const nativeStellarLineageCurrent = Boolean(nativeStellarProjectionIdentity &&
+    nativeStellarProjectionReadIdentity &&
+    nativeStellarProjectionIdentity.sessionId === nativeStellarProjectionReadIdentity.sessionId &&
+    nativeStellarProjectionIdentity.runId === nativeStellarProjectionReadIdentity.runId &&
+    nativeStellarProjectionIdentity.revision === nativeStellarProjectionReadIdentity.revision &&
+    nativeStellarProjectionIdentity.registryFingerprint === nativeStellarProjectionReadIdentity.registryFingerprint);
+  const nativeStarMapWritesEnabled = nativeStellarLineageCurrent &&
+    nativeStarMapWorkspaceReadModel?.revision === nativeStellarProjectionReadIdentity?.revision;
+  const nativeStellarQuantumWritesEnabled = nativeStellarLineageCurrent &&
+    nativeStellarQuantumReadModel?.revision === nativeStellarProjectionReadIdentity?.revision;
+  const commandPaletteEntitySearchSelector = useMemo(
+    () => createCommandPaletteEntitySearchSelector(
+      commandPaletteEntitySearchRequest.query,
+      commandPaletteEntitySearchRequest.cursor,
+    ),
+    [
+      commandPaletteEntitySearchRequest.cursor,
+      commandPaletteEntitySearchRequest.query,
+      recipeWorkspaceRegistryFingerprint,
+    ],
+  );
+  const updateCommandPaletteEntitySearchRequest = useCallback((query: string, cursor: number) => {
+    setCommandPaletteEntitySearchRequest((current) => current.query === query && current.cursor === cursor
+      ? current
+      : { query, cursor });
+  }, []);
+  const nativeCommandPaletteEntitySearchIdentity = useMemo<NativeCommandPaletteEntitySearchIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeCommandPaletteEntitySearchReadIdentity = useMemo<NativeCommandPaletteEntitySearchIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeCommandPaletteEntitySearchStoreRef = useRef<NativeCommandPaletteEntitySearchStore | null>(null);
+  if (nativeCommandPaletteEntitySearchStoreRef.current === null) {
+    nativeCommandPaletteEntitySearchStoreRef.current = new NativeCommandPaletteEntitySearchStore();
+  }
+  const nativeCommandPaletteEntitySearchStore = nativeCommandPaletteEntitySearchStoreRef.current;
+  const nativeCommandPaletteEntitySearchSnapshot = useSyncExternalStore(
+    nativeCommandPaletteEntitySearchStore.subscribe,
+    nativeCommandPaletteEntitySearchStore.getSnapshot,
+    nativeCommandPaletteEntitySearchStore.getSnapshot,
+  );
+  const nativeCommandPaletteEntitySearchSource = useMemo(
+    () => nativeCommandPaletteEntitySearchReadIdentity
+      ? createNativePlayerAuthorityCommandPaletteEntitySearchSource(
+        desktopBridge,
+        nativeCommandPaletteEntitySearchReadIdentity,
+      )
+      : null,
+    [desktopBridge, nativeCommandPaletteEntitySearchReadIdentity],
+  );
+  const nativeCommandPaletteEntitySearchFrame = useMemo(
+    () => nativeCommandPaletteEntitySearchIdentity
+      ? selectNativeCommandPaletteEntitySearchFrame(
+        nativeCommandPaletteEntitySearchSnapshot,
+        nativeCommandPaletteEntitySearchIdentity,
+        commandPaletteEntitySearchSelector,
+      )
+      : null,
+    [
+      commandPaletteEntitySearchSelector,
+      nativeCommandPaletteEntitySearchIdentity,
+      nativeCommandPaletteEntitySearchSnapshot,
+    ],
+  );
+  const nativeCommandPaletteEntitySearchReadModel = useMemo(
+    () => selectNativeCommandPaletteEntitySearchReadModel(
+      nativeCommandPaletteEntitySearchFrame,
+      {
+        enabled: Boolean(nativeCommandPaletteEntitySearchIdentity),
+        sessionId: nativeCommandPaletteEntitySearchIdentity?.sessionId ?? null,
+        runId: nativeCommandPaletteEntitySearchIdentity?.runId ?? null,
+        expectedRevision: nativeCommandPaletteEntitySearchIdentity?.revision ?? factoryThinViewExpectedRevision,
+        expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+        selector: commandPaletteEntitySearchSelector,
+      },
+    ),
+    [
+      commandPaletteEntitySearchSelector,
+      factoryThinViewExpectedRevision,
+      nativeCommandPaletteEntitySearchFrame,
+      nativeCommandPaletteEntitySearchIdentity,
+      recipeWorkspaceRegistryFingerprint,
+    ],
+  );
+  const commandPaletteEntitySearchStatus = !commandPaletteOpen || !nativePlayerAuthorityBoundFrame ||
+      commandPaletteEntitySearchSelector.query.length < 2
+    ? "empty"
+    : commandPaletteEntitySearchSelector.truncated
+      ? "truncated"
+      : !nativeCommandPaletteEntitySearchIdentity
+        ? "unavailable"
+        : nativeCommandPaletteEntitySearchReadModel?.revision === nativeCommandPaletteEntitySearchIdentity.revision
+          ? "ready"
+          : nativeCommandPaletteEntitySearchReadModel
+            ? "loading"
+          : nativeCommandPaletteEntitySearchSnapshot.status === "unavailable"
+            ? "unavailable"
+            : "loading";
+  const nativeRecipeWorkspaceFrame = useMemo(() => nativeRecipeWorkspaceIdentity
+    ? selectNativeRecipeWorkspaceFrame(
+        nativeRecipeWorkspaceSnapshot,
+        nativeRecipeWorkspaceIdentity,
+        recipeWorkspaceSelector,
+      )
+    : null, [nativeRecipeWorkspaceIdentity, nativeRecipeWorkspaceSnapshot, recipeWorkspaceSelector]);
+  const nativeRecipeWorkspaceReadModel = useMemo(
+    () => selectNativeRecipeWorkspaceReadModel(nativeRecipeWorkspaceFrame, {
+      enabled: Boolean(nativeRecipeWorkspaceIdentity),
+      sessionId: nativeRecipeWorkspaceIdentity?.sessionId ?? null,
+      runId: nativeRecipeWorkspaceIdentity?.runId ?? null,
+      expectedRevision: nativeRecipeWorkspaceFrame?.revision ??
+        nativeRecipeWorkspaceIdentity?.revision ?? factoryThinViewExpectedRevision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+      selector: recipeWorkspaceSelector,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      nativeRecipeWorkspaceFrame,
+      nativeRecipeWorkspaceIdentity,
+      recipeWorkspaceRegistryFingerprint,
+      recipeWorkspaceSelector,
+    ],
+  );
+  const nativeRecipeWorkspaceReadStatus = nativeRecipeWorkspaceFrame &&
+      nativeRecipeWorkspaceIdentity && nativeRecipeWorkspaceSnapshot.status === "ready" &&
+      nativeRecipeWorkspaceFrame.revision === nativeRecipeWorkspaceIdentity.revision
+    ? "ready" as const
+    : nativeRecipeWorkspaceFrame
+      ? nativeRecipeWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : "loading" as const
+      : !nativeRecipeWorkspaceIdentity || nativeRecipeWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeRecipeWorkspaceSnapshot.status === "empty"
+          ? "empty" as const
+          : "loading" as const;
+  const webRecipeWorkspaceReadModel = useMemo(
+    () => recipesOpen && !nativePlayerAuthorityBoundFrame
+      ? createWebRecipeWorkspaceReadModel(game, recipeWorkspaceSelector, recipeWorkspaceRegistryFingerprint)
+      : null,
+    [
+      game,
+      nativePlayerAuthorityBoundFrame,
+      recipeWorkspaceRegistryFingerprint,
+      recipeWorkspaceSelector,
+      recipesOpen,
+    ],
+  );
+  const recipeWorkspaceReadModel = nativePlayerAuthorityBoundFrame
+    ? nativeRecipeWorkspaceReadModel
+    : webRecipeWorkspaceReadModel;
+  const nativeFactoryThinViewMode = nativePlayerAuthorityMacroReadOnly
+    ? "native-authoritative-paused"
+    : nativePlayerAuthorityActiveFrame
+      ? "native-authoritative"
+      : nativePlayerAuthorityBoundFrame
+        ? "native-authoritative-paused"
+        : windowsNativeCoreAvailable && windowsNativeCoreBetaEnabled &&
+            ["shadow-active", "native-ready"].includes(windowsNativeCoreBetaStatus)
+          ? "javascript-shadow"
+          : "inactive";
+  const nativeFactoryThinViewActive = nativeFactoryThinViewMode === "native-authoritative" ||
+    nativeFactoryThinViewMode === "javascript-shadow";
+  useEffect(() => {
+    if (nativeFactoryThinViewMode === "native-authoritative-paused") {
+      // Keep the last verified discovery atom for diagnostics while the native
+      // clock is uncertain. It is not eligible to drive a newer projection.
+      return;
+    }
+    if (nativeFactoryThinViewMode !== "native-authoritative" ||
+      !nativePlayerAuthorityActiveFrame?.sessionId) {
+      nativePlanetNavigationDiscoveryStore.clear();
+      return;
+    }
+    const source = createNativePlayerAuthorityProjectionSource(
+      desktopBridge,
+      nativePlayerAuthorityActiveFrame.sessionId,
+    );
+    if (!source) {
+      nativePlanetNavigationDiscoveryStore.clear();
+      return;
+    }
+    void nativePlanetNavigationDiscoveryStore.refresh(source, {
+      enabled: true,
+      sessionId: nativePlayerAuthorityActiveFrame.sessionId,
+      expectedRevision: factoryThinViewExpectedRevision,
+    }).catch(() => undefined);
+  }, [
+    desktopBridge,
+    factoryThinViewExpectedRevision,
+    nativeFactoryThinViewMode,
+    nativePlanetNavigationDiscoveryStore,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+  ]);
+  const nativePlanetNavigationDiscoveryFrame = nativePlanetNavigationDiscoverySnapshot.frame;
+  const nativeFactoryAuthoritativeRoute = nativePlanetNavigationDiscoverySnapshot.status === "ready" &&
+      nativePlanetNavigationDiscoveryFrame !== null &&
+      nativePlanetNavigationDiscoveryFrame.sessionId === nativePlayerAuthorityActiveFrame?.sessionId &&
+      nativePlanetNavigationDiscoveryFrame.revision === factoryThinViewExpectedRevision
+    ? nativePlanetNavigationDiscoveryFrame
+    : null;
+  const nativeFactoryProjectionRouteReady = !nativePlayerAuthorityOwnsRuntime ||
+    (nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryAuthoritativeRoute !== null);
+  const [nativeFactoryConfirmedProjectionRoute, setNativeFactoryConfirmedProjectionRoute] = useState<{
+    readonly sessionId: string;
+    readonly planetId: PlanetId;
+  } | null>(null);
+  const nativeFactoryExactProjectionRoute = nativeFactoryAuthoritativeRoute
+    ? {
+        sessionId: nativeFactoryAuthoritativeRoute.sessionId,
+        planetId: nativeFactoryAuthoritativeRoute.currentPlanetId as PlanetId,
+      }
+    : null;
+  // Discovery is exact-revision gated, so it is briefly absent on every normal
+  // Rust clock tick. Retain only the last confirmed route identity for that
+  // same session during this read gap. It never enables an IPC read: the
+  // separate `nativeFactoryProjectionRouteReady` proof below still requires the
+  // current exact discovery atom.
+  const nativeFactoryDiscoveredProjectionRoute = retainNativePlanetRouteIdentity(
+    nativePlayerAuthorityBoundFrame?.sessionId,
+    nativeFactoryExactProjectionRoute,
+    nativeFactoryConfirmedProjectionRoute,
+  );
+  const nativeFactoryUnpinnedBootstrap = nativePlanetRouteRequiresBootstrap(
+    nativePlayerAuthorityOwnsRuntime,
+    nativeFactoryConfirmedProjectionRoute,
+    nativeFactoryDiscoveredProjectionRoute,
+  );
+  // The unbound token is deliberately not derived from the legacy GameState.
+  // Every native read below is disabled until discovery proves the exact
+  // session/revision/current-planet tuple, so this value can only appear in the
+  // bounded loading shell and can never address authoritative gameplay data.
+  const nativeFactoryProjectionPlanetId = nativePlayerAuthorityOwnsRuntime
+    ? (nativeFactoryDiscoveredProjectionRoute?.planetId ?? "__native_route_unbound__" as PlanetId)
+    : game.activePlanetId;
+  const nativeFactoryProjectionIdentityRef = useRef<NativeFactoryProjectionIdentity | null>(null);
+  nativeFactoryProjectionIdentityRef.current = nativePlayerAuthorityActiveFrame?.runId && nativeFactoryAuthoritativeRoute &&
+      nativeFactoryAuthoritativeRoute.sessionId === nativePlayerAuthorityActiveFrame.sessionId &&
+      nativeFactoryAuthoritativeRoute.revision === nativePlayerAuthorityActiveFrame.revision
+    ? Object.freeze({
+        sessionId: nativePlayerAuthorityActiveFrame.sessionId,
+        runId: nativePlayerAuthorityActiveFrame.runId,
+        revision: nativePlayerAuthorityActiveFrame.revision,
+        planetId: nativeFactoryAuthoritativeRoute.currentPlanetId,
+      })
+    : null;
+  const factoryGestureRouteKey = nativePlayerAuthorityOwnsRuntime
+    ? `${nativePlayerAuthorityBoundFrame?.sessionId ?? "unbound"}:${nativeFactoryProjectionPlanetId}`
+    : `web:${game.activePlanetId}`;
+  const nativeEntityRecipeProjectionTargetEntityId = nativePlayerAuthorityCommandPending
+    ? nativeEntityRecipeProjectionTargetEntityIdRef.current
+    : null;
+  const factoryThinViewAllSelectedEntityIds = useMemo(
+    () => nativeFactoryUnpinnedBootstrap
+      ? []
+      : nativeEntityRecipeProjectionTargetEntityId
+        ? [nativeEntityRecipeProjectionTargetEntityId]
+        : [...new Set(selectedEntityIds)],
+    [nativeEntityRecipeProjectionTargetEntityId, nativeFactoryUnpinnedBootstrap, selectedEntityIds],
+  );
+  const factoryThinViewSelectedEntityIds = useMemo(
+    () => factoryThinViewAllSelectedEntityIds.slice(0, FACTORY_READ_MODEL_LIMITS.selectedEntityRows),
+    [factoryThinViewAllSelectedEntityIds],
+  );
+  const factoryThinViewAllSelectedBeltIds = useMemo(
+    () => nativeFactoryUnpinnedBootstrap
+      ? []
+      : nativeEntityRecipeProjectionTargetEntityId
+        ? []
+        : [...new Set(selectedBeltId ? [selectedBeltId, ...selectedBeltIds] : selectedBeltIds)],
+    [
+      nativeEntityRecipeProjectionTargetEntityId,
+      nativeFactoryUnpinnedBootstrap,
+      selectedBeltId,
+      selectedBeltIds,
+    ],
+  );
+  const factoryThinViewSelectedBeltIds = useMemo(
+    () => factoryThinViewAllSelectedBeltIds.slice(0, FACTORY_READ_MODEL_LIMITS.selectedBeltRows),
+    [factoryThinViewAllSelectedBeltIds],
+  );
+  const factoryThinViewRelatedEntityIds = useMemo(
+    () => selectNativeFactorySelectionRelatedEntityIds(nativeFactoryThinViewSnapshot, {
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
+      revision: factoryThinViewExpectedRevision,
+      planetId: nativeFactoryProjectionPlanetId,
+      selectedEntityIds: factoryThinViewSelectedEntityIds,
+      selectedBeltIds: factoryThinViewSelectedBeltIds,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      factoryThinViewSelectedBeltIds,
+      factoryThinViewSelectedEntityIds,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryThinViewSnapshot,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+      nativePlayerAuthorityActiveFrame?.runId,
+    ],
+  );
+  const factoryInteractionConnectionEntityIds = useMemo(
+    () => nativeFactoryUnpinnedBootstrap
+      ? []
+      : [...new Set([connectionDraft?.nodeId, connectionCandidateNodeId].filter((id): id is string => Boolean(id)))],
+    [connectionCandidateNodeId, connectionDraft?.nodeId, nativeFactoryUnpinnedBootstrap],
+  );
+  const factoryInteractionPinRequest = useMemo(
+    () => createNativeFactoryInteractionPinRequest({
+      selectedEntityIds: factoryThinViewAllSelectedEntityIds,
+      selectedBeltIds: factoryThinViewAllSelectedBeltIds,
+      primarySelectedBeltId: nativeFactoryUnpinnedBootstrap ? null : selectedBeltId,
+      connectionEntityIds: factoryInteractionConnectionEntityIds,
+      relatedEntityIds: factoryThinViewRelatedEntityIds,
+    }),
+    [
+      factoryInteractionConnectionEntityIds,
+      factoryThinViewAllSelectedBeltIds,
+      factoryThinViewAllSelectedEntityIds,
+      factoryThinViewRelatedEntityIds,
+      nativeFactoryUnpinnedBootstrap,
+      selectedBeltId,
+    ],
+  );
+  const factoryViewportPinnedEntityIds = factoryInteractionPinRequest.entityIds;
+  const factoryViewportPinnedBeltIds = factoryInteractionPinRequest.beltIds;
+  const nativeFactoryViewportBounds = useMemo(
+    () => getNativeFactoryViewportBounds(canvasVisibleRectangle, viewportZoom),
+    [
+      canvasVisibleRectangle.bottom,
+      canvasVisibleRectangle.left,
+      canvasVisibleRectangle.right,
+      canvasVisibleRectangle.top,
+      viewportZoom,
+    ],
+  );
+  const nativeAuthoritativeFactoryCanvasFrame = useMemo(
+    () => selectNativeAuthoritativeFactoryCanvasFrame(nativeFactoryThinViewSnapshot, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+      planetId: nativeFactoryProjectionPlanetId,
+      bounds: nativeFactoryViewportBounds,
+      requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
+      requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
+      requestTruncated:
+        factoryInteractionPinRequest.truncated ||
+        factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+        factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+    }),
+    [
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewExpectedRevision,
+      factoryInteractionPinRequest.truncated,
+      factoryViewportPinnedBeltIds,
+      factoryViewportPinnedEntityIds,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
+      nativeFactoryThinViewMode,
+      nativeFactoryThinViewSnapshot,
+      nativeFactoryViewportBounds,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+      nativePlayerAuthorityActiveFrame?.runId,
+    ],
+  );
+  const nativeEntityInventoryProjectionBinding = useMemo(() => {
+    const canvas = nativeAuthoritativeFactoryCanvasFrame;
+    const inventory = nativeFactoryInventoryFrame;
+    if (!canvas || !inventory || canvas.sessionId !== inventory.sessionId ||
+        canvas.runId !== inventory.runId || canvas.revision !== inventory.revision ||
+        canvas.planetId !== inventory.activePlanetId) return null;
+    return Object.freeze({ canvas, inventory });
+  }, [nativeAuthoritativeFactoryCanvasFrame, nativeFactoryInventoryFrame]);
+  const nativeAuthoritativeFactoryCanvasFrameRef = useRef(nativeAuthoritativeFactoryCanvasFrame);
+  nativeAuthoritativeFactoryCanvasFrameRef.current = nativeAuthoritativeFactoryCanvasFrame;
+  const nativeFactoryPositionWriteReady = Boolean(
+    nativePlayerAuthorityOwnsRuntime && !nativePlayerAuthorityCommandPending &&
+    nativePlayerAuthorityCommandSource && nativeAuthoritativeFactoryCanvasFrame &&
+    nativeAuthoritativeFactoryCanvasFrame.sessionId === nativePlayerAuthorityCommandSource.sessionId &&
+    nativeAuthoritativeFactoryCanvasFrame.runId === nativePlayerAuthorityCommandSource.runId &&
+    nativeAuthoritativeFactoryCanvasFrame.revision === nativePlayerAuthorityCommandSource.baseRevision,
+  );
+  const nativeAuthoritativeFactoryInteractionRows = useMemo(
+    () => selectNativeAuthoritativeFactoryInteractionRows(nativeAuthoritativeFactoryCanvasFrame, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
+      revision: factoryThinViewExpectedRevision,
+      planetId: nativeFactoryProjectionPlanetId,
+      selectedEntityIds: factoryThinViewAllSelectedEntityIds,
+      selectedBeltIds: factoryThinViewAllSelectedBeltIds,
+      primarySelectedBeltId: nativeFactoryUnpinnedBootstrap ? null : selectedBeltId,
+      connectionEntityIds: factoryInteractionConnectionEntityIds,
+      requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
+      requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
+      requestTruncated: factoryInteractionPinRequest.truncated,
+    }),
+    [
+      factoryInteractionConnectionEntityIds,
+      factoryInteractionPinRequest.truncated,
+      factoryThinViewAllSelectedBeltIds,
+      factoryThinViewAllSelectedEntityIds,
+      factoryThinViewExpectedRevision,
+      factoryViewportPinnedBeltIds,
+      factoryViewportPinnedEntityIds,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
+      nativeFactoryUnpinnedBootstrap,
+      nativeAuthoritativeFactoryCanvasFrame,
+      nativeFactoryThinViewMode,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+      nativePlayerAuthorityActiveFrame?.runId,
+      selectedBeltId,
+    ],
+  );
+  const nativeAuthoritativeFactoryWorkspaceFrame = useMemo(
+    () => selectNativeAuthoritativeFactoryWorkspaceFrame(nativeFactoryThinViewSnapshot, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
+      nativeFactoryThinViewMode,
+      nativeFactoryThinViewSnapshot,
+      nativePlayerAuthorityActiveFrame?.runId,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+    ],
+  );
+  const nativeConstructionCenterWorkspaceFrame = useMemo(
+    () => selectNativeConstructionCenterWorkspaceFrame(nativeAuthoritativeFactoryWorkspaceFrame),
+    [nativeAuthoritativeFactoryWorkspaceFrame],
+  );
+  const nativeConstructionCenterLatestIdentity = useMemo<NativeConstructionCenterFrameIdentity | null>(
+    () => nativeFactoryInventoryIdentity && nativeFactoryProjectionPlanetId
+      ? Object.freeze({
+        sessionId: nativeFactoryInventoryIdentity.sessionId,
+        runId: nativeFactoryInventoryIdentity.runId,
+        revision: nativeFactoryInventoryIdentity.revision,
+        activePlanetId: nativeFactoryProjectionPlanetId,
+      })
+      : null,
+    [nativeFactoryInventoryIdentity, nativeFactoryProjectionPlanetId],
+  );
+  const nativeConstructionCenterReadStatus = nativeConstructionCenterWorkspaceFrame
+    ? "ready" as const
+    : nativeFactoryThinViewSnapshot.status === "ready" || nativeFactoryThinViewSnapshot.status === "unavailable"
+      ? "unavailable" as const
+      : "loading" as const;
+  const nativeConstructionCenterWorkspaceFrameRef = useRef(nativeConstructionCenterWorkspaceFrame);
+  const nativeConstructionCenterOpenRef = useRef(constructionCenterOpen);
+  const nativeConstructionCenterPendingIdentityRef = useRef(nativeConstructionCenterPendingIdentity);
+  nativeConstructionCenterWorkspaceFrameRef.current = nativeConstructionCenterWorkspaceFrame;
+  nativeConstructionCenterOpenRef.current = constructionCenterOpen;
+  nativeConstructionCenterPendingIdentityRef.current = nativeConstructionCenterPendingIdentity;
+  useEffect(() => {
+    const pending = nativeConstructionCenterPendingIdentityRef.current;
+    if (!pending) return;
+    const current = nativeConstructionCenterWorkspaceFrame;
+    const activeFrameDrifted = Boolean(nativePlayerAuthorityActiveFrame) && (
+      nativePlayerAuthorityActiveFrame!.sessionId !== pending.sessionId ||
+      nativePlayerAuthorityActiveFrame!.runId !== pending.runId
+    );
+    const projectionIdentityDrifted = Boolean(current) && (
+      current!.sessionId !== pending.sessionId || current!.runId !== pending.runId ||
+      current!.activePlanetId !== pending.activePlanetId
+    );
+    const failedBeforeAck = !nativePlayerAuthorityCommandPending && pending.expectedRevision === null;
+    const freshProjectionArrived = !nativePlayerAuthorityCommandPending && pending.expectedRevision !== null &&
+      Boolean(current) && current!.sessionId === pending.sessionId && current!.runId === pending.runId &&
+      current!.activePlanetId === pending.activePlanetId && current!.revision >= pending.expectedRevision;
+    if (!nativePlayerAuthorityOwnsRuntime || activeFrameDrifted || projectionIdentityDrifted ||
+        nativeFactoryProjectionPlanetId !== pending.activePlanetId ||
+        failedBeforeAck || freshProjectionArrived) {
+      nativeConstructionCenterPendingIdentityRef.current = null;
+      setNativeConstructionCenterPendingIdentity(null);
+    }
+  }, [
+    nativeConstructionCenterWorkspaceFrame,
+    nativeFactoryProjectionPlanetId,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityCommandPending,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  const nativeConstructionCenterUiPendingIdentity = nativeConstructionCenterPendingIdentity ?? (
+    nativePlayerAuthorityCommandPending && nativeConstructionCenterWorkspaceFrame
+      ? {
+        sessionId: nativeConstructionCenterWorkspaceFrame.sessionId,
+        runId: nativeConstructionCenterWorkspaceFrame.runId,
+        revision: nativeConstructionCenterWorkspaceFrame.revision,
+        activePlanetId: nativeConstructionCenterWorkspaceFrame.activePlanetId,
+        kind: "otherNativeCommand" as const,
+        targetId: null,
+        expectedRevision: null,
+      }
+      : null
+  );
+  const nativePlayerAuthorityMacroControllerRef = useRef<
+    NativePlayerAuthorityMacroController | null | undefined
+  >(undefined);
+  if (nativePlayerAuthorityMacroControllerRef.current === undefined) {
+    nativePlayerAuthorityMacroControllerRef.current = createNativePlayerAuthorityMacroController(desktopBridge);
+  }
+  const nativePlayerAuthorityMacroController = nativePlayerAuthorityMacroControllerRef.current;
+  const [nativePlayerAuthorityMacroControllerSnapshot, setNativePlayerAuthorityMacroControllerSnapshot] =
+    useState(() => nativePlayerAuthorityMacroController?.getSnapshot() ?? null);
+  useEffect(() => {
+    if (!nativePlayerAuthorityMacroController) {
+      setNativePlayerAuthorityMacroControllerSnapshot(null);
+      return;
+    }
+    setNativePlayerAuthorityMacroControllerSnapshot(nativePlayerAuthorityMacroController.getSnapshot());
+    return nativePlayerAuthorityMacroController.subscribe(() => {
+      setNativePlayerAuthorityMacroControllerSnapshot(nativePlayerAuthorityMacroController.getSnapshot());
+    });
+  }, [nativePlayerAuthorityMacroController]);
+  useEffect(() => {
+    nativePlayerAuthorityMacroController?.bind({
+      activeFrame: nativePlayerAuthorityActiveFrame,
+      macroStatus: nativePlayerAuthorityMacroStatus,
+      paused: nativeAuthoritativeFactoryWorkspaceFrame?.runStatus.paused ?? null,
+      simulationSpeed: nativeAuthoritativeFactoryWorkspaceFrame?.simulationSpeed ?? null,
+      timeWarp: nativeAuthoritativeFactoryWorkspaceFrame?.timeWarp ?? null,
+      commandSource: nativePlayerAuthorityCommandSource,
+    });
+  }, [
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityCommandSource,
+    nativePlayerAuthorityMacroController,
+    nativePlayerAuthorityMacroStatus,
+  ]);
+  useEffect(() => () => nativePlayerAuthorityMacroController?.dispose(), [nativePlayerAuthorityMacroController]);
+  const nativeRecipeFocusReadModel = useMemo(
+    () => selectNativeRecipeFocusReadModel(nativeFactoryThinViewSnapshot, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
+      nativeFactoryThinViewMode,
+      nativeFactoryThinViewSnapshot,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+    ],
+  );
+  const nativePlanetViewportReadModel = useMemo(
+    () => selectNativePlanetViewportReadModel(nativeFactoryThinViewSnapshot, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
+      nativeFactoryThinViewMode,
+      nativeFactoryThinViewSnapshot,
+      nativePlayerAuthorityActiveFrame?.runId,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+    ],
+  );
+  const nativePlanetViewportReadModelRef = useRef(nativePlanetViewportReadModel);
+  nativePlanetViewportReadModelRef.current = nativePlanetViewportReadModel;
+  const nativeFactoryRouteUnsafe = nativePlayerAuthorityOwnsRuntime &&
+    (nativeFactoryUnpinnedBootstrap || pendingNativePlanetChange !== null);
+  const nativeFactoryProjectionPending = nativePlayerAuthorityOwnsRuntime &&
+    (!nativeAuthoritativeFactoryWorkspaceFrame || !nativeAuthoritativeFactoryCanvasFrame ||
+      nativeFactoryRouteUnsafe);
+  const nativeFactoryProjectionPendingRef = useRef(nativeFactoryProjectionPending);
+  nativeFactoryProjectionPendingRef.current = nativeFactoryProjectionPending;
+  const factoryGestureSurfaceKey = `${factoryGestureRouteKey}:${nativeFactoryRouteUnsafe ? "unsafe" : "stable"}`;
+  const factoryConfirmedActivePlanetId = nativePlayerAuthorityOwnsRuntime
+    ? nativeAuthoritativeFactoryWorkspaceFrame?.planetNavigation.activePlanetId as PlanetId | undefined ?? null
+    : game.activePlanetId;
+  const factoryCanvasPlanetId = factoryConfirmedActivePlanetId ?? nativeFactoryProjectionPlanetId;
+  const nativePendingFactoryRunStatusReadModel = useMemo<FactoryRunStatusReadModel>(() => ({
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "native-core",
+    revision: factoryThinViewExpectedRevision,
+    activePlanetId: nativeFactoryProjectionPlanetId,
+    paused: true,
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId]);
+  const nativePendingFactoryConstructionHeadlineReadModel = useMemo<FactoryConstructionHeadlineReadModel>(() => ({
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "native-core",
+    revision: factoryThinViewExpectedRevision,
+    activePlanetId: nativeFactoryProjectionPlanetId,
+    activePlanetDisplayName: "等待原生投影",
+    constructionQueueCount: 0,
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId]);
+  const nativePendingFactoryConstructionWorkspaceReadModel = useMemo<FactoryConstructionWorkspaceReadModel>(() => ({
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "native-core",
+    revision: factoryThinViewExpectedRevision,
+    activePlanetId: nativeFactoryProjectionPlanetId,
+    queue: { rows: [], totalCount: 0, truncated: false },
+    nativeCenterWorkspace: null,
+    automation: {
+      enabled: false,
+      quantumSourceEnabled: false,
+      totalCrafted: 0,
+      lastCraftedId: null,
+      targets: { rows: [], totalCount: 0, truncated: false },
+      jobs: { rows: [], totalCount: 0, truncated: false },
+      destroyedByproducts: { rows: [], totalCount: 0, truncated: false },
+    },
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId]);
+  const nativePendingFactoryPlanetNavigationReadModel = useMemo<PlanetNavigationReadModel>(() => ({
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    activePlanetId: nativeFactoryProjectionPlanetId,
+    planets: { rows: [], totalCount: 0, truncated: false },
+  }), [nativeFactoryProjectionPlanetId]);
+  const nativePendingFactoryViewportReadModel = useMemo<FactoryViewportReadModel>(() => ({
+    schema: "factory-viewport-read-model-v1",
+    source: "native-core",
+    revision: factoryThinViewExpectedRevision,
+    planetId: nativeFactoryProjectionPlanetId,
+    bounds: nativeFactoryViewportBounds,
+    pinnedEntityIds: [],
+    pinnedBeltIds: [],
+    planetTotals: { entities: 0, belts: 0 },
+    viewportTotals: { entities: 0, belts: 0 },
+    worldBounds: nativeFactoryViewportBounds,
+    entities: [],
+    belts: [],
+    broadQueryFallback: false,
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId, nativeFactoryViewportBounds]);
+  const webRecipeFocusReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebRecipeFocusReadModel(game),
+    [game.recipeFocus, nativePlayerAuthorityOwnsRuntime],
+  );
+  const recipeFocusReadModel = nativePlayerAuthorityOwnsRuntime
+    ? nativeRecipeFocusReadModel
+    : webRecipeFocusReadModel;
+  const webFactoryRunStatusReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebFactoryRunStatusReadModel(game),
+    [game.activePlanetId, game.paused, nativePlayerAuthorityOwnsRuntime],
+  );
+  const factoryRunStatusReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryWorkspaceFrame?.runStatus ?? nativePendingFactoryRunStatusReadModel
+      : selectFactoryRunStatusReadModel(
+          webFactoryRunStatusReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+        ),
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, nativePendingFactoryRunStatusReadModel, nativePlayerAuthorityOwnsRuntime, webFactoryRunStatusReadModel],
+  );
+  const webFactoryConstructionHeadlineReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebFactoryConstructionHeadlineReadModel(game),
+    [game.activePlanetId, game.constructionQueue.length, nativePlayerAuthorityOwnsRuntime],
+  );
+  const factoryConstructionHeadlineReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryWorkspaceFrame?.constructionHeadline ?? nativePendingFactoryConstructionHeadlineReadModel
+      : selectFactoryConstructionHeadlineReadModel(
+          webFactoryConstructionHeadlineReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+        ),
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, nativePendingFactoryConstructionHeadlineReadModel, nativePlayerAuthorityOwnsRuntime, webFactoryConstructionHeadlineReadModel],
+  );
+  const webFactoryConstructionWorkspaceReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebFactoryConstructionWorkspaceReadModel(game),
+    [game, nativePlayerAuthorityOwnsRuntime],
+  );
+  const factoryConstructionWorkspaceReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryWorkspaceFrame?.constructionWorkspace ?? nativePendingFactoryConstructionWorkspaceReadModel
+      : selectFactoryConstructionWorkspaceReadModel(
+          webFactoryConstructionWorkspaceReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+        ),
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, nativePendingFactoryConstructionWorkspaceReadModel, nativePlayerAuthorityOwnsRuntime, webFactoryConstructionWorkspaceReadModel],
+  );
+  const webFactoryPlanetNavigationReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime ? null : createPlanetNavigationReadModel(game),
+    [game, nativePlayerAuthorityOwnsRuntime],
+  );
+  const factoryPlanetNavigationReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryWorkspaceFrame?.planetNavigation ?? nativePendingFactoryPlanetNavigationReadModel
+      : selectFactoryPlanetNavigationReadModel(
+          webFactoryPlanetNavigationReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+        ),
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, nativePendingFactoryPlanetNavigationReadModel, nativePlayerAuthorityOwnsRuntime, webFactoryPlanetNavigationReadModel],
+  );
+  const factoryActivePlanetNavigationRow = useMemo(
+    () => factoryPlanetNavigationReadModel.planets.rows.find(
+      (row) => row.planetId === factoryPlanetNavigationReadModel.activePlanetId,
+    ) ?? webFactoryPlanetNavigationReadModel?.planets.rows.find(
+      (row) => row.planetId === webFactoryPlanetNavigationReadModel.activePlanetId,
+    ),
+    [factoryPlanetNavigationReadModel, webFactoryPlanetNavigationReadModel],
+  );
+  // A bound native session must never infer its Dyson target from the stale
+  // renderer GameState. Until an active native factory frame identifies the
+  // current system, only a previously verified same-run Dyson page may keep
+  // the workspace mounted through the next revision handshake.
+  const nativeDysonRetainedSystemId = useMemo(() => {
+    const frame = nativeDysonWorkspaceSnapshot.frame;
+    const authority = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return frame && authority && frame.sessionId === authority.sessionId &&
+        authority.revision !== null && frame.runId === authority.runId &&
+        frame.revision <= authority.revision &&
+        frame.registryFingerprint === recipeWorkspaceRegistryFingerprint
+      ? frame.selectedSystemId
+      : null;
+  }, [
+    nativeDysonWorkspaceSnapshot.frame,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeDysonFactorySystemId = nativeAuthoritativeFactoryWorkspaceFrame
+    ? factoryActivePlanetNavigationRow?.systemId
+    : undefined;
+  const nativeDysonEffectiveSystemId = nativeDysonSelectedSystemId ?? nativeDysonFactorySystemId ??
+    nativeDysonRetainedSystemId;
+  const nativeDysonWorkspaceIdentity = useMemo(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return frame?.sessionId && frame.runId && frame.revision !== null && nativeDysonEffectiveSystemId
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+          selectedSystemId: nativeDysonEffectiveSystemId,
+        })
+      : null;
+  }, [
+    nativeDysonEffectiveSystemId,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeDysonWorkspaceReadIdentity = useMemo(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return frame?.sessionId && frame.runId && frame.revision !== null && nativeDysonEffectiveSystemId
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+          selectedSystemId: nativeDysonEffectiveSystemId,
+        })
+      : null;
+  }, [
+    nativeDysonEffectiveSystemId,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeDysonWorkspaceSource = useMemo(() => nativeDysonWorkspaceReadIdentity
+    ? createNativePlayerAuthorityDysonWorkspaceSource(desktopBridge, nativeDysonWorkspaceReadIdentity)
+    : null, [desktopBridge, nativeDysonWorkspaceReadIdentity]);
+  const nativeDysonWorkspaceFrame = useMemo(() => nativeDysonWorkspaceIdentity
+    ? selectNativeDysonWorkspaceFrame(nativeDysonWorkspaceSnapshot, nativeDysonWorkspaceIdentity)
+    : null, [nativeDysonWorkspaceIdentity, nativeDysonWorkspaceSnapshot]);
+  const nativeDysonWorkspaceReadStatus = nativeDysonWorkspaceFrame &&
+      nativeDysonWorkspaceIdentity && nativeDysonWorkspaceSnapshot.status === "ready" &&
+      nativeDysonWorkspaceFrame.revision === nativeDysonWorkspaceIdentity.revision
+    ? "ready" as const
+    : nativeDysonWorkspaceFrame
+      ? nativeDysonWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : "loading" as const
+    : !nativeDysonWorkspaceIdentity || !nativeDysonWorkspaceSource ||
+        nativeDysonWorkspaceSnapshot.status === "unavailable"
+      ? "unavailable" as const
+      : nativeDysonWorkspaceSnapshot.status === "empty"
+        ? "empty" as const
+        : "loading" as const;
+  const webFactoryViewportReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebFactoryViewportReadModel(game, {
+      planetId: game.activePlanetId,
+      bounds: nativeFactoryViewportBounds,
+      pinnedEntityIds: factoryViewportPinnedEntityIds,
+      pinnedBeltIds: factoryViewportPinnedBeltIds,
+    }),
+    [
+      factoryViewportPinnedBeltIds,
+      factoryViewportPinnedEntityIds,
+      game.activePlanetId,
+      game.belts,
+      game.entities,
+      nativePlayerAuthorityOwnsRuntime,
+      nativeFactoryViewportBounds,
+    ],
+  );
+  const factoryViewportReadModel = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryCanvasFrame?.viewportReadModel ?? nativePendingFactoryViewportReadModel
+      : selectFactoryViewportReadModel(
+          webFactoryViewportReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+          {
+            bounds: nativeFactoryViewportBounds,
+            requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
+            requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
+            projectionEnabled: nativeFactoryThinViewActive,
+            requestTruncated:
+              factoryInteractionPinRequest.truncated ||
+              factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+              factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+          },
+        ),
+    [
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewExpectedRevision,
+      factoryInteractionPinRequest.truncated,
+      factoryViewportPinnedBeltIds,
+      factoryViewportPinnedEntityIds,
+      nativeFactoryThinViewSnapshot,
+      nativeFactoryThinViewActive,
+      nativeFactoryViewportBounds,
+      nativeAuthoritativeFactoryCanvasFrame,
+      nativePendingFactoryViewportReadModel,
+      nativePlayerAuthorityOwnsRuntime,
+      webFactoryViewportReadModel,
+    ],
+  );
+  useEffect(() => {
+    if (nativeFactoryThinViewMode === "native-authoritative-paused") {
+      // Preserve the last complete frame for diagnostics/read-only rendering,
+      // but never advance it after an uncertain or faulted authority receipt.
+      return;
+    }
+    if (!nativeFactoryThinViewActive) {
+      nativeFactoryThinViewStore.clear();
+      return;
+    }
+    if (nativeFactoryThinViewMode === "native-authoritative" && !nativeFactoryProjectionRouteReady) {
+      nativeFactoryThinViewStore.clear();
+      return;
+    }
+    const coordinates = [
+      nativeFactoryViewportBounds.minX,
+      nativeFactoryViewportBounds.minY,
+      nativeFactoryViewportBounds.maxX,
+      nativeFactoryViewportBounds.maxY,
+    ];
+    if (coordinates.some((value) => !Number.isFinite(value) || Math.abs(value) > 10_000_000)) {
+      nativeFactoryThinViewStore.clear();
+      return;
+    }
+    const projectionSource = nativeFactoryThinViewMode === "native-authoritative"
+      ? createNativePlayerAuthorityProjectionSource(
+          desktopBridge,
+          nativePlayerAuthorityActiveFrame?.sessionId ?? "",
+        )
+      : windowsNativeCoreBetaControllerRef.current;
+    if (!projectionSource) {
+      nativeFactoryThinViewStore.clear();
+      return;
+    }
+    void nativeFactoryThinViewStore.refresh(projectionSource, {
+      expectedRevision: factoryThinViewExpectedRevision,
+      authoritySessionId: nativeFactoryThinViewMode === "native-authoritative"
+        ? nativePlayerAuthorityActiveFrame?.sessionId ?? null
+        : null,
+      authorityRunId: nativeFactoryThinViewMode === "native-authoritative"
+        ? nativePlayerAuthorityActiveFrame?.runId ?? null
+        : null,
+      factory: {
+        selectedEntityIds: factoryThinViewSelectedEntityIds,
+        selectedBeltIds: factoryThinViewSelectedBeltIds,
+      },
+      viewport: {
+        entityPresentationVersion: 1,
+        baseFields: [...RECIPE_FOCUS_NATIVE_BASE_FIELDS, ...PLANET_VIEWPORT_NATIVE_BASE_FIELDS],
+        planetId: nativeFactoryProjectionPlanetId,
+        bounds: nativeFactoryViewportBounds,
+        entityCursor: 0,
+        entityLimit: 256,
+        beltCursor: 0,
+        beltLimit: 512,
+        pinnedEntityIds: [...factoryViewportPinnedEntityIds],
+        pinnedBeltIds: [...factoryViewportPinnedBeltIds],
+      },
+    }).catch(() => undefined);
+  }, [
+    canvasRenderSnapshot.runtimeRevision,
+    desktopBridge,
+    factoryThinViewExpectedRevision,
+    factoryThinViewSelectedBeltIds,
+    factoryThinViewSelectedEntityIds,
+    factoryViewportPinnedBeltIds,
+    factoryViewportPinnedEntityIds,
+    nativeFactoryProjectionPlanetId,
+    nativeFactoryProjectionRouteReady,
+    nativeFactoryViewportBounds,
+    nativeFactoryThinViewStore,
+    nativeFactoryThinViewActive,
+    nativeFactoryThinViewMode,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativeCoreProjectionSessionId,
+    windowsNativeCoreAvailable,
+    windowsNativeCoreBetaEnabled,
+    windowsNativeCoreBetaStatus,
+  ]);
+  useEffect(() => {
+    if (!nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity) {
+      nativeFactoryInventoryStore.clear();
+      return;
+    }
+    if (!nativeFactoryInventoryReadIdentity || !nativeFactoryInventorySource) return;
+    void nativeFactoryInventoryStore.refresh(
+      nativeFactoryInventorySource,
+      nativeFactoryInventoryReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    nativeFactoryInventoryIdentity,
+    nativeFactoryInventoryReadIdentity,
+    nativeFactoryInventorySource,
+    nativeFactoryInventoryStore,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity) {
+      nativeConstructionInventoryStore.clear();
+      return;
+    }
+    if (!nativeFactoryInventoryReadIdentity || !nativeConstructionInventorySource) return;
+    void nativeConstructionInventoryStore.refresh(
+      nativeConstructionInventorySource,
+      nativeFactoryInventoryReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    nativeConstructionInventorySource,
+    nativeConstructionInventoryStore,
+    nativeFactoryInventoryIdentity,
+    nativeFactoryInventoryReadIdentity,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!blueprintsOpen || !nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity) {
+      nativeBlueprintWorkspaceStore.clear();
+      return;
+    }
+    if (!nativeFactoryInventoryReadIdentity || !nativeBlueprintWorkspaceSource) return;
+    void nativeBlueprintWorkspaceStore.refresh(
+      nativeBlueprintWorkspaceSource,
+      nativeFactoryInventoryReadIdentity,
+      nativeBlueprintSelectedId,
+      nativeBlueprintLibraryCursor,
+      nativeBlueprintQueueCursor,
+    ).catch(() => undefined);
+  }, [
+    blueprintsOpen,
+    nativeBlueprintLibraryCursor,
+    nativeBlueprintQueueCursor,
+    nativeBlueprintSelectedId,
+    nativeBlueprintWorkspaceSource,
+    nativeBlueprintWorkspaceStore,
+    nativeFactoryInventoryIdentity,
+    nativeFactoryInventoryReadIdentity,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!technologyOpen || !nativePlayerAuthorityOwnsRuntime || !nativeTechnologyWorkspaceIdentity) {
+      nativeTechnologyWorkspaceStore.clear();
+      return;
+    }
+    if (!nativeTechnologyWorkspaceReadIdentity || !nativeTechnologyWorkspaceSource) return;
+    void nativeTechnologyWorkspaceStore.refresh(
+      nativeTechnologyWorkspaceSource,
+      nativeTechnologyWorkspaceReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeTechnologyWorkspaceIdentity,
+    nativeTechnologyWorkspaceReadIdentity,
+    nativeTechnologyWorkspaceSource,
+    nativeTechnologyWorkspaceStore,
+    technologyOpen,
+  ]);
+  useEffect(() => {
+    if (!recipesOpen || !nativePlayerAuthorityOwnsRuntime || !nativeRecipeWorkspaceIdentity) {
+      nativeRecipeWorkspaceStore.clear();
+      return;
+    }
+    if (!nativeRecipeWorkspaceReadIdentity || !nativeRecipeWorkspaceSource) return;
+    void nativeRecipeWorkspaceStore.refresh(
+      nativeRecipeWorkspaceSource,
+      nativeRecipeWorkspaceReadIdentity,
+      recipeWorkspaceSelector,
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeRecipeWorkspaceIdentity,
+    nativeRecipeWorkspaceReadIdentity,
+    nativeRecipeWorkspaceSource,
+    nativeRecipeWorkspaceStore,
+    recipeWorkspaceSelector,
+    recipesOpen,
+  ]);
+  useEffect(() => {
+    if (!statisticsOpen || !nativePlayerAuthorityOwnsRuntime ||
+        !nativeStatisticsWorkspaceIdentity) {
+      nativeStatisticsWorkspaceStore.close();
+      return;
+    }
+    // The runtime publishes a successful tick before clearing its operation.
+    // Keep the mounted old read-only frame, but wait for a settled clock before
+    // issuing the next exact-lineage broker read.
+    if (!nativeStatisticsWorkspaceReadIdentity || !nativeStatisticsWorkspaceSource) return;
+    void nativeStatisticsWorkspaceStore.refresh(
+      nativeStatisticsWorkspaceSource,
+      nativeStatisticsWorkspaceReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeStatisticsWorkspaceIdentity,
+    nativeStatisticsWorkspaceReadIdentity,
+    nativeStatisticsWorkspaceSource,
+    nativeStatisticsWorkspaceStore,
+    statisticsOpen,
+  ]);
+  useEffect(() => {
+    if (!campaignOpen || !nativePlayerAuthorityOwnsRuntime || !nativeCampaignGalaxyIdentity) {
+      nativeCampaignWorkspaceStore.close();
+      return;
+    }
+    if (!nativeCampaignGalaxyReadIdentity || !nativeCampaignWorkspaceSource) return;
+    void nativeCampaignWorkspaceStore.refresh(
+      nativeCampaignWorkspaceSource,
+      nativeCampaignGalaxyReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    campaignOpen,
+    nativeCampaignGalaxyIdentity,
+    nativeCampaignGalaxyReadIdentity,
+    nativeCampaignWorkspaceSource,
+    nativeCampaignWorkspaceStore,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!galaxyOpen || !nativePlayerAuthorityOwnsRuntime || !nativeCampaignGalaxyIdentity) {
+      nativeGalaxyWorkspaceStore.close();
+      return;
+    }
+    if (!nativeCampaignGalaxyReadIdentity || !nativeGalaxyWorkspaceSource) return;
+    void nativeGalaxyWorkspaceStore.refresh(
+      nativeGalaxyWorkspaceSource,
+      nativeCampaignGalaxyReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    galaxyOpen,
+    nativeCampaignGalaxyIdentity,
+    nativeCampaignGalaxyReadIdentity,
+    nativeGalaxyWorkspaceSource,
+    nativeGalaxyWorkspaceStore,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity) {
+      nativeStarMapCatalogStore.clear();
+      return;
+    }
+    if (!nativeStellarProjectionReadIdentity || !nativeStarMapCatalogSource) return;
+    void nativeStarMapCatalogStore.refresh(
+      nativeStarMapCatalogSource,
+      nativeStellarProjectionReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityBoundFrame,
+    nativeStarMapCatalogSource,
+    nativeStarMapCatalogStore,
+    nativeStellarProjectionIdentity,
+    nativeStellarProjectionReadIdentity,
+    starMapOpen,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity) {
+      nativeStellarWorkspaceStore.clear();
+    }
+  }, [
+    nativePlayerAuthorityBoundFrame,
+    nativeStellarProjectionIdentity,
+    nativeStellarWorkspaceStore,
+    starMapOpen,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
+        !nativeStellarProjectionReadIdentity || !nativeStellarProjectionSource) return;
+    void nativeStellarWorkspaceStore.refreshOverview(
+      nativeStellarProjectionSource,
+      nativeStellarProjectionReadIdentity,
+      { cursor: 0, limit: NATIVE_STELLAR_PAGE_ROWS },
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityBoundFrame,
+    nativeStellarProjectionIdentity,
+    nativeStellarProjectionReadIdentity,
+    nativeStellarProjectionSource,
+    nativeStellarWorkspaceStore,
+    starMapOpen,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
+        !nativeStellarProjectionReadIdentity || !nativeStellarProjectionSource) return;
+    void nativeStellarWorkspaceStore.refreshQuantum(
+      nativeStellarProjectionSource,
+      nativeStellarProjectionReadIdentity,
+      DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityBoundFrame,
+    nativeStellarProjectionIdentity,
+    nativeStellarProjectionReadIdentity,
+    nativeStellarProjectionSource,
+    nativeStellarWorkspaceStore,
+    starMapOpen,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
+        !nativeStellarProjectionReadIdentity || !nativeStellarProjectionSource) return;
+    void nativeStellarWorkspaceStore.refreshIndustry(
+      nativeStellarProjectionSource,
+      nativeStellarProjectionReadIdentity,
+      nativeStellarIndustrySelector,
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityBoundFrame,
+    nativeStellarIndustrySelector,
+    nativeStellarProjectionIdentity,
+    nativeStellarProjectionReadIdentity,
+    nativeStellarProjectionSource,
+    nativeStellarWorkspaceStore,
+    starMapOpen,
+  ]);
+  useEffect(() => {
+    if (!dysonPlannerOpen || !nativePlayerAuthorityBoundFrame || !nativeDysonWorkspaceIdentity ||
+        !nativePlayerAuthorityOwnsRuntime) {
+      nativeDysonWorkspaceStore.clear();
+      return;
+    }
+    if (!nativeDysonWorkspaceReadIdentity || !nativeDysonWorkspaceSource) return;
+    void nativeDysonWorkspaceStore.refresh(
+      nativeDysonWorkspaceSource,
+      nativeDysonWorkspaceReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    dysonPlannerOpen,
+    nativeDysonWorkspaceIdentity,
+    nativeDysonWorkspaceReadIdentity,
+    nativeDysonWorkspaceSource,
+    nativeDysonWorkspaceStore,
+    nativePlayerAuthorityBoundFrame,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!commandPaletteOpen || !nativeCommandPaletteEntitySearchIdentity ||
+        commandPaletteEntitySearchSelector.query.length < 2) {
+      nativeCommandPaletteEntitySearchStore.clear();
+      return;
+    }
+    if (commandPaletteEntitySearchSelector.truncated) {
+      nativeCommandPaletteEntitySearchStore.markTruncated(
+        nativeCommandPaletteEntitySearchIdentity,
+        commandPaletteEntitySearchSelector,
+      );
+      return;
+    }
+    if (!nativeCommandPaletteEntitySearchReadIdentity || !nativeCommandPaletteEntitySearchSource) return;
+    void nativeCommandPaletteEntitySearchStore.refresh(
+      nativeCommandPaletteEntitySearchSource,
+      nativeCommandPaletteEntitySearchReadIdentity,
+      commandPaletteEntitySearchSelector,
+    );
+  }, [
+    commandPaletteEntitySearchSelector,
+    commandPaletteOpen,
+    nativeCommandPaletteEntitySearchIdentity,
+    nativeCommandPaletteEntitySearchReadIdentity,
+    nativeCommandPaletteEntitySearchSource,
+    nativeCommandPaletteEntitySearchStore,
+  ]);
   const simulationProjectionIndexRef = useRef<SimulationProjectionStateIndex>(createSimulationProjectionStateIndex(loaded.state));
   const simulationProjectionScopeRef = useRef<"default" | "full-top-level">("default");
-  simulationProjectionScopeRef.current = fullRealtimeSimulation || statisticsOpen || dysonPlannerOpen ? "full-top-level" : "default";
+  simulationProjectionScopeRef.current = fullRealtimeSimulation || dysonPlannerOpen ? "full-top-level" : "default";
   const simulationCheckpointBarrierRef = useRef(false);
   const simulationSaveBarrierDepthRef = useRef(0);
   const simulationCheckpointRequestRef = useRef<{
@@ -1884,6 +5021,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     chunkedSaveWritePort?: MessagePort;
     nativeSaveTransaction?: NativeSaveTransaction;
     checkpointChunks?: SimulationCheckpointAccumulator;
+    authorityLease: LegacyAuthorityAsyncLeaseToken;
   } | null>(null);
   const dispatchSimulationCheckpointRef = useRef<() => void>(() => undefined);
   const requestAuthoritativeSimulationCheckpointRef = useRef<() => Promise<GameState>>(() => Promise.resolve(loaded.state));
@@ -1954,6 +5092,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const pureIdleMacroRestartCountRef = useRef(0);
   const pureIdleMacroForceConservativeRef = useRef(false);
   const pureIdleBackgroundOfflineAbortRef = useRef<AbortController | null>(null);
+  const cloudAutoSyncAbortRef = useRef<AbortController | null>(null);
+  const cloudAutoSyncInFlightRef = useRef(false);
   const pureIdleStopTargetRef = useRef<{ sessionId: string; targetWallSeconds: number } | null>(null);
   // Visibility and interval callbacks can race while a background recovery
   // Worker is being rebuilt. Keep this boundary single-flight so a candidate
@@ -1996,6 +5136,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     command?: SimulationCommandPatch | null;
     simulationSeconds: number;
     wallSeconds: number;
+    advanceMode?: "exact" | "pure-idle-conservative-v2";
   }) => {
     if (!windowsNativeCoreBetaEnabledRef.current) return;
     const generation = windowsNativeCoreBetaGenerationRef.current;
@@ -2129,7 +5270,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     void windowsNativeCoreBetaControllerRef.current?.notifyCoreExit("renderer-unmount");
   }, []);
-  const performanceMonitor = usePerformanceMonitor(getCurrentGame, game.paused);
+  const performanceMonitor = usePerformanceMonitor(
+    getCurrentGame,
+    nativePlayerAuthorityOwnsRuntime,
+  );
   const publishTimeWarpComputeState = useCallback((next: TimeWarpComputeGovernorState) => {
     timeWarpComputeStateRef.current = next;
     setTimeWarpComputeState(next);
@@ -2141,27 +5285,88 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     connectionCandidateNodeIdRef.current = nodeId;
     setConnectionCandidateNodeId(nodeId);
   }, []);
+  const abortCanvasGestureLifecycle = useCallback(() => {
+    factoryGestureEpochRef.current += 1;
+    const capture = canvasPointerCaptureRef.current;
+    if (capture) {
+      try { if (capture.element.hasPointerCapture(capture.pointerId)) capture.element.releasePointerCapture(capture.pointerId); } catch { /* WebView can invalidate the pointer during modal focus changes. */ }
+    }
+    canvasPointerCaptureRef.current = null;
+    canvasPointerMotionRef.current = stopCanvasPointerMotionSession(canvasPointerMotionRef.current);
+    if (canvasPointerMotionFrameRef.current != null) window.cancelAnimationFrame(canvasPointerMotionFrameRef.current);
+    canvasPointerMotionFrameRef.current = null;
+    const canvas = factoryCanvasRef.current;
+    const capturedPointerIds = new Set<number>(activeCanvasTouchesRef.current.keys());
+    if (regionPointerRef.current) capturedPointerIds.add(regionPointerRef.current.pointerId);
+    if (canvas) {
+      for (const pointerId of capturedPointerIds) {
+        try { if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId); } catch { /* Route replacement can detach capture between checks. */ }
+      }
+    }
+    const resizeCapture = regionResizeRef.current;
+    if (resizeCapture) {
+      try {
+        if (resizeCapture.element.hasPointerCapture(resizeCapture.pointerId)) {
+          resizeCapture.element.releasePointerCapture(resizeCapture.pointerId);
+        }
+      } catch { /* The region handle may already have unmounted at the revision boundary. */ }
+    }
+    activeCanvasTouchesRef.current.clear();
+    canvasMultiTouchRef.current = null;
+    regionPointerRef.current = null;
+    regionResizeRef.current = null;
+    nodeDragActiveRef.current = false;
+    nodeDragGestureEpochRef.current = null;
+    multiDragStartRef.current = null;
+    dragAlignmentSpatialIndexRef.current = null;
+    alignmentSpatialIndexRef.current = null;
+    connectionHandleSpatialIndexRef.current = null;
+    blockCanvasTouchRef.current = false;
+    syntheticTouchCancelRef.current = false;
+    suppressConnectionClickRef.current = false;
+    window.clearTimeout(suppressConnectionClickTimerRef.current);
+    ctrlHeldRef.current = false;
+    selectionModeRef.current = false;
+    deleteModeRef.current = false;
+    setCtrlHeld(false);
+    setDraggedEntityIds([]);
+    setAlignmentGuides({ x: null, y: null });
+    setRegionDraft(null);
+    setRegionResizePreview(null);
+  }, []);
+  useLayoutEffect(() => {
+    if (!nativePlayerAuthorityOwnsRuntime) return;
+    abortCanvasGestureLifecycle();
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    connectionCandidateNodeIdRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    batchConnectionDraftRef.current = null;
+    batchConnectionDraftBaseRef.current = null;
+    dragConnectionStartRef.current = null;
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    setConnectionDraft(null);
+    setConnectionCandidateNodeId(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setBatchConnectionFailures([]);
+    setBatchConnectionFeedback(null);
+    setMobileBatchConnectionExpanded(false);
+    setMobileActionEntityId(null);
+    if (miningTimerRef.current != null) window.clearInterval(miningTimerRef.current);
+    miningTimerRef.current = null;
+    setMiningEntityId(null);
+  }, [abortCanvasGestureLifecycle, flowStore, nativeFactoryRouteUnsafe, nativePlayerAuthorityOwnsRuntime]);
   useEffect(() => {
     const resetAfterDialog = () => {
-      const capture = canvasPointerCaptureRef.current;
-      if (capture) {
-        try { if (capture.element.hasPointerCapture(capture.pointerId)) capture.element.releasePointerCapture(capture.pointerId); } catch { /* WebView can invalidate the pointer during modal focus changes. */ }
-      }
-      canvasPointerCaptureRef.current = null;
-      if (canvasPointerMotionFrameRef.current != null) window.cancelAnimationFrame(canvasPointerMotionFrameRef.current);
-      canvasPointerMotionFrameRef.current = null;
-      activeCanvasTouchesRef.current.clear();
-      canvasMultiTouchRef.current = null;
-      regionPointerRef.current = null;
-      regionResizeRef.current = null;
-      nodeDragActiveRef.current = false;
-      dragAlignmentSpatialIndexRef.current = null;
-      blockCanvasTouchRef.current = false;
-      syntheticTouchCancelRef.current = false;
-      ctrlHeldRef.current = false;
-      setCtrlHeld(false);
-      setAlignmentGuides({ x: null, y: null });
-      setRegionDraft(null);
+      abortCanvasGestureLifecycle();
       flowStore.getState().cancelConnection();
       flowStore.setState({ connectionClickStartHandle: null });
       clickConnectionPreviewRef.current = null;
@@ -2177,10 +5382,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     window.addEventListener(GAME_DIALOG_CLOSED_EVENT, resetAfterDialog);
     return () => window.removeEventListener(GAME_DIALOG_CLOSED_EVENT, resetAfterDialog);
-  }, [flowStore]);
+  }, [abortCanvasGestureLifecycle, flowStore]);
   const lowEndMobile = useLowEndMobile();
   const nextMobileShell = mobileUiPreference === "next";
-  const canvasMinimumZoom = nextMobileShell && game.settings.fontScale >= 2 ? 0.35 : 0.25;
+  const canvasMinimumZoom = nextMobileShell && effectiveUiFontScale >= 2 ? 0.35 : 0.25;
   const resolvedProductionRefreshIntervalMs = resolveProductionRefreshInterval(productionRefreshPreference, automaticRefreshState);
   // Automatic mode keeps work-cycle animation smooth through the visual clock,
   // so a very large authority state does not need to reconcile its 27k/49k
@@ -2210,13 +5415,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     getEffectiveSimulationMultiplier(game),
     game.settings.simulationSpeed,
   );
-  const activeMobileCanvasMode: MobileCanvasMode = placement
+  const activeMobileCanvasMode: MobileCanvasMode = placement || nativePlacementBuildingId ||
+      nativeBlueprintEnqueuePlacement || nativeBlueprintDirectDeployPlacement
     ? "place"
     : connectionDraft || clickConnectionPreview
       ? "connect"
       : mobileCanvasMode;
-  const pointerOverlayActive = Boolean(placement || blueprintPlacementId || connectionDraft || clickConnectionPreview || game.cargo || connectionHint);
+  const canvasPointerCargo = nativePlayerAuthorityOwnsRuntime ? null : game.cargo;
+  const pointerOverlayActive = Boolean(placement || nativePlacementBuildingId ||
+    nativeBlueprintEnqueuePlacement || nativeBlueprintDirectDeployPlacement || blueprintPlacementId ||
+    connectionDraft || clickConnectionPreview || canvasPointerCargo || connectionHint);
   const closeAllWorkspaces = useCallback(() => {
+    authorityWorkspaceSyncIdRef.current += 1;
+    setAuthorityWorkspaceSync(null);
+    statisticsHistoryRecordedAtRef.current = null;
+    setStatisticsHistory(null);
     setTechnologyOpen(false);
     setStatisticsOpen(false);
     setStatisticsFocusTab(null);
@@ -2232,6 +5445,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setGalaxyOpen(false);
     setConstructionCenterOpen(false);
   }, []);
+  useLayoutEffect(() => {
+    if (!nativePlayerAuthorityOwnsRuntime) return;
+    // Close legacy-only surfaces before paint if Rust ownership changes while
+    // one is open. Native-capable workspaces intentionally remain untouched.
+    setSystemSpaceStationOpen(false);
+    setSystemSpaceStationId(null);
+    setOrbitalStationOpen(false);
+    setBlueprintsOpen(false);
+    setOperationsOpen(false);
+    setCampaignOpen(false);
+    setGalaxyOpen(false);
+    setConstructionCenterOpen(false);
+  }, [nativePlayerAuthorityOwnsRuntime]);
+  useEffect(() => {
+    if (statisticsOpen) return;
+    authorityWorkspaceSyncIdRef.current += 1;
+    statisticsHistoryRecordedAtRef.current = null;
+    setStatisticsHistory(null);
+  }, [statisticsOpen]);
   const returnMobileToFactory = useCallback(() => {
     closeAllWorkspaces();
     setMobilePanel(null);
@@ -2282,8 +5514,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     systemSpaceStationOpen || orbitalStationOpen ||
     blueprintsOpen || dysonPlannerOpen || operationsOpen || campaignOpen || galaxyOpen || constructionCenterOpen ||
     (nextMobileShell && mobileNavigation.route.kind === "hub");
-  const canvasWorkspacePaused = canvasWorkspaceHidden;
-  const canvasRefreshPaused = canvasWorkspacePaused || game.paused;
+  const canvasWorkspacePaused = canvasWorkspaceHidden || nativeFactoryProjectionPending;
+  const canvasRefreshPaused = canvasWorkspacePaused || factoryRunStatusReadModel.paused;
   const updateConnectionDraft = useCallback((draft: ConnectionDraft | null) => {
     connectionDraftRef.current = draft;
     setConnectionDraft(draft);
@@ -2356,7 +5588,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   useEffect(() => {
-    if (!coarsePointer || game.paused) {
+    if (!coarsePointer || factoryRunStatusReadModel.paused) {
       setLowFrameRateMode(false);
       return;
     }
@@ -2391,12 +5623,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     frame = window.requestAnimationFrame(sample);
     return () => window.cancelAnimationFrame(frame);
-  }, [coarsePointer, game.paused]);
+  }, [coarsePointer, factoryRunStatusReadModel.paused]);
 
   useEffect(() => {
-    if (productionRefreshPreference !== "auto" || game.paused) return;
+    if (productionRefreshPreference !== "auto" || factoryRunStatusReadModel.paused) return;
     setAutomaticRefreshState(createAutomaticRefreshState(coarsePointer));
-  }, [coarsePointer, productionRefreshPreference]);
+  }, [coarsePointer, factoryRunStatusReadModel.paused, productionRefreshPreference]);
 
   useEffect(() => {
     if (productionRefreshPreference !== "auto") return;
@@ -2426,7 +5658,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     frame = window.requestAnimationFrame(sample);
     return () => window.cancelAnimationFrame(frame);
-  }, [game.paused, productionRefreshPreference]);
+  }, [factoryRunStatusReadModel.paused, productionRefreshPreference]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2436,6 +5668,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // state replacement or schedule a WAL command after lifecycle sealing.
       if (cancelled || lifecycleExitStartedRef.current || durablePrimarySaveInFlightRef.current || !response?.activity) return;
       setGalacticActivityStatus(response.activity);
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+        // The public status remains useful to the shell, but Rust is the only
+        // player-state writer after authority handoff. Replaying contracts or
+        // galactic activity against the renderer's stale mirror would create
+        // an unversioned second writer and could later overwrite a newer
+        // native checkpoint.
+        return;
+      }
       // This callback resolves outside a React event. Publish the imperative
       // state before scheduling the WAL dispatcher, otherwise a deferred
       // functional updater can make that dispatcher observe the old activity
@@ -2647,16 +5887,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   useEffect(() => {
     const bridge = getDesktopBridge();
     const root = document.documentElement;
-    root.dataset.uiFontScale = String(Math.round(game.settings.fontScale * 100));
+    root.dataset.uiFontScale = String(Math.round(effectiveUiFontScale * 100));
     if (bridge && typeof bridge.setFontScale === "function") {
       root.dataset.nativeUiScale = "true";
       root.style.removeProperty("--ui-font-scale");
-      void bridge.setFontScale(game.settings.fontScale).catch(() => undefined);
+      void bridge.setFontScale(effectiveUiFontScale).catch(() => undefined);
       return;
     }
     delete root.dataset.nativeUiScale;
-    root.style.setProperty("--ui-font-scale", String(game.settings.fontScale));
-  }, [game.settings.fontScale]);
+    root.style.setProperty("--ui-font-scale", String(effectiveUiFontScale));
+  }, [effectiveUiFontScale]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Control") {
@@ -2674,6 +5914,29 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setCtrlHeld(false);
       continuousPlacementRef.current = null;
       if (placement) setPlacement(null);
+      if (nativePlacementBuildingId) {
+        nativePlacementIntentRef.current = {
+          buildingId: null,
+          generation: nativePlacementIntentRef.current.generation + 1,
+        };
+        nativePlacementContextPendingRef.current = false;
+        setNativePlacementContextPending(false);
+        setNativePlacementBuildingId(null);
+      }
+      if (nativeBlueprintEnqueuePlacement) {
+        nativeBlueprintEnqueuePlacementRef.current = null;
+        nativeBlueprintEnqueueGenerationRef.current += 1;
+        nativeBlueprintEnqueueContextPendingRef.current = false;
+        setNativeBlueprintEnqueueContextPending(false);
+        setNativeBlueprintEnqueuePlacement(null);
+      }
+      if (nativeBlueprintDirectDeployPlacement) {
+        nativeBlueprintDirectDeployPlacementRef.current = null;
+        nativeBlueprintDirectDeployGenerationRef.current += 1;
+        nativeBlueprintDirectDeployContextPendingRef.current = false;
+        setNativeBlueprintDirectDeployContextPending(false);
+        setNativeBlueprintDirectDeployPlacement(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKey);
@@ -2683,7 +5946,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       window.removeEventListener("keyup", onKey);
       window.removeEventListener("blur", onBlur);
     };
-  }, [placement]);
+  }, [nativeBlueprintDirectDeployPlacement, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId, placement]);
   useEffect(() => {
     if (!loaded.recovery || loaded.recovery.source === "primary") return;
     setNotice(loaded.recovery.issues[0] ?? "已从备用存档恢复");
@@ -2759,6 +6022,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     onStageFailure: (error: unknown) => void,
     onStageSuperseded: () => void,
   ): boolean => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(submission.authorityLease)) return false;
     // pagehide has chosen the existing durable recovery boundary.  A stage
     // which completes afterwards must remain pending for the next bootstrap,
     // never become a late Worker post in the closing document.
@@ -2816,6 +6080,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       ownerId: status.writerId,
       fencingToken: status.fencingToken,
     }).then(({ result, intentSha256 }) => {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(submission.authorityLease)) {
+        durableRecoveryStageInFlightRef.current = false;
+        durableRecoveryStageRequestRef.current = null;
+        return;
+      }
       if (!result.ok || !result.proof.pending || result.proof.finalized ||
         result.proof.sequence !== unsigned.sequence || result.proof.stateRevision !== unsigned.baseStateRevision) {
         throw new Error(!result.ok ? result.message : "durable stage 未返回 pending proof");
@@ -2870,16 +6139,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onStageSuperseded();
         return;
       }
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(submission.authorityLease)) return;
       onStageFailure(error);
     });
     return true;
-  }, []);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent]);
 
   const dispatchDurableUiCommand = useCallback(() => {
     if (lifecycleExitStartedRef.current || durableRecoveryLifecycleRef.current !== "active" ||
       durableRecoveryStageInFlightRef.current) return;
     const deferred = deferredDurableUiSubmissionRef.current;
     if (deferred) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(deferred.submission.authorityLease)) {
+        deferredDurableUiSubmissionRef.current = null;
+        return;
+      }
       const activeSubmission = simulationSubmissionRef.current;
       if (activeSubmission?.kind === "initialize") return;
       if (activeSubmission) return;
@@ -2908,6 +6182,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const command = createSimulationCommandPatch(confirmed, desired, head.stateRevision);
     if (!command) return;
     const registry = contentPackRuntimeSnapshotRef.current;
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return;
     const request: SimulationWorkerRequest = {
       id: simulationRequestIdRef.current + 1,
       kind: "advance",
@@ -2937,6 +6213,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       requestBytes: 0,
       multicore: undefined,
       approximate: false,
+      authorityLease,
     };
     const onFailure = (error: unknown) => {
       simulationPendingSecondsRef.current = 0;
@@ -2955,12 +6232,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }, 0);
     };
     stageAndPostDurableSimulationRequest(request, submission, onFailure, retryAgainstReplacementHead);
-  }, [pauseVisibleStateWithoutRollback, stageAndPostDurableSimulationRequest]);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, pauseVisibleStateWithoutRollback, stageAndPostDurableSimulationRequest]);
   dispatchDurableUiCommandRef.current = dispatchDurableUiCommand;
 
   const dispatchSimulationCheckpoint = useCallback(() => {
     const pending = simulationCheckpointRequestRef.current;
     if (!pending || pending.id !== null || simulationSubmissionRef.current || durableRecoveryStageInFlightRef.current || simulationRecoveryRef.current) return;
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(pending.authorityLease)) {
+      pending.chunkedSaveWritePort?.close();
+      void pending.nativeSaveTransaction?.abort();
+      simulationCheckpointRequestRef.current = null;
+      simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+      pending.reject(new Error("Windows 原生权威状态已变化，旧 JavaScript 检查点已取消"));
+      return;
+    }
     const worker = simulationWorkerRef.current;
     const confirmedState = lastSimulationResultRef.current;
     if (!worker || simulationWorkerDisabledRef.current || !confirmedState) {
@@ -3004,12 +6289,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       channel.port1.onmessage = (writeEvent: MessageEvent<SimulationChunkedSaveWriteRequest>) => {
         const write = writeEvent.data;
         if (write.id !== request.id || !Number.isSafeInteger(write.sequence) || write.sequence < 1 || !Array.isArray(write.records)) return;
+        if (simulationCheckpointRequestRef.current !== pending ||
+          !legacyJavaScriptAuthorityLeaseIsCurrent(pending.authorityLease)) {
+          void pending.nativeSaveTransaction?.abort();
+          channel.port1.close();
+          return;
+        }
         // The native transaction is staged before IndexedDB. Neither backend
         // publishes its manifest until the final batch/commit, and a failure
         // on either side is reported to the authority Worker instead of being
         // presented as a successful Windows beta double-write.
-        void (pending.nativeSaveTransaction?.write(write.records) ?? Promise.resolve()).then(() =>
-          commitLocalSaveInternalRecords(write.records)).then(() => {
+        void (pending.nativeSaveTransaction?.write(write.records) ?? Promise.resolve()).then(async () => {
+          if (simulationCheckpointRequestRef.current !== pending ||
+            !legacyJavaScriptAuthorityLeaseIsCurrent(pending.authorityLease)) {
+            throw new Error("Windows 原生权威状态已变化，旧分块保存已取消");
+          }
+          await commitLocalSaveInternalRecords(write.records);
+          if (simulationCheckpointRequestRef.current !== pending ||
+            !legacyJavaScriptAuthorityLeaseIsCurrent(pending.authorityLease)) {
+            throw new Error("Windows 原生权威状态已变化，旧分块保存回执已取消");
+          }
+        }).then(() => {
           channel.port1.postMessage({ id: write.id, sequence: write.sequence, ok: true } satisfies SimulationChunkedSaveWriteAck);
         }).catch((error) => {
           void pending.nativeSaveTransaction?.abort();
@@ -3039,18 +6339,39 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
       pending.reject(error instanceof Error ? error : new Error("模拟检查点请求失败"));
     }
-  }, [dispatchDurableUiCommand, stateWithSimulationDebt]);
+  }, [dispatchDurableUiCommand, legacyJavaScriptAuthorityLeaseIsCurrent, stateWithSimulationDebt]);
   dispatchSimulationCheckpointRef.current = dispatchSimulationCheckpoint;
 
+  const assertJavaScriptAuthorityCheckpointAllowed = useCallback(() => {
+    if (!readNativeAuthorityPersistenceBoundary().protected) return;
+    throw new Error("Windows 原生权威尚未安全交还控制权，已阻止读取旧 JavaScript 检查点");
+  }, [readNativeAuthorityPersistenceBoundary]);
+
   const requestAuthoritativeSimulationCheckpoint = useCallback((): Promise<GameState> => {
+    try {
+      assertJavaScriptAuthorityCheckpointAllowed();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return Promise.reject(new Error("Windows 原生权威状态尚未确认，旧 JavaScript 检查点已阻止"));
     const existing = simulationCheckpointRequestRef.current;
     if (existing) {
       return existing.mode === "checkpoint"
-        ? existing.promise
+        ? existing.promise.then((state) => {
+            assertJavaScriptAuthorityCheckpointAllowed();
+            return state;
+          })
         : existing.promise.then(() => requestAuthoritativeSimulationCheckpoint());
     }
     if ((!simulationWorkerRef.current || simulationWorkerDisabledRef.current || !lastSimulationResultRef.current) && !simulationRecoveryRef.current) {
-      return Promise.resolve(stateWithSimulationDebt(gameRef.current));
+      const state = stateWithSimulationDebt(gameRef.current);
+      try {
+        assertJavaScriptAuthorityCheckpointAllowed();
+        return Promise.resolve(state);
+      } catch (error) {
+        return Promise.reject(error);
+      }
     }
     let resolve!: (state: GameState) => void;
     let reject!: (error: Error) => void;
@@ -3068,20 +6389,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       baseState: null,
       state: null,
       command: null,
+      authorityLease,
     };
     queueMicrotask(() => dispatchSimulationCheckpointRef.current());
-    return promise;
-  }, [stateWithSimulationDebt]);
+    return promise.then((state) => {
+      assertJavaScriptAuthorityCheckpointAllowed();
+      return state;
+    });
+  }, [assertJavaScriptAuthorityCheckpointAllowed, issueLegacyJavaScriptAuthorityLease, stateWithSimulationDebt]);
   requestAuthoritativeSimulationCheckpointRef.current = requestAuthoritativeSimulationCheckpoint;
 
   const requestAuthoritativePersistenceCheckpoint = useCallback((
     chunkedSave?: NonNullable<SimulationWorkerRequest["chunkedSave"]>,
     nativeSaveTransaction?: NativeSaveTransaction | null,
   ): Promise<GameState> => {
+    try {
+      assertJavaScriptAuthorityCheckpointAllowed();
+    } catch (error) {
+      void nativeSaveTransaction?.abort();
+      return Promise.reject(error);
+    }
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) {
+      void nativeSaveTransaction?.abort();
+      return Promise.reject(new Error("Windows 原生权威状态尚未确认，旧 JavaScript 持久化检查点已阻止"));
+    }
     const existing = simulationCheckpointRequestRef.current;
     if (existing) {
       return existing.mode === "checkpoint" || existing.mode === "persistence-checkpoint"
-        ? existing.promise
+        ? existing.promise.then((state) => {
+            assertJavaScriptAuthorityCheckpointAllowed();
+            return state;
+          })
         : existing.promise.then(() => requestAuthoritativePersistenceCheckpoint(chunkedSave, nativeSaveTransaction));
     }
     if ((!simulationWorkerRef.current || simulationWorkerDisabledRef.current || !lastSimulationResultRef.current) && !simulationRecoveryRef.current) {
@@ -3109,12 +6448,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       command: null,
       ...(chunkedSave ? { chunkedSave } : {}),
       ...(nativeSaveTransaction ? { nativeSaveTransaction } : {}),
+      authorityLease,
     };
     queueMicrotask(() => dispatchSimulationCheckpointRef.current());
-    return promise;
-  }, [stateWithSimulationDebt]);
+    return promise.then((state) => {
+      assertJavaScriptAuthorityCheckpointAllowed();
+      return state;
+    });
+  }, [assertJavaScriptAuthorityCheckpointAllowed, issueLegacyJavaScriptAuthorityLease, stateWithSimulationDebt]);
 
   const requestAuthoritativeDeferredTopLevelProjection = useCallback((): Promise<GameState> => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return Promise.reject(new Error("Windows 原生权威状态尚未确认，旧 JavaScript 投影已阻止"));
     const existing = simulationCheckpointRequestRef.current;
     if (existing) {
       return existing.mode === "deferred-top-level"
@@ -3140,14 +6485,95 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       baseState: null,
       state: null,
       command: null,
+      authorityLease,
     };
     queueMicrotask(() => dispatchSimulationCheckpointRef.current());
     return promise;
-  }, []);
+  }, [issueLegacyJavaScriptAuthorityLease]);
 
   const refreshAuthoritativeUiMirror = useCallback(async (): Promise<void> => {
     await requestAuthoritativeDeferredTopLevelProjection();
   }, [requestAuthoritativeDeferredTopLevelProjection]);
+
+  const requestAuthoritativeStatisticsHistory = useCallback(async (): Promise<StatisticsHistoryReadModel> => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      throw new Error("Rust 玩家权威生产历史必须通过 identity-bound workspace store 读取");
+    }
+    const expectedRevision = simulationStateRevisionRef.current;
+    const nativeProjection = await windowsNativeCoreBetaControllerRef.current?.readVerifiedStatisticsProjection({
+      minElapsedSeconds: 0,
+      maxElapsedSeconds: Math.max(0, gameRef.current.elapsedSeconds),
+      cursor: 0,
+      limit: 512,
+    }, expectedRevision);
+    if (nativeProjection && simulationStateRevisionRef.current === expectedRevision &&
+      nativeProjection.revision === expectedRevision && nativeProjection.nextCursor === null) {
+      return {
+        schemaVersion: 1,
+        kind: "statistics-history-v1",
+        revision: nativeProjection.revision,
+        samples: nativeProjection.samples,
+      };
+    }
+    const existing = statisticsReadModelRequestRef.current;
+    if (existing) return existing.promise;
+    const worker = simulationWorkerRef.current;
+    if (!worker || simulationWorkerDisabledRef.current || !lastSimulationResultRef.current) {
+      return createStatisticsHistoryReadModel(gameRef.current, simulationStateRevisionRef.current);
+    }
+    let resolve!: (readModel: StatisticsHistoryReadModel) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<StatisticsHistoryReadModel>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const id = simulationRequestIdRef.current + 1;
+    simulationRequestIdRef.current = id;
+    statisticsReadModelRequestRef.current = { id, promise, resolve, reject };
+    try {
+      const registrySnapshot = contentPackRuntimeSnapshotRef.current;
+      worker.postMessage({
+        id,
+        kind: "sync-statistics",
+        simulationSeconds: 0,
+        wallSeconds: 0,
+        registryFingerprint: registrySnapshot.fingerprint,
+        ...(simulationWorkerRegistryFingerprintRef.current === registrySnapshot.fingerprint ? {} : { registry: registrySnapshot }),
+        protocol: "projection",
+      } satisfies SimulationWorkerRequest);
+    } catch (error) {
+      statisticsReadModelRequestRef.current = null;
+      reject(error instanceof Error ? error : new Error("权威生产历史请求失败"));
+    }
+    return promise;
+  }, []);
+
+  // Production history advances on its own one-second boundary even though it
+  // is intentionally excluded from the default factory projection. Keep the
+  // open workspace live through its narrow read model; this replaces the old
+  // full-top-level publication without freezing the chart at open time.
+  const statisticsHistoryRefreshToken = game.historyRecordedAt;
+  useEffect(() => {
+    if (nativePlayerAuthorityOwnsRuntime || !statisticsOpen || authorityWorkspaceSync === "statistics") return;
+    if (statisticsHistoryRecordedAtRef.current === statisticsHistoryRefreshToken) return;
+    const authoritySyncId = authorityWorkspaceSyncIdRef.current;
+    const requestedHistoryRecordedAt = statisticsHistoryRefreshToken;
+    let cancelled = false;
+    void requestAuthoritativeStatisticsHistory()
+      .then((readModel) => {
+        if (!cancelled && authorityWorkspaceSyncIdRef.current === authoritySyncId) {
+          statisticsHistoryRecordedAtRef.current = requestedHistoryRecordedAt;
+          setStatisticsHistory(readModel.samples);
+        }
+      })
+      .catch(() => {
+        // A transient read failure leaves the last verified chart visible.
+        // The next authoritative history boundary retries automatically.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authorityWorkspaceSync, nativePlayerAuthorityOwnsRuntime, requestAuthoritativeStatisticsHistory, statisticsHistoryRefreshToken, statisticsOpen]);
 
   /** Replace the live simulation Worker from the exact terminal state that
    * was just persisted (pure-idle handoff). This uses the existing durable
@@ -3231,6 +6657,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const recovery = simulationRecoveryRef.current;
     const worker = simulationWorkerRef.current;
     if (!recovery || !worker || simulationSubmissionRef.current) return;
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return;
     const operation = recovery.operations[recovery.nextOperationIndex];
     const registrySnapshot = operation?.registry ?? contentPackRuntimeSnapshotRef.current;
     const command = operation?.command
@@ -3281,6 +6709,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       requestBytes: 0,
       multicore: operation?.multicore,
       approximate: operation?.approximate ?? false,
+      authorityLease,
     };
     try {
       worker.postMessage(request);
@@ -3293,7 +6722,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       worker.terminate();
       pauseVisibleStateWithoutRollback("模拟 Worker 恢复失败；当前画面与进度已保留并暂停，可重试恢复或导出");
     }
-  }, [pauseVisibleStateWithoutRollback]);
+  }, [issueLegacyJavaScriptAuthorityLease, pauseVisibleStateWithoutRollback]);
   dispatchSimulationRecoveryRef.current = dispatchSimulationRecovery;
 
   const currentPrimarySaveSource = useCallback(() => {
@@ -3313,32 +6742,44 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
   }, []);
 
-  const isCurrentPrimarySaveSource = useCallback((expected: NonNullable<typeof controlledReturnCommitRef.current>): boolean => {
-    const current = currentPrimarySaveSource();
-    return current.game === expected.game &&
-      current.pendingSimulationSeconds === expected.pendingSimulationSeconds &&
-      current.pendingWallSeconds === expected.pendingWallSeconds &&
-      current.submissionId === expected.submissionId &&
-      current.pendingViewportSignature === expected.pendingViewportSignature;
-  }, [currentPrimarySaveSource]);
-
-  const saveVerifiedPrimaryCheckpoint = useCallback((state: GameState, options: { deferBackup?: boolean; force?: boolean } = {}): Promise<SaveGameResult> => {
+  const saveVerifiedPrimaryCheckpoint = useCallback(async (state: GameState, options: { deferBackup?: boolean; force?: boolean } = {}): Promise<SaveGameResult> => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      return {
+        success: false,
+        message: "Windows 原生权威尚未安全交还控制权，已阻止提交旧 JavaScript 主档",
+        code: "conflict",
+      };
+    }
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return {
+      success: false,
+      message: "Windows 原生权威状态已变化，旧 JavaScript 主档未提交",
+      code: "conflict",
+    };
     const checkpoint = latestAuthoritativeCheckpointTransferRef.current;
+    let result: SaveGameResult;
     if (!checkpoint || checkpoint.state !== state) {
       // A replacement/imported state must not retain the previous authority
       // buffer indefinitely. Identity mismatch already prevents reuse; clear
       // the stale 35+ MiB ownership here as well.
       if (checkpoint) latestAuthoritativeCheckpointTransferRef.current = null;
-      return saveGameVerified(state, undefined, undefined, options);
+      result = await saveGameVerified(state, undefined, undefined, options);
+    } else {
+      // Ownership passes synchronously with postMessage inside the storage
+      // boundary. Never offer this same buffer to a later, rebased save.
+      latestAuthoritativeCheckpointTransferRef.current = null;
+      result = await saveGameVerified(state, checkpoint.transfer, checkpoint.checkpointOverlay, {
+        ...options,
+        ...(checkpoint.expectedStateIdentity ? { expectedStateIdentity: checkpoint.expectedStateIdentity } : {}),
+      });
     }
-    // Ownership passes synchronously with postMessage inside the storage
-    // boundary. Never offer this same buffer to a later, rebased save.
-    latestAuthoritativeCheckpointTransferRef.current = null;
-    return saveGameVerified(state, checkpoint.transfer, checkpoint.checkpointOverlay, {
-      ...options,
-      ...(checkpoint.expectedStateIdentity ? { expectedStateIdentity: checkpoint.expectedStateIdentity } : {}),
-    });
-  }, []);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return {
+      success: false,
+      message: "Windows 原生权威已在保存期间接管；旧 JavaScript 保存结果已作废",
+      code: "conflict",
+    };
+    return result;
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, readNativeAuthorityPersistenceBoundary]);
 
   /**
    * Direct/dev entry points can mount FactoryGame without the StartMenu
@@ -3352,6 +6793,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!durableSimulationRuntimeEnabled) return true;
     if (durableRecoveryLifecycleRef.current === "active" && durableRecoveryHeadRef.current) return true;
     if (lifecycleExitStartedRef.current) return false;
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return false;
     try {
       const mode = state.mode === "speedrun" ? "speedrun" : "normal";
       const identity = getPrimaryLocalSaveRecoveryIdentity(mode);
@@ -3370,6 +6813,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         ownerId: writer.writerId,
         fencingToken: writer.fencingToken,
       });
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
       if (!initialized.result.ok) return false;
       durableRecoveryHeadRef.current = {
         baseIdentity: checkpoint.baseIdentity,
@@ -3389,12 +6833,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } catch {
       return false;
     }
-  }, [durableSimulationRuntimeEnabled]);
+  }, [durableSimulationRuntimeEnabled, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent]);
 
   const persistDurablePrimaryCheckpoint = useCallback(async (
     requestedState: GameState | undefined,
     kind: RuntimePersistenceKind,
   ): Promise<SaveGameResult> => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) {
+      return { success: false, message: "Windows 原生权威状态尚未确认，旧 durable 保存已阻止", code: "conflict" };
+    }
     if (lifecycleExitStartedRef.current) {
       return { success: false, message: "页面正在退出，已保留 durable recovery 供下次精确恢复", code: "conflict" };
     }
@@ -3423,6 +6871,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // the wrong revision.
       let sourceState = gameRef.current;
       let barrierState = await requestAuthoritativeSimulationCheckpoint();
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 durable 保存已取消");
       // React may still publish an edit that was accepted immediately before
       // this save acquired its edit lock. New player edits are rejected below,
       // so repeat the checkpoint only until that already-accepted state is the
@@ -3431,6 +6880,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       while (!requestedState && gameRef.current !== sourceState) {
         sourceState = gameRef.current;
         barrierState = await requestAuthoritativeSimulationCheckpoint();
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 durable 保存已取消");
       }
       let saveState = requestedState ?? barrierState;
       let checkpointRevision = simulationStateRevisionRef.current;
@@ -3444,7 +6894,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         policy: memoryGuardPolicy,
       });
       if (saveMemoryDecision.shouldPause) {
-        const failure: SaveGameResult = { success: false, message: "内存压力过高，已暂停并保留当前进度", code: "conflict" };
+        const nativeProtected = nativeAuthorityPersistenceProtectedRef.current;
+        const failure: SaveGameResult = {
+          success: false,
+          message: nativeProtected
+            ? "内存压力过高；已停止旧存档写入，但未把 JavaScript 暂停冒充为 Rust 权威保护"
+            : "内存压力过高，已暂停并保留当前进度",
+          code: "conflict",
+        };
         pauseForMemoryPressure(saveMemoryDecision.reason ?? "存档需要的临时内存过高");
         setSaveFailure(failure);
         setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message: failure.message });
@@ -3461,6 +6918,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在验证 T1 主存档并滚动 recovery…" });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "serialize-write-readback" });
       let result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 durable 保存结果已作废");
       if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
       if (!result.success) {
         setSaveFailure(result);
@@ -3488,11 +6946,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         (!requestedState && allowEditsDuringSaveRef.current && gameRef.current !== saveState);
       if (checkpointAdvancedDuringSave()) {
         const finalBarrierState = await requestAuthoritativeSimulationCheckpoint();
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 durable 保存已取消");
         const finalCheckpointRevision = simulationStateRevisionRef.current;
         if (finalBarrierState !== saveState || finalCheckpointRevision !== checkpointRevision) {
           saveState = finalBarrierState;
           checkpointRevision = finalCheckpointRevision;
           const finalResult = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 durable 保存结果已作废");
           if (!finalResult.success) throw new Error(finalResult.message);
           result = finalResult;
           primaryWriteVerified = true;
@@ -3520,6 +6980,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         committedAtMs: identity.savedAt,
       });
       const initialized = await initializeSimulationRuntimeRecoveryInPersistenceWorker(checkpoint, fence);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 recovery head 未发布");
       if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
       if (!initialized.result.ok) throw new Error(initialized.result.message);
       durableRecoveryHeadRef.current = {
@@ -3551,6 +7012,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message: failure.message });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "failed" });
       if (kind === "autosave") completeRuntimeTransition("autosave", "save-failed");
+      if (nativeAuthorityPersistenceProtectedRef.current || readNativeAuthorityPersistenceBoundary().protected) {
+        setNotice(`${failure.message}；Rust 权威状态未被旧 JavaScript 镜像替换或假暂停`);
+        repairDurableWorkerAfterSave = primaryWriteVerified;
+        return failure;
+      }
       if (allowEditsDuringSaveRef.current) {
         // 保存失败时不再回滚/丢弃玩家在保存期间已接受的编辑；
         // 保留当前 UI 与 durable 队列，提示玩家导出或重试。
@@ -3576,7 +7042,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
     }
-  }, [memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, pauseVisibleStateWithoutRollback, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint]);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, pauseVisibleStateWithoutRollback, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint]);
   persistDurablePrimaryCheckpointRef.current = persistDurablePrimaryCheckpoint;
 
   const loadVerifiedDurablePrimaryState = useCallback(async (
@@ -3611,6 +7077,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
    * without forcing a page reload.
    */
   const recoverSimulationWorkerFromDurableRecovery = useCallback(async (resume = false): Promise<boolean> => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return false;
     if (resume) pendingResumeAfterDurableRecoveryRef.current = true;
     const existing = durableWorkerRecoveryInFlightRef.current;
     if (existing) return existing;
@@ -3625,6 +7093,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       if (durablePrimarySaveInFlightRef.current) {
         await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
         if (durablePrimarySaveInFlightRef.current) {
           setNotice("主存档仍在验证，保存完成后可从 recovery 重建模拟 Worker");
           return false;
@@ -3650,6 +7119,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const stageWaitStartedAt = performance.now();
       while (durableRecoveryStageInFlightRef.current && performance.now() - stageWaitStartedAt < 5_000) {
         await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
       }
       if (durableRecoveryStageInFlightRef.current) {
         throw new Error("durable recovery intent 仍在写入，请稍后重试");
@@ -3662,6 +7132,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       let recoveredState = durableRecoveryBaseRequiresPrimaryReloadRef.current
         ? await loadVerifiedDurablePrimaryState(head)
         : durableRecoveryBaseStateRef.current;
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
       if (durableRecoveryBaseRequiresPrimaryReloadRef.current) {
         durableRecoveryBaseStateRef.current = recoveredState;
         latestAuthoritativeCheckpointRef.current = recoveredState;
@@ -3682,6 +7153,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         if (allowEditsDuringSaveRef.current) pendingCommandView = setPaused(gameRef.current, true);
       } else {
         const read = await readSimulationRuntimeRecoveryInPersistenceWorker(head.baseIdentity, fence);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
         if (!read.ok) throw new Error(read.message);
         if (read.diagnostic === "corrupt-recovery-quarantined") {
           throw new Error("durable recovery 已隔离损坏记录；请刷新后选择恢复");
@@ -3691,6 +7163,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             registry,
             timeoutMs: 120_000,
           });
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
           recoveredState = replay.state;
           recoveredRevision = replay.replay.finalStateRevision;
         }
@@ -3700,6 +7173,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const stopped = setPaused(recoveredState, true);
       latestAuthoritativeCheckpointTransferRef.current = null;
       const saved = await saveVerifiedPrimaryCheckpoint(stopped);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
       if (!saved.success) throw new Error(saved.message);
       // An initialize failure below leaves this verified T1 on disk while the
       // old head remains intentionally available. Keep retries aligned with
@@ -3722,6 +7196,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         ownerId: latestWriter.writerId,
         fencingToken: latestWriter.fencingToken,
       });
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
       if (!initialized.result.ok) throw new Error(initialized.result.message);
       durableRecoveryHeadRef.current = {
         baseIdentity: checkpoint.baseIdentity,
@@ -3773,6 +7248,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         : "存档已从 recovery 精确恢复，模拟已暂停");
       return true;
     })().catch((error) => {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
       const message = error instanceof Error ? error.message : "durable recovery 重建失败";
       setNotice(`${message}；当前仍暂停，刷新后可从 recovery 精确恢复`);
       return false;
@@ -3781,7 +7257,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     });
     durableWorkerRecoveryInFlightRef.current = recoveryPromise;
     return recoveryPromise;
-  }, [invalidateFactoryAlertProjection, loadVerifiedDurablePrimaryState, saveVerifiedPrimaryCheckpoint]);
+  }, [invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, loadVerifiedDurablePrimaryState, saveVerifiedPrimaryCheckpoint]);
   durableRecoveryRepairRef.current = (resumeAfterRepair = false) => {
     void recoverSimulationWorkerFromDurableRecovery(resumeAfterRepair);
   };
@@ -3789,7 +7265,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const persistPureIdleTerminalEnvelope = useCallback(async (
     record: PureIdleRecoveryRecord,
     finalized: PureIdleMacroFinalEnvelopeResult,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
   ): Promise<SaveGameResult> => {
+    const staleAuthorityResult = (): SaveGameResult => ({
+      success: false,
+      message: "Windows 原生权威已接管，旧纯挂机终态已作废",
+      code: "conflict",
+    });
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
     if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
     if (durableRecoveryLifecycleRef.current !== "active") {
       return { success: false, message: "durable recovery 尚未就绪，未写入纯挂机终态", code: "unavailable" };
@@ -3817,6 +7300,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         deferredDurableUiSubmissionRef.current || durableRecoveryStageInFlightRef.current) {
         throw new Error("纯挂机终态接管前仍有普通模拟操作未完成");
       }
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind: "pure-idle-stop", phase: "serialize-write-readback" });
       const identity = finalized.finalEnvelope.identity;
@@ -3833,6 +7317,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         elapsedSeconds: identity.elapsedSeconds,
       }, {
         onProgress: (progress) => {
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (progress.stage === "complete") {
             setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "serialize-write-readback", startedAt, message: "纯挂机终态已写入，正在验证模拟 Worker 接管…" });
           } else if ("bytes" in progress && progress.bytes) {
@@ -3840,6 +7325,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           }
         },
       });
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (saved.sourceEnvelopeTransfer) finalized.finalEnvelope.payloadBytes = saved.sourceEnvelopeTransfer;
       if (!saved.success) {
         setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "failed", startedAt, message: saved.message });
@@ -3862,6 +7348,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
       const fence = { ownerId: writer.writerId, fencingToken: writer.fencingToken };
       const initialized = await initializeSimulationRuntimeRecoveryInPersistenceWorker(nextCheckpoint, fence);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (!initialized.result.ok) throw new Error(initialized.result.message);
       durableRecoveryHeadRef.current = {
         baseIdentity: nextCheckpoint.baseIdentity,
@@ -3879,6 +7366,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         committed: true,
         committedAtMs,
       }, committedAtMs);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (marked && pureIdleRecoveryRef.current?.sessionId === record.sessionId) {
         pureIdleRecoveryRef.current = {
           ...pureIdleRecoveryRef.current,
@@ -3894,7 +7382,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (!sourceStateTransfer) throw new Error("纯挂机保存未返还模拟 Worker state transfer");
       setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "serialize-write-readback", startedAt, message: "主存档已验证，正在等待模拟 Worker 接管…" });
       await replaceSimulationAuthorityFromStateTransfer(sourceStateTransfer, durableRecoveryHeadRef.current);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       if (saved.bytes !== undefined) setPersistedPrimaryBytes(saved.bytes);
       // Keep completion presentation in the same low-priority publication as
       // the caller's terminal GameState + overlay close. Publishing here used
@@ -3907,18 +7397,96 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind: "pure-idle-stop", phase: "complete" });
       return saved;
     } catch (error) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       const failure: SaveGameResult = { success: false, message: error instanceof Error ? error.message : "纯挂机终态保存/接管失败", code: "unavailable" };
       setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "failed", startedAt, message: failure.message });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind: "pure-idle-stop", phase: "failed" });
       setNotice(`${failure.message}；主存档若已验证，请刷新以从新主存档恢复`);
       return failure;
     } finally {
-      durablePrimarySaveInFlightRef.current = false;
-      simulationSaveBarrierDepthRef.current = Math.max(0, simulationSaveBarrierDepthRef.current - 1);
-      if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current) simulationCheckpointBarrierRef.current = false;
-      window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
+      if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+        durablePrimarySaveInFlightRef.current = false;
+        simulationSaveBarrierDepthRef.current = Math.max(0, simulationSaveBarrierDepthRef.current - 1);
+        if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current) simulationCheckpointBarrierRef.current = false;
+        window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
+      }
     }
-  }, [clearPureIdleRecovery, replaceSimulationAuthorityFromStateTransfer]);
+  }, [clearPureIdleRecovery, legacyJavaScriptAuthorityLeaseIsCurrent, replaceSimulationAuthorityFromStateTransfer]);
+
+  const persistNativeAuthorityCheckpoint = useCallback(async (
+    kind: RuntimePersistenceKind,
+  ): Promise<SaveGameResult> => {
+    const handoff = nativeAuthorityHandoffRef.current;
+    if (handoff && nativePlayerAuthorityClock.getSnapshot().expectedSessionId !== handoff.sessionId) {
+      return kind === "autosave" || kind === "lifecycle"
+        ? { success: true, message: "Windows 原生权威正在交接，本次自动检查点已合并", skippedUnchanged: true }
+        : { success: false, message: "Windows 原生权威正在交接，请等待主进程确认所有权", code: "conflict" };
+    }
+    if (kind === "return") {
+      return {
+        success: false,
+        message: "Windows 原生 durable 检查点的启动恢复链尚未完成验证，已阻止返回主页；当前 Rust 工厂未改变",
+        code: "unavailable",
+      };
+    }
+    if (nativeAuthorityCheckpointInFlightRef.current) {
+      return kind === "autosave" || kind === "lifecycle"
+        ? { success: true, message: "已有 Windows 原生 durable 检查点正在进行，本次自动请求已合并", skippedUnchanged: true }
+        : { success: false, message: "已有 Windows 原生 durable 检查点正在验证，请稍候再试", code: "conflict" };
+    }
+    const initialBoundary = await refreshNativeAuthorityPersistenceBoundary();
+    const token = initialBoundary.checkpointToken;
+    if (!token) {
+      return {
+        success: false,
+        message: initialBoundary.runtimeKind === "macro"
+          ? "Windows 原生宏观结算使用自己的 durable 提交链；普通保存未写入旧 JavaScript 主档"
+          : "Windows 原生权威尚未取得稳定 revision，保存已失败关闭且未写入旧 JavaScript 主档",
+        code: "unavailable",
+      };
+    }
+    nativeAuthorityCheckpointInFlightRef.current = true;
+    const savedAt = Date.now();
+    try {
+      const controller = windowsNativeCoreBetaControllerRef.current;
+      if (!controller) throw new Error("Windows 原生权威控制器不可用");
+      const receipt = await controller.createAuthorityCheckpoint(undefined, savedAt);
+      if (!verifyNativeAuthorityCheckpointArtifact(token, receipt)) {
+        throw new Error("Windows 原生 durable 检查点回执发生 lineage 回退、替换或结构损坏");
+      }
+      let runtime: NativeAuthorityRuntimeObservation | null = null;
+      let liveLineageHealthy = false;
+      try {
+        await nativePlayerAuthorityClock.refresh();
+        runtime = readNativeAuthorityRuntimeObservation();
+        liveLineageHealthy = verifyNativeAuthorityCheckpointReceipt(token, receipt, runtime);
+      } catch {
+        // The immutable checkpoint is already durable. A failed follow-up clock
+        // pull affects recovery status only and cannot undo or falsify that ACK.
+      }
+      const revision = receipt.artifact.identity.revision;
+      const recoveryWarning = liveLineageHealthy && runtime?.kind === "active"
+        ? ""
+        : "；检查点本身已安全落盘，但原生时钟正忙或等待恢复，游戏不会回退到旧 JavaScript 存档";
+      const result: SaveGameResult = {
+        success: true,
+        message: `Windows 原生 durable 检查点已确认（revision ${revision}）；未写入公共 JavaScript 主档或云档${recoveryWarning}`,
+        savedAt,
+      };
+      setSaveFailure(null);
+      return result;
+    } catch (error) {
+      const result: SaveGameResult = {
+        success: false,
+        message: `${error instanceof Error ? error.message : "Windows 原生 durable 检查点失败"}；未写入旧 JavaScript 主档，也未把 JavaScript 暂停冒充为 Rust 保护`,
+        code: "unavailable",
+      };
+      setSaveFailure(result);
+      return result;
+    } finally {
+      nativeAuthorityCheckpointInFlightRef.current = false;
+    }
+  }, [nativePlayerAuthorityClock, readNativeAuthorityRuntimeObservation, refreshNativeAuthorityPersistenceBoundary]);
 
   const persistPrimarySave = useCallback(async (
     state?: GameState,
@@ -3926,6 +7494,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   ): Promise<SaveGameResult> => {
     if (lifecycleExitStartedRef.current) {
       return { success: false, message: "页面正在退出，已保留当前恢复边界", code: "conflict" };
+    }
+    const nativeBoundary = readNativeAuthorityPersistenceBoundary();
+    if (nativeBoundary.protected) {
+      if (state !== undefined) {
+        return {
+          success: false,
+          message: "Windows 原生权威尚未安全交还控制权，已阻止用旧 JavaScript 状态替换主存档；当前 Rust 工厂和原存档均未改变",
+          code: "conflict",
+        };
+      }
+      return persistNativeAuthorityCheckpoint(kind);
     }
     // Exactly one full checkpoint may own memory at a time. Timers coalesce;
     // explicit actions get a visible conflict and can be retried after the
@@ -3938,6 +7517,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     if (durableSimulationRuntimeEnabled && durableRecoveryLifecycleRef.current === "active") {
       return persistDurablePrimaryCheckpoint(state, kind);
+    }
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) {
+      return { success: false, message: "Windows 原生权威状态尚未确认，旧 JavaScript 保存已阻止", code: "conflict" };
     }
     if (import.meta.env.DEV && verifiedPrimarySaveInFlightDepthRef.current !== 0) {
       throw new Error("primary-save ownership invariant violated");
@@ -3983,6 +7566,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const chunkedSaveContext = checkpointBaseIdentity
         ? await prepareChunkedSaveJournalContext(checkpointMode, checkpointBaseIdentity.checksum).catch(() => null)
         : null;
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+        throw new Error("Windows 原生权威已在保存准备期间接管，旧保存已取消");
+      }
       const directChunkedSave = checkpointBaseIdentity && chunkedSaveContext
         ? {
             options: { mode: checkpointMode, basePrimaryChecksum: checkpointBaseIdentity.checksum },
@@ -4005,6 +7591,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             savedAtMs: Date.now(),
           })
         : null;
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+        await nativeSaveTransaction?.abort();
+        throw new Error("Windows 原生权威已在保存事务启动期间接管，旧保存已取消");
+      }
       let barrierState: GameState;
       const useConfirmedAutosaveBoundary = canUseConfirmedAutosaveBoundary && !nativeSaveTransaction;
       try {
@@ -4013,6 +7603,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           : state === undefined && checkpointCandidateIsLarge
             ? await requestAuthoritativePersistenceCheckpoint(directChunkedSave, nativeSaveTransaction)
             : await requestAuthoritativeSimulationCheckpoint();
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+          await nativeSaveTransaction?.abort();
+          throw new Error("Windows 原生权威已在检查点期间接管，旧保存已取消");
+        }
       } catch (error) {
         await nativeSaveTransaction?.abort();
         throw error;
@@ -4022,6 +7616,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // transaction alive when that path is selected.
       if (nativeSaveTransaction && (state !== undefined || !checkpointCandidateIsLarge)) {
         await nativeSaveTransaction.abort();
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+          throw new Error("Windows 原生权威已在保存清理期间接管，旧保存已取消");
+        }
       }
       if (useConfirmedAutosaveBoundary) {
         recordRuntimeTransitionPhase("autosave-confirmed-checkpoint", startedAt, performance.now() - startedAt, {
@@ -4045,7 +7642,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         policy: memoryGuardPolicy,
       });
       if (saveMemoryDecision.shouldPause) {
-        const failure: SaveGameResult = { success: false, message: "内存压力过高，已暂停并保留当前进度", code: "conflict" };
+        const nativeProtected = nativeAuthorityPersistenceProtectedRef.current;
+        const failure: SaveGameResult = {
+          success: false,
+          message: nativeProtected
+            ? "内存压力过高；已停止旧存档写入，但未把 JavaScript 暂停冒充为 Rust 权威保护"
+            : "内存压力过高，已暂停并保留当前进度",
+          code: "conflict",
+        };
         pauseForMemoryPressure(saveMemoryDecision.reason ?? "存档需要的临时内存过高");
         // A guard rejection is an expected, terminal save outcome rather than
         // an exception. Publish the same failed phase/transition as the catch
@@ -4105,6 +7709,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             basePrimaryChecksum: baseIdentity.checksum,
             },
           );
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+            throw new Error("Windows 原生权威已在增量保存期间接管，旧保存结果已作废");
+          }
           chunkedAutosaveCommitted = true;
           result = {
             success: true,
@@ -4124,15 +7731,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           // A quota/lease failure in the sidecar must not weaken the verified
           // primary path. Fall back to the existing full save atomically.
           result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: true, force: false });
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+            throw new Error("Windows 原生权威已在完整保存期间接管，旧保存结果已作废");
+          }
         }
       } else {
         result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+          throw new Error("Windows 原生权威已在完整保存期间接管，旧保存结果已作废");
+        }
       }
       if (result.success && !chunkedAutosaveCommitted) {
         // Manual/full saves compact the sidecar into the public v2 envelope;
         // a stale journal can never shadow the newly verified primary.
         try {
           await clearChunkedSaveJournal(mode);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return {
+            success: false,
+            message: "Windows 原生权威已接管，旧保存清理结果已忽略",
+            code: "conflict",
+          };
         } catch { /* best-effort cleanup */ }
       }
       const durationMs = performance.now() - startedAt;
@@ -4166,6 +7784,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "存档流程失败";
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+        return { success: false, message, code: "conflict" };
+      }
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "failed" });
       if (kind === "autosave") completeRuntimeTransition("autosave", "save-failed");
@@ -4187,11 +7808,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
       }
     }
-  }, [createAuthoritativeCheckpointOverlay, durableSimulationRuntimeEnabled, largeSaveAutosavePolicy.largeSave, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure,
+  }, [createAuthoritativeCheckpointOverlay, durableSimulationRuntimeEnabled, issueLegacyJavaScriptAuthorityLease, largeSaveAutosavePolicy.largeSave, legacyJavaScriptAuthorityLeaseIsCurrent, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, persistNativeAuthorityCheckpoint, readNativeAuthorityPersistenceBoundary,
     performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativePersistenceCheckpoint,
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
   persistPrimarySaveRef.current = persistPrimarySave;
-  isCurrentPrimarySaveSourceRef.current = isCurrentPrimarySaveSource;
 
   useEffect(() => registerCurrentTabTakeoverHandler(async () => {
     const before = getLocalSaveWriterStatus();
@@ -4259,8 +7879,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const persistPureIdleTransition = useCallback(async (
     record: PureIdleRecoveryRecord,
     update: PureIdleRecoveryTransition,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
     nowMs = Date.now(),
   ): Promise<boolean> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
     let persisted = false;
     try {
       persisted = await recordPureIdleRecoveryTransition(
@@ -4272,6 +7894,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } catch {
       // The checkpoint remains authoritative if diagnostic metadata cannot be written.
     }
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
     const current = pureIdleRecoveryRef.current;
     if (current?.sessionId !== record.sessionId) return persisted;
     pureIdleRecoveryRef.current = {
@@ -4288,13 +7911,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       lastTransitionAtMs: nowMs,
     };
     return persisted;
-  }, []);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent]);
 
   const persistPureIdleWorkerFailure = useCallback(async (
     record: PureIdleRecoveryRecord,
     message: string,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
     stopReason: PureIdleStopReason = "worker-error",
   ): Promise<number> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return pureIdleMacroRestartCountRef.current;
     const localFallback = pureIdleMacroRestartCountRef.current + 1;
     let persisted: number | null = null;
     try {
@@ -4307,6 +7932,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // The durable checkpoint remains authoritative even if this diagnostic
       // transaction is temporarily unavailable.
     }
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return pureIdleMacroRestartCountRef.current;
     const restartCount = persisted ?? localFallback;
     pureIdleMacroRestartCountRef.current = restartCount;
     pureIdleMacroForceConservativeRef.current = restartCount >= PURE_IDLE_WORKER_RESTART_LIMIT;
@@ -4323,11 +7949,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       stopReason,
       phase: "failed",
       lastError: message,
-    });
+    }, authorityLease);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return pureIdleMacroRestartCountRef.current;
     return restartCount;
-  }, [persistPureIdleTransition]);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTransition]);
 
-  const publishPureIdleMacroSummary = useCallback((record: PureIdleRecoveryRecord, summary: PureIdleMacroSummary) => {
+  const publishPureIdleMacroSummary = useCallback((
+    record: PureIdleRecoveryRecord,
+    summary: PureIdleMacroSummary,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
+  ) => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     const current = pureIdleRecoveryRef.current;
     if (!pureIdleMacroActiveRef.current || current?.sessionId !== record.sessionId) return;
     pureIdleRecoveryRef.current = {
@@ -4350,9 +7982,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       summary.phase,
       summary,
     ).then((retained) => { if (!retained) handlePureIdleLeaseLost(record.sessionId); });
-  }, [handlePureIdleLeaseLost, setPureIdleRecoveryContinueState]);
+  }, [handlePureIdleLeaseLost, legacyJavaScriptAuthorityLeaseIsCurrent, setPureIdleRecoveryContinueState]);
 
-  const initializePureIdleMacroClient = useCallback(async (record: PureIdleRecoveryRecord): Promise<PureIdleMacroClient | null> => {
+  const initializePureIdleMacroClient = useCallback(async (
+    record: PureIdleRecoveryRecord,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
+  ): Promise<PureIdleMacroClient | null> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return null;
     pureIdleMacroRestartCountRef.current = Math.max(
       pureIdleMacroRestartCountRef.current,
       record.workerRestartCount,
@@ -4379,10 +8015,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const client = new PureIdleMacroClient({
       operationDeadlineMs: complexity?.recommendedDeadlineMs || undefined,
       onProgress: (progress) => {
-        if (pureIdleMacroClientRef.current !== client || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) return;
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease) ||
+          pureIdleMacroClientRef.current !== client || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) return;
         setPureIdleRecoveryStatus(`${pureIdleProgressLabel(progress)} · 现实耗时 ${(progress.wallClockMs / 1_000).toFixed(1)} 秒`);
       },
     });
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+      client.close();
+      return null;
+    }
     pureIdleMacroClientRef.current = client;
     setPureIdleRecoveryStatus(record.mode === "replication"
       ? "正在读取既有滚动统计快照；不会执行额外精确校准"
@@ -4398,11 +8039,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           baselineTotalProduced: record.state.totalProduced,
         },
       });
-      if (!pureIdleMacroActiveRef.current || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease) ||
+        !pureIdleMacroActiveRef.current || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) {
         client.close();
         return null;
       }
-      publishPureIdleMacroSummary(record, summary);
+      publishPureIdleMacroSummary(record, summary, authorityLease);
       if (summary.settledWallSeconds > 0) pureIdleMacroRestartCountRef.current = 0;
       setPureIdleRecoveryContinueState(false);
       setNotice(record.mode === "replication"
@@ -4416,9 +8058,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } catch (error) {
       client.close();
       if (pureIdleMacroClientRef.current === client) pureIdleMacroClientRef.current = null;
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return null;
       if (!isCountedPureIdleWorkerFailure(error)) return null;
       const message = error instanceof Error ? error.message : "纯挂机 Worker 初始化失败";
-      const restartCount = await persistPureIdleWorkerFailure(record, message, pureIdleStopReasonForError(error));
+      const restartCount = await persistPureIdleWorkerFailure(record, message, authorityLease, pureIdleStopReasonForError(error));
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return null;
       if (forceConservativeReason) {
         setPureIdleRecoveryContinueState(true);
         setPureIdleRecoveryStatus(`保守 Worker 仍不可用：${message}`);
@@ -4431,7 +8075,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       return null;
     }
-  }, [persistPureIdleWorkerFailure, publishPureIdleMacroSummary, setPureIdleRecoveryContinueState]);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, setPureIdleRecoveryContinueState]);
 
   /**
    * Publish the verified terminal mirror while the pure-idle overlay still
@@ -4440,7 +8084,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
    * painted frames keep the state publication and canvas reveal as separate,
    * bounded tasks without ever exposing the stale pre-terminal canvas.
    */
-  const publishPureIdleTerminalGameBehindOverlay = useCallback(async (): Promise<void> => {
+  const publishPureIdleTerminalGameBehindOverlay = useCallback(async (
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
+  ): Promise<boolean> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
     startTransition(() => publishRuntimeGame(gameRef.current, true));
     await new Promise<void>((resolve) => {
       let settled = false;
@@ -4453,33 +8100,39 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const fallback = window.setTimeout(finish, 100);
       window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
     });
-  }, [publishRuntimeGame]);
+    return legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease);
+  }, [legacyJavaScriptAuthorityLeaseIsCurrent, publishRuntimeGame]);
 
   const settlePureIdleBackgroundRecovery = useCallback(async (
     record: PureIdleRecoveryRecord,
+    authorityLease: LegacyAuthorityAsyncLeaseToken,
     nowMs = Date.now(),
   ): Promise<"continued" | "completed" | "not-backgrounded"> => {
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
     const plan = getPureIdleBackgroundPlan(record, nowMs);
     if (!plan.backgrounded) return "not-backgrounded";
     if (pureIdleStoppingRef.current || pureIdleBackgroundRecoveryRef.current) return "completed";
     pureIdleBackgroundRecoveryRef.current = true;
 
     if (!plan.graceExpired) {
-      const client = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record);
+      const client = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       if (!client) {
         pureIdleBackgroundRecoveryRef.current = false;
         return "completed";
       }
       try {
         const summary = await client.advance(plan.highWallSeconds);
-        if (!pureIdleMacroActiveRef.current || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) {
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease) ||
+          !pureIdleMacroActiveRef.current || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) {
           client.close();
           pureIdleBackgroundRecoveryRef.current = false;
           return "completed";
         }
         pureIdleMacroClientRef.current = client;
-        publishPureIdleMacroSummary(record, summary);
+        publishPureIdleMacroSummary(record, summary, authorityLease);
         const cleared = await clearPureIdleBackground(record.sessionId, pureIdleOwnerTokenRef.current);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (cleared && pureIdleRecoveryRef.current?.sessionId === record.sessionId) {
           const { backgroundStartedAtMs: _backgroundStartedAtMs, ...withoutBackground } = pureIdleRecoveryRef.current;
           pureIdleRecoveryRef.current = withoutBackground;
@@ -4489,9 +8142,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return "continued";
       } catch (error) {
         client.close();
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         const restartCount = isCountedPureIdleWorkerFailure(error)
-          ? await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "后台纯挂机恢复失败", pureIdleStopReasonForError(error))
+          ? await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "后台纯挂机恢复失败", authorityLease, pureIdleStopReasonForError(error))
           : pureIdleMacroRestartCountRef.current;
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         const message = error instanceof Error ? error.message : "后台纯挂机恢复失败";
         setPureIdleRecoveryStatus(`${message}；恢复日志与原主存档保持不变（${restartCount}/${PURE_IDLE_WORKER_RESTART_LIMIT}）`);
         setNotice(`${message}；正在等待安全重建`);
@@ -4507,10 +8162,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       phase: "finalizing",
       stopRequestedAtMs: nowMs,
       targetWallSeconds: plan.highWallSeconds,
-    }, nowMs);
+    }, authorityLease, nowMs);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
     setPureIdleRecoveryStatus("后台宽限已结束，正在切换普通离线结算");
     setNotice("后台超过 5 分钟，剩余时间将按普通离线规则结算");
-    const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record);
+    const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
     if (!finalizer) {
       pureIdleStoppingRef.current = false;
       pureIdleBackgroundRecoveryRef.current = false;
@@ -4528,12 +8185,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         // 1.0.44-only envelope/head handoff below.
         setPureIdleRecoveryStatus("正在复用已校准会话推进后台宽限边界");
         const legacyFinalized = await finalizer.finalize(plan.highWallSeconds);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         macroFinalized = true;
         await persistPureIdleTransition(record, {
           stopReason: "background-grace-expired",
           phase: "validating",
           finalizedAtMs: Date.now(),
-        });
+        }, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         let ordinaryState = legacyFinalized.state;
         if (plan.normalOfflineSeconds >= 1) {
           setPureIdleRecoveryStatus("后台普通离线结果正在由后台 Worker 核对");
@@ -4541,11 +8200,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             () => import("./game/offlineSimulation"),
             "后台普通离线结算模块",
           );
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
           const ordinary = await runOfflineSimulationInWorkerDetailed(ordinaryState, plan.normalOfflineSeconds, {
             signal: abortController.signal,
             approximate: readOfflineApproximationEnabled(),
             registry: contentPackRuntimeSnapshotRef.current,
           });
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
           if (ordinary.status !== "complete") {
             throw new Error(ordinary.approximation.fallbackReason ?? "后台普通离线结算需要玩家确认");
           }
@@ -4565,7 +8226,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           record.startedPaused,
         );
         setPureIdleRecoveryStatus("后台候选已验证，正在按稳定存档链写入并复核主存档");
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         const saved = await persistPrimarySave(restored, "pure-idle-stop");
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (lifecycleExitStartedRef.current) return "completed";
         if (!saved.success) {
           setPureIdleRecoveryContinueState(true);
@@ -4578,9 +8241,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           phase: "finalizing",
           committed: true,
           committedAtMs: Date.now(),
-        });
+        }, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (!marked) throw new Error("纯挂机恢复日志提交标记未获得持久化确认");
         const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
 
         // The macro Worker owned the old time-warp checkpoint.  Reinstall the
         // ordinary simulation Worker from the verified stable state before the
@@ -4622,17 +8287,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         terminal: false,
         binaryTransport: "blob",
       });
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       macroFinalized = true;
       await persistPureIdleTransition(record, {
         stopReason: "background-grace-expired",
         phase: "validating",
         finalizedAtMs: Date.now(),
-      });
+      }, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       setPureIdleRecoveryStatus("后台普通离线结果正在由后台 Worker 核对并生成终止存档");
       const { runOfflineBackgroundTerminalFinalize } = await importWithRecovery(
         () => import("./game/offlineSimulation"),
         "后台普通离线结算模块",
       );
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       const settled = await runOfflineBackgroundTerminalFinalize({
         sourceEnvelope: finalized.finalEnvelope.payloadBytes,
         sourceVerification: finalized.finalEnvelope.verification,
@@ -4646,6 +8314,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         signal: abortController.signal,
         approximate: readOfflineApproximationEnabled(),
       });
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       // Reuse the same proof-bound persistence + durable head roll + committed
       // journal mark + simulation-Worker rebase + exact recovery clear as a
       // normal pure-idle stop. The old recovery journal stays authoritative
@@ -4657,7 +8326,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         durationMs: settled.durationMs,
       };
       setPureIdleRecoveryStatus("后台候选已验证，正在由保存 Worker 写入并重新读取主存档");
-      const saved = await persistPureIdleTerminalEnvelope(record, backgroundFinalized);
+      const saved = await persistPureIdleTerminalEnvelope(record, backgroundFinalized, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       if (lifecycleExitStartedRef.current) return "completed";
       if (!saved.success) {
         setPureIdleRecoveryContinueState(true);
@@ -4669,7 +8339,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // T0->T1 recovery replacement, simulation-Worker rebase, and exact
       // recovery clear. Only now may the UI close the session.
       const cleared = pureIdleRecoveryRef.current?.sessionId !== record.sessionId;
-      await publishPureIdleTerminalGameBehindOverlay();
+      if (!await publishPureIdleTerminalGameBehindOverlay(authorityLease)) return "completed";
       pureIdleMacroActiveRef.current = false;
       pureIdleActiveRef.current = false;
       pureIdleRecoveryRef.current = null;
@@ -4688,8 +8358,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
       return "completed";
     } catch (error) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       if (!macroFinalized && isCountedPureIdleWorkerFailure(error)) {
-        const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "后台纯挂机恢复失败", pureIdleStopReasonForError(error));
+        const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "后台纯挂机恢复失败", authorityLease, pureIdleStopReasonForError(error));
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (restartCount >= PURE_IDLE_WORKER_RESTART_LIMIT) setPureIdleRecoveryContinueState(true);
         finalizer.close();
         if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
@@ -4701,13 +8373,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(`${message}；未提交后台候选时间，原主存档保持不变`);
       return "completed";
     } finally {
-      pureIdleBackgroundOfflineAbortRef.current = null;
-      pureIdleStoppingRef.current = false;
-      pureIdleBackgroundRecoveryRef.current = false;
+      if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
+        pureIdleBackgroundOfflineAbortRef.current = null;
+        pureIdleStoppingRef.current = false;
+        pureIdleBackgroundRecoveryRef.current = false;
+      }
     }
-  }, [durableSimulationRuntimeEnabled, initializePureIdleMacroClient, invalidateFactoryAlertProjection, persistPrimarySave, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, publishRuntimeGame, setPureIdleRecoveryContinueState]);
+  }, [durableSimulationRuntimeEnabled, initializePureIdleMacroClient, invalidateFactoryAlertProjection, legacyJavaScriptAuthorityLeaseIsCurrent, persistPrimarySave, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, publishRuntimeGame, setPureIdleRecoveryContinueState]);
 
   const markPureIdleBackgrounded = useCallback(() => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleMacroActiveRef.current) return;
     const record = pureIdleRecoveryRef.current;
     if (!record || record.backgroundStartedAtMs !== undefined) return;
@@ -4715,25 +8391,103 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     pureIdleRecoveryRef.current = { ...record, backgroundStartedAtMs };
     void markPureIdleBackground(record.sessionId, pureIdleOwnerTokenRef.current, backgroundStartedAtMs);
     setPureIdleRecoveryStatus("页面已进入后台，纯挂机保留 5 分钟高倍率宽限");
-  }, []);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent]);
 
   const resumePureIdleFromBackground = useCallback(() => {
     const record = pureIdleRecoveryRef.current;
     if (!record || !pureIdleMacroActiveRef.current || document.visibilityState !== "visible") return;
-    void settlePureIdleBackgroundRecovery(record);
-  }, [settlePureIdleBackgroundRecovery]);
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return;
+    void settlePureIdleBackgroundRecovery(record, authorityLease);
+  }, [issueLegacyJavaScriptAuthorityLease, settlePureIdleBackgroundRecovery]);
 
   useEffect(() => {
     const bridge = getDesktopBridge();
     if (!bridge?.onPrepareForUpdate) return;
     return bridge.onPrepareForUpdate(() => {
+      if (readNativeAuthorityPersistenceBoundary().protected) {
+        setNotice("Windows 原生权威的更新重启恢复链尚未完成验证；已阻止退出安装，Rust 工厂未被旧 JavaScript 主档替换");
+        return;
+      }
       void persistPrimarySave().finally(() => {
         void bridge.confirmUpdateReady();
       });
     });
-  }, [persistPrimarySave]);
+  }, [persistPrimarySave, readNativeAuthorityPersistenceBoundary]);
 
   const togglePause = useCallback(() => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const bridge = desktopBridge;
+      const frame = nativePlayerAuthorityClockRef.current?.getSnapshot().currentFrame ?? null;
+      if (!bridge?.setNativePlayerAuthorityPaused || frame?.schemaVersion !== 1) {
+        setNotice("Windows 原生暂停控制当前不可用；本次操作未应用，也没有修改旧 JavaScript 状态");
+        return;
+      }
+      const targetPaused = frame.phase === "active" || frame.phase === "pause-uncertain"
+        ? true
+        : frame.phase === "paused" || frame.phase === "resume-uncertain"
+          ? false
+          : null;
+      if (targetPaused === null) {
+        if (frame.phase === "uncertain") {
+          setNotice("最后一个模拟秒的落盘回执暂时无法确认，程序已保护性停止；请重启应用，让 Rust 从磁盘恢复后再尝试暂停。不会切换到旧 JavaScript 状态，也不会主动回退进度");
+          return;
+        }
+        const label = frame.phase === "pausing"
+          ? "暂停正在安全落盘"
+          : frame.phase === "resuming"
+            ? "继续正在建立新时间锚点"
+            : "原生权威当前正在处理其他事务";
+        setNotice(`${label}；请等待当前回执完成`);
+        return;
+      }
+      if (nativePlayerAuthorityCommandInFlightRef.current) {
+        setNotice("当前建筑或物流操作正在落盘；完成后再切换暂停状态");
+        return;
+      }
+      if (nativePlayerAuthorityPauseInFlightRef.current) {
+        setNotice("暂停状态正在核对；请等待当前回执完成");
+        return;
+      }
+      nativePlayerAuthorityPauseInFlightRef.current = true;
+      invalidateFactoryAlertProjection();
+      setNotice(targetPaused
+        ? "正在结清已到期的一秒并安全暂停；不会丢弃进度"
+        : "正在从新的当前时间继续；暂停期间不会补算积压时间");
+      void bridge.setNativePlayerAuthorityPaused({ paused: targetPaused })
+        .then(async (receipt) => {
+          await nativePlayerAuthorityClockRef.current?.refresh();
+          const settled = receipt.phase === (targetPaused ? "paused" : "active");
+          setNotice(settled
+            ? targetPaused ? "模拟已安全暂停" : "模拟已继续"
+            : "暂停状态回执仍在核对；不会切换到旧 JavaScript 状态");
+        })
+        .catch(async () => {
+          await nativePlayerAuthorityClockRef.current?.refresh();
+          const latest = nativePlayerAuthorityClockRef.current?.getSnapshot().currentFrame;
+          if (latest?.schemaVersion === 1 &&
+              latest.phase === (targetPaused ? "paused" : "active")) {
+            setNotice(targetPaused ? "模拟已安全暂停" : "模拟已继续");
+            return;
+          }
+          if (latest?.schemaVersion === 1 &&
+              latest.phase === (targetPaused ? "pause-uncertain" : "resume-uncertain")) {
+            setNotice(targetPaused
+              ? "暂停事务的最终回执暂时无法确认；请再次点击，程序会按同一个持久事务核对，不会重复提交"
+              : "继续事务的最终回执暂时无法确认；请再次点击，程序会按同一时间锚点核对，不会补算暂停时间");
+            return;
+          }
+          if (latest?.schemaVersion === 1 && latest.phase === "uncertain") {
+            setNotice("暂停前最后一个模拟秒的落盘回执暂时无法确认，程序已保护性停止；请重启应用，让 Rust 从磁盘恢复后再操作。不会切换到旧 JavaScript 状态，也不会主动回退进度");
+            return;
+          }
+          setNotice("暂停状态尚未确认，程序没有切换到旧 JavaScript 状态；请等待片刻，若状态不恢复请重启应用后再操作");
+        })
+        .finally(() => {
+          nativePlayerAuthorityPauseInFlightRef.current = false;
+        });
+      return;
+    }
     if (gameRef.current.paused && durableRecoveryLifecycleRef.current === "active" &&
       (!simulationWorkerRef.current || simulationWorkerDisabledRef.current)) {
       void recoverSimulationWorkerFromDurableRecovery(true);
@@ -4751,9 +8505,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       dispatchDurableUiCommandRef.current();
     }
     setNotice(wasPaused ? "模拟已继续" : "模拟已暂停");
-  }, [invalidateFactoryAlertProjection, publishRuntimeGame, recoverSimulationWorkerFromDurableRecovery, rejectPlayerStateEditDuringPrimarySave]);
+  }, [desktopBridge, invalidateFactoryAlertProjection, publishRuntimeGame, recoverSimulationWorkerFromDurableRecovery, rejectPlayerStateEditDuringPrimarySave]);
 
   const handleTimeWarpEnabledChange = useCallback((enabled: boolean, requestedMode: "conservative" | "replication" = "conservative") => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const accepted = enabled
+        ? nativePlayerAuthorityMacroController?.requestStart() ?? false
+        : nativePlayerAuthorityMacroController?.requestStop() ?? false;
+      if (accepted) {
+        setNotice(enabled
+          ? "正在由 Windows 原生权威启用时间扭曲并等待供电确认；不会预支未来时间"
+          : "正在结清已经流逝的时间并停止 Windows 原生纯挂机；不会丢弃或重复结算");
+      } else {
+        const phase = nativePlayerAuthorityMacroController?.getSnapshot().phase ?? "unavailable";
+        setNotice(`Windows 原生纯挂机当前无法${enabled ? "启动" : "停止"}（${phase}）；本次操作未应用`);
+      }
+      return;
+    }
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     if (enabled) {
       if (requestedMode === "replication" && gameRef.current.speedrun?.enabled) {
@@ -4766,6 +8534,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return;
       }
       if (!gameRef.current.speedrun?.enabled) {
+        const authorityLease = issueLegacyJavaScriptAuthorityLease();
+        if (!authorityLease) {
+          setNotice("Windows 原生权威状态正在变化，旧纯挂机启动已取消");
+          return;
+        }
         pureIdleMacroActiveRef.current = true;
         pureIdleStopTargetRef.current = null;
         pureIdleMacroRestartCountRef.current = 0;
@@ -4781,7 +8554,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               setNotice("终局工厂当前 Worker 切片正在收尾；完成后会自动进入纯挂机，无需再次点击…");
             }
             await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           }
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (simulationSubmissionRef.current) {
             pureIdleMacroActiveRef.current = false;
             setNotice("当前 Worker 切片 60 秒内仍未提交；已保留进度并暂停，可立即重试纯挂机");
@@ -4829,11 +8604,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           // points, so do the same durable T0 bootstrap the menu normally
           // performs before creating a pure-idle recovery journal.
           if (!await ensureDurableRecoveryBaseline(gameRef.current)) {
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
             pureIdleMacroActiveRef.current = false;
             setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
             return;
           }
           setNotice("正在取得纯挂机恢复日志写入权…");
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const claim = await createPureIdleRecovery(
             checkpoint,
             mode,
@@ -4842,16 +8619,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             Date.now(),
             startedPaused,
           );
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (!claim.ok) {
             pureIdleMacroActiveRef.current = false;
             setNotice(claim.message);
             return;
           }
           setNotice("正在写入并读回纯挂机开始检查点…");
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const saved = await persistPrimarySave(checkpoint);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (lifecycleExitStartedRef.current) return;
           if (!saved.success) {
             await clearPureIdleRecovery(claim.record.sessionId, pureIdleOwnerTokenRef.current);
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
             pureIdleMacroActiveRef.current = false;
             setNotice("无法创建纯挂机检查点，主存档未改变");
             return;
@@ -4867,7 +8648,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           setNotice(mode === "replication"
             ? "正在启动产率复制挂机；直接读取既有统计，不执行 30 秒校准"
             : mode === "stable" ? "正在启动稳定宏观纯挂机" : "正在启动终局极限纯挂机");
-          await initializePureIdleMacroClient(claim.record);
+          await initializePureIdleMacroClient(claim.record, authorityLease);
         })().catch((error) => {
           // Startup owns no committed macro output yet. An unexpected browser,
           // lock, or persistence exception must return the UI to an immediately
@@ -4882,6 +8663,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             ? `纯挂机启动失败：${error.message}；主存档未改变，可立即重试`
             : "纯挂机启动失败；主存档未改变，可立即重试");
         });
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+        })();
         return;
       }
       if (!simulationWorkerRef.current || simulationWorkerDisabledRef.current) {
@@ -4922,7 +8705,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     simulationPendingWallSecondsRef.current = 0;
     setTimeWarpPendingUi(0);
     setNotice("纯挂机已停止");
-  }, [endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, requestAuthoritativeDeferredTopLevelProjection, setPureIdleRecoveryContinueState]);
+  }, [endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityMacroController, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, requestAuthoritativeDeferredTopLevelProjection, setPureIdleRecoveryContinueState]);
 
   const abortPureIdleForWorkerFailure = useCallback((message: string) => {
     if (pureIdleMacroActiveRef.current) {
@@ -4961,7 +8744,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(message);
   }, [publishTimeWarpComputeState]);
 
-  const stopPureIdle = useCallback(async () => {
+  const stopPureIdle = useCallback(async (
+    inheritedAuthorityLease?: LegacyAuthorityAsyncLeaseToken,
+  ) => {
+    const authorityLease = inheritedAuthorityLease ?? issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (pureIdleMacroActiveRef.current) {
       recordRuntimeTransitionPhase("pure-idle-terminal-stop-requested", performance.now(), 0);
       if (pureIdleStoppingRef.current) return;
@@ -4976,7 +8763,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const backgroundPlan = getPureIdleBackgroundPlan(record, stoppedAtMs);
       if (backgroundPlan.backgrounded && backgroundPlan.graceExpired) {
         pureIdleStoppingRef.current = false;
-        await settlePureIdleBackgroundRecovery(record, stoppedAtMs);
+        await settlePureIdleBackgroundRecovery(record, authorityLease, stoppedAtMs);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         return;
       }
       const targetWallSeconds = backgroundPlan.backgrounded
@@ -4991,13 +8779,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         phase: "finalizing",
         stopRequestedAtMs: stoppedAtMs,
         targetWallSeconds: frozenTarget,
-      }, stoppedAtMs);
+      }, authorityLease, stoppedAtMs);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       recordRuntimeTransitionPhase("pure-idle-terminal-journal-staged", performance.now(), 0);
       startTransition(() => {
         setPureIdleRecoveryStatus("正在复用已校准会话推进最后结算边界");
         setNotice("正在停止纯挂机；恢复日志会保留到主存档验证成功");
       });
-      const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record);
+      const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       if (!finalizer) {
         pureIdleStoppingRef.current = false;
         return;
@@ -5009,12 +8799,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           // validated state, the ordinary primary save verifies it, and only
           // then is the independent recovery log marked committed/cleared.
           const legacyFinalized = await finalizer.finalize(frozenTarget);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           macroFinalized = true;
           await persistPureIdleTransition(record, {
             stopReason: "user-stop-requested",
             phase: "validating",
             finalizedAtMs: Date.now(),
-          });
+          }, authorityLease);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const settledIdle = settleIdleRun(
             record.state.idleSettlement,
             frozenTarget,
@@ -5029,7 +8821,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             record.startedPaused,
           );
           setPureIdleRecoveryStatus("候选已序列化验证，正在写入并重新读取主存档");
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const saved = await persistPrimarySave(restored, "pure-idle-stop");
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (!saved.success) {
             setPureIdleRecoveryContinueState(true);
             setPureIdleRecoveryStatus("候选状态有效，但主存档写入失败；恢复日志已保留");
@@ -5041,8 +8835,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             phase: "finalizing",
             committed: true,
             committedAtMs: Date.now(),
-          });
+          }, authorityLease);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           pureIdleMacroActiveRef.current = false;
           pureIdleActiveRef.current = false;
           pureIdleRecoveryRef.current = null;
@@ -5069,6 +8865,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           terminal: true,
           binaryTransport: "blob",
         });
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         recordRuntimeTransitionPhase(
           "pure-idle-terminal-finalize-received",
           terminalFinalizeStartedAt,
@@ -5080,13 +8877,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           stopReason: "user-stop-requested",
           phase: "validating",
           finalizedAtMs: Date.now(),
-        });
+        }, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         startTransition(() => {
           setPureIdleRecoveryStatus("候选已序列化验证，正在由保存 Worker 写入并重新读取主存档");
         });
         const terminalPersistStartedAt = performance.now();
         recordRuntimeTransitionPhase("pure-idle-terminal-persist-dispatched", terminalPersistStartedAt, 0);
-        const saved = await persistPureIdleTerminalEnvelope(record, finalized);
+        const saved = await persistPureIdleTerminalEnvelope(record, finalized, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         recordRuntimeTransitionPhase(
           "pure-idle-terminal-persist-returned",
           terminalPersistStartedAt,
@@ -5104,7 +8903,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         // T0->T1 recovery replacement, simulation-worker rebase, and exact
         // recovery clear.  Only now may the UI close the overlay/session.
         const cleared = pureIdleRecoveryRef.current?.sessionId !== record.sessionId;
-        await publishPureIdleTerminalGameBehindOverlay();
+        if (!await publishPureIdleTerminalGameBehindOverlay(authorityLease)) return;
         pureIdleMacroActiveRef.current = false;
         pureIdleActiveRef.current = false;
         pureIdleRecoveryRef.current = null;
@@ -5121,8 +8920,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         finalizer.close();
         if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
       } catch (error) {
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         if (!macroFinalized && isCountedPureIdleWorkerFailure(error)) {
-          const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "纯挂机停止结算失败", pureIdleStopReasonForError(error));
+          const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "纯挂机停止结算失败", authorityLease, pureIdleStopReasonForError(error));
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (restartCount >= PURE_IDLE_WORKER_RESTART_LIMIT) setPureIdleRecoveryContinueState(true);
           finalizer.close();
           if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
@@ -5131,7 +8932,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         setPureIdleRecoveryStatus(`${message}；恢复日志和原主存档保持不变`);
         setNotice(`${message}；可以重试停止，未结算时间没有被清空`);
       } finally {
-        pureIdleStoppingRef.current = false;
+        if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) pureIdleStoppingRef.current = false;
       }
       return;
     }
@@ -5145,7 +8946,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const waitStartedAt = performance.now();
     while (simulationSubmissionRef.current && performance.now() - waitStartedAt < 10_000) {
       await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     }
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (simulationSubmissionRef.current) {
       pureIdleStoppingRef.current = false;
       pureIdleActiveRef.current = true;
@@ -5166,7 +8969,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     let authoritative: GameState;
     try {
       authoritative = await requestAuthoritativeSimulationCheckpoint();
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     } catch (error) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       pureIdleStoppingRef.current = false;
       pureIdleActiveRef.current = true;
       setPureIdleActive(true);
@@ -5179,7 +8984,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     gameRef.current = next;
     setGame(next);
     setPureIdleStartedAt(null);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     const result = await persistPrimarySave(next, "pure-idle-stop");
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (lifecycleExitStartedRef.current) return;
     if (!result.success) {
       setSaveFailure(result);
@@ -5189,9 +8996,638 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     setNotice("纯挂机已停止，Worker 权威进度已校验保存");
     pureIdleStoppingRef.current = false;
-  }, [initializePureIdleMacroClient, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleTerminalGameBehindOverlay, requestAuthoritativeSimulationCheckpoint, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
+  }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleTerminalGameBehindOverlay, requestAuthoritativeSimulationCheckpoint, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
+
+  const nativeRendererReleasedIdentityRef = useRef<string | null>(null);
+  const releaseNativeRendererState = useCallback((sessionId: string, runId: string) => {
+    const identity = `${sessionId}\0${runId}`;
+    if (nativeRendererReleasedIdentityRef.current === identity) return;
+
+    // The active frame exists only after main/Rust owns the durable writer and
+    // the handoff has proven that renderer/Worker work is drained. From this
+    // point the old GameState is neither a fallback nor a valid save source.
+    const shell = createNativeRendererShellState(gameRef.current);
+    const releasedLoad: LoadedGame = {
+      state: shell,
+      offlineSeconds: 0,
+      offlineReport: null,
+    };
+    const shellCanvas = createCanvasRenderSnapshot(shell);
+    nativeRendererReleasedIdentityRef.current = identity;
+
+    if (pendingRuntimeGamePublicationTimerRef.current !== null) {
+      window.clearTimeout(pendingRuntimeGamePublicationTimerRef.current);
+      pendingRuntimeGamePublicationTimerRef.current = null;
+    }
+    pendingRuntimeGamePublicationRef.current = null;
+    runtimeGamePublicationInFlightRef.current = null;
+    deferredProjectionGameRef.current = null;
+    controlledReturnCommitRef.current = null;
+    pendingCanvasSnapshotPublicationRef.current = null;
+    canvasSnapshotPublicationInFlightRef.current = null;
+    pendingCanvasProjectionRef.current = null;
+    batchConnectionDraftRef.current = null;
+    batchConnectionDraftBaseRef.current = null;
+    viewportOnlyGameStateRef.current = null;
+    durableRecoveryPendingViewRef.current = null;
+    latestAuthoritativeCheckpointTransferRef.current = null;
+    simulationReplayJournalRef.current = [];
+    simulationRecoveryRef.current = null;
+    lastSimulationResultRef.current = null;
+    gameHistoryRef.current.clear();
+    lineFindTraceCacheRef.current = null;
+    canvasTopologyRef.current = null;
+    edgeRouteCacheRef.current = null;
+    edgeRenderCacheRef.current.clear();
+    edgeRenderArrayRef.current = [];
+    canvasPositionNodesRef.current = [];
+    connectionHandleSpatialIndexRef.current = null;
+    alignmentSpatialIndexRef.current = null;
+    dragAlignmentSpatialIndexRef.current = null;
+
+    durableRecoveryBaseStateRef.current = shell;
+    latestAuthoritativeCheckpointRef.current = shell;
+    simulationProjectionIndexRef.current = createSimulationProjectionStateIndex(shell);
+    gameRef.current = shell;
+    committedRuntimeGameRef.current = shell;
+    latestCanvasGameRef.current = shell;
+    lastCanvasPublishedGameRef.current = shell;
+    canvasRenderSnapshotRef.current = shellCanvas;
+
+    setAutoLayoutUndo(null);
+    setBlueprintPlacementId(null);
+    setStatisticsHistory(null);
+    setOfflineReport(null);
+    setImportPreview(null);
+    setPendingImportState(null);
+    setPendingImportRaw(null);
+    setCanvasRenderSnapshot(shellCanvas);
+    setLoaded(releasedLoad);
+    setGame(shell);
+    onReleaseNativeRendererState(releasedLoad);
+  }, [onReleaseNativeRendererState]);
+
+  useEffect(() => {
+    const active = nativePlayerAuthorityActiveFrame;
+    if (!active?.sessionId || !active.runId) return;
+    releaseNativeRendererState(active.sessionId, active.runId);
+  }, [nativePlayerAuthorityActiveFrame, releaseNativeRendererState]);
+
+  useEffect(() => {
+    if (!desktopBridge?.onNativePlayerAuthorityHandoffRequest) return;
+    const sameIdentity = (
+      request: DesktopNativePlayerAuthorityHandoffRequest,
+      current: NonNullable<typeof nativeAuthorityHandoffRef.current>,
+    ) => "sessionId" in request && "runId" in request &&
+      request.handoffId === current.handoffId && request.sessionId === current.sessionId &&
+      request.runId === current.runId;
+    const sameFence = (left: LocalSaveWriterFence, right: LocalSaveWriterFence) =>
+      left.ownerId === right.ownerId && left.fencingToken === right.fencingToken;
+    const sameCheckpoint = (
+      left: LocalSaveNativeAuthorityCheckpoint,
+      right: LocalSaveNativeAuthorityCheckpoint,
+    ) => left.generation === right.generation && left.rootHash === right.rootHash &&
+      left.revision === right.revision;
+    const resumeJavaScriptAfterPreTransferBlock = (cancelledIdentity?: {
+      handoffId: string;
+      sessionId: string;
+      runId: string;
+    }) => {
+      const nativeStillOwns = readNativeAuthorityRuntimeObservation().kind !== "inactive";
+      if (nativeStillOwns) return;
+      if (cancelledIdentity) lastCancelledNativeAuthorityHandoffRef.current = { ...cancelledIdentity };
+      nativeAuthorityHandoffRef.current = null;
+      nativeAuthorityPersistenceProtectedRef.current = false;
+      legacyAuthorityAsyncLeaseFenceRef.current = reconcileLegacyAuthorityAsyncLeaseFence(
+        legacyAuthorityAsyncLeaseFenceRef.current,
+        "javascript",
+      );
+      nativePlayerAuthorityOwnsRuntimeRef.current = false;
+      simulationWorkerDisabledRef.current = false;
+      setNativeAuthorityHandoffQuiescing(false);
+      setSimulationWorkerGeneration((generation) => generation + 1);
+    };
+    const stopLegacySimulationWorker = () => {
+      const worker = simulationWorkerRef.current;
+      simulationWorkerRef.current = null;
+      if (worker) {
+        worker.onmessage = null;
+        worker.onerror = null;
+        worker.terminate();
+      }
+      const statisticsRequest = statisticsReadModelRequestRef.current;
+      if (statisticsRequest) {
+        statisticsReadModelRequestRef.current = null;
+        statisticsRequest.reject(new Error("Windows 原生权威交接已停止旧生产历史请求"));
+      }
+      const checkpointRequest = simulationCheckpointRequestRef.current;
+      if (checkpointRequest) {
+        checkpointRequest.chunkedSaveWritePort?.close();
+        void checkpointRequest.nativeSaveTransaction?.abort();
+        simulationCheckpointRequestRef.current = null;
+        checkpointRequest.reject(new Error("Windows 原生权威交接已停止旧 JavaScript 检查点"));
+      }
+      const replacement = simulationAuthorityReplacementRef.current;
+      if (replacement) {
+        replacement.projectionAckPort?.close();
+        simulationAuthorityReplacementRef.current = null;
+        replacement.reject(new Error("Windows 原生权威交接已停止旧 Worker 接管"));
+      }
+      simulationSubmissionRef.current = null;
+      deferredDurableUiSubmissionRef.current = null;
+      simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+      setSimulationWorkerActive(false);
+    };
+    const inFlightCounts = () => ({
+      renderer: Number(verifiedPrimarySaveInFlightDepthRef.current > 0) +
+        Number(durablePrimarySaveInFlightRef.current) +
+        Number(nativeAuthorityCheckpointInFlightRef.current) +
+        Number(cloudAutoSyncInFlightRef.current),
+      worker: Number(Boolean(simulationSubmissionRef.current)) +
+        Number(Boolean(simulationCheckpointRequestRef.current)) +
+        Number(Boolean(statisticsReadModelRequestRef.current)) +
+        Number(durableRecoveryStageInFlightRef.current) +
+        Number(durableRecoveryFinalizeInFlightRef.current !== null) +
+        Number(Boolean(durableWorkerRecoveryInFlightRef.current)) +
+        Number(Boolean(deferredDurableUiSubmissionRef.current)) +
+        Number(Boolean(simulationRecoveryRef.current)) +
+        Number(Boolean(simulationAuthorityReplacementRef.current)) +
+        Number(pureIdleBackgroundRecoveryRef.current),
+    });
+    const waitUntilDrained = async (timeoutMs: number, shadowQueue: Promise<void>) => {
+      let shadowSettled = false;
+      void shadowQueue.catch(() => undefined).finally(() => { shadowSettled = true; });
+      const deadline = performance.now() + timeoutMs;
+      while (performance.now() < deadline) {
+        const counts = inFlightCounts();
+        if (shadowSettled && counts.renderer === 0 && counts.worker === 0) return counts;
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+      }
+      throw Object.assign(new Error("Windows 原生权威交接等待旧任务超时"), {
+        code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_TIMEOUT",
+      });
+    };
+    const handleRequest = async (
+      request: DesktopNativePlayerAuthorityHandoffRequest,
+    ): Promise<DesktopNativePlayerAuthorityHandoffResult> => {
+      if (request.kind === "native-player-authority-startup-reconcile-v1") {
+        // The trusted main challenge may arrive after startup effects have
+        // already queued old JavaScript work. Invalidate every old async
+        // continuation synchronously, then stop/abort and wait for the exact
+        // same save/cloud/Worker/shadow boundary used by live handoff.
+        legacyAuthorityAsyncLeaseFenceRef.current = reconcileLegacyAuthorityAsyncLeaseFence(
+          legacyAuthorityAsyncLeaseFenceRef.current,
+          "native",
+        );
+        nativePlayerAuthorityOwnsRuntimeRef.current = true;
+        nativeAuthorityPersistenceProtectedRef.current = true;
+        simulationWorkerDisabledRef.current = true;
+        setNativeAuthorityHandoffQuiescing(true);
+        windowsNativeCoreBetaGenerationRef.current += 1;
+        windowsNativeCoreBetaCheckpointTokenRef.current += 1;
+        if (windowsNativeCoreBetaTimerRef.current !== null) {
+          window.clearTimeout(windowsNativeCoreBetaTimerRef.current);
+          windowsNativeCoreBetaTimerRef.current = null;
+        }
+        const shadowQueue = windowsNativeCoreBetaQueueRef.current;
+        cloudAutoSyncAbortRef.current?.abort();
+        pureIdleBackgroundOfflineAbortRef.current?.abort();
+        pureIdleMacroClientRef.current?.cancel("Windows 原生权威启动恢复已接管");
+        pureIdleMacroClientRef.current = null;
+        pureIdleMacroActiveRef.current = false;
+        pureIdleStoppingRef.current = false;
+        setPureIdleActive(false);
+        stopLegacySimulationWorker();
+        const counts = await waitUntilDrained(request.timeoutMs, shadowQueue);
+        const inspection = await inspectLocalSaveNativeAuthorityHandoff();
+        const journal = inspection.journal;
+        if (!journal || journal.phase !== "browser-fenced") {
+          const noBrowserFence = request.rustLease.state === "absent" &&
+            inspection.storage === "indexeddb" &&
+            !isLocalSaveNativeAuthorityLease(inspection.writerLease) &&
+            (inspection.journalState === "missing" || journal?.phase === "handed-back");
+          if (noBrowserFence) resumeJavaScriptAfterPreTransferBlock();
+          return {
+            kind: "native-player-authority-startup-reconciled-v1",
+            action: noBrowserFence ? "no-browser-fence" : "fail-closed",
+            rendererInFlightCoreOperations: counts.renderer as 0,
+            workerInFlightCoreOperations: counts.worker as 0,
+          };
+        }
+        const rustLease = request.rustLease.state === "active"
+          ? {
+            state: "active" as const,
+            runId: request.rustLease.runId,
+            sessionId: request.rustLease.sessionId,
+            stateVersion: 47 as const,
+            mode: "normal" as const,
+            checkpoint: request.rustLease.entryCheckpoint,
+          }
+          : request.rustLease;
+        const decision = reconcileLocalSaveNativeAuthorityHandoff({
+          journal,
+          currentLease: inspection.writerLease,
+          rustLease,
+          releaseAuthorized: request.releaseAuthorized,
+        });
+        if (decision.action === "release-browser-fence") {
+          await releaseLocalSaveNativeAuthorityHandoff({
+            receipt: {
+              kind: "local-save-native-authority-lease-v1",
+              leaseId: journal.runId,
+              previousWriterFence: journal.previousWriterFence,
+              nativeWriterFence: journal.nativeWriterFence,
+            },
+            decision,
+          });
+          resumeJavaScriptAfterPreTransferBlock();
+          return {
+            kind: "native-player-authority-startup-reconciled-v1",
+            action: "released-browser-fence",
+            rendererInFlightCoreOperations: 0,
+            workerInFlightCoreOperations: 0,
+          };
+        }
+        if (decision.action !== "resume-native" || request.rustLease.state !== "active") {
+          nativeAuthorityPersistenceProtectedRef.current = true;
+          simulationWorkerDisabledRef.current = true;
+          return {
+            kind: "native-player-authority-startup-reconciled-v1",
+            action: "fail-closed",
+            rendererInFlightCoreOperations: 0,
+            workerInFlightCoreOperations: 0,
+          };
+        }
+        await nativePlayerAuthorityClock.refresh();
+        const clockSnapshot = nativePlayerAuthorityClock.getSnapshot();
+        const active = selectActiveNativePlayerAuthorityFrame(clockSnapshot, request.rustLease.sessionId);
+        const bound = selectBoundNativePlayerAuthorityFrame(clockSnapshot, request.rustLease.sessionId);
+        const paused = bound?.phase === "paused" && !bound.inFlight &&
+            bound.currentOperation === null && bound.lastErrorCode === null
+          ? bound
+          : null;
+        const settled = active ?? paused;
+        const macro = selectNativePlayerAuthorityMacroStatus(
+          clockSnapshot,
+          clockSnapshot.expectedSessionId,
+        );
+        const clockRevision = settled?.revision ?? macro?.revision ?? null;
+        const nextDeadlineMs = settled?.nextDeadlineMs ?? macro?.nextDeadlineMs ?? null;
+        if ((!settled && !macro) || settled && settled.runId !== request.rustLease.runId ||
+          settled && request.rustLease.summary.paused !== (settled.phase === "paused") ||
+          clockRevision !== request.rustLease.checkpoint.revision ||
+          !Number.isSafeInteger(nextDeadlineMs) ||
+          journal.nativeWriterFence.ownerId !== `native_authority:${request.rustLease.runId}`) {
+          nativeAuthorityPersistenceProtectedRef.current = true;
+          simulationWorkerDisabledRef.current = true;
+          return {
+            kind: "native-player-authority-startup-reconciled-v1",
+            action: "fail-closed",
+            rendererInFlightCoreOperations: 0,
+            workerInFlightCoreOperations: 0,
+          };
+        }
+        const controller = windowsNativeCoreBetaControllerRef.current;
+        if (!controller) throw new Error("Windows 原生权威控制器不可用");
+        controller.bindMainOwnedPlayerAuthority({
+          sessionId: request.rustLease.sessionId,
+          runId: request.rustLease.runId,
+          checkpoint: request.rustLease.checkpoint,
+          summary: request.rustLease.summary,
+          source: "startup-recovery",
+        });
+        nativeAuthorityHandoffRef.current = {
+          handoffId: request.handoffId,
+          sessionId: journal.sessionId,
+          runId: journal.runId,
+          phase: "native-active",
+          publicWriterFence: journal.previousWriterFence,
+          settledDeadlineMs: (nextDeadlineMs as number) - 1_000,
+          checkpoint: request.rustLease.checkpoint,
+          receipt: {
+            kind: "local-save-native-authority-lease-v1",
+            leaseId: journal.runId,
+            previousWriterFence: journal.previousWriterFence,
+            nativeWriterFence: journal.nativeWriterFence,
+          },
+        };
+        nativeAuthorityPersistenceProtectedRef.current = true;
+        simulationWorkerDisabledRef.current = true;
+        setNativeAuthorityHandoffQuiescing(false);
+        return {
+          kind: "native-player-authority-startup-reconciled-v1",
+          action: "resumed-native",
+          rendererInFlightCoreOperations: 0,
+          workerInFlightCoreOperations: 0,
+        };
+      }
+      if (request.kind === "native-player-authority-quiescence-prepare-v1") {
+        const existing = nativeAuthorityHandoffRef.current;
+        if (existing && sameIdentity(request, existing) && existing.phase === "prepared") {
+          const counts = inFlightCounts();
+          if (counts.renderer !== 0 || counts.worker !== 0) {
+            throw Object.assign(new Error("重复交接准备尚未处于空闲边界"), {
+              code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_BUSY",
+            });
+          }
+          return {
+            kind: "native-player-authority-quiescence-prepared-v1",
+            publicWriterFence: existing.publicWriterFence,
+            rendererInFlightCoreOperations: 0,
+            workerInFlightCoreOperations: 0,
+            settledDeadlineMs: existing.settledDeadlineMs,
+          };
+        }
+        if (existing || nativePlayerAuthorityOwnsRuntimeRef.current ||
+          windowsNativeCoreBetaControllerRef.current?.snapshot().authority.sessionId !== request.sessionId) {
+          throw Object.assign(new Error("Windows 原生权威交接准备身份无效"), {
+            code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_INVALID",
+          });
+        }
+        const nativeSnapshot = windowsNativeCoreBetaControllerRef.current.snapshot();
+        if (nativeSnapshot.summary?.revision !== request.initialRevision ||
+          !["shadow", "native-ready"].includes(nativeSnapshot.authority.phase)) {
+          throw Object.assign(new Error("Windows 原生影子 revision 已变化"), {
+            code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_STALE",
+          });
+        }
+        // A productive pure-idle candidate has an independent recovery log.
+        // Do not abandon or silently finalize it as part of an authority swap.
+        if (pureIdleMacroActiveRef.current || pureIdleStoppingRef.current ||
+          pureIdleBackgroundRecoveryRef.current || gameRef.current.timeWarp.enabled) {
+          throw Object.assign(new Error("纯挂机必须先完成自己的权威结算"), {
+            code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_PURE_IDLE_ACTIVE",
+          });
+        }
+        const status = getLocalSaveWriterStatus();
+        if (status.role !== "primary" || !status.writerId || status.fencingToken < 1) {
+          throw Object.assign(new Error("当前页面没有主存档写入权"), {
+            code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_WRITER_UNAVAILABLE",
+          });
+        }
+        const publicWriterFence = Object.freeze({
+          ownerId: status.writerId,
+          fencingToken: status.fencingToken,
+        });
+        const initialCounts = inFlightCounts();
+        if (initialCounts.renderer !== 0 || initialCounts.worker !== 0) {
+          // A successful prepare starts only from an already quiet boundary.
+          // Invalidating an async generation while a durable intent/save is
+          // running could otherwise strand its ACK or lose an accepted UI
+          // command. Main may issue a fresh, newly-bound challenge later.
+          throw Object.assign(new Error("旧 JavaScript/Worker 任务仍在途，请在安全边界重试交接"), {
+            code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_BUSY",
+          });
+        }
+        const settledDeadlineMs = Math.max(0, Math.floor(
+          Date.now() - Math.max(0, simulationPendingWallSecondsRef.current) * 1_000,
+        ));
+        nativeAuthorityHandoffRef.current = {
+          handoffId: request.handoffId,
+          sessionId: request.sessionId,
+          runId: request.runId,
+          phase: "prepared",
+          publicWriterFence,
+          settledDeadlineMs,
+          checkpoint: null,
+          receipt: null,
+        };
+        // This synchronous generation change happens before any await. Every
+        // old save/cloud/Worker continuation therefore fails its next check.
+        legacyAuthorityAsyncLeaseFenceRef.current = reconcileLegacyAuthorityAsyncLeaseFence(
+          legacyAuthorityAsyncLeaseFenceRef.current,
+          "native",
+        );
+        nativePlayerAuthorityOwnsRuntimeRef.current = true;
+        nativeAuthorityPersistenceProtectedRef.current = true;
+        setNativeAuthorityHandoffQuiescing(true);
+        windowsNativeCoreBetaGenerationRef.current += 1;
+        windowsNativeCoreBetaCheckpointTokenRef.current += 1;
+        if (windowsNativeCoreBetaTimerRef.current !== null) {
+          window.clearTimeout(windowsNativeCoreBetaTimerRef.current);
+          windowsNativeCoreBetaTimerRef.current = null;
+        }
+        const shadowQueue = windowsNativeCoreBetaQueueRef.current;
+        cloudAutoSyncAbortRef.current?.abort();
+        pureIdleBackgroundOfflineAbortRef.current?.abort();
+        stopLegacySimulationWorker();
+        try {
+          const counts = await waitUntilDrained(request.timeoutMs, shadowQueue);
+          const current = nativeAuthorityHandoffRef.current;
+          const currentWriter = getLocalSaveWriterStatus();
+          if (!current || !sameIdentity(request, current) || current.phase !== "prepared" ||
+            currentWriter.role !== "primary" || !currentWriter.writerId ||
+            !sameFence(current.publicWriterFence, {
+              ownerId: currentWriter.writerId,
+              fencingToken: currentWriter.fencingToken,
+            })) {
+            throw Object.assign(new Error("主存档 writer fence 在交接准备期间变化"), {
+              code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_WRITER_DRIFT",
+            });
+          }
+          return {
+            kind: "native-player-authority-quiescence-prepared-v1",
+            publicWriterFence,
+            rendererInFlightCoreOperations: counts.renderer as 0,
+            workerInFlightCoreOperations: counts.worker as 0,
+            settledDeadlineMs,
+          };
+        } catch (error) {
+          resumeJavaScriptAfterPreTransferBlock({
+            handoffId: request.handoffId,
+            sessionId: request.sessionId,
+            runId: request.runId,
+          });
+          throw error;
+        }
+      }
+
+      if (request.kind === "native-player-authority-quiescence-cancel-v1") {
+        const disposition = classifyNativePlayerAuthorityPreTransferCancel({
+          request,
+          current: nativeAuthorityHandoffRef.current,
+          lastCancelled: lastCancelledNativeAuthorityHandoffRef.current,
+        });
+        if (disposition === "already-cancelled") {
+          return {
+            kind: "native-player-authority-quiescence-cancelled-v1",
+            resumedJavaScript: true,
+          };
+        }
+        if (disposition === "reject") {
+          throw Object.assign(new Error("Windows 原生权威交接取消未经授权"), {
+            code: "NATIVE_PLAYER_AUTHORITY_RELEASE_NOT_AUTHORIZED",
+          });
+        }
+      }
+      const current = nativeAuthorityHandoffRef.current;
+      if (!current || !sameIdentity(request, current)) {
+        throw Object.assign(new Error("Windows 原生权威交接请求已过期"), {
+          code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_STALE",
+        });
+      }
+      if (request.kind === "native-player-authority-quiescence-cancel-v1") {
+        resumeJavaScriptAfterPreTransferBlock({
+          handoffId: request.handoffId,
+          sessionId: request.sessionId,
+          runId: request.runId,
+        });
+        return {
+          kind: "native-player-authority-quiescence-cancelled-v1",
+          resumedJavaScript: true,
+        };
+      }
+      if (request.kind === "native-player-authority-quiescence-request-v1") {
+        const nativeSnapshot = windowsNativeCoreBetaControllerRef.current?.snapshot();
+        if (current.phase !== "prepared" || request.revision !== request.checkpoint.revision ||
+          request.settledDeadlineMs !== current.settledDeadlineMs ||
+          !sameFence(current.publicWriterFence, request.publicWriterFence) ||
+          nativeSnapshot?.authority.sessionId !== request.sessionId ||
+          !["shadow", "native-ready"].includes(nativeSnapshot.authority.phase) ||
+          nativeSnapshot.summary?.revision !== request.revision ||
+          nativeSnapshot.summary.stateVersion !== 47 || nativeSnapshot.summary.mode !== "normal" ||
+          nativeSnapshot.summary.paused !== false ||
+          nativeSnapshot.summary.coverage.authorityEligible !== true) {
+          throw Object.assign(new Error("Windows 原生权威最终检查点与准备边界不一致"), {
+            code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_STALE",
+          });
+        }
+        const counts = inFlightCounts();
+        if (counts.renderer !== 0 || counts.worker !== 0) {
+          throw Object.assign(new Error("Windows 原生权威交接仍有旧任务未结束"), {
+            code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_BUSY",
+          });
+        }
+        const acquired = await acquireLocalSaveNativeAuthorityHandoff({
+          runId: request.runId,
+          sessionId: request.sessionId,
+          checkpoint: request.checkpoint,
+          writerFence: request.publicWriterFence,
+        });
+        const afterAcquire = inFlightCounts();
+        const latest = nativeAuthorityHandoffRef.current;
+        if (!latest || !sameIdentity(request, latest) || latest.phase !== "prepared" ||
+          afterAcquire.renderer !== 0 || afterAcquire.worker !== 0) {
+          // The transaction may already be durable. Retain the browser fence
+          // and require startup reconciliation instead of guessing rollback.
+          throw Object.assign(new Error("浏览器交接日志已写入，但最终 ACK 身份不确定"), {
+            code: "NATIVE_PLAYER_AUTHORITY_BROWSER_FENCE_UNCERTAIN",
+          });
+        }
+        latest.phase = "browser-fenced";
+        latest.checkpoint = request.checkpoint;
+        latest.receipt = acquired.receipt;
+        return {
+          kind: "native-player-authority-browser-fenced-v1",
+          leaseReceipt: acquired.receipt,
+          journal: acquired.journal,
+          rendererInFlightCoreOperations: 0,
+          workerInFlightCoreOperations: 0,
+        };
+      }
+      if (request.kind === "native-player-authority-handoff-complete-v1") {
+        const completionPhaseValid = current.phase === "browser-fenced" || current.phase === "native-active";
+        const completionCheckpointValid = current.checkpoint !== null &&
+          (current.phase === "browser-fenced"
+            ? sameCheckpoint(request.checkpoint, current.checkpoint)
+            : request.revision >= current.checkpoint.revision &&
+              (request.revision > current.checkpoint.revision ||
+                sameCheckpoint(request.checkpoint, current.checkpoint)));
+        if (!completionPhaseValid || !completionCheckpointValid || !current.receipt ||
+          request.revision !== request.checkpoint.revision ||
+          !sameFence(request.nativeWriterFence, current.receipt.nativeWriterFence) ||
+          request.summary.revision !== request.revision || request.summary.stateVersion !== 47 ||
+          request.summary.mode !== "normal" || request.summary.paused !== false ||
+          request.summary.coverage.authorityEligible !== true) {
+          throw Object.assign(new Error("Windows 原生权威完成回执与 browser fence 不一致"), {
+            code: "NATIVE_PLAYER_AUTHORITY_COMPLETION_STALE",
+          });
+        }
+        await nativePlayerAuthorityClock.refresh();
+        const active = selectActiveNativePlayerAuthorityFrame(
+          nativePlayerAuthorityClock.getSnapshot(),
+          request.sessionId,
+        );
+        const counts = inFlightCounts();
+        if (!active || active.runId !== request.runId || active.revision !== request.revision ||
+          counts.renderer !== 0 || counts.worker !== 0) {
+          throw Object.assign(new Error("Windows 原生权威时钟尚未到达完成边界"), {
+            code: "NATIVE_PLAYER_AUTHORITY_COMPLETION_STALE",
+          });
+        }
+        const controller = windowsNativeCoreBetaControllerRef.current;
+        if (!controller) throw new Error("Windows 原生权威控制器不可用");
+        const bound = controller.bindMainOwnedPlayerAuthority({
+          sessionId: request.sessionId,
+          runId: request.runId,
+          checkpoint: request.checkpoint,
+          summary: request.summary,
+          source: "handoff",
+        });
+        if (bound.authority.phase !== "native-authoritative" || bound.authority.authority !== "native") {
+          throw new Error("Windows 原生权威控制器未完成正式绑定");
+        }
+        current.phase = "native-active";
+        current.checkpoint = request.checkpoint;
+        nativeAuthorityPersistenceProtectedRef.current = true;
+        simulationWorkerDisabledRef.current = true;
+        setNativeAuthorityHandoffQuiescing(false);
+        return {
+          kind: "native-player-authority-handoff-completed-v1",
+          sessionId: request.sessionId,
+          runId: request.runId,
+          revision: request.revision,
+          checkpoint: request.checkpoint,
+          nativeWriterFence: request.nativeWriterFence,
+          rendererInFlightCoreOperations: 0,
+          workerInFlightCoreOperations: 0,
+          controllerPhase: "native-authoritative",
+        };
+      }
+      if (request.kind === "native-player-authority-browser-fence-release-v1") {
+        if (current.phase !== "browser-fenced" || request.releaseAuthorized !== true ||
+          !current.receipt || !current.checkpoint ||
+          request.receipt.leaseId !== current.receipt.leaseId ||
+          !sameFence(request.receipt.previousWriterFence, current.receipt.previousWriterFence) ||
+          !sameFence(request.receipt.nativeWriterFence, current.receipt.nativeWriterFence) ||
+          !sameCheckpoint(request.checkpoint, current.checkpoint)) {
+          throw Object.assign(new Error("Windows 原生权威 browser fence 交还未经授权"), {
+            code: "NATIVE_PLAYER_AUTHORITY_RELEASE_NOT_AUTHORIZED",
+          });
+        }
+        const released = await releaseLocalSaveNativeAuthorityHandoff({
+          receipt: request.receipt,
+          decision: request.decision,
+        });
+        const returnedWriterFence = {
+          ownerId: released.writerStatus.writerId,
+          fencingToken: released.writerStatus.fencingToken,
+        };
+        if (!returnedWriterFence.ownerId || returnedWriterFence.fencingToken < 1) {
+          throw Object.assign(new Error("Windows 原生权威交还回执无效"), {
+            code: "NATIVE_PLAYER_AUTHORITY_RELEASE_UNCERTAIN",
+          });
+        }
+        resumeJavaScriptAfterPreTransferBlock();
+        return {
+          kind: "native-player-authority-browser-fence-released-v1",
+          released: true,
+          returnedWriterFence: {
+            ownerId: returnedWriterFence.ownerId,
+            fencingToken: returnedWriterFence.fencingToken,
+          },
+        };
+      }
+      throw Object.assign(new Error("Windows 原生权威交接请求类型无效"), {
+        code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_INVALID",
+      });
+    };
+    return desktopBridge.onNativePlayerAuthorityHandoffRequest(handleRequest);
+  }, [desktopBridge, nativePlayerAuthorityClock, readNativeAuthorityRuntimeObservation]);
 
   const cancelPureIdleSettlement = useCallback(async () => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleStoppingRef.current) return;
     const record = pureIdleRecoveryRef.current;
     pureIdleStopTargetRef.current = null;
@@ -5205,13 +9641,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       await persistPureIdleTransition(record, {
         stopReason: "user-cancelled",
         lastError: "玩家取消了本次停止结算；候选未提交",
-      });
+      }, authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     }
     setPureIdleRecoveryStatus("停止结算已取消；恢复日志和原主存档保持不变");
     setNotice("停止结算已取消；纯挂机会话将从权威检查点安全恢复");
-  }, [persistPureIdleTransition]);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTransition]);
 
   const retryPureIdleRecovery = useCallback(async () => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleMacroActiveRef.current || pureIdleStoppingRef.current) return;
     const record = pureIdleRecoveryRef.current;
     if (!record) {
@@ -5220,15 +9659,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     setPureIdleRecoveryContinueState(false);
     setPureIdleRecoveryStatus("正在从权威检查点重试恢复 Worker");
-    const client = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record);
+    const client = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!client) {
       setPureIdleRecoveryContinueState(true);
       return;
     }
-    if (pureIdleStopTargetRef.current?.sessionId === record.sessionId) await stopPureIdle();
-  }, [initializePureIdleMacroClient, setPureIdleRecoveryContinueState, stopPureIdle]);
+    if (pureIdleStopTargetRef.current?.sessionId === record.sessionId) {
+      await stopPureIdle(authorityLease);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+    }
+  }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, setPureIdleRecoveryContinueState, stopPureIdle]);
 
   const continueFromPureIdleCheckpoint = useCallback(async () => {
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleMacroActiveRef.current || pureIdleStoppingRef.current) return;
     const record = pureIdleRecoveryRef.current;
     if (!record) {
@@ -5244,7 +9689,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       stopReason: "user-cancelled",
       abandonedWallSeconds,
       lastError: `玩家确认放弃 ${Math.floor(abandonedWallSeconds)} 秒未结算时间`,
-    });
+    }, authorityLease);
+    if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     setPureIdleRecoveryStatus("正在恢复检查点并验证主存档");
     setNotice("正在放弃未结算纯挂机时间，并恢复普通模拟");
     pureIdleMacroClientRef.current?.close();
@@ -5259,7 +9705,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         { ...setTimeWarpEnabled(repaired, false), idleSettlement: finishIdleRun(repaired.idleSettlement) },
         record.startedPaused,
       );
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       const saved = await persistPrimarySave(restored, "pure-idle-stop");
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       if (lifecycleExitStartedRef.current) return;
       if (!saved.success) {
         setPureIdleRecoveryStatus("检查点有效，但主存档写入失败；恢复日志已保留");
@@ -5267,6 +9715,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return;
       }
       const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       pureIdleMacroActiveRef.current = false;
       pureIdleActiveRef.current = false;
       pureIdleRecoveryRef.current = null;
@@ -5283,28 +9732,54 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         ? "未结算纯挂机时间未发放，已恢复到开始前的暂停状态"
         : "未结算纯挂机时间未发放，已恢复普通模拟");
     } catch (error) {
+      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       const message = error instanceof Error ? error.message : "恢复普通模拟失败";
       setPureIdleRecoveryStatus(`${message}；恢复日志和原主存档保持不变`);
       setNotice(`${message}；可以重试，未结算时间没有被清空`);
     } finally {
-      pureIdleStoppingRef.current = false;
+      if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) pureIdleStoppingRef.current = false;
     }
-  }, [invalidateFactoryAlertProjection, persistPrimarySave, persistPureIdleTransition, setPureIdleRecoveryContinueState]);
+  }, [invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPrimarySave, persistPureIdleTransition, setPureIdleRecoveryContinueState]);
 
   const openCommandPalette = useCallback(() => {
     if (nextMobileShell) mobileNavigation.openModal("command");
+    nativeCommandPaletteEntitySearchStore.clear();
+    setCommandPaletteEntitySearchRequest({ query: "", cursor: 0 });
     setCommandPaletteOpen(true);
-  }, [mobileNavigation.openModal, nextMobileShell]);
+  }, [mobileNavigation.openModal, nativeCommandPaletteEntitySearchStore, nextMobileShell]);
 
   const closeCommandPalette = useCallback(() => {
+    nativeCommandPaletteEntitySearchStore.clear();
+    setCommandPaletteEntitySearchRequest({ query: "", cursor: 0 });
     setCommandPaletteOpen(false);
     if (nextMobileShell) mobileNavigation.dismissModal("command");
-  }, [mobileNavigation.dismissModal, nextMobileShell]);
+  }, [mobileNavigation.dismissModal, nativeCommandPaletteEntitySearchStore, nextMobileShell]);
 
   const returnToMenuSafely = useCallback(async () => {
     if (returnToMenuSaveInFlightRef.current) return;
     returnToMenuSaveInFlightRef.current = true;
-    const source = currentPrimarySaveSource();
+    // React Flow publishes its final camera position through a trailing
+    // debounce. Returning during that window used to let the timer mutate the
+    // save source after the verified checkpoint, which both lost the camera
+    // and triggered an un-awaited cleanup write from the unmount path. Freeze
+    // the latest imperative viewport into the checkpoint overlay instead.
+    if (factoryConfirmedActivePlanetId) {
+      const previous = pendingPlanetViewportRef.current.get(factoryConfirmedActivePlanetId);
+      if (previous?.timer) window.clearTimeout(previous.timer);
+      pendingPlanetViewportRef.current.set(factoryConfirmedActivePlanetId, {
+        viewport: {
+          x: alignToDevicePixel(viewportRef.current.x),
+          y: alignToDevicePixel(viewportRef.current.y),
+          zoom: Math.max(0.25, Math.min(1.8, Math.round(viewportRef.current.zoom * 1000) / 1000)),
+        },
+        timer: 0,
+      });
+    }
+    // React Flow emits its final debounced viewport event asynchronously. Give
+    // that event one bounded window to land in the checkpoint overlay before
+    // asking the Worker for the return barrier. This preserves the camera
+    // without relying on a post-unmount cleanup save.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 200));
     const result = await persistPrimarySave(undefined, "return");
     if (lifecycleExitStartedRef.current) {
       returnToMenuSaveInFlightRef.current = false;
@@ -5316,13 +9791,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       playTone("alert");
       return;
     }
-    // Skip cleanup only while the exact authoritative state/debt/viewport
-    // source remains current. A Worker result or player command arriving while
-    // the durable write was in flight must still receive the final cleanup
-    // save, preserving the former no-progress-loss behavior.
-    controlledReturnCommitRef.current = source;
+    // `return` always crosses a Worker checkpoint barrier. Capture the source
+    // after its durable ACK: this is the exact state/debt/viewport boundary
+    // that may suppress the otherwise redundant unmount cleanup write.
+    controlledReturnCommitRef.current = currentPrimarySaveSource();
     onReturnToMenu();
-  }, [currentPrimarySaveSource, onReturnToMenu, persistPrimarySave, playTone]);
+  }, [currentPrimarySaveSource, factoryConfirmedActivePlanetId, onReturnToMenu, persistPrimarySave, playTone]);
 
   const spawnInteractionBurst = useCallback((x: number, y: number, label: string, tone: InteractionBurst["tone"] = "positive") => {
     const id = burstSequenceRef.current + 1;
@@ -5336,6 +9810,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     updater: (current: GameState) => GameState,
     options: { clearHistory?: boolean } = {},
   ): boolean => {
+    // `commitGame` is the legacy Web/PWA edit surface. Once Rust owns the
+    // player-visible runtime, never even evaluate an old JavaScript gameplay
+    // updater against the deliberately hollow renderer shell. Native controls
+    // must enter through `commitNativeProjectedCommand`, whose typed intent is
+    // re-derived from a same-revision Rust projection and validated again by
+    // the authority core.
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("该旧操作尚未接入有类型的 Rust 权威命令；本次操作未应用");
+      return false;
+    }
     if (rejectPlayerStateEditDuringPrimarySave()) return false;
     const current = gameRef.current;
     const next = updater(current);
@@ -5366,7 +9850,822 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       dispatchDurableUiCommandRef.current();
     }
     return true;
-  }, [publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+  }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+
+  const commitNativeProjectedCommand = useCallback((
+    projectedRevision: number,
+    buildCommand: (baseRevision: number) => SimulationCommandPatch | null,
+    afterCommitted?: (receipt: NativePlayerAuthorityCommandReceipt) => void,
+    afterFailed?: (failure: "definite-failure" | "uncertain") => void,
+  ): boolean => {
+    if (rejectPlayerStateEditDuringPrimarySave()) return false;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("原生投影命令只能在 Windows 原生权威接管后使用；本次操作未应用");
+      return false;
+    }
+    const binding = nativePlayerAuthorityCommandBindingRef.current;
+    if (!binding || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一条命令或等待稳定 revision；本次操作未应用");
+      return false;
+    }
+    if (!Number.isSafeInteger(projectedRevision) || projectedRevision !== binding.source.baseRevision) {
+      setNotice("原生投影视图已过期；等待当前权威 revision 刷新后再操作");
+      return false;
+    }
+    let command: SimulationCommandPatch | null;
+    try {
+      command = buildCommand(binding.source.baseRevision);
+    } catch {
+      setNotice("原生投影命令参数未通过边界校验；本次操作未应用");
+      return false;
+    }
+    if (!command) return false;
+    nativePlayerAuthorityCommandInFlightRef.current = true;
+    setNativePlayerAuthorityCommandPending(true);
+    void binding.source.applyCommand(command).then((receipt) => {
+      // Never install or predict the projected edit locally. The next exact
+      // authority revision refreshes every affected bounded read model.
+      invalidateFactoryAlertProjection();
+      try {
+        afterCommitted?.(receipt);
+      } catch {
+        // The durable Rust command already succeeded. A renderer-only refresh
+        // callback must not be mislabeled as an authority command failure.
+        setNotice("原生命令已提交；界面刷新失败，请等待下一次权威投影");
+      }
+    }).catch((error: unknown) => {
+      const commandId = error && typeof error === "object" && "commandId" in error &&
+        typeof error.commandId === "string" && error.commandId.length > 0
+        ? error.commandId
+        : null;
+      const failure = commandId === null ? "definite-failure" as const : "uncertain" as const;
+      try {
+        afterFailed?.(failure);
+      } catch {
+        // A renderer reconciliation callback cannot change the command result.
+      }
+      setNotice(failure === "uncertain"
+        ? "原生玩家命令结果暂时无法确认；已停止重试并等待权威恢复"
+        : "原生投影命令未通过当前 revision 的权威校验；本次操作未应用");
+    }).finally(async () => {
+      // A desktop transport may commit durably without delivering its push.
+      // Pull the main-owned clock once after every terminal command outcome;
+      // this is reconciliation only and never resends the mutation.
+      try {
+        await nativePlayerAuthorityClockRef.current?.refresh();
+      } finally {
+        nativePlayerAuthorityCommandInFlightRef.current = false;
+        setNativePlayerAuthorityCommandPending(false);
+      }
+    });
+    return true;
+  }, [invalidateFactoryAlertProjection, rejectPlayerStateEditDuringPrimarySave]);
+
+  const commitNativeWorkspaceAction = useCallback((
+    intent: NativeWorkspaceActionIntent,
+    successNotice: string,
+    projectedRevision = nativePlayerAuthorityCommandBindingRef.current?.source.baseRevision ?? -1,
+  ): boolean => commitNativeProjectedCommand(
+    projectedRevision,
+    (baseRevision) => createNativeWorkspaceActionCommand(baseRevision, intent),
+    () => setNotice(successNotice),
+  ), [commitNativeProjectedCommand]);
+
+  const commitNativeSystemSpaceStationIntent = useCallback((
+    intent: DesktopNativeSystemSpaceStationIntent,
+    successNotice: string,
+  ): boolean => {
+    if (rejectPlayerStateEditDuringPrimarySave()) return false;
+    const identity = nativeSystemSpaceStationIdentity;
+    const commitIntent = desktopBridge?.commitNativeSystemSpaceStationIntent;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !systemSpaceStationOpen ||
+        !identity || identity.systemId !== systemSpaceStationId || typeof commitIntent !== "function") {
+      setNotice("原生空间站权威会话或耐久命令通道尚未就绪；本次操作未提交");
+      return false;
+    }
+    if (nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一条命令；本次空间站操作未提交");
+      return false;
+    }
+    nativePlayerAuthorityCommandInFlightRef.current = true;
+    setNativePlayerAuthorityCommandPending(true);
+    void commitIntent({
+      expectedSessionId: identity.sessionId,
+      expectedRunId: identity.runId,
+      expectedRevision: identity.revision,
+      expectedRegistryFingerprint: identity.registryFingerprint,
+      expectedSystemId: identity.systemId,
+      intent,
+    }).then((receipt) => {
+      if (receipt.previousRevision !== identity.revision || receipt.revision !== identity.revision + 1) {
+        throw new Error("native system-space-station receipt revision drifted");
+      }
+      invalidateFactoryAlertProjection();
+      setNotice(successNotice);
+    }).catch(() => {
+      // The Host may have durably committed even when its renderer response
+      // was lost. The renderer never creates a second mutation; main may only
+      // reconcile the byte-identical idempotent intent. The clock refresh
+      // below then treats the next exact projection as truth.
+      setNotice("空间站命令未通过校验或结果暂时无法确认；不会自动重发，正在核对权威 revision");
+    }).finally(async () => {
+      try {
+        await nativePlayerAuthorityClockRef.current?.refresh();
+      } finally {
+        nativePlayerAuthorityCommandInFlightRef.current = false;
+        setNativePlayerAuthorityCommandPending(false);
+      }
+    });
+    return true;
+  }, [
+    desktopBridge,
+    invalidateFactoryAlertProjection,
+    nativeSystemSpaceStationIdentity,
+    rejectPlayerStateEditDuringPrimarySave,
+    systemSpaceStationId,
+    systemSpaceStationOpen,
+  ]);
+
+  const commitNativeOrbitalContractIntent = useCallback((
+    intent: DesktopNativeOrbitalContractIntent,
+    successNotice: string,
+  ): boolean => {
+    if (rejectPlayerStateEditDuringPrimarySave()) return false;
+    const identity = nativeOrbitalContractIdentity;
+    const commitIntent = desktopBridge?.commitNativeOrbitalContractIntent;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !orbitalStationOpen ||
+        !identity || typeof commitIntent !== "function") {
+      setNotice("原生轨道合同权威会话或耐久命令通道尚未就绪；本次操作未提交");
+      return false;
+    }
+    if (nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一条命令；本次合同操作未提交");
+      return false;
+    }
+    nativePlayerAuthorityCommandInFlightRef.current = true;
+    setNativePlayerAuthorityCommandPending(true);
+    void commitIntent({
+      expectedSessionId: identity.sessionId,
+      expectedRunId: identity.runId,
+      expectedRevision: identity.expectedRevision,
+      expectedRegistryFingerprint: identity.expectedRegistryFingerprint,
+      intent,
+    }).then((receipt) => {
+      if (receipt.previousRevision !== identity.expectedRevision ||
+          receipt.revision !== identity.expectedRevision + 1) {
+        throw new Error("native orbital-contract receipt revision drifted");
+      }
+      invalidateFactoryAlertProjection();
+      setNotice(successNotice);
+    }).catch(() => {
+      setNotice("轨道合同命令未通过校验或结果暂时无法确认；不会自动重发，正在核对权威 revision");
+    }).finally(async () => {
+      try {
+        await nativePlayerAuthorityClockRef.current?.refresh();
+      } finally {
+        nativePlayerAuthorityCommandInFlightRef.current = false;
+        setNativePlayerAuthorityCommandPending(false);
+      }
+    });
+    return true;
+  }, [
+    desktopBridge,
+    invalidateFactoryAlertProjection,
+    nativeOrbitalContractIdentity,
+    orbitalStationOpen,
+    rejectPlayerStateEditDuringPrimarySave,
+  ]);
+
+  const submitNativeBlueprintRenameIntent = useCallback((
+    identity: NativeBlueprintRenameIdentity,
+    targetName: string,
+  ): NativeBlueprintRenameSubmitOutcome => {
+    if (!blueprintsOpenRef.current) {
+      setNotice("蓝图工作区已关闭；草稿已保留，本次重命名未提交");
+      return Object.freeze({ status: "rejected", reason: "closed" });
+    }
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("原生玩家权威未接管；草稿已保留，本次重命名未提交");
+      return Object.freeze({ status: "rejected", reason: "gate" });
+    }
+    if (nativePlayerAuthorityCommandInFlightRef.current ||
+        nativeBlueprintRenamePendingIdentityRef.current) {
+      setNotice("原生命令或蓝图重命名仍在对账；草稿已保留，本次重命名未提交");
+      return Object.freeze({ status: "rejected", reason: "busy" });
+    }
+    const frame = nativeBlueprintWorkspaceFrameRef.current;
+    const routeIdentity = nativeBlueprintWorkspaceIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!commandSource) {
+      setNotice("原生玩家权威命令源暂不可用；草稿已保留，本次重命名未提交");
+      return Object.freeze({ status: "rejected", reason: "gate" });
+    }
+    const command = prepareNativeBlueprintRenameIntentCommand(
+      identity,
+      targetName,
+      frame,
+      routeIdentity,
+      commandSource,
+    );
+    if (!command) {
+      setNotice("蓝图 lineage、选中行、名称或最新命令 revision 已变化；草稿已保留，本次重命名未提交");
+      return Object.freeze({ status: "rejected", reason: "stale" });
+    }
+    const submissionId = nativeBlueprintRenameSubmissionSequenceRef.current + 1;
+    if (!Number.isSafeInteger(submissionId)) {
+      setNotice("蓝图重命名本地提交序列已耗尽；草稿已保留");
+      return Object.freeze({ status: "rejected", reason: "gate" });
+    }
+    const pending = Object.freeze({
+      ...identity,
+      submissionId,
+      commandRevision: command.baseRevision,
+      targetName,
+      phase: "awaiting-ack" as const,
+      expectedRevision: null,
+      conflictReason: null,
+    });
+    const accepted = commitNativeProjectedCommand(command.baseRevision, (baseRevision) => {
+      if (baseRevision !== command.baseRevision) return null;
+      return command;
+    }, (receipt) => {
+      const current = nativeBlueprintRenamePendingIdentityRef.current;
+      if (!current) return;
+      if (nativeBlueprintRenameUncertainCommandRef.current?.submissionId === submissionId) {
+        nativeBlueprintRenameUncertainCommandRef.current = null;
+      }
+      const acknowledged = acknowledgeNativeBlueprintRename(current, submissionId, receipt);
+      nativeBlueprintRenamePendingIdentityRef.current = acknowledged;
+      setNativeBlueprintRenamePendingIdentity(acknowledged);
+      setNotice(acknowledged.phase === "awaiting-projection"
+        ? `蓝图重命名意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 精确投影`
+        : "蓝图重命名 durable ACK 与提交 revision 不匹配；界面保持锁定");
+    }, (failure) => {
+      const current = nativeBlueprintRenamePendingIdentityRef.current;
+      if (!current) return;
+      if (failure === "uncertain") {
+        nativeBlueprintRenameUncertainCommandRef.current = Object.freeze({
+          submissionId,
+          source: commandSource,
+          command,
+        });
+      } else if (nativeBlueprintRenameUncertainCommandRef.current?.submissionId === submissionId) {
+        nativeBlueprintRenameUncertainCommandRef.current = null;
+      }
+      const settled = settleNativeBlueprintRenameFailure(current, submissionId, failure);
+      nativeBlueprintRenamePendingIdentityRef.current = settled.pending;
+      setNativeBlueprintRenamePendingIdentity(settled.pending);
+      if (settled.resolution) setNativeBlueprintRenameResolution(settled.resolution);
+    });
+    if (!accepted) return Object.freeze({ status: "rejected", reason: "gate" });
+    nativeBlueprintRenameSubmissionSequenceRef.current = submissionId;
+    nativeBlueprintRenamePendingIdentityRef.current = pending;
+    setNativeBlueprintRenamePendingIdentity(pending);
+    setNativeBlueprintRenameResolution(null);
+    return Object.freeze({
+      status: "accepted",
+      submissionId,
+      commandRevision: command.baseRevision,
+    });
+  }, [commitNativeProjectedCommand]);
+
+  const consumeNativeBlueprintRenameResolution = useCallback((submissionId: number) => {
+    setNativeBlueprintRenameResolution((current) => current?.submissionId === submissionId
+      ? null
+      : current);
+  }, []);
+
+  const commitNativeConstructionCenterIntent = useCallback((
+    identity: NativeConstructionCenterFrameIdentity,
+    kind: Exclude<NativeConstructionCenterIntentKind, "otherNativeCommand">,
+    targetId: string | null,
+    buildCommand: (baseRevision: number) => SimulationCommandPatch,
+    successNotice: (receipt: NativePlayerAuthorityCommandReceipt) => string,
+  ): boolean => {
+    if (!nativeConstructionCenterOpenRef.current || !nativePlayerAuthorityOwnsRuntimeRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current || nativeConstructionCenterPendingIdentityRef.current) {
+      setNotice("建筑制造中心已关闭、被锁定或仍在等待上一条命令的新 revision 投影；本次操作未提交");
+      return false;
+    }
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativeConstructionCenterIdentityMatchesFrame(identity, frame) || !frame || !routeIdentity ||
+        !commandSource || routeIdentity.sessionId !== identity.sessionId || routeIdentity.runId !== identity.runId ||
+        routeIdentity.revision !== identity.revision || routeIdentity.planetId !== identity.activePlanetId ||
+        commandSource.sessionId !== identity.sessionId || commandSource.runId !== identity.runId ||
+        commandSource.baseRevision !== identity.revision) {
+      setNotice("建筑制造中心 session、run、revision 或活动行星已变化；本次操作未提交");
+      return false;
+    }
+    const accepted = commitNativeProjectedCommand(identity.revision, (baseRevision) => {
+      if (baseRevision !== identity.revision) return null;
+      return buildCommand(baseRevision);
+    }, (receipt) => {
+      const pending = nativeConstructionCenterPendingIdentityRef.current;
+      if (pending && pending.sessionId === identity.sessionId && pending.runId === identity.runId &&
+          pending.revision === identity.revision && pending.activePlanetId === identity.activePlanetId &&
+          pending.kind === kind && pending.targetId === targetId) {
+        const acknowledged = Object.freeze({ ...pending, expectedRevision: receipt.revision });
+        nativeConstructionCenterPendingIdentityRef.current = acknowledged;
+        setNativeConstructionCenterPendingIdentity(acknowledged);
+      }
+      setNotice(successNotice(receipt));
+    });
+    if (!accepted) return false;
+    const pending = Object.freeze({
+      ...identity,
+      kind,
+      targetId,
+      expectedRevision: null,
+    });
+    nativeConstructionCenterPendingIdentityRef.current = pending;
+    setNativeConstructionCenterPendingIdentity(pending);
+    return true;
+  }, [commitNativeProjectedCommand]);
+
+  const submitNativeConstructionCenterEnabledIntent = useCallback((
+    identity: NativeConstructionCenterFrameIdentity,
+    enabled: boolean,
+  ): void => {
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    if (!nativeConstructionCenterIdentityMatchesFrame(identity, frame) || !frame ||
+        !frame.workspace.writeAvailable ||
+        typeof enabled !== "boolean" || enabled === frame.workspace.enabled) {
+      setNotice("自动补足开关不属于当前 Rust 投影或没有变化；本次操作未提交");
+      return;
+    }
+    commitNativeConstructionCenterIntent(
+      identity,
+      "enabled",
+      null,
+      (baseRevision) => createNativeConstructionAutomationEnabledIntentCommand(baseRevision, enabled),
+      (receipt) => `自动补足意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`,
+    );
+  }, [commitNativeConstructionCenterIntent]);
+
+  const submitNativeConstructionCenterQuantumSupplyIntent = useCallback((
+    identity: NativeConstructionCenterFrameIdentity,
+    enabled: boolean,
+  ): void => {
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    if (!nativeConstructionCenterIdentityMatchesFrame(identity, frame) || !frame ||
+        !frame.workspace.writeAvailable ||
+        typeof enabled !== "boolean" || !frame.workspace.quantumNetworkEnabled ||
+        enabled === frame.workspace.quantumSourceEnabled) {
+      setNotice("量子直供开关不属于当前可写 Rust 投影、量子网络未启用或值没有变化；本次操作未提交");
+      return;
+    }
+    commitNativeConstructionCenterIntent(
+      identity,
+      "quantumSupplyEnabled",
+      null,
+      (baseRevision) => createNativeConstructionAutomationQuantumSupplyIntentCommand(baseRevision, enabled),
+      (receipt) => `量子直供意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`,
+    );
+  }, [commitNativeConstructionCenterIntent]);
+
+  const submitNativeConstructionCenterTargetStockIntent = useCallback((
+    submission: NativeConstructionCenterTargetStockSubmission,
+  ): void => {
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    const row = frame?.workspace.targets.rows.find((candidate) => candidate.targetId === submission.targetId);
+    const lowering = Boolean(row) && submission.target < row!.target;
+    if (!nativeConstructionCenterIdentityMatchesFrame(submission, frame) || !frame ||
+        !frame.workspace.writeAvailable || !row || !row.unlocked ||
+        !Number.isSafeInteger(submission.target) || submission.target < 0 ||
+        submission.target > frame.workspace.stockLimit || submission.target === row.target ||
+        (lowering ? submission.confirmedDecreaseFrom !== row.target : submission.confirmedDecreaseFrom !== null)) {
+      setNotice("单目标库存不属于当前已解锁 Rust 目录、超出同 revision 上限或缺少降低确认；本次操作未提交");
+      return;
+    }
+    commitNativeConstructionCenterIntent(
+      submission,
+      "targetStock",
+      submission.targetId,
+      (baseRevision) => createNativeConstructionAutomationTargetStockIntentCommand(
+        baseRevision,
+        submission.targetId as ConstructionAutomationTargetId,
+        submission.target,
+      ),
+      (receipt) => `${row.name}目标意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`,
+    );
+  }, [commitNativeConstructionCenterIntent]);
+
+  const submitNativeConstructionCenterBatchBuildingTargetStockIntent = useCallback((
+    submission: NativeConstructionCenterBatchBuildingTargetStockSubmission,
+  ): void => {
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    const affectedRows = frame?.workspace.targets.rows.filter((row) => row.kind === "building" && row.unlocked) ?? [];
+    const changedRows = affectedRows.filter((row) => row.target !== submission.target);
+    const loweredCount = changedRows.filter((row) => row.target > submission.target).length;
+    if (!nativeConstructionCenterIdentityMatchesFrame(submission, frame) || !frame ||
+        !frame.workspace.writeAvailable || frame.workspace.targets.truncated ||
+        frame.workspace.targets.totalCount !== frame.workspace.targets.rows.length || affectedRows.length === 0 ||
+        !Number.isSafeInteger(submission.target) || submission.target < 1 ||
+        submission.target > frame.workspace.stockLimit || submission.target > 100_000_000 || changedRows.length === 0 ||
+        submission.confirmedAffectedCount !== affectedRows.length ||
+        submission.confirmedChangedCount !== changedRows.length ||
+        submission.confirmedLoweredCount !== loweredCount) {
+      setNotice("批量建筑目标不属于当前完整 Rust 投影、没有变化或超出同 revision 上限；本次操作未提交");
+      return;
+    }
+    commitNativeConstructionCenterIntent(
+      submission,
+      "batchBuildingTargetStock",
+      null,
+      (baseRevision) => createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(
+        baseRevision,
+        submission.target,
+      ),
+      (receipt) => `全部已解锁建筑目标意图已由 Rust 原子提交（${affectedRows.length.toLocaleString("zh-CN")} 种）；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`,
+    );
+  }, [commitNativeConstructionCenterIntent]);
+
+  const takeNativeTrayItem = useCallback((itemId: string): void => {
+    const frame = nativeFactoryInventoryFrame;
+    if (!frame) {
+      setNotice("原生物资投影尚未就绪；本次操作未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, () =>
+      createNativeProjectedTrayTakeCommand(frame, itemId));
+  }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
+
+  const returnNativeCargo = useCallback((): void => {
+    const frame = nativeFactoryInventoryFrame;
+    if (!frame) {
+      setNotice("原生手持物投影尚未就绪；本次操作未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, () =>
+      createNativeProjectedCargoReturnCommand(frame));
+  }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
+
+  const setNativeTrayItemLimit = useCallback((value: number): void => {
+    const frame = nativeFactoryInventoryFrame;
+    if (!frame) {
+      setNotice("原生托盘上限投影尚未就绪；本次操作未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, () =>
+      createNativeProjectedTrayItemLimitCommand(frame, value));
+  }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
+
+  const setNativeProductionBufferLimit = useCallback((value: number): void => {
+    const frame = nativeFactoryInventoryFrame;
+    if (!frame) {
+      setNotice("原生生产缓存上限投影尚未就绪；本次操作未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, () =>
+      createNativeProjectedProductionBufferLimitCommand(frame, value));
+  }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
+
+  const discardNativeTrayItem = useCallback(async (itemId: string, amount: number): Promise<void> => {
+    const source = nativeFactoryInventoryFrame;
+    const row = source?.rowsByItemId.get(itemId);
+    if (!source || !row || !Number.isSafeInteger(amount) || amount < 1 || row.amount !== amount) {
+      setNotice("原生托盘投影已经变化；永久丢弃未提交");
+      return;
+    }
+    const label = ITEMS[itemId as ItemId]?.name ?? itemId;
+    const confirmed = await gameDialog.confirm(
+      `确认永久丢弃当前行星托盘中的全部 ${label} ×${amount.toLocaleString("zh-CN")}？该操作不会返还物资。`,
+      { danger: true, title: "确认永久丢弃", confirmLabel: "永久丢弃" },
+    );
+    if (!confirmed) return;
+    const current = nativeFactoryInventoryFrameRef.current;
+    if (!current || current.sessionId !== source.sessionId || current.runId !== source.runId ||
+        current.revision !== source.revision || current.rowsByItemId.get(itemId)?.amount !== amount) {
+      setNotice("确认期间 Rust 托盘 revision 已变化；永久丢弃已取消");
+      return;
+    }
+    commitNativeWorkspaceAction(
+      { kind: "tray-discard", itemId, amount },
+      `${label}已由 Rust 从当前行星托盘永久丢弃`,
+      source.revision,
+    );
+  }, [commitNativeWorkspaceAction, gameDialog, nativeFactoryInventoryFrame]);
+
+  const cancelNativeBuildingPlacement = useCallback((): void => {
+    nativePlacementIntentRef.current = {
+      buildingId: null,
+      generation: nativePlacementIntentRef.current.generation + 1,
+    };
+    setNativePlacementBuildingId(null);
+    nativePlacementContextPendingRef.current = false;
+    setNativePlacementContextPending(false);
+  }, []);
+
+  const cancelNativeBlueprintEnqueuePlacement = useCallback((): void => {
+    nativeBlueprintEnqueuePlacementRef.current = null;
+    nativeBlueprintEnqueueGenerationRef.current += 1;
+    nativeBlueprintEnqueueContextPendingRef.current = false;
+    setNativeBlueprintEnqueueContextPending(false);
+    setNativeBlueprintEnqueuePlacement(null);
+  }, []);
+
+  const cancelNativeBlueprintDirectDeployPlacement = useCallback((): void => {
+    nativeBlueprintDirectDeployPlacementRef.current = null;
+    nativeBlueprintDirectDeployGenerationRef.current += 1;
+    nativeBlueprintDirectDeployContextPendingRef.current = false;
+    setNativeBlueprintDirectDeployContextPending(false);
+    setNativeBlueprintDirectDeployPlacement(null);
+  }, []);
+
+  const selectNativeBuildingPlacement = useCallback((buildingId: string | null): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) return;
+    if (buildingId !== null) {
+      const row = nativeConstructionInventoryFrame?.rowsByBuildingId.get(buildingId);
+      if (!row || row.amount < 1) {
+        setNotice("当前 Rust 施工库存中没有这个条目；本次放置未开始");
+        return;
+      }
+    }
+    nativePlacementIntentRef.current = {
+      buildingId,
+      generation: nativePlacementIntentRef.current.generation + 1,
+    };
+    cancelNativeBlueprintEnqueuePlacement();
+    cancelNativeBlueprintDirectDeployPlacement();
+    nativeBeltPlacementRequestGenerationRef.current += 1;
+    nativeBeltPlacementTierRef.current = null;
+    setNativeBeltPlacementTier(null);
+    nativeBeltPlacementContextPendingRef.current = false;
+    setNativeBeltPlacementContextPending(false);
+    setNativePlacementBuildingId(buildingId);
+    nativePlacementContextPendingRef.current = false;
+    setNativePlacementContextPending(false);
+    setPlacement(null);
+    setBlueprintPlacementId(null);
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    updateConnectionDraft(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setSelectionMode(false);
+    setDeleteMode(false);
+    setRegionMode(false);
+    setRegionDraft(null);
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
+    setSelectedEntityIds([]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setFocusedBeltNetworkId(null);
+    if (buildingId) setNotice("请在空白画布选择落点；Rust 会按当前 revision 重新检查后再建造");
+  }, [cancelNativeBlueprintDirectDeployPlacement, cancelNativeBlueprintEnqueuePlacement, flowStore, nativeConstructionInventoryFrame, updateConnectionDraft]);
+
+  const selectNativeBeltPlacement = useCallback((tier: BeltTier | null): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) return;
+    if (tier !== null) {
+      const constructionId = getBeltConstructionId(tier);
+      const row = nativeConstructionInventoryFrame?.rowsByBuildingId.get(constructionId);
+      if (!row || row.amount < 1) {
+        setNotice(`当前 Rust 施工库存中没有 Mk.${tier === 3 ? "III" : tier === 2 ? "II" : "I"} 传送带；拉线未开始`);
+        return;
+      }
+    }
+    nativePlacementIntentRef.current = {
+      buildingId: null,
+      generation: nativePlacementIntentRef.current.generation + 1,
+    };
+    cancelNativeBlueprintEnqueuePlacement();
+    cancelNativeBlueprintDirectDeployPlacement();
+    setNativePlacementBuildingId(null);
+    nativePlacementContextPendingRef.current = false;
+    setNativePlacementContextPending(false);
+    nativeBeltPlacementRequestGenerationRef.current += 1;
+    nativeBeltPlacementTierRef.current = tier;
+    setNativeBeltPlacementTier(tier);
+    nativeBeltPlacementContextPendingRef.current = false;
+    setNativeBeltPlacementContextPending(false);
+    setPlacement(null);
+    setBlueprintPlacementId(null);
+    setBeltTierMode("manual");
+    if (tier !== null) setBeltTier(tier);
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    updateConnectionDraft(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setSelectionMode(false);
+    setDeleteMode(false);
+    setRegionMode(false);
+    setRegionDraft(null);
+    if (tier !== null) {
+      const tierName = tier === 3 ? "III" : tier === 2 ? "II" : "I";
+      setNotice(`已锁定传送带 Mk.${tierName}；请把普通建筑的同物品输出端口拖到输入端口`);
+    } else {
+      setConnectionHint(null);
+    }
+  }, [cancelNativeBlueprintDirectDeployPlacement, cancelNativeBlueprintEnqueuePlacement, flowStore, nativeConstructionInventoryFrame, updateConnectionDraft]);
+
+  const placeNativeOrdinaryBuildingAt = useCallback(async (
+    buildingId: string,
+    position: Readonly<{ x: number; y: number }>,
+    screenPoint: Readonly<{ x: number; y: number }>,
+  ): Promise<void> => {
+    const identity = nativeFactoryInventoryIdentity;
+    const intent = nativePlacementIntentRef.current;
+    if (!identity || intent.buildingId !== buildingId || nativePlacementContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次落点未提交");
+      return;
+    }
+    nativePlacementContextPendingRef.current = true;
+    setNativePlacementContextPending(true);
+    const generation = intent.generation;
+    const context = await readVerifiedNativeConstructionPlacementContext(
+      desktopBridge,
+      identity,
+      buildingId,
+    );
+    const currentIntent = nativePlacementIntentRef.current;
+    if (currentIntent.generation !== generation || currentIntent.buildingId !== buildingId) return;
+    nativePlacementContextPendingRef.current = false;
+    setNativePlacementContextPending(false);
+    if (!context) {
+      setNotice("没有取得同一 revision 的 Rust 建造凭证；存档未改变，请重新落点");
+      return;
+    }
+    if (!context.support.supported || !context.placement) {
+      cancelNativeBuildingPlacement();
+      setNotice(nativePlacementBlockedMessage(context.support.reason ?? "unsupported-building-domain"));
+      return;
+    }
+    if (context.activePlanetId !== nativeFactoryProjectionPlanetId) {
+      cancelNativeBuildingPlacement();
+      setNotice("建造凭证所属行星已变化；存档未改变，请等待画布刷新");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(context.revision, (baseRevision) =>
+      baseRevision === context.revision
+        ? createNativeProjectedOrdinaryBuildingPlacementCommand(context, position)
+        : null, () => {
+      const label = getConstructionDefinition(buildingId)?.name ?? buildingId;
+      setNotice(`已由 Rust 确认放置${label} ×1`);
+      playTone("place");
+      spawnInteractionBurst(screenPoint.x, screenPoint.y, "建筑已放置", "positive");
+      trackAnalyticsEvent("building_place", 1);
+      recordBasicOnboardingEvent("building-placed");
+    });
+    if (!accepted) return;
+    nativePlacementIntentRef.current = { buildingId: null, generation: generation + 1 };
+    setNativePlacementBuildingId(null);
+    setPlacementCount(1);
+  }, [
+    cancelNativeBuildingPlacement,
+    commitNativeProjectedCommand,
+    desktopBridge,
+    nativeFactoryInventoryIdentity,
+    nativeFactoryProjectionPlanetId,
+    playTone,
+    spawnInteractionBurst,
+  ]);
+
+  useEffect(() => {
+    cancelNativeBuildingPlacement();
+  }, [
+    cancelNativeBuildingPlacement,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    cancelNativeBlueprintEnqueuePlacement();
+  }, [
+    cancelNativeBlueprintEnqueuePlacement,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    cancelNativeBlueprintDirectDeployPlacement();
+  }, [
+    cancelNativeBlueprintDirectDeployPlacement,
+    nativeFactoryProjectionPlanetId,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!nativePlayerAuthorityOwnsRuntime) return;
+    setBlueprintPlacementId(null);
+    setBlueprintAllowOverlap(false);
+  }, [
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (nativeBlueprintDirectDeployPlacement &&
+        (nativePlacementBuildingId || nativeBlueprintEnqueuePlacement || blueprintPlacementId ||
+          selectionMode || deleteMode || regionMode || connectionDraft)) {
+      cancelNativeBlueprintDirectDeployPlacement();
+    }
+  }, [
+    blueprintPlacementId,
+    cancelNativeBlueprintDirectDeployPlacement,
+    connectionDraft,
+    deleteMode,
+    nativeBlueprintDirectDeployPlacement,
+    nativeBlueprintEnqueuePlacement,
+    nativePlacementBuildingId,
+    regionMode,
+    selectionMode,
+  ]);
+  useEffect(() => {
+    nativeRemovalRequestGenerationRef.current += 1;
+    nativeRemovalContextPendingRef.current = false;
+    setNativeRemovalContextPending(false);
+  }, [
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    nativeStackRequestGenerationRef.current += 1;
+    nativeStackContextPendingRef.current = false;
+    setNativeStackContextPending(false);
+    nativeBeltPlacementRequestGenerationRef.current += 1;
+    nativeBeltPlacementContextPendingRef.current = false;
+    setNativeBeltPlacementContextPending(false);
+    nativeBeltPlacementTierRef.current = null;
+    setNativeBeltPlacementTier(null);
+  }, [
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (nativePlacementBuildingId &&
+        (blueprintPlacementId || selectionMode || deleteMode || regionMode || connectionDraft)) {
+      cancelNativeBuildingPlacement();
+    }
+  }, [
+    blueprintPlacementId,
+    cancelNativeBuildingPlacement,
+    connectionDraft,
+    deleteMode,
+    nativePlacementBuildingId,
+    regionMode,
+    selectionMode,
+  ]);
+  useEffect(() => {
+    if (nativeBlueprintEnqueuePlacement &&
+        (nativePlacementBuildingId || nativeBlueprintDirectDeployPlacement || blueprintPlacementId ||
+          selectionMode || deleteMode || regionMode || connectionDraft)) {
+      cancelNativeBlueprintEnqueuePlacement();
+    }
+  }, [
+    blueprintPlacementId,
+    cancelNativeBlueprintEnqueuePlacement,
+    connectionDraft,
+    deleteMode,
+    nativeBlueprintDirectDeployPlacement,
+    nativeBlueprintEnqueuePlacement,
+    nativePlacementBuildingId,
+    regionMode,
+    selectionMode,
+  ]);
+
+  const rejectLegacyFactoryInteractionWhileNative = useCallback((label: string): boolean => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) return false;
+    setNotice(`Windows 原生权威尚未接入${label}命令；本次操作未应用，也不会读取旧星球数据`);
+    return true;
+  }, []);
+
+  const captureLegacyFactoryInteractionEpoch = useCallback(
+    () => nativePlayerAuthorityOwnershipEpochRef.current.epoch,
+    [],
+  );
+  const rejectLegacyFactoryContinuationAfterAwait = useCallback((startedEpoch: number, label: string): boolean => {
+    const authority = nativePlayerAuthorityOwnershipEpochRef.current;
+    if (canResumeLegacyInteractionAfterAwait(startedEpoch, authority)) return false;
+    setNotice(`Windows 原生权威在${label}确认期间已接管或发生切换；旧操作已取消，存档未改变`);
+    return true;
+  }, []);
 
   useEffect(() => {
     const loopback = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
@@ -5403,6 +10702,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   useEffect(() => {
     if (gameRef.current.mode !== "normal") return;
     const synchronizeTaskDay = () => {
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+        // Rust advances the contract calendar from its authoritative clock.
+        // Recomputing it from the renderer's stale mirror would create an
+        // unversioned second writer and could replace a newer native board.
+        return;
+      }
       const current = gameRef.current;
       if (current.mode !== "normal") return;
       const orbitalStation = synchronizeStationContracts(current, Date.now());
@@ -5423,6 +10728,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     const pending = pendingPlanetViewportRef.current.get(planetId);
     if (pending) window.clearTimeout(pending.timer);
+    if (returnToMenuSaveInFlightRef.current) {
+      // The return checkpoint reads this map as an overlay. Do not start a
+      // late timer that can race the durable ACK. Keep the latest imperative
+      // viewport in the overlay so the checkpoint still preserves the camera;
+      // the unmount cleanup is suppressed after this successful final commit.
+      pendingPlanetViewportRef.current.set(planetId, { viewport: normalized, timer: 0 });
+      return;
+    }
     const schedule = () => {
       const timer = window.setTimeout(() => {
         const latest = pendingPlanetViewportRef.current.get(planetId);
@@ -5434,10 +10747,40 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           schedule();
           return;
         }
-        pendingPlanetViewportRef.current.delete(planetId);
+        if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+          const model = nativePlanetViewportReadModelRef.current;
+          const current = model?.viewports.get(planetId);
+          if (!model || !current || !nativePlayerAuthorityCommandBindingRef.current ||
+              nativePlayerAuthorityCommandInFlightRef.current) {
+            schedule();
+            return;
+          }
+          if (current.x === latest.viewport.x && current.y === latest.viewport.y &&
+              current.zoom === latest.viewport.zoom) {
+            pendingPlanetViewportRef.current.delete(planetId);
+            return;
+          }
+          // Persist only the changed camera leaves from the exact Rust
+          // directory. The renderer never diffs or installs its stale full
+          // GameState mirror while native authority owns the session.
+          const accepted = commitNativeProjectedCommand(model.identity.revision, (baseRevision) =>
+            baseRevision === model.identity.revision
+              ? createNativeProjectedPlanetViewportCommand(model, planetId, latest.viewport)
+              : null);
+          if (!accepted) {
+            schedule();
+            return;
+          }
+          pendingPlanetViewportRef.current.delete(planetId);
+          return;
+        }
         const current = gameRef.current;
         const previous = current.planetViewports[planetId];
-        if (previous && previous.x === latest.viewport.x && previous.y === latest.viewport.y && previous.zoom === latest.viewport.zoom) return;
+        if (previous && previous.x === latest.viewport.x && previous.y === latest.viewport.y && previous.zoom === latest.viewport.zoom) {
+          pendingPlanetViewportRef.current.delete(planetId);
+          return;
+        }
+        pendingPlanetViewportRef.current.delete(planetId);
         const next = { ...current, planetViewports: { ...current.planetViewports, [planetId]: latest.viewport } };
         viewportOnlyGameStateRef.current = next;
         // The imperative authority and lifecycle save must see the viewport
@@ -5454,13 +10797,59 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       pendingPlanetViewportRef.current.set(planetId, { viewport: normalized, timer });
     };
     schedule();
-  }, [publishRuntimeGame]);
+  }, [commitNativeProjectedCommand, publishRuntimeGame]);
   useEffect(() => () => {
     for (const pending of pendingPlanetViewportRef.current.values()) window.clearTimeout(pending.timer);
     pendingPlanetViewportRef.current.clear();
   }, []);
 
+  const commitNativeHistory = useCallback((direction: "undo" | "redo") => {
+    const source = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const commitHistory = desktopBridge?.commitNativePlayerAuthorityHistory;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !source || !commitHistory ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认命令或撤销历史不可用");
+      return false;
+    }
+    const available = direction === "undo"
+      ? nativePlayerAuthorityHistory?.canUndo
+      : nativePlayerAuthorityHistory?.canRedo;
+    if (!available || nativePlayerAuthorityHistory?.revision !== source.baseRevision) {
+      setNotice(direction === "undo" ? "当前没有可撤销的已确认操作" : "当前没有可重做的操作");
+      return false;
+    }
+    nativePlayerAuthorityCommandInFlightRef.current = true;
+    setNativePlayerAuthorityCommandPending(true);
+    const operationId = `renderer-history-${direction}-${source.baseRevision}-${crypto.randomUUID()}`;
+    void commitHistory({
+      sessionId: source.sessionId,
+      operationId,
+      baseRevision: source.baseRevision,
+      direction,
+    }).then((receipt) => {
+      setNativePlayerAuthorityHistory(receipt.history);
+      invalidateFactoryAlertProjection();
+      setNotice(direction === "undo" ? "已撤销上一步原生权威操作" : "已重做上一步原生权威操作");
+    }).catch(() => {
+      // Never retry a mutation after an unknown transport result. Pulling the
+      // authority clock/history below is read-only reconciliation.
+      setNotice("撤销结果暂时无法确认；已停止重试并读取当前权威状态");
+    }).finally(async () => {
+      try {
+        await nativePlayerAuthorityClockRef.current?.refresh();
+      } finally {
+        nativePlayerAuthorityCommandInFlightRef.current = false;
+        setNativePlayerAuthorityCommandPending(false);
+      }
+    });
+    return true;
+  }, [desktopBridge, invalidateFactoryAlertProjection, nativePlayerAuthorityHistory]);
+
   const undoGame = useCallback(() => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      commitNativeHistory("undo");
+      return;
+    }
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     // Resolve the history transition synchronously against the imperative
     // game ref. React may defer a functional updater until after the timer
@@ -5476,9 +10865,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (durableRecoveryLifecycleRef.current === "active") {
       dispatchDurableUiCommandRef.current();
     }
-  }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+  }, [commitNativeHistory, invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
 
   const redoGame = useCallback(() => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      commitNativeHistory("redo");
+      return;
+    }
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     const current = gameRef.current;
     const next = gameHistoryRef.current.redo(current);
@@ -5490,7 +10883,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (durableRecoveryLifecycleRef.current === "active") {
       dispatchDurableUiCommandRef.current();
     }
-  }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+  }, [commitNativeHistory, invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
 
   const clearHistory = useCallback(() => {
     gameHistoryRef.current.clear();
@@ -5498,6 +10891,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   useEffect(() => {
+    if (nativePlayerAuthorityOwnsRuntime) {
+      // Main/Rust is now the only mutable runtime. The legacy Worker must not
+      // be recreated or retain a second independently advancing factory.
+      simulationWorkerDisabledRef.current = true;
+      simulationSubmissionRef.current = null;
+      durablePrimarySaveInFlightRef.current = false;
+      simulationSaveBarrierDepthRef.current = 0;
+      simulationCheckpointBarrierRef.current = false;
+      simulationPendingSecondsRef.current = 0;
+      simulationPendingWallSecondsRef.current = 0;
+      simulationRetrySecondsRef.current = 0;
+      simulationRetryWallSecondsRef.current = 0;
+      setTimeWarpPendingUi(0);
+      setSimulationWorkerActive(false);
+      setInitialSimulationWorkerReady(true);
+      cloudAutoSyncAbortRef.current?.abort();
+      cloudAutoSyncAbortRef.current = null;
+      pureIdleBackgroundOfflineAbortRef.current?.abort();
+      pureIdleBackgroundOfflineAbortRef.current = null;
+      pureIdleMacroClientRef.current?.close();
+      pureIdleMacroClientRef.current = null;
+      pureIdleMacroActiveRef.current = false;
+      pureIdleMacroRestartingRef.current = false;
+      pureIdleActiveRef.current = false;
+      pureIdleStoppingRef.current = false;
+      pureIdleBackgroundRecoveryRef.current = false;
+      pureIdleStopTargetRef.current = null;
+      pureIdleRecoveryRef.current = null;
+      setPureIdleActive(false);
+      setPureIdleStartedAt(null);
+      return;
+    }
     if (typeof Worker === "undefined") {
       simulationWorkerDisabledRef.current = true;
       setInitialSimulationWorkerReady(true);
@@ -5514,11 +10939,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // instance acknowledged the same fingerprint. Force the first request to
     // carry the runtime registry and rebuild the authoritative cache safely.
     simulationWorkerRegistryFingerprintRef.current = null;
+    const workerAuthorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!workerAuthorityLease) {
+      simulationWorkerDisabledRef.current = true;
+      setInitialSimulationWorkerReady(false);
+      return;
+    }
     const worker = new Worker(new URL("./game/simulation.worker.ts", import.meta.url), { type: "module", name: "factory-simulation" });
     simulationWorkerRef.current = worker;
+    const workerContinuationIsCurrent = () => simulationWorkerRef.current === worker &&
+      legacyJavaScriptAuthorityLeaseIsCurrent(workerAuthorityLease);
     let installedSubmission: SimulationSubmission | null = null;
     worker.onmessage = async (event: MessageEvent<SimulationWorkerResponse>) => {
-      if (simulationWorkerRef.current !== worker) return;
+      if (!workerContinuationIsCurrent()) return;
       const authorityReplacement = simulationAuthorityReplacementRef.current;
       if (authorityReplacement?.id === event.data.id) {
         const failReplacement = (error: Error) => {
@@ -5653,6 +11086,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           authorityReplacement.resolve({ state: projectedState, stateRevision: event.data.stateRevision });
         } catch (error) {
           failReplacement(error instanceof Error ? error : new Error("挂机终态检查点校验失败"));
+        }
+        return;
+      }
+      const statisticsRequest = statisticsReadModelRequestRef.current;
+      if (statisticsRequest?.id === event.data.id) {
+        statisticsReadModelRequestRef.current = null;
+        const readModel = event.data.statisticsReadModel;
+        if (event.data.needsRegistry || event.data.registryError || event.data.needsState || event.data.needsResync ||
+          !readModel || readModel.schemaVersion !== 1 || readModel.kind !== "statistics-history-v1" ||
+          readModel.revision !== event.data.stateRevision) {
+          statisticsRequest.reject(new Error(event.data.registryError ?? "Worker 无法提供权威生产历史"));
+        } else {
+          simulationWorkerRegistryFingerprintRef.current = event.data.registryFingerprint ?? simulationWorkerRegistryFingerprintRef.current;
+          statisticsRequest.resolve(readModel);
         }
         return;
       }
@@ -5792,6 +11239,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               }
               const committedChunkedSave = event.data.chunkedSaveResult;
               const nativeCommit = await checkpointRequest.nativeSaveTransaction?.commit();
+              if (!workerContinuationIsCurrent() ||
+                !legacyJavaScriptAuthorityLeaseIsCurrent(checkpointRequest.authorityLease)) return;
               delete checkpointRequest.nativeSaveTransaction;
               latestAuthoritativeCheckpointTransferRef.current = null;
               latestChunkedAutosaveResultRef.current = { state: saveState, result: committedChunkedSave };
@@ -6047,11 +11496,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               durableRecoveryFinalizeInFlightRef.current = null;
               // Ask the simulation Worker for an offloaded authoritative transfer.
               const authoritative = await requestAuthoritativeSimulationCheckpointRef.current();
+              if (!workerContinuationIsCurrent()) return;
               const transfer = latestAuthoritativeCheckpointTransferRef.current?.transfer;
               if (!transfer || !(transfer.buffer instanceof ArrayBuffer) || transfer.byteLength <= 0) {
                 throw new Error("durable 检查点吸收缺少权威状态 transfer");
               }
               const storedSha256 = await computeSimulationRuntimeDurableBytesSha256(transfer.buffer);
+              if (!workerContinuationIsCurrent()) return;
               const nextCheckpoint: SimulationRuntimeDurableTransferCheckpoint = {
                 schemaVersion: 1,
                 sessionId: intent.sessionId,
@@ -6080,6 +11531,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 { ownerId: status.writerId, fencingToken: status.fencingToken },
                 { intent, resultStateRevision: nextStateRevision },
               );
+              if (!workerContinuationIsCurrent()) return;
               if (!rolled.result.ok) throw new Error(rolled.result.message);
               durableRecoveryHeadRef.current = {
                 baseIdentity: head.baseIdentity,
@@ -6106,6 +11558,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               dispatchDurableUiCommandRef.current();
               return;
             } catch (error) {
+              if (!workerContinuationIsCurrent()) return;
               durableRecoveryFinalizeInFlightRef.current = null;
               simulationSubmissionRef.current = null;
               simulationRetrySecondsRef.current += submission.simulationSeconds;
@@ -6129,6 +11582,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           event.data.stateRevision,
           { ownerId: status.writerId, fencingToken: status.fencingToken },
         ).then(async (result) => {
+          if (!workerContinuationIsCurrent()) return;
           if (!result.ok) throw new Error(result.message);
           if (result.proof.stateRevision > submission.durableIntent!.baseStateRevision) {
             const commandId = `intent-${submission.durableIntent!.intentSha256}`;
@@ -6143,6 +11597,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 resultStateRevision: result.proof.stateRevision,
               },
             );
+            if (!workerContinuationIsCurrent()) return;
             if (nativeWalResult === "appended") enqueueWindowsNativeCoreShadowOperation({
               commandId,
               baseRevision: submission.durableIntent!.baseStateRevision,
@@ -6150,6 +11605,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               command: submission.durableIntent!.command,
               simulationSeconds: submission.durableIntent!.simulationSeconds,
               wallSeconds: submission.durableIntent!.wallSeconds,
+              ...(submission.durableIntent!.approximate
+                ? { advanceMode: "pure-idle-conservative-v2" as const }
+                : {}),
             });
           }
           durableRecoveryHeadRef.current = advanceSimulationRuntimeDurableAppHead(
@@ -6160,6 +11618,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           durableRecoveryFinalizeReadyRef.current = event.data.id;
           worker.onmessage?.(event);
         }).catch((error) => {
+          if (!workerContinuationIsCurrent()) return;
           durableRecoveryFinalizeInFlightRef.current = null;
           simulationSubmissionRef.current = null;
           simulationRetrySecondsRef.current += submission.simulationSeconds;
@@ -6457,6 +11916,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 registry: submission.registry,
               },
             );
+            if (!workerContinuationIsCurrent()) return;
             if (nativeWalResult === "appended") enqueueWindowsNativeCoreShadowOperation({
               commandId,
               baseRevision: submission.baseStateRevision,
@@ -6464,14 +11924,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               command: submission.command,
               simulationSeconds: submission.simulationSeconds,
               wallSeconds: submission.wallSeconds,
+              ...(submission.approximate
+                ? { advanceMode: "pure-idle-conservative-v2" as const }
+                : {}),
             });
           } catch (error) {
+            if (!workerContinuationIsCurrent()) return;
             // The JS authority and compatible v47 save remain exact. Native
             // authority promotion is blocked until the next full native
             // checkpoint heals this WAL gap.
             setNotice(`Windows 原生 WAL 未确认，本轮继续使用兼容存档保护：${error instanceof Error ? error.message : "未知错误"}`);
           }
         }
+        if (!workerContinuationIsCurrent()) return;
         acceptFactoryAlertProjection(event.data.projection?.alerts, event.data.factoryAlertsGeneration);
         simulationProjectionIndexRef.current = projectionIndex;
         lastSimulationResultRef.current = confirmed;
@@ -6532,6 +11997,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     worker.onerror = () => {
       if (simulationWorkerRef.current !== worker) return;
+      const statisticsRequest = statisticsReadModelRequestRef.current;
+      if (statisticsRequest) {
+        statisticsReadModelRequestRef.current = null;
+        statisticsRequest.reject(new Error("模拟 Worker 异常，无法读取权威生产历史"));
+      }
       const checkpointWriteRequest = simulationCheckpointRequestRef.current;
       checkpointWriteRequest?.chunkedSaveWritePort?.close();
       if (checkpointWriteRequest) {
@@ -6654,6 +12124,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         requestBytes: stateTransfer.byteLength,
         multicore: undefined,
         approximate: false,
+        authorityLease: workerAuthorityLease,
       };
       simulationSubmissionRef.current = installedSubmission;
       worker.postMessage(request, [stateTransfer.buffer]);
@@ -6668,38 +12139,70 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       worker.terminate();
     }
     return () => {
+      // Invalidate the imperative identity before touching any pending
+      // transaction. An already-entered async onmessage continuation observes
+      // this immediately after its await and cannot publish old JS state.
+      if (simulationWorkerRef.current === worker) simulationWorkerRef.current = null;
+      worker.onmessage = null;
+      worker.onerror = null;
+      const statisticsRequest = statisticsReadModelRequestRef.current;
+      if (statisticsRequest) {
+        statisticsReadModelRequestRef.current = null;
+        statisticsRequest.reject(new Error("模拟 Worker 已重建，生产历史请求已取消"));
+      }
       const checkpointWriteRequest = simulationCheckpointRequestRef.current;
       checkpointWriteRequest?.chunkedSaveWritePort?.close();
       if (checkpointWriteRequest) {
         delete checkpointWriteRequest.chunkedSaveWritePort;
         void checkpointWriteRequest.nativeSaveTransaction?.abort();
         delete checkpointWriteRequest.nativeSaveTransaction;
+        if (simulationCheckpointRequestRef.current === checkpointWriteRequest) {
+          simulationCheckpointRequestRef.current = null;
+          simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
+          checkpointWriteRequest.reject(new Error("模拟 Worker 权威已切换，旧检查点请求已取消"));
+        }
+      }
+      const authorityReplacement = simulationAuthorityReplacementRef.current;
+      if (authorityReplacement) {
+        authorityReplacement.projectionAckPort?.close();
+        simulationAuthorityReplacementRef.current = null;
+        authorityReplacement.reject(new Error("模拟 Worker 权威已切换，旧终态接管已取消"));
       }
       worker.terminate();
-      if (simulationWorkerRef.current === worker) simulationWorkerRef.current = null;
       if (installedSubmission && simulationSubmissionRef.current === installedSubmission) {
         simulationSubmissionRef.current = null;
       }
     };
-  }, [abortPureIdleForWorkerFailure, acceptFactoryAlertProjection, pauseVisibleStateWithoutRollback, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, simulationWorkerGeneration]);
+  }, [abortPureIdleForWorkerFailure, acceptFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityOwnsRuntime, pauseVisibleStateWithoutRollback, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, simulationWorkerGeneration]);
 
   useEffect(() => {
+    if (nativePlayerAuthorityOwnsRuntime) {
+      setPureIdleRecoveryContinueState(false);
+      setPureIdleRecoveryStatus(nativePlayerAuthorityBootstrapPending
+        ? "正在确认 Windows 原生权威恢复状态"
+        : "Windows 原生权威已接管，旧纯挂机恢复未启动");
+      return;
+    }
     if (!loaded.state.timeWarp.enabled || loaded.state.speedrun?.enabled) {
       setPureIdleRecoveryContinueState(false);
       setPureIdleRecoveryStatus(loaded.state.speedrun?.enabled ? "速通工厂继续使用独立精确规则" : "未运行纯挂机");
       return;
     }
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease) return;
     let cancelled = false;
     void (async () => {
       let claim = await claimPureIdleRecovery(pureIdleOwnerTokenRef.current);
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       // A same-tab reload can briefly leave the previous document's Web Lock
       // visible after its IndexedDB lease has already been released. Retry only
       // this bounded boot race; a genuinely active tab remains authoritative.
       if (!claim.ok && claim.reason === "owned") {
         for (const delayMs of [50, 150, 300]) {
           await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
-          if (cancelled) return;
+          if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           claim = await claimPureIdleRecovery(pureIdleOwnerTokenRef.current);
+          if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (claim.ok || claim.reason !== "owned") break;
         }
       }
@@ -6719,8 +12222,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           Date.now(),
           startedPaused,
         );
+        if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       }
-      if (cancelled) return;
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       if (!claim.ok) {
         if (claim.reason === "owned") {
           setPureIdleRecoveryStatus("另一个标签页持有纯挂机会话");
@@ -6756,6 +12260,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           pureIdleOwnerTokenRef.current,
           backgroundStartedAtMs,
         );
+        if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         if (marked) recoveryRecord = { ...recoveryRecord, backgroundStartedAtMs };
       }
       pureIdleRecoveryRef.current = recoveryRecord;
@@ -6777,24 +12282,29 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         setNotice("上次停止结算未提交；原主存档保持不变，等待安全恢复");
         return;
       }
-      const backgroundRecovery = await settlePureIdleBackgroundRecovery(recoveryRecord);
+      const backgroundRecovery = await settlePureIdleBackgroundRecovery(recoveryRecord, authorityLease);
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       if (backgroundRecovery !== "not-backgrounded") return;
-      await initializePureIdleMacroClient(recoveryRecord);
+      await initializePureIdleMacroClient(recoveryRecord, authorityLease);
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     })().catch((error) => {
-      if (cancelled) return;
+      if (cancelled || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       const message = error instanceof Error ? error.message : "纯挂机恢复失败";
       setPureIdleRecoveryStatus(`${message}；原主存档保持不变`);
       setNotice(`${message}；未结算会话仍保留在恢复日志中`);
     });
     return () => { cancelled = true; };
-    // Recovery is a one-time boot boundary for the loaded primary save.
+    // Recovery starts once only after the main-owned authority bootstrap has
+    // proved that JavaScript still owns this save.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initializePureIdleMacroClient, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
+  }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityBootstrapPending, nativePlayerAuthorityOwnsRuntime, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
 
   useEffect(() => {
     if (!pureIdleActive || !pureIdleMacroActiveRef.current) return;
     let cancelled = false;
     const tick = async () => {
+      const authorityLease = issueLegacyJavaScriptAuthorityLease();
+      if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
       const record = pureIdleRecoveryRef.current;
       if (!record || cancelled || pureIdleStoppingRef.current || pureIdleStopTargetRef.current?.sessionId === record.sessionId) return;
       let client = pureIdleMacroClientRef.current;
@@ -6816,18 +12326,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         pureIdleMacroRestartingRef.current = true;
         try {
           const claim = await claimPureIdleRecovery(pureIdleOwnerTokenRef.current);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (claim.ok && !cancelled && pureIdleMacroActiveRef.current) {
             pureIdleRecoveryRef.current = claim.record;
             pureIdleMacroRestartCountRef.current = Math.max(
               pureIdleMacroRestartCountRef.current,
               claim.record.workerRestartCount,
             );
-            await initializePureIdleMacroClient(claim.record);
+            await initializePureIdleMacroClient(claim.record, authorityLease);
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           } else if (!claim.ok) {
             setPureIdleRecoveryStatus(claim.message);
           }
         } finally {
-          pureIdleMacroRestartingRef.current = false;
+          if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) pureIdleMacroRestartingRef.current = false;
         }
         return;
       }
@@ -6835,7 +12347,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (!client || client.busy) return;
       const backgroundPlan = getPureIdleBackgroundPlan(record);
       if (backgroundPlan.backgrounded && backgroundPlan.graceExpired && document.visibilityState === "visible") {
-        await settlePureIdleBackgroundRecovery(record);
+        await settlePureIdleBackgroundRecovery(record, authorityLease);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         return;
       }
       const totalWallSeconds = Math.max(0, (Date.now() - record.startedAtMs) / 1_000);
@@ -6847,8 +12360,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (targetBoundary > settled + 1e-9) {
         try {
           const summary = await client.advance(targetBoundary);
-          publishPureIdleMacroSummary(record, summary);
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+          publishPureIdleMacroSummary(record, summary, authorityLease);
           if (await resetPureIdleWorkerFailures(record.sessionId, pureIdleOwnerTokenRef.current)) {
+            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
             pureIdleMacroRestartCountRef.current = 0;
             pureIdleMacroForceConservativeRef.current = summary.conservativeOnly;
             const current = pureIdleRecoveryRef.current;
@@ -6859,9 +12374,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         } catch (error) {
           client.close();
           if (pureIdleMacroClientRef.current === client) pureIdleMacroClientRef.current = null;
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (!isCountedPureIdleWorkerFailure(error)) return;
           const message = error instanceof Error ? error.message : "宏观结算 Worker 失败";
-          const restartCount = await persistPureIdleWorkerFailure(record, message, pureIdleStopReasonForError(error));
+          const restartCount = await persistPureIdleWorkerFailure(record, message, authorityLease, pureIdleStopReasonForError(error));
+          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           setPureIdleRecoveryStatus(`${message}；墙钟时间与检查点已保留（${restartCount}/${PURE_IDLE_WORKER_RESTART_LIMIT}）`);
           setNotice(pureIdleMacroForceConservativeRef.current
             ? `${message}；精确重建已达上限，下一次只建立保守宏观会话`
@@ -6886,18 +12403,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [handlePureIdleLeaseLost, initializePureIdleMacroClient, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, pureIdleActive, settlePureIdleBackgroundRecovery]);
+  }, [handlePureIdleLeaseLost, initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, pureIdleActive, settlePureIdleBackgroundRecovery]);
 
   useEffect(() => () => {
     pureIdleMacroClientRef.current?.close();
+    const authorityLease = issueLegacyJavaScriptAuthorityLease();
+    if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     const record = pureIdleRecoveryRef.current;
     if (record) {
       const mark = record.backgroundStartedAtMs === undefined
         ? markPureIdleBackground(record.sessionId, pureIdleOwnerTokenRef.current, Date.now())
         : Promise.resolve(true);
-      void mark.finally(() => releasePureIdleRecoveryLease(record.sessionId, pureIdleOwnerTokenRef.current));
+      void (async () => {
+        try {
+          await mark;
+        } catch {
+          // Best-effort page lifecycle metadata must not block lease release.
+        }
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+        try {
+          await releasePureIdleRecoveryLease(record.sessionId, pureIdleOwnerTokenRef.current);
+        } catch {
+          // The IndexedDB lease expires naturally if explicit release fails.
+        }
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+      })();
     }
-  }, []);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent]);
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -6918,6 +12450,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const timer = window.setInterval(() => {
       const now = performance.now();
       const currentState = gameRef.current;
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+        // Rust owns this runtime in exact and macro phases. Do not accumulate
+        // wall debt, post a Worker command/projection, or fall through to the
+        // JavaScript fallback after ownership has transferred.
+        previous = now;
+        return;
+      }
       if (pureIdleMacroActiveRef.current) {
         previous = now;
         return;
@@ -7029,6 +12568,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const worker = simulationWorkerRef.current;
       if (worker && !simulationWorkerDisabledRef.current) {
         if (simulationSubmissionRef.current || durableRecoveryStageInFlightRef.current) return;
+        const authorityLease = issueLegacyJavaScriptAuthorityLease();
+        if (!authorityLease) return;
         const budget = takeSimulationBudgetSlice(
           simulationPendingSecondsRef.current,
           simulationPendingWallSecondsRef.current,
@@ -7091,6 +12632,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           requestBytes: performanceMonitor.isActive() ? serializedPayloadBytes(request) : 0,
           multicore: request.multicore,
           approximate: request.approximate === true,
+          authorityLease,
         } satisfies SimulationSubmission;
         const restoreUnpostedSlice = (error: unknown) => {
           simulationPendingSecondsRef.current += simulationSeconds;
@@ -7151,7 +12693,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       publishRuntimeGame(next);
     }, 1_000);
     return () => window.clearInterval(timer);
-  }, [memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, pauseVisibleStateWithoutRollback, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
+  }, [abortPureIdleForWorkerFailure, issueLegacyJavaScriptAuthorityLease, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, pauseVisibleStateWithoutRollback, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
 
   // Keep the autosave timer responsive to the player's interval/throttle
   // preference, but do not couple it to lifecycle listener cleanup. A
@@ -7193,6 +12735,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // callback may already be queued behind this synchronous event; it must
       // not enqueue a new primary write after pagehide chose the recovery path.
       lifecycleExitStartedRef.current = true;
+      if (nativeAuthorityPersistenceProtectedRef.current || readNativeAuthorityPersistenceBoundary().protected) {
+        // Synchronous unload cannot wait for a Rust checkpoint. The native
+        // host keeps its last durable revision; writing the renderer mirror
+        // here would be an irreversible authority downgrade.
+        return;
+      }
       if (durableRecoveryLifecycleRef.current === "active") {
         // beforeunload/pagehide are synchronous and cannot await a checkpoint
         // or WAL finalize. Never overwrite the T0 primary with an emergency
@@ -7240,34 +12788,60 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       queueMicrotask(() => {
         if (lifecycleSaveEffectGenerationRef.current !== effectGeneration) return;
         const controlledCommit = controlledReturnCommitRef.current;
-        if (lifecycleSaveStarted || lifecycleExitStartedRef.current || durableRecoveryLifecycleRef.current === "active" ||
-          (controlledCommit && isCurrentPrimarySaveSourceRef.current(controlledCommit))) return;
+        if (lifecycleSaveStarted || lifecycleExitStartedRef.current || nativeAuthorityPersistenceProtectedRef.current ||
+          readNativeAuthorityPersistenceBoundary().protected ||
+          durableRecoveryLifecycleRef.current === "active" ||
+          // A successful return checkpoint is the final commit for this
+          // mounted factory. React Flow/Worker callbacks can still publish a
+          // harmless late mirror while React tears the tree down; writing it
+          // here would create an unbounded second revision after the user has
+          // already left. Any state that was accepted before the checkpoint
+          // is included by the barrier itself.
+          controlledCommit) return;
         const cleanupState = durableSimulationRuntimeEnabled
           ? latestAuthoritativeCheckpointRef.current
           : gameRef.current;
         saveGame(stateWithSimulationDebtRef.current(cleanupState));
       });
     };
-  }, [durableSimulationRuntimeEnabled]);
+  }, [durableSimulationRuntimeEnabled, readNativeAuthorityPersistenceBoundary]);
 
   useEffect(() => {
     let active = true;
     let syncing = false;
     const synchronizeMainSave = async () => {
       if (syncing || !hasCloudAuthentication() || pureIdleMacroActiveRef.current) return;
+      const nativeBoundary = readNativeAuthorityPersistenceBoundary();
+      if (nativeBoundary.protected) {
+        const previous = readCloudAutoSyncStatus();
+        if (previous?.userId) writeCloudAutoSyncStatus({
+          userId: previous.userId,
+          state: "skipped",
+          attemptedAt: Date.now(),
+          uploadedAt: previous.uploadedAt,
+          revision: previous.revision,
+          message: "Windows 原生权威接管期间不上传旧 JavaScript 镜像",
+        });
+        return;
+      }
+      const authorityLease = issueLegacyJavaScriptAuthorityLease();
+      if (!authorityLease) return;
       syncing = true;
+      cloudAutoSyncInFlightRef.current = true;
       const attemptedAt = Date.now();
       let syncUserId = readCloudAutoSyncStatus()?.userId ?? null;
       let syncRevision: number | null = null;
       try {
         const mode = gameRef.current.mode;
         const session = await resumeCloudSession(mode);
-        if (!active || lifecycleExitStartedRef.current) return;
+        if (!active || lifecycleExitStartedRef.current ||
+          !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         if (session.status !== "authenticated" || !session.user) return;
         syncUserId = session.user.id;
         syncRevision = session.cloudSave?.revision ?? null;
         const authoritativeState = await requestAuthoritativeSimulationCheckpoint();
-        if (!active || lifecycleExitStartedRef.current) return;
+        if (!active || lifecycleExitStartedRef.current ||
+          !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         const prepared = await serializeEnvelopeInWorker(
           authoritativeState,
           Date.now(),
@@ -7276,7 +12850,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           "main",
           true,
         );
-        if (!active || lifecycleExitStartedRef.current) return;
+        if (!active || lifecycleExitStartedRef.current ||
+          !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         const payload = prepared.raw;
         const summary = prepared.summary ?? summarizeCloudPayload(payload);
         const comparison = compareCloudSaveSummary(session.user.id, summary, session.cloudSave, "main", mode);
@@ -7289,15 +12864,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           writeCloudAutoSyncStatus({ userId: session.user.id, state: "skipped", attemptedAt, uploadedAt: session.cloudSave?.updatedAt ?? null, revision: session.cloudSave?.revision ?? null, message: "本地与云端已一致" });
           return;
         }
-        if (!active || lifecycleExitStartedRef.current) return;
+        if (!active || lifecycleExitStartedRef.current ||
+          !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+        const uploadAbortController = new AbortController();
+        cloudAutoSyncAbortRef.current = uploadAbortController;
         const uploaded = await uploadCloudSave(payload, session.cloudSave?.revision ?? 0, "main", {
           mode,
+          signal: uploadAbortController.signal,
           payloadSha256: prepared.payloadSha256,
           payloadByteLength: prepared.verification.byteLength,
         });
-        if (!active || lifecycleExitStartedRef.current) return;
-        const cloudSave = await refreshCloudSaveMetadata("main", undefined, mode).catch(() => uploaded) ?? uploaded;
-        if (!active || lifecycleExitStartedRef.current) return;
+        if (cloudAutoSyncAbortRef.current === uploadAbortController) cloudAutoSyncAbortRef.current = null;
+        if (!active || lifecycleExitStartedRef.current ||
+          !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+        const cloudSave = await refreshCloudSaveMetadata("main", uploadAbortController.signal, mode).catch(() => uploaded) ?? uploaded;
+        if (!active || lifecycleExitStartedRef.current ||
+          !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
         markCloudSaveSynchronized(session.user.id, cloudSave, payload, "main", mode);
         writeCloudAutoSyncStatus({ userId: session.user.id, state: "success", attemptedAt, uploadedAt: cloudSave.updatedAt, revision: cloudSave.revision, message: "主存档自动上传成功" });
         if (active) setNotice(`主存档已自动同步到云端修订 ${cloudSave.revision}`);
@@ -7313,18 +12895,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         });
         if (active && conflict) setNotice("自动云同步已暂停：云端已有更新版本");
       } finally {
+        cloudAutoSyncAbortRef.current = null;
+        cloudAutoSyncInFlightRef.current = false;
         syncing = false;
       }
     };
     const timer = window.setInterval(() => void synchronizeMainSave(), CLOUD_AUTO_SYNC_INTERVAL_MS);
     return () => {
       active = false;
+      cloudAutoSyncAbortRef.current?.abort();
+      cloudAutoSyncAbortRef.current = null;
       window.clearInterval(timer);
     };
-  }, [requestAuthoritativeSimulationCheckpoint]);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, readNativeAuthorityPersistenceBoundary, requestAuthoritativeSimulationCheckpoint]);
 
   useEffect(() => {
     const syncAccount = () => {
+      // The renderer GameState is stale by construction while Rust owns the
+      // player. Account-domain writes must never derive from that mirror.
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
       const current = accountStateRef.current;
       const next = recordAccountProgress(current, gameRef.current);
       if (next === current) return;
@@ -7384,6 +12973,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [game.research.completedTechIds, playTone]);
 
   useEffect(() => {
+    // The native renderer shell intentionally contains no authoritative
+    // entity/belt history. Achievement progression belongs to the Rust
+    // campaign domain while it owns the player session, so never derive a
+    // legacy command from that inert shell.
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     const newAchievementIds = measureRuntimeTransitionPhase("achievement-progress-sync", () => getNewAchievementIds(game), {
       entities: game.entities.length,
       belts: game.belts.length,
@@ -7403,6 +12997,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [game.achievements.unlockedIds, playTone]);
 
   useEffect(() => {
+    // See the achievement guard above: syncCampaignProgress() is a full
+    // GameState updater and must not run against the renderer-only shell.
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     const synced = measureRuntimeTransitionPhase("campaign-progress-sync", () => syncCampaignProgress(game), {
       entities: game.entities.length,
       belts: game.belts.length,
@@ -7490,6 +13087,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         updateConnectionDraft(null);
         setConnectionHint(null);
         setPlacement(null);
+        cancelNativeBuildingPlacement();
+        cancelNativeBlueprintEnqueuePlacement();
+        cancelNativeBlueprintDirectDeployPlacement();
         setTechnologyOpen(false);
         setStatisticsOpen(false);
         setRecipesOpen(false);
@@ -7515,7 +13115,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         setSelectedEntityIds([]);
         setSelectedBeltId(null);
         setSelectedBeltIds([]);
-        commitGame((current) => dropCargoToTray(current));
+        if (!rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) {
+          commitGame((current) => dropCargoToTray(current));
+        }
       } else if (gameRef.current.timeWarp.enabled) {
         // The idle overlay owns the interaction surface. Do not let global
         // shortcuts mutate the hidden factory while it is active.
@@ -7524,6 +13126,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         event.preventDefault();
         togglePause();
       } else if (event.key === "Delete" && !editing && !document.querySelector('[role="dialog"]')) {
+        if (rejectLegacyFactoryInteractionWhileNative("建筑与线路回收")) return;
         const entityIds = selectedEntityIdsRef.current.filter((entityId) =>
           gameRef.current.entities.some((entity) => entity.id === entityId && (entity.kind !== "vein" || entity.minerCount > 0)));
         const beltIds = [...new Set([...selectedBeltIdsRef.current, ...(selectedBeltIdRef.current ? [selectedBeltIdRef.current] : [])])];
@@ -7547,7 +13150,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeCommandPalette, commandPaletteOpen, commitGame, flowStore, mobileNavigation.overlay, mobileNavigation.requestBack, mobileNavigation.route.kind, nextMobileShell, openCommandPalette, playTone, redoGame, togglePause, undoGame]);
+  }, [cancelNativeBlueprintDirectDeployPlacement, cancelNativeBlueprintEnqueuePlacement, cancelNativeBuildingPlacement, closeCommandPalette, commandPaletteOpen, commitGame, flowStore, mobileNavigation.overlay, mobileNavigation.requestBack, mobileNavigation.route.kind, nextMobileShell, openCommandPalette, playTone, redoGame, rejectLegacyFactoryInteractionWhileNative, togglePause, undoGame]);
 
   const onMiningStop = useCallback(() => {
     if (miningTimerRef.current != null) window.clearInterval(miningTimerRef.current);
@@ -7555,14 +13158,46 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setMiningEntityId(null);
   }, []);
 
+  const submitNativeManualMine = useCallback((entityId: string): boolean => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) return false;
+    const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+    const binding = nativePlayerAuthorityCommandBindingRef.current;
+    if (!frame || !binding ||
+        frame.sessionId !== binding.source.sessionId ||
+        frame.runId !== binding.source.runId ||
+        frame.revision !== binding.source.baseRevision) return false;
+    const entity = frame.entityById.get(entityId);
+    const resource = entity?.resourceId ? ITEMS[entity.resourceId] : undefined;
+    if (!entity || entity.kind !== "vein" || entity.planetId !== frame.planetId ||
+        !entity.resourceId || resource?.kind !== "solid") return false;
+    const frameKey = JSON.stringify([frame.sessionId, frame.runId, frame.revision]);
+    if (nativeManualMiningLastAttemptedFrameKeyRef.current === frameKey) return false;
+    // Consume this projected identity before dispatch. Even a rejected or
+    // transport-uncertain command must never be retried from the same frame.
+    nativeManualMiningLastAttemptedFrameKeyRef.current = frameKey;
+    return commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedManualMineCommand({ baseRevision, entityId })
+        : null);
+  }, [commitNativeProjectedCommand]);
+
   const onMiningStart = useCallback((entityId: string) => {
     if (miningTimerRef.current != null) window.clearInterval(miningTimerRef.current);
     setMiningEntityId(entityId);
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      submitNativeManualMine(entityId);
+      miningTimerRef.current = window.setInterval(() => {
+        submitNativeManualMine(entityId);
+      }, 320);
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("手动采矿")) return;
     commitGame((current) => manualMine(current, entityId, 1));
     miningTimerRef.current = window.setInterval(() => {
       commitGame((current) => manualMine(current, entityId, 1));
     }, 320);
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative, submitNativeManualMine]);
 
   useEffect(() => {
     window.addEventListener("pointerup", onMiningStop);
@@ -7577,16 +13212,52 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [onMiningStop]);
 
   const onPickOutput = useCallback((entityId: string, itemId: ItemId) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const binding = nativeEntityInventoryProjectionBinding;
+      const entity = binding?.canvas.entityById.get(entityId);
+      if (!binding || !entity) {
+        setNotice("没有取得同一 revision 的 Rust 建筑库存；本次拿取未应用");
+        return;
+      }
+      commitNativeProjectedCommand(binding.inventory.revision, () =>
+        createNativeProjectedEntityInventoryTakeCommand(binding.inventory, entity, "outputs", itemId));
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => pickFromEntity(current, entityId, itemId));
-  }, [commitGame]);
+  }, [commitGame, commitNativeProjectedCommand, nativeEntityInventoryProjectionBinding, rejectLegacyFactoryInteractionWhileNative]);
 
   const onPickInput = useCallback((entityId: string, itemId: ItemId) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const binding = nativeEntityInventoryProjectionBinding;
+      const entity = binding?.canvas.entityById.get(entityId);
+      if (!binding || !entity) {
+        setNotice("没有取得同一 revision 的 Rust 建筑库存；本次拿取未应用");
+        return;
+      }
+      commitNativeProjectedCommand(binding.inventory.revision, () =>
+        createNativeProjectedEntityInventoryTakeCommand(binding.inventory, entity, "inputs", itemId));
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => pickFromEntityInput(current, entityId, itemId));
-  }, [commitGame]);
+  }, [commitGame, commitNativeProjectedCommand, nativeEntityInventoryProjectionBinding, rejectLegacyFactoryInteractionWhileNative]);
 
   const onDropCargo = useCallback((entityId: string) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const binding = nativeEntityInventoryProjectionBinding;
+      const entity = binding?.canvas.entityById.get(entityId);
+      if (!binding || !entity) {
+        setNotice("没有取得同一 revision 的 Rust 建筑库存；本次投料未应用");
+        return;
+      }
+      commitNativeProjectedCommand(binding.inventory.revision, () =>
+        createNativeProjectedCargoToEntityInputCommand(binding.inventory, entity));
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => dropCargoToEntity(current, entityId));
-  }, [commitGame]);
+  }, [commitGame, commitNativeProjectedCommand, nativeEntityInventoryProjectionBinding, rejectLegacyFactoryInteractionWhileNative]);
 
   const onDropDraggedItem = useCallback((
     targetEntityId: string,
@@ -7594,21 +13265,53 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     sourceKind: DraggedItemSourceKind,
     sourceId?: string,
   ) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (sourceKind !== "tray" || sourceId) return;
+      const binding = nativeEntityInventoryProjectionBinding;
+      const entity = binding?.canvas.entityById.get(targetEntityId);
+      if (!binding || !entity) {
+        setNotice("没有取得同一 revision 的 Rust 建筑库存；本次托盘投料未应用");
+        return;
+      }
+      commitNativeProjectedCommand(binding.inventory.revision, () =>
+        createNativeProjectedTrayToEntityInputCommand(binding.inventory, entity, itemId));
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => sourceKind === "node" && sourceId
       ? moveEntityOutputToEntity(current, sourceId, targetEntityId, itemId)
       : sourceKind === "node-input" && sourceId
         ? moveEntityInputToEntity(current, sourceId, targetEntityId, itemId)
         : moveTrayItemToEntity(current, targetEntityId, itemId));
-  }, [commitGame]);
+  }, [commitGame, commitNativeProjectedCommand, nativeEntityInventoryProjectionBinding, rejectLegacyFactoryInteractionWhileNative]);
 
   const handleStowCargo = useCallback(() => {
+    if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
     const before = gameRef.current;
     const next = dropCargoToTray(before);
     if (next === before) return;
     if (commitGame(() => next)) recordBasicOnboardingEvent("cargo-stowed");
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
 
   const handleDraggedItemToTray = useCallback((itemId: ItemId, sourceKind: DraggedItemSourceKind, sourceId?: string) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (!sourceId || (sourceKind !== "node" && sourceKind !== "node-input")) return;
+      const binding = nativeEntityInventoryProjectionBinding;
+      const entity = binding?.canvas.entityById.get(sourceId);
+      if (!binding || !entity) {
+        setNotice("没有取得同一 revision 的 Rust 建筑库存；本次拖回未应用");
+        return;
+      }
+      commitNativeProjectedCommand(binding.inventory.revision, () =>
+        createNativeProjectedEntityInventoryStowCommand(
+          binding.inventory,
+          entity,
+          sourceKind === "node" ? "outputs" : "inputs",
+          itemId,
+        ));
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
     if (!sourceId || (sourceKind !== "node" && sourceKind !== "node-input")) return;
     const before = gameRef.current;
     const next = sourceKind === "node"
@@ -7616,9 +13319,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       : moveEntityInputToTray(before, sourceId, itemId);
     if (next === before) return;
     if (commitGame(() => next)) recordBasicOnboardingEvent("cargo-stowed");
-  }, [commitGame]);
+  }, [commitGame, commitNativeProjectedCommand, nativeEntityInventoryProjectionBinding, rejectLegacyFactoryInteractionWhileNative]);
 
   const expandEntityGroup = useCallback((entityId: string, requestedCount = 1, point?: { x: number; y: number }) => {
+    if (rejectLegacyFactoryInteractionWhileNative("建筑放置与扩建")) return undefined;
     const current = gameRef.current;
     const entity = current.entities.find((candidate) => candidate.id === entityId);
     if (!entity) return null;
@@ -7655,7 +13359,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       planetId: nextEntity.planetId,
       remaining: next.construction[constructionId] ?? 0,
     };
-  }, [commitGame, playTone, spawnInteractionBurst]);
+  }, [commitGame, playTone, rejectLegacyFactoryInteractionWhileNative, spawnInteractionBurst]);
 
   const expandPlacedEntity = useCallback((entityId: string, requestedCount: PlacementCount) => {
     const keepContinuous = ctrlHeldRef.current;
@@ -7679,6 +13383,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [expandEntityGroup]);
 
   const handleRemoveEntity = useCallback(async (entityId: string, count?: number) => {
+    if (rejectLegacyFactoryInteractionWhileNative("建筑回收")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const entity = gameRef.current.entities.find((candidate) => candidate.id === entityId);
     if (!entity) return;
     const availableCount = entity.kind === "vein" ? entity.minerCount : entity.machineCount;
@@ -7689,6 +13395,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         ? "回收微型黑洞连接装置会移除该实体的累计销毁统计。已经销毁的物资无法恢复，确认继续吗？"
         : `确认完整回收${getBuilding(entity.buildingId!).name} ×${entity.machineCount}？输入、输出、燃料和线路物资会按现有回收规则返还。`;
       if (!await gameDialog.confirm(warning, { danger: true, confirmLabel: "确认回收" })) return;
+      if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "建筑回收")) return;
     }
     const before = gameRef.current;
     const next = removeEntity(before, entityId, count);
@@ -7708,7 +13415,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(`已完整回收${getBuilding(entity.buildingId).name} ×${entity.machineCount}`);
     }
     playTone("remove");
-  }, [commitGame, gameDialog, playTone]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const onInstallMiner = useCallback((entityId: string, count: PlacementCount) => {
     expandPlacedEntity(entityId, count);
@@ -7723,11 +13430,63 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame]);
 
   const onRecipeFocusChange = useCallback((itemId: ItemId | null) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const identity = nativeFactoryProjectionIdentityRef.current;
+      const model = nativeRecipeFocusReadModel;
+      if (!identity || !model) {
+        setNotice("原生生产链聚焦投影尚未就绪；本次操作未应用");
+        return;
+      }
+      commitNativeProjectedCommand(identity.revision, (baseRevision) =>
+        baseRevision === identity.revision
+          ? createNativeProjectedRecipeFocusItemCommand(identity, model, itemId)
+          : null,
+        () => setNotice(itemId ? "已由 Rust 更新聚焦物料" : "已由 Rust 取消聚焦物料"),
+      );
+      return;
+    }
     commitGame((current) => setRecipeFocus(current, itemId));
-  }, [commitGame]);
+  }, [commitGame, commitNativeProjectedCommand, nativeRecipeFocusReadModel]);
+
+  const onRecipeFocusModeChange = useCallback((mode: RecipeFocusMode) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const identity = nativeFactoryProjectionIdentityRef.current;
+      const model = nativeRecipeFocusReadModel;
+      if (!identity || !model) {
+        setNotice("原生生产链聚焦投影尚未就绪；本次操作未应用");
+        return;
+      }
+      commitNativeProjectedCommand(identity.revision, (baseRevision) =>
+        baseRevision === identity.revision
+          ? createNativeProjectedRecipeFocusModeCommand(identity, model, mode)
+          : null,
+        () => setNotice(`已由 Rust 切换为${mode === "full" ? "完整" : "两层"}生产链`),
+      );
+      return;
+    }
+    commitGame((current) => setRecipeFocusMode(current, mode));
+  }, [commitGame, commitNativeProjectedCommand, nativeRecipeFocusReadModel]);
+
+  const onRecipeFocusPositionChange = useCallback((position: { x: number; y: number }) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const identity = nativeFactoryProjectionIdentityRef.current;
+      const model = nativeRecipeFocusReadModel;
+      if (!identity || !model) {
+        setNotice("原生生产链聚焦投影尚未就绪；本次操作未应用");
+        return;
+      }
+      commitNativeProjectedCommand(identity.revision, (baseRevision) =>
+        baseRevision === identity.revision
+          ? createNativeProjectedRecipeFocusPositionCommand(identity, model, position)
+          : null);
+      return;
+    }
+    commitGame((current) => setRecipeFocusPosition(current, position));
+  }, [commitGame, commitNativeProjectedCommand, nativeRecipeFocusReadModel]);
 
   const openRecipeFocus = useCallback((itemId?: ItemId) => {
-    const focused = itemId ?? gameRef.current.recipeFocus.itemId;
+    const focused = itemId ?? recipeFocusReadModel?.itemId ??
+      (nativePlayerAuthorityOwnsRuntimeRef.current ? null : gameRef.current.recipeFocus.itemId);
     if (focused) setCampaignFocusItemId(focused);
     closeAllWorkspaces();
     setRecipesOpen(true);
@@ -7735,7 +13494,259 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(null);
     if (nextMobileShell) mobileNavigation.replaceModalWithWorkspace("recipes");
     else mobileNavigation.openWorkspace("recipes");
-  }, [closeAllWorkspaces, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithWorkspace, nextMobileShell]);
+  }, [closeAllWorkspaces, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, recipeFocusReadModel?.itemId]);
+
+  const onNativeDysonSelectLayer = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层切换未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonActiveLayerCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 切换当前戴森壳层"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonSelectOrbit = useCallback((orbitId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次太阳帆轨道切换未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonActiveOrbitCommand(frame, orbitId)
+        : null,
+      () => setNotice("已由 Rust 切换当前太阳帆轨道"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonOrbitChange = useCallback((orbitId: string, changes: NativeProjectedDysonOrbitGeometry) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次太阳帆轨道调整未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonOrbitGeometryCommand(frame, orbitId, changes)
+        : null,
+      () => setNotice("已由 Rust 更新太阳帆轨道参数"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonAddLayer = useCallback((standard: boolean) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层新增未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonAddLayerCommand(frame, standard)
+        : null,
+      () => setNotice(standard ? "已由 Rust 创建标准戴森壳层" : "已由 Rust 创建空白戴森壳层"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonLayerChange = useCallback((layerId: string, changes: NativeProjectedDysonLayerGeometry) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层轨道调整未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonLayerGeometryCommand(frame, layerId, changes)
+        : null,
+      () => setNotice("已由 Rust 更新戴森壳层轨道参数并重算框架需求"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonRemoveLayer = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层删除未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonRemoveLayerCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 删除壳层设计；历史结构点与壳面帆总量保持不变"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonAddNode = useCallback((layerId: string, angle: number) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次节点新增未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonAddNodeCommand(frame, layerId, angle)
+        : null,
+      () => setNotice("已由 Rust 新增戴森节点"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonRemoveNode = useCallback((layerId: string, nodeId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次节点删除未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonRemoveNodeCommand(frame, layerId, nodeId)
+        : null,
+      () => setNotice("已由 Rust 删除节点及其关联框架和壳面；历史物料总量保持不变"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonConnectNodes = useCallback((layerId: string, sourceNodeId: string, targetNodeId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次节点连线未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonConnectNodesCommand(frame, layerId, sourceNodeId, targetNodeId)
+        : null,
+      () => setNotice("已由 Rust 创建戴森框架并计算结构需求"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonPasteLayer = useCallback((sourceSystemId: string, sourceLayerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层粘贴未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonPasteLayerCommand(frame, sourceSystemId, sourceLayerId)
+        : null,
+      () => setNotice("已由 Rust 复制壳层设计；新副本使用独立 ID 且施工进度从零开始"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonAddOrbit = useCallback(() => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次太阳帆轨道新增未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonAddOrbitCommand(frame)
+        : null,
+      () => setNotice("已由 Rust 创建太阳帆轨道"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonRemoveOrbit = useCallback((orbitId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次太阳帆轨道删除未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonRemoveOrbitCommand(frame, orbitId)
+        : null,
+      () => setNotice("已由 Rust 合并在轨物料并删除太阳帆轨道"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonLaunchModeChange = useCallback((mode: DysonLaunchMode) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次发射模式未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonLaunchModeCommand(frame, mode)
+        : null,
+      () => setNotice(`已由 Rust 将戴森发射模式设为${mode === "balanced" ? "均衡" : mode === "swarm" ? "太阳帆" : "火箭"}`),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonLaunchThrottleChange = useCallback((throttle: DysonLaunchThrottle) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次发射节流未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonLaunchThrottleCommand(frame, throttle)
+        : null,
+      () => setNotice(`已由 Rust 将戴森发射节流设为 ${Math.round(throttle * 100)}%`),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonLaunchEnabledChange = useCallback((enabled: boolean) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次发射开关未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonLaunchEnabledCommand(frame, enabled)
+        : null,
+      () => setNotice(enabled ? "已由 Rust 恢复戴森发射" : "已由 Rust 暂停戴森发射"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonAutoConnect = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次框架闭合未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonAutoConnectCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 补齐当前壳层的闭合框架"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonPlanShell = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳面规划未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonPlanShellCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 补齐框架并规划当前壳面"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonClearShell = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳面清除未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonClearShellCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 清除当前层壳面设计；结构点与太阳帆总量保持不变"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
 
   const onFuelChange = useCallback((entityId: string, itemId: ItemId) => {
     commitGame((current) => setFuelItem(current, entityId, itemId));
@@ -7805,8 +13816,218 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`已永久重置${getPlanetDisplayName(next, planetId)}：删除 ${preview.buildingUnits + preview.extractorUnits} 台设备、${preview.beltConnections} 条传送带；天然资源剩余量与全局进度保持不变`);
     return true;
   }, [commitGame, onMiningStop, playTone, updateConnectionDraft]);
+  const resetPlanetScopedFactoryUi = useCallback(() => {
+    abortCanvasGestureLifecycle();
+    onMiningStop();
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    connectionCandidateNodeIdRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    batchConnectionDraftRef.current = null;
+    batchConnectionDraftBaseRef.current = null;
+    dragConnectionStartRef.current = null;
+    continuousPlacementRef.current = null;
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    updateConnectionDraft(null);
+    setConnectionCandidateNodeId(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setBatchConnectionFailures([]);
+    setBatchConnectionFeedback(null);
+    setMobileBatchConnectionExpanded(false);
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
+    setSelectedEntityIds([]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setFocusedBeltNetworkId(null);
+    setProductionLineFocus(null);
+    setLineFindMode(false);
+    setAutoLayoutUndo(null);
+    setPlacement(null);
+    cancelNativeBuildingPlacement();
+    setBlueprintPlacementId(null);
+    setBlueprintsOpen(false);
+    setConstructionCenterOpen(false);
+    setSystemSpaceStationOpen(false);
+    setSystemSpaceStationId(null);
+    setOrbitalStationOpen(false);
+    setInspectorTab("inspect");
+    setSelectionMode(false);
+    setDeleteMode(false);
+    setRegionMode(false);
+    setRegionDraft(null);
+    setRegionResizePreview(null);
+    setSelectedRegionId(null);
+    setMobileCanvasMode("browse");
+    setMobileContinuousPlacement(false);
+    setMobileActionEntityId(null);
+    setHoveredBeltId(null);
+    setHoveredNodeId(null);
+    setFocusedNodeId(null);
+    setNodes([]);
+  }, [abortCanvasGestureLifecycle, cancelNativeBuildingPlacement, flowStore, onMiningStop, setNodes, updateConnectionDraft]);
+
+  useEffect(() => {
+    const workspace = nativeAuthoritativeFactoryWorkspaceFrame;
+    const canvas = nativeAuthoritativeFactoryCanvasFrame;
+    if (!workspace || !canvas || workspace.sessionId !== canvas.sessionId ||
+      workspace.revision !== canvas.revision ||
+      workspace.planetNavigation.activePlanetId !== canvas.planetId) return;
+    if (nativeFactoryUnpinnedBootstrap) resetPlanetScopedFactoryUi();
+    setNativeFactoryConfirmedProjectionRoute((current) =>
+      current?.sessionId === workspace.sessionId && current.planetId === canvas.planetId
+        ? current
+        : { sessionId: workspace.sessionId, planetId: canvas.planetId });
+  }, [
+    nativeAuthoritativeFactoryCanvasFrame,
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    nativeFactoryUnpinnedBootstrap,
+    resetPlanetScopedFactoryUi,
+  ]);
+
+  const finishPlanetViewChange = useCallback((
+    previousPlanetId: PlanetId,
+    planetId: PlanetId,
+    destinationViewport: CanvasViewport,
+    reducedMotion: boolean,
+    notice: string,
+  ) => {
+    resetPlanetScopedFactoryUi();
+    if (!reducedMotion) setPlanetTransition({ id: Date.now(), from: previousPlanetId, to: planetId });
+    playTone("travel");
+    viewportRef.current = { ...destinationViewport };
+    setViewportZoom(destinationViewport.zoom);
+    setPendingBlueprintViewport({ ...destinationViewport });
+    setMinimapViewport({ ...destinationViewport });
+    setViewport(destinationViewport, { duration: reducedMotion ? 0 : 180 });
+    setNotice(notice);
+  }, [playTone, resetPlanetScopedFactoryUi, setViewport]);
+
+  useEffect(() => {
+    const pending = pendingNativePlanetChange;
+    const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+    const canvasFrame = nativeAuthoritativeFactoryCanvasFrame;
+    const target = pending && frame
+      ? frame.planetNavigation.planets.rows.find((row) => row.planetId === pending.planetId)
+      : undefined;
+    const decision = evaluateNativePlanetTransition(
+      pending,
+      frame
+        ? {
+            sessionId: frame.sessionId,
+            revision: frame.revision,
+            activePlanetId: frame.planetNavigation.activePlanetId,
+            targetRowActive: target?.active === true,
+          }
+        : null,
+      canvasFrame
+        ? { sessionId: canvasFrame.sessionId, revision: canvasFrame.revision, planetId: canvasFrame.planetId }
+        : null,
+    );
+    if (decision === "idle" || decision === "waiting") return;
+    if (decision !== "ready" || !pending || !target) {
+      setPendingNativePlanetChange(null);
+      setNotice(decision === "session-mismatch"
+        ? "原生权威会话已变化；已取消旧星球界面跳转，不会回退存档"
+        : decision === "projection-mismatch"
+          ? "原生星球画布与导航投影不一致；界面保持原位并等待复核"
+          : decision === "target-mismatch"
+            ? "原生星球切换回执与最新投影不一致；界面保持原位并等待复核"
+            : "原生星球导航投影不完整；界面保持原位并等待刷新");
+      return;
+    }
+    setPendingNativePlanetChange(null);
+    persistPlanetViewport(pending.previousPlanetId, pending.leavingViewport);
+    finishPlanetViewChange(
+      pending.previousPlanetId,
+      pending.planetId,
+      pending.destinationViewport,
+      pending.reducedMotion,
+      `已切换至${target.displayName}`,
+    );
+  }, [
+    finishPlanetViewChange,
+    nativeAuthoritativeFactoryCanvasFrame,
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    pendingNativePlanetChange,
+    persistPlanetViewport,
+  ]);
 
   const onPlanetChange = useCallback((planetId: PlanetId): boolean => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (pendingNativePlanetChange) {
+        setNotice("Windows 原生星球切换正在完成界面确认；本次重复切换未应用");
+        return false;
+      }
+      const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+      if (!frame) {
+        setNotice("原生星球导航正在等待当前 revision；本次切换未应用");
+        return false;
+      }
+      const previousPlanetId = frame.planetNavigation.activePlanetId as PlanetId;
+      if (previousPlanetId === planetId) return true;
+      const target = frame.planetNavigation.planets.rows.find((row) => row.planetId === planetId);
+      if (!target?.discovered || !target.colonized) {
+        setNotice("目标行星尚未解锁或殖民；本次切换未应用");
+        return false;
+      }
+      const cameraModel = nativePlanetViewportReadModelRef.current;
+      const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+      if (!cameraModel || !routeIdentity || routeIdentity.sessionId !== frame.sessionId ||
+          routeIdentity.revision !== frame.revision || cameraModel.identity.sessionId !== routeIdentity.sessionId ||
+          cameraModel.identity.runId !== routeIdentity.runId || cameraModel.identity.revision !== frame.revision ||
+          cameraModel.identity.planetId !== previousPlanetId) {
+        setNotice("原生行星视角目录尚未完成当前 revision 校验；本次切换未应用");
+        return false;
+      }
+      const projectedDestinationViewport = cameraModel.viewports.get(planetId);
+      if (!projectedDestinationViewport) {
+        setNotice("原生行星视角目录缺少目标行星；本次切换未应用");
+        return false;
+      }
+      const leavingViewport = { ...viewportRef.current };
+      // Camera positions are persisted in Rust-owned v47 state. Reduced motion
+      // remains a local presentation preference; no inventory, metrics or
+      // persisted camera value comes from the stale JavaScript mirror.
+      const destinationViewport = { ...projectedDestinationViewport };
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+      commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => {
+          const command = createNativeProjectedActivePlanetCommand(frame, planetId);
+          return command?.baseRevision === baseRevision ? command : null;
+        },
+        (receipt) => {
+          // The receipt proves the durable mutation. Route the next bounded
+          // read, but delay every visible transition until that newer Rust
+          // projection independently confirms the target planet.
+          setPendingNativePlanetChange({
+            sessionId: frame.sessionId,
+            acceptedRevision: receipt.revision,
+            previousPlanetId,
+            planetId,
+            leavingViewport,
+            destinationViewport,
+            reducedMotion,
+          });
+        },
+      );
+      // `true` means the requested planet is already visible and safe for a
+      // caller to focus/select inside. A queued native command is deliberately
+      // not reported as completed; its visible continuation waits for the
+      // independently verified target projection above.
+      return false;
+    }
+
     const current = gameRef.current;
     const cargo = current.cargo;
     const previousPlanetId = current.activePlanetId;
@@ -7819,49 +14040,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       planetViewports: { ...nextPlanetState.planetViewports, [previousPlanetId]: leavingViewport },
     };
     if (!commitGame(() => next)) return false;
-
-    onMiningStop();
-    flowStore.getState().cancelConnection();
-    flowStore.setState({ connectionClickStartHandle: null });
-    clickConnectionPreviewRef.current = null;
-    clickConnectionSucceededRef.current = false;
-    setClickConnectionPreview(null);
-    setClickConnectionTone("pending");
-    setClickConnectionSnapPoint(null);
-    updateConnectionDraft(null);
-    setConnectionHint(null);
     const destinationViewport = next.planetViewports[planetId] ?? { x: 510, y: 250, zoom: 0.84 };
-    if (!current.settings.reducedMotion) setPlanetTransition({ id: Date.now(), from: previousPlanetId, to: planetId });
-    playTone("travel");
-    selectedEntityIdsRef.current = [];
-    selectedBeltIdRef.current = null;
-    selectedBeltIdsRef.current = [];
-    setSelectedEntityIds([]);
-    setSelectedBeltId(null);
-    setSelectedBeltIds([]);
-    setFocusedBeltNetworkId(null);
-    setPlacement(null);
-    setBlueprintPlacementId(null);
-    setRegionMode(false);
-    setRegionDraft(null);
-    setRegionResizePreview(null);
-    setSelectedRegionId(null);
-    regionPointerRef.current = null;
-    regionResizeRef.current = null;
-    setNodes([]);
-    viewportRef.current = { ...destinationViewport };
-    setViewportZoom(destinationViewport.zoom);
-    setPendingBlueprintViewport({ ...destinationViewport });
-    setMinimapViewport({ ...destinationViewport });
-    setViewport(destinationViewport, { duration: current.settings.reducedMotion ? 0 : 180 });
-    if (cargo) {
-      const titanium = cargo.itemId === "titanium_ore" || cargo.itemId === "titanium_ingot";
-      setNotice(`${titanium ? "托钛天王" : "手提星际运输"}：${ITEMS[cargo.itemId].name} ×${cargo.amount} 已抵达${getPlanetDisplayName(next, planetId)}`);
-    } else {
-      setNotice(`已切换至${getPlanetDisplayName(next, planetId)}`);
-    }
+    const destinationName = getPlanetDisplayName(next, planetId);
+    const notice = cargo
+      ? `${cargo.itemId === "titanium_ore" || cargo.itemId === "titanium_ingot" ? "托钛天王" : "手提星际运输"}：${ITEMS[cargo.itemId].name} ×${cargo.amount} 已抵达${destinationName}`
+      : `已切换至${destinationName}`;
+    finishPlanetViewChange(
+      previousPlanetId,
+      planetId,
+      destinationViewport,
+      current.settings.reducedMotion,
+      notice,
+    );
     return true;
-  }, [commitGame, flowStore, onMiningStop, playTone, setNodes, setViewport, updateConnectionDraft]);
+  }, [
+    commitGame,
+    commitNativeProjectedCommand,
+    finishPlanetViewChange,
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    pendingNativePlanetChange,
+  ]);
 
   const onExploreSystem = useCallback((systemId: StarSystemId) => {
     commitGame((current) => exploreStarSystem(current, systemId));
@@ -7880,9 +14078,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     playTone("place");
   }, [commitGame, playTone]);
 
-  const activePlanetEntityCount = canvasRenderSnapshot.planetId === game.activePlanetId
-    ? canvasRenderSnapshot.entityById.size
-    : game.entities.filter((entity) => entity.planetId === game.activePlanetId).length;
+  const activePlanetEntityCount = nativePlayerAuthorityOwnsRuntime
+    ? nativeAuthoritativeFactoryCanvasFrame?.planetTotals.entities ?? 0
+    : canvasRenderSnapshot.planetId === game.activePlanetId
+      ? canvasRenderSnapshot.entityById.size
+      : game.entities.filter((entity) => entity.planetId === game.activePlanetId).length;
   const automaticPerformanceMode = activePlanetEntityCount >= 300 || constrainedMobile || lowFrameRateMode;
   const performanceVisualMode = endgameExtremeMode || game.settings.performanceMode || automaticPerformanceMode;
   const largeFactoryMode = performanceVisualMode && (activePlanetEntityCount >= 150 || constrainedMobile);
@@ -7911,13 +14111,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const updateSettings = useCallback((settings: Partial<GameSettings>) => {
+    if (rejectLegacyFactoryInteractionWhileNative("旧版游戏规则设置")) return;
     commitGame((current) => ({ ...current, settings: { ...current.settings, ...settings } }));
     if (settings.theme) {
       setThemeMode(settings.theme);
       writeThemePreference(settings.theme);
     }
     if (settings.soundEnabled === true) playTone("confirm", true);
-  }, [commitGame, playTone]);
+  }, [commitGame, playTone, rejectLegacyFactoryInteractionWhileNative]);
+
+  const updateNativeThemePreference = useCallback((theme: "dark" | "light" | "system") => {
+    setThemeMode(theme);
+    writeThemePreference(theme);
+  }, []);
+  const updateNativeFontScalePreference = useCallback((scale: FontScale) => {
+    setNativeFontScale(scale);
+    writeFontScalePreference(scale);
+  }, []);
 
   const updateRunLogPreference = useCallback((enabled: boolean) => {
     setShowRunLog(enabled);
@@ -7944,7 +14154,53 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(cloud ? "当前本地身份已绑定云账号" : "当前本地身份已解除云账号绑定");
   }, []);
 
+  const updateNativeGalaxyCloudBinding = useCallback((
+    expectedAccountId: string,
+    cloud: { id: string; email: string } | null,
+  ): boolean => {
+    const current = accountStateRef.current;
+    if (current.activeAccountId !== expectedAccountId) return false;
+    const next = setActiveCloudBinding(current, cloud);
+    accountStateRef.current = next;
+    setAccountState(next);
+    setNotice(cloud ? "当前本地身份已绑定云账号" : "当前本地身份已解除云账号绑定");
+    return true;
+  }, []);
+
+  const submitNativeGalacticExportIntent = useCallback((
+    intent: NativeProjectedGalacticExportIntent,
+  ): boolean => {
+    const frame = nativeGalaxyWorkspaceFrame;
+    const latest = nativeCampaignGalaxyIdentity;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !frame || !latest || !commandSource ||
+        frame.sessionId !== latest.sessionId || frame.runId !== latest.runId ||
+        frame.registryFingerprint !== latest.registryFingerprint || frame.revision !== latest.revision ||
+        commandSource.sessionId !== frame.sessionId || commandSource.runId !== frame.runId ||
+        commandSource.baseRevision !== frame.revision) {
+      setNotice("原生银河出口投影、session 或 revision 已变化；本次操作未提交");
+      return false;
+    }
+    const accepted = commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedGalacticExportCommand(frame, intent)
+        : null,
+      () => setNotice(intent.type === "manual-dispatch"
+        ? "银河物资已由 Rust 按当前库存和储备守恒交付"
+        : "银河出口设置已由 Rust 提交"),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次银河出口命令；存档未改变");
+    return accepted;
+  }, [commitNativeProjectedCommand, nativeCampaignGalaxyIdentity, nativeGalaxyWorkspaceFrame]);
+
   const createGalaxyAccount = useCallback((displayName: string) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const next = createLocalAccount(accountStateRef.current, displayName);
+      accountStateRef.current = next;
+      setAccountState(next);
+      playTone("confirm");
+      return;
+    }
     const synced = recordAccountProgress(accountStateRef.current, gameRef.current);
     saveAccountState(synced);
     const next = baselineAccountProgress(createLocalAccount(synced, displayName), gameRef.current);
@@ -7956,6 +14212,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const switchGalaxyAccount = useCallback((accountId: string) => {
     const current = accountStateRef.current;
     if (current.activeAccountId === accountId) return;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const next = switchLocalAccount(current, accountId);
+      accountStateRef.current = next;
+      setAccountState(next);
+      return;
+    }
     const synced = recordAccountProgress(current, gameRef.current);
     saveAccountState(synced);
     const next = baselineAccountProgress(switchLocalAccount(synced, accountId), gameRef.current);
@@ -7964,13 +14226,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const openCommandWorkspace = useCallback(async (workspace: CommandWorkspace) => {
+    if (workspace === "resources" && rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+    closeAllWorkspaces();
     const authoritySyncId = authorityWorkspaceSyncIdRef.current + 1;
     authorityWorkspaceSyncIdRef.current = authoritySyncId;
-    const requiresAuthoritySync = workspace === "statistics" || workspace === "dyson";
+    const requiresAuthoritySync = workspace === "dyson" ||
+      (workspace === "statistics" && !nativePlayerAuthorityOwnsRuntimeRef.current);
     setCommandPaletteOpen(false);
-    closeAllWorkspaces();
     setAuthorityWorkspaceSync(requiresAuthoritySync ? workspace : null);
-    if (requiresAuthoritySync) setNotice("正在从模拟 Worker 同步权威历史与戴森规划…");
+    if (workspace === "statistics") setNotice(nativePlayerAuthorityOwnsRuntimeRef.current
+      ? null
+      : "正在读取权威生产历史…");
+    else if (workspace === "dyson") setNotice("正在从模拟 Worker 同步权威戴森规划…");
     setMobilePanel(null);
     if (workspace === "inspector" || workspace === "resources") {
       const sheet = workspace === "resources" ? "inventory" : "inspector";
@@ -7997,6 +14264,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setBlueprintsOpen(true);
       if (nextMobileShell) mobileNavigation.replaceModalWithWorkspace("blueprints");
       else mobileNavigation.openWorkspace("blueprints");
+    } else if (workspace === "construction-center") {
+      setConstructionCenterOpen(true);
+      if (nextMobileShell) mobileNavigation.replaceModalWithWorkspace("construction-center");
+      else mobileNavigation.openWorkspace("construction-center");
     } else if (workspace === "dyson") {
       setDysonPlannerOpen(true);
       if (nextMobileShell) mobileNavigation.replaceModalWithWorkspace("dyson");
@@ -8017,10 +14288,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     if (requiresAuthoritySync) {
       try {
-        await refreshAuthoritativeUiMirror();
+        if (workspace === "statistics") {
+          const requestedHistoryRecordedAt = gameRef.current.historyRecordedAt;
+          const readModel = await requestAuthoritativeStatisticsHistory();
+          if (authorityWorkspaceSyncIdRef.current === authoritySyncId) {
+            statisticsHistoryRecordedAtRef.current = requestedHistoryRecordedAt;
+            setStatisticsHistory(readModel.samples);
+          }
+        } else {
+          await refreshAuthoritativeUiMirror();
+        }
         if (authorityWorkspaceSyncIdRef.current === authoritySyncId) {
           setAuthorityWorkspaceSync(null);
-          setNotice("权威历史与戴森规划已同步");
+          setNotice(workspace === "statistics" ? "权威生产历史已同步" : "权威戴森规划已同步");
         }
       } catch (error) {
         if (authorityWorkspaceSyncIdRef.current === authoritySyncId) {
@@ -8031,7 +14311,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
       }
     }
-  }, [closeAllWorkspaces, mobileNavigation.openSheet, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithSheet, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, refreshAuthoritativeUiMirror]);
+  }, [closeAllWorkspaces, mobileNavigation.openSheet, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithSheet, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, refreshAuthoritativeUiMirror, rejectLegacyFactoryInteractionWhileNative, requestAuthoritativeStatisticsHistory]);
 
   const openSystemSpaceStation = useCallback((systemId: StarSystemId) => {
     closeAllWorkspaces();
@@ -8068,6 +14348,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const handleUpgradeAllInterstellarStations = useCallback(async (systemId?: StarSystemId): Promise<StarMapBatchActionResult | null> => {
+    if (rejectLegacyFactoryInteractionWhileNative("批量升级星际物流站")) return null;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     let result = upgradeAllInterstellarStationsToMk2(gameRef.current, systemId);
     const scope = systemId ? `${getStarSystem(systemId).name}内` : "全星区";
     if (result.upgradedIds.length === 0) {
@@ -8079,10 +14361,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return report;
     }
     const previewReasons = summarizeBatchSkipReasons(result.skipped);
-    if (result.upgradedIds.length + result.skipped.length > 1 && !await gameDialog.confirm(
-      `${scope}批量升级预览：可成功 ${result.upgradedIds.length} 座，跳过 ${result.skipped.length} 座${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。升级不可逆，是否继续？`,
-      { title: "确认批量升级物流站", confirmLabel: "确认升级" },
-    )) return null;
+    if (result.upgradedIds.length + result.skipped.length > 1) {
+      const confirmed = await gameDialog.confirm(
+        `${scope}批量升级预览：可成功 ${result.upgradedIds.length} 座，跳过 ${result.skipped.length} 座${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。升级不可逆，是否继续？`,
+        { title: "确认批量升级物流站", confirmLabel: "确认升级" },
+      );
+      if (!confirmed || rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量升级星际物流站")) return null;
+    }
     result = upgradeAllInterstellarStationsToMk2(gameRef.current, systemId);
     if (result.upgradedIds.length > 0) commitGame((current) => upgradeAllInterstellarStationsToMk2(current, systemId).state);
     const skipReasons = summarizeBatchSkipReasons(result.skipped);
@@ -8090,9 +14375,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`${scope}批量升级完成：成功 ${result.upgradedIds.length} 座${skippedText}`);
     playTone("upgrade");
     return { actionLabel: "升级星际物流站", scopeLabel: scope, successCount: result.upgradedIds.length, skippedCount: result.skipped.length, skipReasons };
-  }, [commitGame, gameDialog, playTone, summarizeBatchSkipReasons]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative, summarizeBatchSkipReasons]);
 
   const handleAttachAllQuantumStations = useCallback(async (systemId?: StarSystemId): Promise<StarMapBatchActionResult | null> => {
+    if (rejectLegacyFactoryInteractionWhileNative("批量接入量子物流")) return null;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     let result = attachAllInterstellarStationsToQuantumNetwork(gameRef.current, systemId);
     const scope = systemId ? `${getStarSystem(systemId).name}内` : "全星区";
     if (result.startedIds.length === 0) {
@@ -8103,10 +14390,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return { actionLabel: "接入量子物流站", scopeLabel: scope, successCount: 0, skippedCount: result.skipped.length, skipReasons: skipReasons.length > 0 ? skipReasons : [firstReason] };
     }
     const previewReasons = summarizeBatchSkipReasons(result.skipped);
-    if (result.startedIds.length + result.skipped.length > 1 && !await gameDialog.confirm(
-      `${scope}量子物流切换预览：可成功 ${result.startedIds.length} 座，跳过 ${result.skipped.length} 座${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。接入会等待旧航线尾货和五秒边界，是否继续？`,
-      { title: "确认批量接入量子物流", confirmLabel: "确认接入" },
-    )) return null;
+    if (result.startedIds.length + result.skipped.length > 1) {
+      const confirmed = await gameDialog.confirm(
+        `${scope}量子物流切换预览：可成功 ${result.startedIds.length} 座，跳过 ${result.skipped.length} 座${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。接入会等待旧航线尾货和五秒边界，是否继续？`,
+        { title: "确认批量接入量子物流", confirmLabel: "确认接入" },
+      );
+      if (!confirmed || rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量接入量子物流")) return null;
+    }
     result = attachAllInterstellarStationsToQuantumNetwork(gameRef.current, systemId);
     if (result.startedIds.length > 0) commitGame((current) => attachAllInterstellarStationsToQuantumNetwork(current, systemId).state);
     const skipReasons = summarizeBatchSkipReasons(result.skipped);
@@ -8114,9 +14404,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`${scope}量子物流切换完成：成功 ${result.startedIds.length} 座${skippedText}；已等待旧星际航线和五秒边界，本地运输机继续运行`);
     playTone("confirm");
     return { actionLabel: "接入量子物流站", scopeLabel: scope, successCount: result.startedIds.length, skippedCount: result.skipped.length, skipReasons };
-  }, [commitGame, gameDialog, playTone, summarizeBatchSkipReasons]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative, summarizeBatchSkipReasons]);
 
   const handleAllOrbitalCollectorsQuantumMode = useCallback(async (enabled: boolean, systemId?: StarSystemId): Promise<StarMapBatchActionResult | null> => {
+    if (rejectLegacyFactoryInteractionWhileNative("批量切换轨道采集器量子模式")) return null;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     let result = setAllOrbitalCollectorsQuantumMode(gameRef.current, enabled, systemId);
     const scope = systemId ? `${getStarSystem(systemId).name}内` : "全星区";
     const actionLabel = enabled ? "轨道收集器接入量子网络" : "关闭轨道收集器量子网络";
@@ -8128,10 +14420,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return { actionLabel, scopeLabel: scope, successCount: 0, skippedCount: result.skipped.length, skipReasons: skipReasons.length > 0 ? skipReasons : [firstReason] };
     }
     const previewReasons = summarizeBatchSkipReasons(result.skipped);
-    if (result.startedIds.length + result.skipped.length > 1 && !await gameDialog.confirm(
-      `${scope}${enabled ? "接入" : "关闭"}量子采集预览：可成功 ${result.startedIds.length} 台，跳过 ${result.skipped.length} 台${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。只会提交符合单采集器安全校验的目标，是否继续？`,
-      { title: enabled ? "确认批量接入轨道收集器" : "确认批量关闭量子采集", confirmLabel: enabled ? "确认接入" : "确认关闭" },
-    )) return null;
+    if (result.startedIds.length + result.skipped.length > 1) {
+      const confirmed = await gameDialog.confirm(
+        `${scope}${enabled ? "接入" : "关闭"}量子采集预览：可成功 ${result.startedIds.length} 台，跳过 ${result.skipped.length} 台${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。只会提交符合单采集器安全校验的目标，是否继续？`,
+        { title: enabled ? "确认批量接入轨道收集器" : "确认批量关闭量子采集", confirmLabel: enabled ? "确认接入" : "确认关闭" },
+      );
+      if (!confirmed || rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量切换轨道采集器量子模式")) return null;
+    }
     result = setAllOrbitalCollectorsQuantumMode(gameRef.current, enabled, systemId);
     if (result.startedIds.length > 0) commitGame((current) => setAllOrbitalCollectorsQuantumMode(current, enabled, systemId).state);
     const skipReasons = summarizeBatchSkipReasons(result.skipped);
@@ -8139,9 +14434,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`${scope}量子采集切换完成：成功 ${result.startedIds.length} 台${skippedText}`);
     playTone("confirm");
     return { actionLabel, scopeLabel: scope, successCount: result.startedIds.length, skippedCount: result.skipped.length, skipReasons };
-  }, [commitGame, gameDialog, playTone, summarizeBatchSkipReasons]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative, summarizeBatchSkipReasons]);
 
-  const restoreGame = useCallback((state: GameState, report: OfflineReport | null = null) => {
+  const restoreGame = useCallback((state: GameState, report: OfflineReport | null = null): boolean => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice("Windows 原生权威尚未安全交还控制权，已阻止替换当前工厂；Rust 工厂和旧 JavaScript 镜像均未改变");
+      return false;
+    }
     onMiningStop();
     simulationWorkerRef.current?.terminate();
     simulationWorkerRef.current = null;
@@ -8199,16 +14498,41 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setPendingBlueprintViewport({ ...viewport });
     setMinimapViewport({ ...viewport });
     setViewport(viewport, { duration: state.settings.reducedMotion ? 0 : 180 });
-  }, [clearHistory, invalidateFactoryAlertProjection, onMiningStop, setNodes, setViewport]);
+    return true;
+  }, [clearHistory, invalidateFactoryAlertProjection, onMiningStop, readNativeAuthorityPersistenceBoundary, setNodes, setViewport]);
+
+  const readConfirmedFactoryPlanetId = useCallback((): PlanetId | null => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) return gameRef.current.activePlanetId;
+    return nativeAuthoritativeFactoryCanvasFrameRef.current?.planetId ?? null;
+  }, []);
+
+  const ensureFactoryPlanetVisible = useCallback((planetId: PlanetId): boolean => {
+    const activePlanetId = readConfirmedFactoryPlanetId();
+    if (activePlanetId === null) {
+      setNotice("Windows 原生星球画面尚未确认；本次定位未执行");
+      return false;
+    }
+    return activePlanetId === planetId || onPlanetChange(planetId);
+  }, [onPlanetChange, readConfirmedFactoryPlanetId]);
 
   const focusEntityIds = useCallback((entityIds: string[]) => {
-    const selected = gameRef.current.entities.filter((entity) => entityIds.includes(entity.id));
+    const nativeFrame = nativePlayerAuthorityOwnsRuntimeRef.current
+      ? nativeAuthoritativeFactoryCanvasFrameRef.current
+      : null;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && !nativeFrame) {
+      setNotice("Windows 原生建筑画面尚未确认；本次定位未执行");
+      return;
+    }
+    const selected = (nativeFrame?.entities ?? gameRef.current.entities)
+      .filter((entity) => entityIds.includes(entity.id));
     if (selected.length === 0) return;
     const center = selected.reduce((total, entity) => ({
       x: total.x + entity.position.x + 128,
       y: total.y + entity.position.y + 90,
     }), { x: 0, y: 0 });
-    const duration = gameRef.current.settings.reducedMotion ? 0 : 260;
+    const duration = nativeFrame
+      ? window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? 0 : 260
+      : gameRef.current.settings.reducedMotion ? 0 : 260;
     setCenter(center.x / selected.length, center.y / selected.length, {
       zoom: selected.length === 1 ? 1.05 : selected.length <= 3 ? 0.85 : 0.65,
       duration,
@@ -8219,19 +14543,48 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!targetId) return;
     const target = gameRef.current.entities.find((entity) => entity.id === targetId);
     if (!target) return;
-    if (gameRef.current.activePlanetId !== target.planetId && !onPlanetChange(target.planetId)) return;
+    if (!ensureFactoryPlanetVisible(target.planetId)) return;
     setSelectedEntityIds([target.id]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
     setMobilePanel(null);
     focusEntityIds([target.id]);
     setNotice(`已定位连续拉线目标：${batchConnectionEntityLabel(target)}`);
-  }, [focusEntityIds, onPlanetChange]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds]);
 
-  const focusPlacedEntity = useCallback((entityId: string) => {
+  const focusPlacedEntity = useCallback((entityId: string, nativeTarget?: CommandPaletteNativeEntityTarget) => {
+    if (nativeTarget) {
+      const authority = selectActiveNativePlayerAuthorityFrame(
+        nativePlayerAuthorityClock.getSnapshot(),
+        nativeCoreProjectionSessionId,
+      );
+      const focusPlan = createCommandPaletteNativeEntityFocusPlan(
+        gameRef.current,
+        nativeTarget,
+        authority,
+        contentPackRuntimeSnapshotRef.current.fingerprint,
+      );
+      if (!focusPlan) {
+        setNotice("原生命令搜索结果已过期，本次定位已安全取消");
+        return;
+      }
+      if (!ensureFactoryPlanetVisible(focusPlan.planetId)) return;
+      setSelectedEntityIds([entityId]);
+      setSelectedBeltId(null);
+      setSelectedBeltIds([]);
+      setInspectorTab("inspect");
+      setMobilePanel("inspector");
+      if (nextMobileShell) mobileNavigation.replaceModalWithSheet("inspector");
+      void setCenter(focusPlan.centerX, focusPlan.centerY, {
+        zoom: 1.05,
+        duration: focusPlan.duration,
+      });
+      setNotice(`已定位：${nativeTarget.label}`);
+      return;
+    }
     const entity = gameRef.current.entities.find((candidate) => candidate.id === entityId);
     if (!entity) return;
-    if (gameRef.current.activePlanetId !== entity.planetId && !onPlanetChange(entity.planetId)) return;
+    if (!ensureFactoryPlanetVisible(entity.planetId)) return;
     setSelectedEntityIds([entityId]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -8240,7 +14593,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (nextMobileShell) mobileNavigation.replaceModalWithSheet("inspector");
     window.setTimeout(() => focusEntityIds([entityId]), gameRef.current.settings.reducedMotion ? 0 : 50);
     setNotice(`已定位：${entity.buildingId ? getBuilding(entity.buildingId).name : entity.resourceId ? ITEMS[entity.resourceId].name : entity.id}`);
-  }, [focusEntityIds, mobileNavigation.replaceModalWithSheet, nextMobileShell, onPlanetChange]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds, mobileNavigation.replaceModalWithSheet, nativeCoreProjectionSessionId, nativePlayerAuthorityClock, nextMobileShell, setCenter]);
 
   const locateProductionLine = useCallback((itemId: ItemId, planetId: PlanetId) => {
     const location = getProductionLineLocations(gameRef.current, itemId).find((candidate) => candidate.planetId === planetId);
@@ -8248,7 +14601,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(`${ITEMS[itemId].name}在${getPlanetDisplayName(gameRef.current, planetId)}没有可定位的生产设备`);
       return;
     }
-    if (gameRef.current.activePlanetId !== planetId && !onPlanetChange(planetId)) return;
+    if (!ensureFactoryPlanetVisible(planetId)) return;
     closeAllWorkspaces();
     setCommandPaletteOpen(false);
     setMobilePanel(null);
@@ -8258,7 +14611,96 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (nextMobileShell) mobileNavigation.goFactory();
     window.setTimeout(() => focusEntityIds(location.producerEntityIds), gameRef.current.settings.reducedMotion ? 0 : 50);
     setNotice(`已定位${getPlanetDisplayName(gameRef.current, planetId)}的${ITEMS[itemId].name}产线 · ${location.producerEntityIds.length} 个生产节点`);
-  }, [closeAllWorkspaces, focusEntityIds, mobileNavigation.goFactory, nextMobileShell, onPlanetChange]);
+  }, [closeAllWorkspaces, ensureFactoryPlanetVisible, focusEntityIds, mobileNavigation.goFactory, nextMobileShell]);
+
+  const locateRecipeWorkspaceProduction = useCallback(async (itemId: ItemId, planetId: PlanetId) => {
+    if (!nativePlayerAuthorityBoundFrame) {
+      locateProductionLine(itemId, planetId);
+      return;
+    }
+    const authority = nativePlayerAuthorityActiveFrame;
+    const authorityRevision = authority?.revision;
+    const nativeReadModel = recipeWorkspaceReadModel?.source === "native-core" ? recipeWorkspaceReadModel : null;
+    if (!authority?.sessionId || typeof authorityRevision !== "number" || !nativeReadModel ||
+        typeof desktopBridge?.getNativePlayerAuthorityState !== "function" ||
+        typeof desktopBridge.getNativeCoreRecipeWorkspaceProjection !== "function") {
+      setNotice("原生资料库正在等待稳定版本，请稍后再定位");
+      return;
+    }
+    if (nativeReadModel.activePlanetId !== planetId) {
+      if (onPlanetChange(planetId)) {
+        setNotice(`已切换到${getPlanet(planetId).name}；等待原生版本更新后请再次点击定位`);
+      }
+      return;
+    }
+    try {
+      const projection = await desktopBridge.getNativeCoreRecipeWorkspaceProjection({
+        sessionId: authority.sessionId,
+        expectedRevision: authorityRevision,
+        expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+        itemIds: [],
+        selectedItemId: itemId,
+        location: {
+          planetId,
+          cursor: 0,
+          limit: RECIPE_WORKSPACE_PROJECTION_LIMITS.locationRows,
+        },
+      });
+      const page = projection.locationPage;
+      const clock = await desktopBridge.getNativePlayerAuthorityState();
+      if (projection.truncated || projection.revision !== authorityRevision ||
+          projection.registryFingerprint !== recipeWorkspaceRegistryFingerprint || !page ||
+          page.planetId !== planetId || page.cursor !== 0 || page.nextCursor !== null ||
+          page.totalCount !== page.entities.length || clock.schemaVersion !== 1 ||
+          clock.phase !== "active" || clock.inFlight ||
+          clock.sessionId !== authority.sessionId || clock.revision !== authorityRevision) {
+        setNotice("原生资料库版本已变化或生产设备过多，本次定位已安全取消");
+        return;
+      }
+      if (page.entities.length === 0) {
+        setNotice(`${ITEMS[itemId].name}在${getPlanet(planetId).name}没有可定位的生产设备`);
+        return;
+      }
+      const entityIds = page.entities.map((entity) => entity.id);
+      const center = page.entities.reduce((total, entity) => ({
+        x: total.x + entity.x + 128,
+        y: total.y + entity.y + 90,
+      }), { x: 0, y: 0 });
+      closeAllWorkspaces();
+      setCommandPaletteOpen(false);
+      setMobilePanel(null);
+      setHighlightedTaskId(null);
+      setFocusedBeltNetworkId(null);
+      setProductionLineFocus({
+        planetId,
+        producerEntityIds: entityIds,
+        relatedEntityIds: entityIds,
+        relatedBeltIds: [],
+        itemId,
+        activeIndex: 0,
+      });
+      if (nextMobileShell) mobileNavigation.goFactory();
+      setCenter(center.x / page.entities.length, center.y / page.entities.length, {
+        zoom: page.entities.length === 1 ? 1.05 : page.entities.length <= 3 ? 0.85 : 0.65,
+        duration: gameRef.current.settings.reducedMotion ? 0 : 260,
+      });
+      setNotice(`已定位${getPlanet(planetId).name}的${ITEMS[itemId].name}生产设备 · ${page.entities.length} 个（原生资料库不扩展上游线路）`);
+    } catch {
+      setNotice("原生生产设备定位失败，未使用旧版网页存档数据兜底");
+    }
+  }, [
+    closeAllWorkspaces,
+    desktopBridge,
+    locateProductionLine,
+    mobileNavigation.goFactory,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityBoundFrame,
+    nextMobileShell,
+    onPlanetChange,
+    recipeWorkspaceReadModel,
+    recipeWorkspaceRegistryFingerprint,
+    setCenter,
+  ]);
 
   const itemReferenceActions = useMemo(() => ({
     getLocateAvailability: (itemId: ItemId) => {
@@ -8269,7 +14711,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     },
     onLocate: (itemId: ItemId) => {
       const locations = getProductionLineLocations(gameRef.current, itemId);
-      const target = locations.find((location) => location.planetId === gameRef.current.activePlanetId) ?? locations[0];
+      const activePlanetId = readConfirmedFactoryPlanetId();
+      if (activePlanetId === null) {
+        setNotice("Windows 原生星球画面尚未确认；本次定位未执行");
+        return;
+      }
+      const target = locations.find((location) => location.planetId === activePlanetId) ?? locations[0];
       if (!target) {
         setNotice(`${ITEMS[itemId].name}在当前存档中没有可定位的生产设备`);
         return;
@@ -8277,7 +14724,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       locateProductionLine(itemId, target.planetId);
     },
     onOpenCodex: (itemId: ItemId) => openRecipeFocus(itemId),
-  }), [locateProductionLine, openRecipeFocus]);
+  }), [locateProductionLine, openRecipeFocus, readConfirmedFactoryPlanetId]);
 
   const cycleProductionLineTarget = useCallback((direction: -1 | 1) => {
     setProductionLineFocus((current) => {
@@ -8312,30 +14759,64 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame, playTone]);
 
   const updateMaterialDeliverySlot = useCallback(async (entityId: string, slotIndex: number, mode: import("./game/types").MaterialDeliverySlotMode, itemId: ItemId | null) => {
+    if (rejectLegacyFactoryInteractionWhileNative("物料配送接口设置")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const check = getMaterialDeliverySlotChangeCheck(gameRef.current, entityId, slotIndex, mode, itemId);
     if (!check.ok) {
       setNotice(check.label);
       return;
     }
-    if (check.requiresDisconnect && !await gameDialog.confirm(`${check.label}。枢纽缓存会安全退回本行星物资托盘，是否继续？`, { danger: true, confirmLabel: "断开并重置" })) return;
+    if (check.requiresDisconnect) {
+      if (!await gameDialog.confirm(`${check.label}。枢纽缓存会安全退回本行星物资托盘，是否继续？`, { danger: true, confirmLabel: "断开并重置" })) return;
+      if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "物料配送接口设置")) return;
+    }
     commitGame((current) => setMaterialDeliverySlot(current, entityId, slotIndex, mode, itemId, check.requiresDisconnect));
     setNotice(mode === "manual" && itemId
       ? `接口 ${slotIndex + 1} 已指定为${ITEMS[itemId].name}`
       : mode === "auto" ? `接口 ${slotIndex + 1} 已恢复自动识别` : `接口 ${slotIndex + 1} 已清空`);
-  }, [commitGame, gameDialog]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const clearOrbitalCargoTerminalPort = useCallback(async (entityId: string, portIndex: 0 | 1 | 2 | 3) => {
+    if (rejectLegacyFactoryInteractionWhileNative("轨道货运接口清空")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const check = getOrbitalCargoPortClearCheck(gameRef.current, entityId, portIndex);
     if (!check.ok) {
       setNotice(check.label);
       return;
     }
-    if (check.requiresConfirmation && !await gameDialog.confirm(`${check.label}。确认后缓存会退回本行星物资托盘，传送带会返还施工库存；已提交空间站物资不会退款。`, { danger: true, title: "清空轨道货运接口", confirmLabel: "安全清空" })) return;
+    if (check.requiresConfirmation) {
+      if (!await gameDialog.confirm(`${check.label}。确认后缓存会退回本行星物资托盘，传送带会返还施工库存；已提交空间站物资不会退款。`, { danger: true, title: "清空轨道货运接口", confirmLabel: "安全清空" })) return;
+      if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "轨道货运接口清空")) return;
+    }
     commitGame((current) => clearOrbitalCargoPort(current, entityId, portIndex, check.requiresConfirmation));
     setNotice(`轨道货运接口 ${portIndex + 1} 已释放`);
-  }, [commitGame, gameDialog]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const autoLayoutEntities = useCallback((entityIds?: readonly string[]) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      const binding = nativePlayerAuthorityCommandBindingRef.current;
+      if (!frame || !binding ||
+          frame.sessionId !== binding.source.sessionId ||
+          frame.runId !== binding.source.runId ||
+          frame.revision !== binding.source.baseRevision) {
+        setNotice("Windows 原生建筑画面正在刷新；请在当前权威 revision 就绪后重试");
+        return;
+      }
+      const selection = entityIds?.length ? [...entityIds] : undefined;
+      const accepted = commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => createNativeFactoryAutoLayoutCommand(baseRevision, selection),
+        () => {
+          setAutoLayoutUndo(null);
+          setNotice(selection
+            ? `Rust 已按权威物流拓扑整理所选 ${selection.length} 个设备；正在刷新画布`
+            : "Rust 已按权威物流拓扑整理当前行星；正在刷新画布");
+        },
+      );
+      if (accepted) setNotice("Rust 正在按当前权威物流拓扑计算并提交自动布局…");
+      return;
+    }
     const current = gameRef.current;
     const moves = planFactoryAutoLayout(current, current.activePlanetId, entityIds);
     if (moves.length === 0) {
@@ -8357,9 +14838,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     commitGame((current) => moveEntities(current, moves));
     setNotice(`已按物流上下游整理 ${moves.length} 个设备`);
     window.requestAnimationFrame(() => void fitView({ padding: 0.2, minZoom: canvasMinimumZoom, duration: gameRef.current.settings.reducedMotion ? 0 : 280 }));
-  }, [canvasMinimumZoom, commitGame, fitView, setNodes]);
+  }, [canvasMinimumZoom, commitGame, commitNativeProjectedCommand, fitView, setNodes]);
 
   const undoAutoLayout = useCallback(() => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("Windows 原生权威暂未开放自动布局撤销；本次操作未应用");
+      return;
+    }
     if (!autoLayoutUndo || autoLayoutUndo.planetId !== gameRef.current.activePlanetId) return;
     const existingIds = new Set(gameRef.current.entities.map((entity) => entity.id));
     const positions = autoLayoutUndo.positions.filter((entry) => existingIds.has(entry.id));
@@ -8379,10 +14864,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [autoLayoutUndo, canvasMinimumZoom, commitGame, fitView, setNodes]);
 
   const focusBeltNetwork = useCallback((beltId: string, planetId?: PlanetId) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("Windows 原生线路网络正在迁移到有界读取；本次定位未执行");
+      return;
+    }
     const snapshot = analyzeBeltNetwork(gameRef.current, beltId);
     if (!snapshot) return;
     const destination = planetId ?? snapshot.planetId;
-    if (gameRef.current.activePlanetId !== destination && !onPlanetChange(destination)) return;
+    if (!ensureFactoryPlanetVisible(destination)) return;
     setFocusedBeltNetworkId(beltId);
     setHighlightedTaskId(null);
     setSelectedBeltId(beltId);
@@ -8392,10 +14881,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setStatisticsOpen(false);
     setMobilePanel(null);
     window.setTimeout(() => focusEntityIds(snapshot.entityIds), gameRef.current.settings.reducedMotion ? 0 : 40);
-  }, [focusEntityIds, onPlanetChange]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds]);
 
   const openCanvasBookmark = useCallback((bookmark: CanvasBookmark) => {
-    if (gameRef.current.activePlanetId !== bookmark.planetId && !onPlanetChange(bookmark.planetId)) return;
+    if (!ensureFactoryPlanetVisible(bookmark.planetId)) return;
     setStatisticsOpen(false);
     setFocusedBeltNetworkId(null);
     setHighlightedTaskId(null);
@@ -8408,10 +14897,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       void setViewport(bookmark.viewport, { duration: gameRef.current.settings.reducedMotion ? 0 : 260 });
     }, gameRef.current.settings.reducedMotion ? 0 : 40);
     setNotice(`已打开画布书签：${bookmark.name}`);
-  }, [onPlanetChange, setViewport]);
+  }, [ensureFactoryPlanetVisible, setViewport]);
 
   const selectAlert = useCallback((alert: FactoryAlert) => {
-    if (gameRef.current.activePlanetId !== alert.planetId && !onPlanetChange(alert.planetId)) return;
+    if (!ensureFactoryPlanetVisible(alert.planetId)) return;
     setSelectedEntityIds([alert.entityId]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -8424,10 +14913,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     focusEntityIds([alert.entityId]);
     setNotice(`已定位：${alert.title} · ${alert.reason}`);
     playTone("alert");
-  }, [focusEntityIds, onPlanetChange, playTone]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds, playTone]);
+
+  const selectNativeOperationsAlert = useCallback((alert: DesktopNativeCoreOperationsAlertRow) => {
+    if (!ensureFactoryPlanetVisible(alert.planetId as PlanetId)) return;
+    setSelectedEntityIds([alert.entityId]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setInspectorTab("inspect");
+    setMobilePanel("inspector");
+    setOperationsOpen(false);
+    focusEntityIds([alert.entityId]);
+    setNotice(`已定位：${alert.label}`);
+    playTone("alert");
+  }, [ensureFactoryPlanetVisible, focusEntityIds, playTone]);
 
   const focusStellarStation = useCallback((entityId: string, planetId: PlanetId) => {
-    if (gameRef.current.activePlanetId !== planetId && !onPlanetChange(planetId)) return;
+    if (!ensureFactoryPlanetVisible(planetId)) return;
     setSelectedEntityIds([entityId]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -8437,7 +14939,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setStarMapOpen(false);
     window.setTimeout(() => focusEntityIds([entityId]), gameRef.current.settings.reducedMotion ? 0 : 40);
     setNotice(`已定位星际物流问题：${getPlanetDisplayName(gameRef.current, planetId)}`);
-  }, [focusEntityIds, onPlanetChange]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds]);
 
   const openCampaign = useCallback(() => {
     closeAllWorkspaces();
@@ -8513,7 +15015,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     const entity = gameRef.current.entities.find((candidate) => candidate.buildingId === navigation.buildingId);
     if (entity) {
-      if (gameRef.current.activePlanetId !== entity.planetId && !onPlanetChange(entity.planetId)) return;
+      if (!ensureFactoryPlanetVisible(entity.planetId)) return;
       setSelectedEntityIds([entity.id]);
       setSelectedBeltId(null);
       setInspectorTab("inspect");
@@ -8526,7 +15028,56 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setInspectorTab("fabricate");
     setMobilePanel("inspector");
     setNotice(`施工托盘已切换到${getBuilding(navigation.buildingId).name}`);
-  }, [closeAllWorkspaces, focusEntityIds, onPlanetChange, openCommandWorkspace]);
+  }, [closeAllWorkspaces, ensureFactoryPlanetVisible, focusEntityIds, openCommandWorkspace]);
+
+  const navigateFromNativeCampaign = useCallback((locator: DesktopNativeCampaignLocator, taskId: string) => {
+    // A native locator is presentation-only. It never selects a campaign task
+    // and never derives an entity, inventory or belt from the stale Web game.
+    setHighlightedTaskId(taskId as CampaignTaskId);
+    closeAllWorkspaces();
+    setCampaignFocusItemId(null);
+    setCampaignFocusTechId(null);
+    setMobilePanel(null);
+    if (locator.kind === "item") {
+      if (Object.prototype.hasOwnProperty.call(ITEMS, locator.targetId)) {
+        setCampaignFocusItemId(locator.targetId as ItemId);
+        setRecipesOpen(true);
+        setNotice("已打开原生生产资料目标");
+      } else {
+        setNotice("任务目标目录已变化；未打开任何旧版游戏数据");
+      }
+      return;
+    }
+    if (locator.kind === "technology") {
+      if (getTechnology(locator.targetId as never)) {
+        setCampaignFocusTechId(locator.targetId as never);
+        setTechnologyOpen(true);
+        setNotice("已定位原生科研目标");
+      } else {
+        setNotice("科技目标目录已变化；未打开任何旧版游戏数据");
+      }
+      return;
+    }
+    if (locator.kind === "planet" || locator.targetId.startsWith("star-map:")) {
+      setStarMapOpen(true);
+      setNotice("已打开原生星图；请在权威目录中选择目标");
+      return;
+    }
+    if (locator.kind === "entity") {
+      setCommandPaletteOpen(true);
+      setNotice(`已打开原生命令面板；建筑目录目标：${locator.targetId}`);
+      return;
+    }
+    if (locator.targetId.startsWith("dyson:")) {
+      void openCommandWorkspace("dyson");
+      return;
+    }
+    if (locator.targetId === "galaxy") {
+      void openCommandWorkspace("galaxy");
+      return;
+    }
+    setNotice("该只读任务没有可用的原生界面定位目标");
+  }, [closeAllWorkspaces, openCommandWorkspace]);
 
   const runOnboardingAction = useCallback((stepId: OnboardingActionId) => {
     closeAllWorkspaces();
@@ -8543,7 +15094,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     if (stepId === "basic-place-stack") {
-      if (gameRef.current.activePlanetId !== "home" && !onPlanetChange("home")) return;
+      if (!ensureFactoryPlanetVisible("home")) return;
       setPlacement("wind_turbine");
       setPlacementCount(1);
       if (nextMobileShell) mobileNavigation.goFactory();
@@ -8566,7 +15117,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice("选择一项可研究科技加入队列");
       return;
     }
-    if (gameRef.current.activePlanetId !== "home" && !onPlanetChange("home")) return;
+    if (!ensureFactoryPlanetVisible("home")) return;
     if (stepId === "mine") {
       setSelectedEntityIds(["vein_iron"]);
       window.setTimeout(() => focusEntityIds(["vein_iron"]), 40);
@@ -8615,7 +15166,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     openCampaign();
-  }, [closeAllWorkspaces, focusBeltNetwork, focusEntityIds, focusPlacedEntity, mobileNavigation.goFactory, mobileNavigation.openSheet, navigateFromCampaign, nextMobileShell, onPlanetChange, openCampaign]);
+  }, [closeAllWorkspaces, ensureFactoryPlanetVisible, focusBeltNetwork, focusEntityIds, focusPlacedEntity, mobileNavigation.goFactory, mobileNavigation.openSheet, navigateFromCampaign, nextMobileShell, openCampaign]);
 
   const onSelectCampaignTask = useCallback((taskId: CampaignTaskId) => {
     commitGame((current) => selectCampaignTask(current, taskId));
@@ -8649,6 +15200,58 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const downloadSave = useCallback(() => {
     void (async () => {
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，存档导出未执行");
+      const nativeBoundary = await refreshNativeAuthorityPersistenceBoundary();
+      if (nativeBoundary.protected) {
+        if (!nativeBoundary.canExportAuthoritativeV47 || !nativeBoundary.checkpointToken) {
+          throw new Error("Windows 原生权威当前不是稳定 active revision；导出已失败关闭且未读取旧 JavaScript 主档");
+        }
+        const checkpoint = await persistNativeAuthorityCheckpoint("manual");
+        if (!checkpoint.success) throw new Error(checkpoint.message);
+        const exportBoundary = await refreshNativeAuthorityPersistenceBoundary();
+        if (!exportBoundary.canExportAuthoritativeV47 || !exportBoundary.checkpointToken) {
+          throw new Error("Windows 原生权威 revision 在导出前发生变化；请等待稳定后重试");
+        }
+        const controller = windowsNativeCoreBetaControllerRef.current;
+        if (!controller) throw new Error("Windows 原生权威控制器不可用");
+        const date = new Date().toISOString().slice(0, 10);
+        const exported = await controller.exportAuthoritativeV47(
+          `manual-export-${Date.now().toString(36)}`,
+          `dsp-idle-native-save-${date}.json`,
+        );
+        if (exported.artifact.export.cancelled) return "cancelled" as const;
+        const exportedIdentity = exported.artifact.identity;
+        const exportToken = exportBoundary.checkpointToken;
+        if (exportedIdentity.sessionId !== exportToken.sessionId ||
+          exportedIdentity.runId !== exportToken.runId ||
+          exportedIdentity.revision < exportToken.minimumRevision ||
+          exportedIdentity.revision !== exported.artifact.export.result.revision) {
+          // Main validates this before publishing the file and the controller
+          // validates it again before returning. Reaching this branch means the
+          // trusted bridge contract itself was violated; never downgrade that
+          // to the ordinary post-export clock recovery warning.
+          throw new Error("Windows 原生导出会话证明与当前权威不一致");
+        }
+        let latestRuntime: NativeAuthorityRuntimeObservation | null = null;
+        let liveLineageHealthy = false;
+        try {
+          await nativePlayerAuthorityClock.refresh();
+          latestRuntime = readNativeAuthorityRuntimeObservation();
+          liveLineageHealthy = verifyNativeAuthorityArtifactLineage(
+            exportBoundary.checkpointToken,
+            exportedIdentity,
+            latestRuntime,
+          );
+        } catch {
+          // Main already verified and atomically published the selected file.
+          // Surface only a recovery warning if the follow-up clock pull fails.
+        }
+        // Main has already verified and atomically replaced the selected file.
+        // A tick/command may make the subsequent clock read transiently busy;
+        // never rewrite that durable success into a false "export failed".
+        return liveLineageHealthy && latestRuntime?.kind === "active"
+          ? "native-json" as const
+          : "native-json-recovery-warning" as const;
+      }
       const saved = await persistPrimarySave(undefined, "manual");
       if (!saved.success) throw new Error(saved.message);
       const mode = gameRef.current.mode;
@@ -8672,15 +15275,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
       return "json" as const;
     })().then((format) => {
-      setNotice(format === "gzip" ? "压缩存档 .json.gz 已导出" : "存档 JSON 已导出（当前环境不支持 gzip）");
-      playTone("confirm");
+      setNotice(format === "gzip"
+        ? "压缩存档 .json.gz 已导出"
+        : format === "native-json"
+          ? "Windows 原生权威 v47 存档已直接导出"
+          : format === "native-json-recovery-warning"
+            ? "Windows 原生权威 v47 存档已成功导出；随后检测到原生时钟正忙或需恢复，文件无需重导"
+          : format === "cancelled"
+            ? "已取消 Windows 原生权威存档导出"
+            : "存档 JSON 已导出（当前环境不支持 gzip）");
+      playTone(format === "cancelled" ? "remove" : "confirm");
     }).catch((error) => {
       setNotice(error instanceof Error ? `存档导出失败：${error.message}` : "存档导出失败");
       playTone("alert");
     });
-  }, [persistPrimarySave, playTone]);
+  }, [nativePlayerAuthorityClock, persistNativeAuthorityCheckpoint, persistPrimarySave, playTone, readNativeAuthorityRuntimeObservation, refreshNativeAuthorityPersistenceBoundary]);
 
   const importSave = useCallback(async (raw: string) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("import"));
+      playTone("alert");
+      return;
+    }
     if (saveImportCommitInFlightRef.current) {
       setNotice("当前存档正在导入，请等待写入完成");
       return;
@@ -8711,7 +15327,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(error instanceof Error ? `存档导入失败：${error.message}` : "存档导入失败：后台检查不可用");
       playTone("alert");
     }
-  }, [playTone]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary]);
 
   const cancelImport = useCallback(() => {
     saveImportInspectionGenerationRef.current += 1;
@@ -8722,6 +15338,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const confirmImport = useCallback(async () => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("import"));
+      playTone("alert");
+      return;
+    }
     const importedState = pendingImportState;
     const importedPreview = importPreview;
     if (!importedState || !importedPreview || saveImportCommitInFlightRef.current) return;
@@ -8770,7 +15391,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         restoreImportPreview(result.message);
         return;
       }
-      restoreGame(importedState);
+      if (!restoreGame(importedState)) {
+        restoreImportPreview(nativeAuthorityReplacementBlockedMessage("import"));
+        return;
+      }
       void refreshSaveData();
       setNotice("存档导入完成，已自动创建回滚快照");
       playTone("complete");
@@ -8779,9 +15403,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } finally {
       saveImportCommitInFlightRef.current = false;
     }
-  }, [importPreview, pendingImportState, persistPrimarySave, playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
+  }, [importPreview, pendingImportState, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
   const confirmImportRescue = useCallback(() => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("repair"));
+      playTone("alert");
+      return;
+    }
     if (!importPreview?.repairable || importPreview.valid || !pendingImportRaw) return;
     if (!importRescueArmed) {
       setImportRescueArmed(true);
@@ -8815,7 +15444,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         playTone("alert");
         return;
       }
-      restoreGame(repaired.inspection.state!);
+      if (!restoreGame(repaired.inspection.state!)) {
+        setNotice(nativeAuthorityReplacementBlockedMessage("repair"));
+        playTone("alert");
+        return;
+      }
       refreshSaveData();
       setImportPreview(null);
       setPendingImportState(null);
@@ -8827,9 +15460,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(error instanceof Error ? `原始存档备份失败：${error.message}` : "原始存档备份失败，未执行救援");
       playTone("alert");
     });
-  }, [importPreview, importRescueArmed, pendingImportRaw, persistPrimarySave, playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
+  }, [importPreview, importRescueArmed, pendingImportRaw, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
   const restoreCloudSave = useCallback(async (raw: string): Promise<{ success: boolean; message: string }> => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      const message = nativeAuthorityReplacementBlockedMessage("cloud-restore");
+      setNotice(message);
+      playTone("alert");
+      return { success: false, message };
+    }
     const inspection = await inspectSaveInWorker(raw);
     if (!inspection.valid || !inspection.state) {
       if (inspection.repairable && inspection.state) {
@@ -8861,13 +15500,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       playTone("alert");
       return { success: false, message: result.message };
     }
-    restoreGame(inspection.state);
+    if (!restoreGame(inspection.state)) {
+      const message = nativeAuthorityReplacementBlockedMessage("cloud-restore");
+      playTone("alert");
+      return { success: false, message };
+    }
     refreshSaveData();
     playTone("complete");
     return { success: true, message: "云存档已恢复，原工厂已保留为本地快照" };
-  }, [persistPrimarySave, playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
+  }, [persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
   const saveToSlot = useCallback(async (slotId: SaveSlotId) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice("Windows 原生权威接管期间不能把旧 JavaScript 镜像写入本地槽位；槽位和当前工厂均未改变");
+      playTone("alert");
+      return;
+    }
     const checkpoint = await requestAuthoritativeSimulationCheckpoint();
     if (lifecycleExitStartedRef.current) {
       setNotice("页面正在退出，槽位保存未执行");
@@ -8881,9 +15529,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     refreshSaveData();
     setNotice(result.message);
     playTone(result.success ? "confirm" : "alert");
-  }, [playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
 
   const loadFromSlot = useCallback(async (slotId: SaveSlotId) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("load-slot"));
+      playTone("alert");
+      return;
+    }
     const slot = await loadGameSlotFromPersistence(slotId, gameRef.current.mode);
     if (!slot) {
       setNotice(`槽位 ${slotId} 没有可用存档`);
@@ -8899,11 +15552,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       playTone("alert");
       return;
     }
-    restoreGame(slot.state, slot.offlineReport);
+    if (!restoreGame(slot.state, slot.offlineReport)) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("load-slot"));
+      playTone("alert");
+      return;
+    }
     refreshSaveData();
     setNotice(`已载入本地槽位 ${slotId}`);
     playTone("complete");
-  }, [persistPrimarySave, playTone, refreshSaveData, restoreGame]);
+  }, [persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, restoreGame]);
 
   const deleteSlot = useCallback(async (slotId: SaveSlotId) => {
     const removed = await clearGameSlotVerified(slotId, gameRef.current.mode);
@@ -8912,6 +15569,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [refreshSaveData]);
 
   const createSnapshot = useCallback(async () => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice("Windows 原生权威接管期间不能用旧 JavaScript 镜像创建快照；当前工厂和已有快照均未改变");
+      playTone("alert");
+      return;
+    }
     const checkpoint = await requestAuthoritativeSimulationCheckpoint();
     if (lifecycleExitStartedRef.current) {
       setNotice("页面正在退出，快照未创建");
@@ -8925,10 +15587,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     refreshSaveData();
     setNotice(snapshot ? "手动快照已创建" : "快照创建失败：本地存储空间不足");
     playTone(snapshot ? "confirm" : "alert");
-  }, [playTone, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
 
   const addSecondUnipolarVein = useCallback(async () => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("repair"));
+      playTone("alert");
+      return;
+    }
     if (unipolarExpansionBusy) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const source = gameRef.current;
     if (!source.paused) {
       setNotice("请先暂停模拟，再执行单极磁石矿脉扩容");
@@ -8952,16 +15620,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { title: "单极磁石矿脉扩容预览", confirmLabel: "继续确认" },
     );
     if (!firstConfirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "单极磁石矿脉扩容")) return;
     const finalConfirmed = await gameDialog.confirm(
       `执行前将创建可回滚快照，并校验源存档 ${preview.sourceChecksum}。该操作仅限普通模式，副本不能计入速通排行榜。确认增加第二个矿脉？`,
       { title: "最终确认：增加到两个矿脉", confirmLabel: "创建快照并增加", danger: true },
     );
     if (!finalConfirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "单极磁石矿脉扩容")) return;
     setUnipolarExpansionBusy(true);
     try {
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，扩容未执行");
       const snapshot = await saveGameSnapshotVerified(source, "增加第二个单极磁石矿脉前");
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，扩容未执行");
+      if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "单极磁石矿脉扩容")) return;
       if (!snapshot) throw new Error("无法创建扩容前快照，操作已取消；请先释放本地存储空间");
       const repairPackage = createSecondUnipolarVeinPackage(source, context, preview.confirmationToken);
       const saved = await persistPrimarySave(repairPackage.candidateState);
@@ -8977,9 +15648,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } finally {
       setUnipolarExpansionBusy(false);
     }
-  }, [commitGame, gameDialog, persistPrimarySave, playTone, refreshSaveData, unipolarExpansionBusy]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, rejectLegacyFactoryContinuationAfterAwait, unipolarExpansionBusy]);
 
   const loadSnapshot = useCallback(async (snapshotId: string) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("load-snapshot"));
+      playTone("alert");
+      return;
+    }
     const state = await loadSaveSnapshotFromPersistence(snapshotId, gameRef.current.mode);
     if (!state) {
       setNotice("快照不可用，可能已损坏");
@@ -8996,11 +15672,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       playTone("alert");
       return;
     }
-    restoreGame(state);
+    if (!restoreGame(state)) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("load-snapshot"));
+      playTone("alert");
+      return;
+    }
     refreshSaveData();
     setNotice("已回滚到自动快照");
     playTone("complete");
-  }, [persistPrimarySave, playTone, refreshSaveData, restoreGame]);
+  }, [persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, restoreGame]);
 
   const deleteSnapshot = useCallback(async (snapshotId: string) => {
     const removed = await clearSaveSnapshotVerified(snapshotId, gameRef.current.mode);
@@ -9044,6 +15724,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame]);
 
   const registerValidatedContentPack = useCallback(() => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
+      playTone("alert");
+      return;
+    }
     if (!modValidation?.valid || !modValidation.manifest) {
       setNotice("请先选择并校验内容包 JSON");
       playTone("alert");
@@ -9069,9 +15754,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       ? `内容包已注册并启用：${modValidation.manifest.name}`
       : `内容包已注册，等待依赖：${result.reason ?? "未满足"}`);
     playTone(result.enabled && report.catalogValid ? "complete" : "alert");
-  }, [applyRegisteredContentPacks, contentPackRegistry, modValidation, playTone]);
+  }, [applyRegisteredContentPacks, contentPackRegistry, modValidation, playTone, readNativeAuthorityPersistenceBoundary]);
 
   const toggleRegisteredContentPack = useCallback((packId: string, enabled: boolean) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
+      playTone("alert");
+      return;
+    }
     const pack = contentPackRegistry.packs[packId];
     if (!pack) return;
     if (!enabled) {
@@ -9091,9 +15781,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const report = applyRegisteredContentPacks(result.registry);
     setNotice(`${pack.manifest.name}已${enabled ? "启用" : "停用"}${report.catalogValid ? "" : "，目录存在校验问题"}`);
     playTone(enabled && report.catalogValid ? "confirm" : "alert");
-  }, [applyRegisteredContentPacks, contentPackRegistry, playTone]);
+  }, [applyRegisteredContentPacks, contentPackRegistry, playTone, readNativeAuthorityPersistenceBoundary]);
 
   const removeRegisteredContentPack = useCallback((packId: string) => {
+    if (readNativeAuthorityPersistenceBoundary().protected) {
+      setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
+      playTone("alert");
+      return;
+    }
     const pack = contentPackRegistry.packs[packId];
     if (!pack) return;
     const usage = getContentPackUsage(gameRef.current, pack.manifest);
@@ -9111,7 +15806,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     applyRegisteredContentPacks(result.registry);
     setNotice(`内容包已移除：${pack.manifest.name}`);
     playTone("remove");
-  }, [applyRegisteredContentPacks, contentPackRegistry, playTone]);
+  }, [applyRegisteredContentPacks, contentPackRegistry, playTone, readNativeAuthorityPersistenceBoundary]);
 
   const downloadModTemplate = useCallback(() => {
     void exportTextFile({ contents: JSON.stringify(createContentPackTemplate(), null, 2), fileName: "dsp-content-pack-template.json", title: "导出内容包模板" })
@@ -9122,8 +15817,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const downloadBlueprint = useCallback((blueprintId: string) => {
     const blueprint = gameRef.current.blueprints.find((candidate) => candidate.id === blueprintId);
     if (!blueprint) return;
+    let contents: string;
+    try {
+      contents = serializeBlueprintExchange(blueprint);
+    } catch (error) {
+      setNotice(error instanceof Error ? `蓝图导出失败：${error.message}` : "蓝图导出失败");
+      playTone("alert");
+      return;
+    }
     void exportTextFile({
-      contents: serializeBlueprintExchange(blueprint),
+      contents,
       fileName: `${blueprint.name.replace(/[\\/:*?"<>|]/g, "-").slice(0, 40) || "dsp-blueprint"}.dspblueprint.json`,
       title: `导出蓝图：${blueprint.name}`,
     }).then(() => {
@@ -9136,6 +15839,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [playTone]);
 
   const importBlueprint = useCallback((raw: string) => {
+    if (gameRef.current.blueprints.length >= BLUEPRINT_LIBRARY_MAX_ROWS) {
+      const message = `蓝图导入失败：蓝图库已达到 ${BLUEPRINT_LIBRARY_MAX_ROWS} 条安全上限`;
+      setNotice(message);
+      playTone("alert");
+      return { success: false, message };
+    }
     const result = parseBlueprintExchange(raw);
     if (!result.valid || !result.blueprint) {
       const message = `蓝图导入失败：${result.issues[0] ?? "格式无效"}`;
@@ -9144,7 +15853,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return { success: false, message };
     }
     const importedName = result.blueprint.name;
-    commitGame((current) => importBlueprintExchange(current, result.blueprint!));
+    let failureReason: "library-full" | "invalid-next-id" | "allocator-exhausted" | "id-collision" | "name-exhausted" | null = null;
+    let importedBlueprintId: string | null = null;
+    const committed = commitGame((current) => {
+      const imported = importBlueprintExchange(current, result.blueprint!);
+      if (!imported.ok) {
+        failureReason = imported.reason;
+        return current;
+      }
+      importedBlueprintId = imported.blueprintId;
+      return imported.state;
+    });
+    if (!committed || !importedBlueprintId) {
+      const reasonLabel = failureReason === "library-full"
+        ? `蓝图库已达到 ${BLUEPRINT_LIBRARY_MAX_ROWS} 条安全上限`
+        : failureReason === "invalid-next-id"
+          ? "存档的编号分配器无效"
+          : failureReason === "allocator-exhausted"
+            ? "存档的安全编号已经耗尽"
+            : failureReason === "id-collision"
+              ? "新蓝图编号与现有存档内容冲突"
+              : failureReason === "name-exhausted"
+                ? "蓝图名称冲突且无法安全分配后缀"
+                : "当前存档状态拒绝了这次修改";
+      const message = `蓝图导入失败：${reasonLabel}`;
+      setNotice(message);
+      playTone("alert");
+      return { success: false, message };
+    }
     const message = `已导入蓝图：${importedName} · ${result.blueprint.entities.length} 个建筑 · ${result.blueprint.belts.length} 条传送带`;
     setNotice(message);
     playTone("complete");
@@ -9202,14 +15938,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [getViewport, setViewport]);
 
   const beginPlacementPointerMotion = useCallback((event: React.PointerEvent<HTMLElement>) => {
-    if ((!placement && !blueprintPlacementId) || event.button !== 0 || !event.isPrimary) return;
+    if ((!placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+        !nativeBlueprintDirectDeployPlacement && !blueprintPlacementId) ||
+        event.button !== 0 || !event.isPrimary) return;
     canvasPointerMotionRef.current = beginCanvasPointerMotion(
       canvasPointerMotionRef.current,
       event.pointerId,
       event.clientX,
       event.clientY,
     );
-  }, [blueprintPlacementId, placement]);
+  }, [blueprintPlacementId, nativeBlueprintDirectDeployPlacement, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId, placement]);
 
   const movePlacementPointerMotion = useCallback((event: React.PointerEvent<HTMLElement>) => {
     const previousMotion = canvasPointerMotionRef.current;
@@ -9253,7 +15991,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   useEffect(() => {
     stopCanvasPointerMotion();
-  }, [blueprintPlacementId, placement, stopCanvasPointerMotion]);
+  }, [blueprintPlacementId, nativeBlueprintDirectDeployPlacement, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId, placement, stopCanvasPointerMotion]);
 
   useEffect(() => {
     const stopWhenHidden = () => {
@@ -9276,21 +16014,52 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [stopCanvasPointerMotion]);
 
   useEffect(() => {
-    if (canvasWorkspacePaused) stopCanvasPointerMotion();
-  }, [canvasWorkspacePaused, game.activePlanetId, stopCanvasPointerMotion]);
+    if (canvasWorkspaceHidden || nativeFactoryRouteUnsafe) stopCanvasPointerMotion();
+  }, [canvasWorkspaceHidden, game.activePlanetId, nativeFactoryRouteUnsafe, stopCanvasPointerMotion]);
 
-  const activePlanetEntities = useMemo(
-    () => measureRuntimeTransitionPhase("active-planet-entity-filter", () =>
-      canvasGame.entities.filter((entity) => entity.planetId === canvasGame.activePlanetId),
-    { entities: canvasGame.entities.length }),
-    [canvasGame.activePlanetId, canvasGame.entities],
-  );
-  const activePlanetBelts = useMemo(
-    () => measureRuntimeTransitionPhase("active-planet-belt-filter", () =>
-      canvasGame.belts.filter((belt) => belt.planetId === canvasGame.activePlanetId),
-    { belts: canvasGame.belts.length }),
-    [canvasGame.activePlanetId, canvasGame.belts],
-  );
+  const factoryCanvasRows = useMemo<FactoryCanvasRows>(() => {
+    if (nativePlayerAuthorityOwnsRuntime && !nativeAuthoritativeFactoryCanvasFrame) {
+      return {
+        source: "native-authoritative",
+        revision: factoryThinViewExpectedRevision,
+        entities: [],
+        belts: [],
+        entityById: new Map<string, FactoryEntity>(),
+        nodePresentationByEntityId: new Map(),
+      };
+    }
+    return selectFactoryCanvasRows(nativeAuthoritativeFactoryCanvasFrame, () => {
+      const entities = measureRuntimeTransitionPhase("active-planet-entity-filter", () =>
+        canvasGame.entities.filter((entity) => entity.planetId === canvasGame.activePlanetId),
+      { entities: canvasGame.entities.length });
+      const belts = measureRuntimeTransitionPhase("active-planet-belt-filter", () =>
+        canvasGame.belts.filter((belt) => belt.planetId === canvasGame.activePlanetId),
+      { belts: canvasGame.belts.length });
+      return {
+        entities,
+        belts,
+        entityById: canvasRenderSnapshot.planetId === canvasGame.activePlanetId
+          ? canvasRenderSnapshot.entityById
+          : new Map(entities.map((entity) => [entity.id, entity] as const)),
+      };
+    });
+  }, [
+    canvasGame.activePlanetId,
+    canvasGame.belts,
+    canvasGame.entities,
+    canvasRenderSnapshot.entityById,
+    canvasRenderSnapshot.planetId,
+    factoryThinViewExpectedRevision,
+    nativeAuthoritativeFactoryCanvasFrame,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  const activePlanetEntities = factoryCanvasRows.entities;
+  const activePlanetBelts = factoryCanvasRows.belts;
+  // React Flow replays its current selection whenever the callback identity
+  // changes. Keep the callback stable across belt revisions while still
+  // reading the latest bounded viewport rows.
+  const activePlanetBeltsRef = useRef(activePlanetBelts);
+  activePlanetBeltsRef.current = activePlanetBelts;
   const automaticDenseCanvasMode = shouldAutoOptimizeDenseCanvas(activePlanetEntityCount, activePlanetBelts.length);
   const denseNodeLodActive = nodeLodFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.nodeLod);
   const denseViewportCullingActive = viewportCullingFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.viewportCulling);
@@ -9349,7 +16118,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   useEffect(() => () => connectionViewportPublisherRef.current?.cancel(), []);
   useEffect(() => {
     scheduleConnectionViewport(viewportRef.current, canvasSizeRef.current ?? canvasViewportSize);
-  }, [canvasGame.activePlanetId, canvasViewportSize, scheduleConnectionViewport]);
+  }, [canvasViewportSize, factoryCanvasPlanetId, scheduleConnectionViewport]);
   const selectedEntityIdSet = useMemo(() => new Set(selectedEntityIds), [selectedEntityIds]);
   const ordinaryViewportBounds = useMemo(() => {
     const size = canvasSizeRef.current ?? canvasViewportSize;
@@ -9367,7 +16136,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const activeConnectionViewportBounds = connectionDraft
     ? getConnectionViewportBounds(viewportRef.current, canvasSizeRef.current ?? canvasViewportSize)
     : ordinaryViewportBounds;
-  const visibleFactoryAlertProjection = !factoryAlertsEnabled || game.paused
+  const visibleFactoryAlertProjection = !factoryAlertsEnabled || factoryRunStatusReadModel.paused
     ? EMPTY_FACTORY_ALERT_PROJECTION
     : factoryAlertProjection;
   const alertCount = visibleFactoryAlertProjection.rows.length;
@@ -9383,26 +16152,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       alerts: alertCount,
     })
     : [], [alertCount, game, operationsOpen, operationsTab, visibleFactoryAlertProjection]);
-  const activeEntityById = useMemo(
-    () => canvasRenderSnapshot.planetId === canvasGame.activePlanetId
-      ? canvasRenderSnapshot.entityById
-      : new Map(activePlanetEntities.map((entity) => [entity.id, entity])),
-    [activePlanetEntities, canvasGame.activePlanetId, canvasRenderSnapshot.entityById, canvasRenderSnapshot.planetId],
-  );
+  const activeEntityById = factoryCanvasRows.entityById;
 
   const canvasTopology = useMemo(() => {
     return measureRuntimeTransitionPhase("canvas-topology-reconcile", () => {
       const next = reconcileFactoryCanvasTopology(
         canvasTopologyRef.current,
-        canvasGame.activePlanetId,
+        factoryCanvasPlanetId,
         activePlanetEntities,
         activePlanetBelts,
-        topologyCacheFeatureActive ? canvasRenderSnapshot.topologyRevision : undefined,
+        topologyCacheFeatureActive && factoryCanvasRows.source === "web-game-state"
+          ? canvasRenderSnapshot.topologyRevision
+          : undefined,
       );
       canvasTopologyRef.current = next;
       return next;
     }, { entities: activePlanetEntities.length, belts: activePlanetBelts.length });
-  }, [activePlanetBelts, activePlanetEntities, canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision, topologyCacheFeatureActive]);
+  }, [activePlanetBelts, activePlanetEntities, canvasRenderSnapshot.topologyRevision, factoryCanvasPlanetId, factoryCanvasRows.source, topologyCacheFeatureActive]);
+  const factoryMiniMapUsesNativeTopology = nativeFactoryThinViewActive &&
+    factoryViewportProvesWholePlanet(factoryViewportReadModel);
+  const factoryMiniMapEntities = factoryMiniMapUsesNativeTopology
+    ? factoryViewportReadModel.entities
+    : canvasTopology.entities;
+  const factoryMiniMapWorldBounds = factoryMiniMapUsesNativeTopology
+    ? factoryViewportReadModel.worldBounds
+    : nativeAuthoritativeFactoryCanvasFrame?.worldBounds ?? webFactoryViewportReadModel?.worldBounds ??
+      factoryViewportReadModel.worldBounds;
+  const factoryMiniMapProjectionIsNative = factoryMiniMapUsesNativeTopology ||
+    factoryCanvasRows.source === "native-authoritative";
 
   const beltDiagnosticIndex = useMemo(() => ({ entityById: activeEntityById }), [activeEntityById]);
 
@@ -9420,6 +16197,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       occupancy: canvasTopology.occupancy,
     };
   }, [activePlanetBelts, canvasTopology]);
+  const canvasBeltFlowActivity = useMemo(() => new Map(
+    activePlanetBelts.map((belt) => [belt.id, belt.lastFlow] as const),
+  ), [activePlanetBelts]);
 
   const beltBundleMap = canvasTopology.bundleByBeltId;
   const activeLogisticsEntityIdSet = useMemo(() => new Set(beltNodeIndex.activeEntityIds), [beltNodeIndex.activeEntityIds]);
@@ -9431,7 +16211,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const lineFindTrace = useMemo(() => {
     if (!lineFindMode || selectedEntityIds.length !== 1) return null;
     const revision = canvasTopology.revision;
-    const planetId = canvasGame.activePlanetId;
+    const planetId = factoryCanvasPlanetId;
     const cached = lineFindTraceCacheRef.current;
     if (!cached || cached.planetId !== planetId || cached.revision !== revision) {
       lineFindTraceCacheRef.current = { planetId, revision, traces: new Map() };
@@ -9442,7 +16222,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const entityId = selectedEntityIds[0];
     if (!traces.has(entityId)) traces.set(entityId, analyzeEntityLineTrace(canvasGame, entityId));
     return traces.get(entityId) ?? null;
-  }, [canvasGame.activePlanetId, canvasTopology.revision, lineFindMode, selectedEntityIds]);
+  }, [canvasGame, canvasTopology.revision, factoryCanvasPlanetId, lineFindMode, selectedEntityIds]);
   const lineFindUpstreamEntityIds = useMemo(() => new Set(lineFindTrace?.upstreamEntityIds ?? []), [lineFindTrace]);
   const lineFindDownstreamEntityIds = useMemo(() => new Set(lineFindTrace?.downstreamEntityIds ?? []), [lineFindTrace]);
   const lineFindUpstreamBeltIds = useMemo(() => new Set(lineFindTrace?.upstreamBeltIds ?? []), [lineFindTrace]);
@@ -9478,9 +16258,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       const entityIds = new Set(activePlanetEntities.flatMap((entity) => {
         const directBuilding = task.navigation?.kind === "building" && entity.buildingId === task.navigation.buildingId;
+        const nativePresentation = factoryCanvasRows.nodePresentationByEntityId?.get(entity.id);
+        const producedItemIds = nativePresentation
+          ? nativePresentation.supported ? nativePresentation.producedOutputItemIds : []
+          : getProducedOutputs(entity);
+        const acceptedItemIds = nativePresentation
+          ? nativePresentation.supported ? nativePresentation.acceptedInputItemIds : []
+          : getAcceptedInputs(entity, canvasGame);
         const relevantItem = (entity.resourceId && itemIds.has(entity.resourceId)) ||
-          getProducedOutputs(entity).some((itemId) => itemIds.has(itemId)) ||
-          getAcceptedInputs(entity, canvasGame).some((itemId) => itemIds.has(itemId));
+          producedItemIds.some((itemId) => itemIds.has(itemId as ItemId)) ||
+          acceptedItemIds.some((itemId) => itemIds.has(itemId as ItemId));
         return directBuilding || relevantItem ? [entity.id] : [];
       }));
       const beltIds = new Set(activePlanetBelts.flatMap((belt) => {
@@ -9491,7 +16278,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }));
       return { entityIds, beltIds, itemIds };
     }, { entities: activePlanetEntities.length, belts: activePlanetBelts.length });
-  }, [activePlanetBelts, activePlanetEntities, canvasGame, highlightedTaskId]);
+  }, [activePlanetBelts, activePlanetEntities, canvasGame, factoryCanvasRows.nodePresentationByEntityId, highlightedTaskId]);
 
   const canvasPositionNodes = useMemo(() => activePlanetEntities.map((entity) => ({
     id: entity.id,
@@ -9503,7 +16290,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // collapsed to 96x32.
     width: CANVAS_STACK_PROXY_WIDTH,
     height: CANVAS_STACK_PROXY_HEIGHT,
-  })), [canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision]);
+  })), [activePlanetEntities, canvasRenderSnapshot.topologyRevision, factoryCanvasPlanetId, factoryCanvasRows.revision]);
   canvasPositionNodesRef.current = canvasPositionNodes;
   const canvasVisibleNodeCount = useMemo(() => countVisibleCanvasNodes(
     canvasPositionNodes,
@@ -9555,18 +16342,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const activeAlertEntityIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [entityId, planetId] of visibleFactoryAlertProjection.rows) {
-      if (planetId === canvasGame.activePlanetId) ids.add(entityId);
+      if (planetId === factoryCanvasPlanetId) ids.add(entityId);
     }
     return ids;
-  }, [canvasGame.activePlanetId, visibleFactoryAlertProjection]);
+  }, [factoryCanvasPlanetId, visibleFactoryAlertProjection]);
   const activeCriticalAlertEntityIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [entityId, planetId, codeIndex] of visibleFactoryAlertProjection.rows) {
       const code = visibleFactoryAlertProjection.codes[codeIndex];
-      if (planetId === canvasGame.activePlanetId && code && isCriticalFactoryAlertCode(code)) ids.add(entityId);
+      if (planetId === factoryCanvasPlanetId && code && isCriticalFactoryAlertCode(code)) ids.add(entityId);
     }
     return ids;
-  }, [canvasGame.activePlanetId, visibleFactoryAlertProjection]);
+  }, [factoryCanvasPlanetId, visibleFactoryAlertProjection]);
   const detailedCanvasBeltIds = useMemo(() => {
     const ids = new Set(selectedBeltIdSet);
     if (hoveredBeltId) ids.add(hoveredBeltId);
@@ -9612,23 +16399,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const canvasFlowStaticPresentationCandidate = !connectionDraft && draggedEntityIds.length === 0 && (
     canvasPresentationDetailStage === "compact" || (
       canvasDetailPreference !== "full" && canvasVisibleNodeCount === 0 && fullDetailCanvasNodeIds.size === 0 &&
-      !(nextMobileShell && game.settings.fontScale >= 2)
+      !(nextMobileShell && effectiveUiFontScale >= 2)
     )
   );
   const canvasRuntimeDetailsDeferred = canvasFlowStaticPresentationCandidate && canvasVisibleNodeCount === 0 &&
     reactFlowBelts.length === 0 && !placement && !blueprintPlacementId && !selectionMode && !deleteMode &&
     !regionMode && !lineFindMode;
   const canvasDisplayLookup = useMemo(
-    () => automaticDenseCanvasMode && !canvasRuntimeDetailsDeferred ? measureRuntimeTransitionPhase("canvas-display-lookup", () =>
+    () => automaticDenseCanvasMode && !nativePlayerAuthorityOwnsRuntime && !canvasRuntimeDetailsDeferred ? measureRuntimeTransitionPhase("canvas-display-lookup", () =>
       createEntityDisplayLookup(canvasGame), {
         entities: canvasGame.entities.length,
         belts: canvasGame.belts.length,
       }) : undefined,
-    [automaticDenseCanvasMode, canvasGame, canvasRuntimeDetailsDeferred],
+    [automaticDenseCanvasMode, canvasGame, canvasRuntimeDetailsDeferred, nativePlayerAuthorityOwnsRuntime],
   );
   const activateCanvasStack = useCallback((entityId: string, memberIds: readonly string[], mode: "select" | "cycle") => {
     const currentIndex = Math.max(0, memberIds.indexOf(entityId));
     const targetId = mode === "cycle" ? memberIds[(currentIndex + 1) % memberIds.length] ?? entityId : entityId;
+    selectedEntityIdsRef.current = [targetId];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
     setSelectedEntityIds([targetId]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -9660,13 +16450,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const stableOnEnergyModeChange = useStableEventCallback(onEnergyModeChange);
   const stableOnInteractionLockChange = useStableEventCallback(changeCanvasEntityInteractionLock);
   const stableOnStackActivate = useStableEventCallback(activateCanvasStack);
+  const nativeOrdinaryBeltConnectionEnabled = nativePlayerAuthorityOwnsRuntime &&
+    nativeBeltPlacementTier !== null && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+    !nativeBlueprintDirectDeployPlacement &&
+    !nativeFactoryRouteUnsafe && !nativeFactoryProjectionPending &&
+    !nativeBeltPlacementContextPending && !nativePlayerAuthorityCommandPending &&
+    Boolean(nativeFactoryInventoryIdentity) &&
+    typeof desktopBridge?.getNativeCoreConstructionBeltPlacementContext === "function";
+  const nativeEntityInventoryPickupEnabled = nativePlayerAuthorityOwnsRuntime &&
+    nativeEntityInventoryProjectionBinding !== null &&
+    !nativePlayerAuthorityCommandPending && Boolean(nativePlayerAuthorityCommandSource);
+  const nativeEntityInventoryDepositEnabled = nativeEntityInventoryPickupEnabled &&
+    nativeEntityInventoryProjectionBinding?.inventory.registryFingerprint === "7df8cf3a";
+  const nativeManualMiningEnabled = nativePlayerAuthorityOwnsRuntime &&
+    nativeAuthoritativeFactoryCanvasFrame !== null && nativePlayerAuthorityCommandSource !== null &&
+    nativeAuthoritativeFactoryCanvasFrame.sessionId === nativePlayerAuthorityCommandSource.sessionId &&
+    nativeAuthoritativeFactoryCanvasFrame.runId === nativePlayerAuthorityCommandSource.runId &&
+    nativeAuthoritativeFactoryCanvasFrame.revision === nativePlayerAuthorityCommandSource.baseRevision;
 
-  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
+  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "semanticSupported" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
     const progress = technology ? canvasGame.research.progressByTech[technology.id] ?? {} : {};
-    const planetProfile = getPlanetIndustrialProfile(canvasGame, canvasGame.activePlanetId);
+    const planetProfile = getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
     return {
-      cargo: canvasGame.cargo,
+      readOnly: nativePlayerAuthorityOwnsRuntime,
+      manualMiningEnabled: nativeManualMiningEnabled,
+      beltConnectionsEnabled: nativeOrdinaryBeltConnectionEnabled,
+      inventoryPickupEnabled: nativeEntityInventoryPickupEnabled,
+      inventoryDepositEnabled: nativeEntityInventoryDepositEnabled,
+      cargo: nativePlayerAuthorityOwnsRuntime
+        ? nativeEntityInventoryProjectionBinding?.inventory.cargo ?? null
+        : canvasGame.cargo,
       placement,
       placementCount,
       miningEntityId,
@@ -9686,9 +16500,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       researchLabel: technology?.name ?? null,
       researchCosts: technology?.costs.filter((cost) => (progress[cost.itemId] ?? 0) < cost.amount) ?? [],
       completedTechIds: canvasGame.research.completedTechIds,
-      paused: canvasGame.paused,
+      paused: nativePlayerAuthorityOwnsRuntime ? factoryRunStatusReadModel.paused : canvasGame.paused,
       powerDemandMultiplier: getDifficultyDefinition(canvasGame.settings.difficulty).powerDemandMultiplier,
-      solarGenerationMultiplier: getPlanetSolarPowerMultiplier(canvasGame, canvasGame.activePlanetId),
+      solarGenerationMultiplier: getPlanetSolarPowerMultiplier(canvasGame, factoryCanvasPlanetId),
       windGenerationMultiplier: planetProfile.windMultiplier,
       geothermalGenerationMultiplier: planetProfile.geothermalMultiplier,
       activeLogisticsEntityIds: beltNodeIndex.activeEntityIds,
@@ -9698,10 +16512,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationMultiplier: getEffectiveSimulationMultiplier(canvasGame),
       extremeVisuals: extremeVisualsActive,
     };
-  }, [beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, miningEntityId, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
+  }, [beltNodeIndex.activeEntityIds, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, factoryCanvasPlanetId, factoryRunStatusReadModel.paused, miningEntityId, nativeEntityInventoryDepositEnabled, nativeEntityInventoryPickupEnabled, nativeEntityInventoryProjectionBinding, nativeManualMiningEnabled, nativeOrdinaryBeltConnectionEnabled, nativePlayerAuthorityOwnsRuntime, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
 
   const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken([
-    canvasGame.activePlanetId,
+    factoryCanvasPlanetId,
+    factoryCanvasRows.source,
+    factoryCanvasRows.revision ?? "web",
     canvasRenderSnapshot.runtimeRevision,
     canvasRenderSnapshot.topologyRevision,
     canvasPresentationDetailStage,
@@ -9737,8 +16553,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     lineFindMode,
     lineFindTrace?.entityId ?? "",
     nextMobileShell,
-    game.settings.fontScale,
+    effectiveUiFontScale,
     extremeVisualsActive,
+    nativePlayerAuthorityOwnsRuntime,
+    nativeFactoryPositionWriteReady,
+    nativeOrdinaryBeltConnectionEnabled,
   ]);
   const appliedCanvasNodeSemanticRevisionTokenRef = useRef<string | null>(null);
 
@@ -9773,7 +16592,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           const selected = selectedEntityIdSet.has(entity.id);
           const interactionProtected = fullDetailCanvasNodeIds.has(entity.id);
           const alertActive = activeAlertEntityIds.has(entity.id);
-          const draggable = !placement && !blueprintPlacementId && !entity.interactionLocked;
+          const draggable = (!nativePlayerAuthorityOwnsRuntime || nativeFactoryPositionWriteReady) &&
+            !placement && !blueprintPlacementId && !entity.interactionLocked;
           const presentationVisible = canvasNodeIntersectsWorldRectangle({
             id: entity.id,
             x: entity.position.x,
@@ -9781,10 +16601,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             width: previous?.measured?.width,
             height: previous?.measured?.height,
           }, activeConnectionViewportBounds.enter);
-          const preserveMobileConstructionCenterDetail = nextMobileShell && game.settings.fontScale >= 2 && entity.buildingId === "construction_center";
+          const preserveMobileConstructionCenterDetail = nextMobileShell && effectiveUiFontScale >= 2 && entity.buildingId === "construction_center";
           const topologyStable = Boolean(previous && previous.type === entity.kind &&
             previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
             previous.data.entity.buildingId === entity.buildingId && previous.data.entity.resourceId === entity.resourceId);
+          const nativePresentation = factoryCanvasRows.nodePresentationByEntityId?.get(entity.id);
+          const nativePresentationSignature = nativePresentation
+            ? nativePresentation.supported
+              ? [
+                  "supported",
+                  nativePresentation.coverage,
+                  nativePresentation.status.code,
+                  nativePresentation.status.label,
+                  nativePresentation.status.tone,
+                  nativePresentation.powerFactor,
+                  nativePresentation.resourceReserve?.infinite ?? "",
+                  nativePresentation.resourceReserve?.exhausted ?? "",
+                  nativePresentation.resourceReserve?.remaining ?? "",
+                  nativePresentation.resourceReserve?.capacity ?? "",
+                  nativePresentation.resourceReserve?.remainingRatio ?? "",
+                  nativePresentation.resourceReserve?.remainingPercent ?? "",
+                  nativePresentation.outputCapacity,
+                  nativePresentation.cycleRatePerSecond,
+                  nativePresentation.acceptedInputItemIds.join(","),
+                  nativePresentation.producedOutputItemIds.join(","),
+                  nativePresentation.targetDysonOrbitLabel ?? "",
+                ].join("|")
+              : "unsupported"
+            : "web";
           const stackPresentation = canvasStackGrouping.byNodeId.get(entity.id) ?? {
             groupId: null,
             membershipToken: `${entity.id}:1`,
@@ -9803,7 +16647,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           const forceDynamicPresentation = interactionProtected || preserveMobileConstructionCenterDetail ||
             (canvasDetailPreference === "full" && canvasPresentationDetailStage !== "compact" && presentationVisible && !stackHidden && !stackMarker) ||
             Boolean(connectionDraft && connectExpandAll);
-          const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === canvasGame.activePlanetId);
+          const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === factoryCanvasPlanetId);
           const preserveInteractionVisibility = selected || interactionProtected;
           let focusClassName: string | undefined;
           let focusContextOnly = false;
@@ -9815,7 +16659,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           } else if (highlightedTaskId) {
             if (taskHighlight.entityIds.has(entity.id)) focusClassName = "factory-flow-node--task-focus";
             else focusContextOnly = true;
-          } else if (productionLineFocus?.planetId === canvasGame.activePlanetId) {
+          } else if (productionLineFocus?.planetId === factoryCanvasPlanetId) {
             if (locatedProductionEntityIds.has(entity.id)) focusClassName = "factory-flow-node--network-focus";
             else focusContextOnly = true;
           } else if (focusedBeltNetwork) {
@@ -9847,7 +16691,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           const nodeDraggable = draggable && !stackHidden && !stackMarker && !focusContextOnly;
           const nodeSelectable = !stackHidden && !stackMarker;
           const nodeFocusable = !stackHidden && !stackMarker;
-          const nodeConnectable = !stackHidden && !stackMarker;
+          const nodeConnectable = !stackHidden && !stackMarker && nativePresentation?.supported !== false;
           const hiddenWrapperStyle = stackHidden ? { pointerEvents: "none" as const } : undefined;
           const hiddenWrapperAttributes = stackHidden
             ? { "aria-hidden": true, "data-stack-hidden-wrapper": "true" }
@@ -9863,7 +16707,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             stackPresentation.halo ? "factory-flow-node--stack-halo" : undefined,
             focusClassName,
           ].filter(Boolean).join(" ");
+          const staticVisualSignature = [
+            "deferred",
+            entity.id,
+            entity.kind,
+            entity.buildingId ?? "",
+            entity.resourceId ?? "",
+            nativePresentationSignature,
+          ].join(":");
           const staticPresentationStable = Boolean(previous && topologyStable && previous.data.lod === "compact" &&
+            previous.data.visualSignature === staticVisualSignature &&
+            previous.data.readOnly === commonNodeData.readOnly &&
             previous.data.alertActive === staticAlertActive &&
             previous.draggable === nodeDraggable && previous.selectable === nodeSelectable &&
             previous.focusable === nodeFocusable && previous.connectable === nodeConnectable && previous.selected === selected &&
@@ -9885,10 +16739,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             const inputBeltCounts = beltNodeIndex.occupancy.input.get(entity.id) ?? previous?.data.inputBeltCounts ?? {};
             const outputBeltCounts = beltNodeIndex.occupancy.output.get(entity.id) ?? previous?.data.outputBeltCounts ?? {};
             const blackHolePortConnections = canvasTopology.targetPortItemsByEntity.get(entity.id) ?? previous?.data.blackHolePortConnections ?? {};
-            const acceptedInputItemIds = topologyStable && previous ? previous.data.acceptedInputItemIds : getAcceptedInputs(entity, canvasGame);
-            const producedOutputItemIds = topologyStable && previous ? previous.data.producedOutputItemIds : getProducedOutputs(entity);
+            const acceptedInputItemIds = nativePresentation
+              ? nativePresentation.supported ? nativePresentation.acceptedInputItemIds as readonly ItemId[] : []
+              : topologyStable && previous ? previous.data.acceptedInputItemIds : getAcceptedInputs(entity, canvasGame);
+            const producedOutputItemIds = nativePresentation
+              ? nativePresentation.supported ? nativePresentation.producedOutputItemIds as readonly ItemId[] : []
+              : topologyStable && previous ? previous.data.producedOutputItemIds : getProducedOutputs(entity);
             const stablePresentationVisible = previous?.data.lod === "compact" ? previous.data.presentationVisible : presentationVisible;
             const presentationSignature = ["static", entity.id, nodeDraggable, staticAlertActive, focusClassName,
+              nativePresentation?.supported ?? true,
               stackPresentation.groupId, stackPresentation.count, stackPresentation.hidden, stackPresentation.marker, stackPresentation.halo,
               stackPresentation.alertCount, stackPresentation.criticalAlertCount,
               stackGeometryHandlesRequired,
@@ -9909,21 +16768,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
                 previous.data.stackMarker === stackPresentation.marker ? previous.measured : undefined,
               data: {
                 ...commonNodeData,
-                visualSignature: `deferred:${entity.id}:${entity.kind}:${entity.buildingId ?? ""}:${entity.resourceId ?? ""}`,
+                visualSignature: staticVisualSignature,
                 presentationSignature,
+                semanticSupported: nativePresentation?.supported ?? true,
                 entity,
                 connectedInputItemIds,
                 inputBeltCounts,
                 outputBeltCounts,
                 blackHolePortConnections,
-                targetDysonOrbitLabel: previous?.data.targetDysonOrbitLabel,
-                powerFactor: previous?.data.powerFactor ?? 0,
-                resourceReserve: previous?.data.resourceReserve ?? null,
+                targetDysonOrbitLabel: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.targetDysonOrbitLabel ?? undefined : undefined
+                  : previous?.data.targetDysonOrbitLabel,
+                powerFactor: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.powerFactor : 0
+                  : previous?.data.powerFactor ?? 0,
+                resourceReserve: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.resourceReserve : null
+                  : previous?.data.resourceReserve ?? null,
                 status: staticAlertActive
                   ? { code: "idle", label: `重叠组内 ${stackPresentation.alertCount} 个生产告警`, tone: "warning" }
-                  : previous?.data.status ?? { code: "idle", label: stablePresentationVisible ? "密集视口简化" : "视口外简化", tone: "idle" },
-                outputCapacity: previous?.data.outputCapacity ?? 0,
-                cycleRatePerSecond: previous?.data.cycleRatePerSecond ?? 0,
+                  : nativePresentation
+                    ? nativePresentation.supported ? nativePresentation.status : {
+                        code: "unconfigured" as const,
+                        label: "原生语义暂不支持",
+                        tone: "idle" as const,
+                      }
+                    : previous?.data.status ?? { code: "idle", label: stablePresentationVisible ? "密集视口简化" : "视口外简化", tone: "idle" },
+                outputCapacity: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.outputCapacity : 0
+                  : previous?.data.outputCapacity ?? 0,
+                cycleRatePerSecond: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.cycleRatePerSecond : 0
+                  : previous?.data.cycleRatePerSecond ?? 0,
                 lod: "compact",
                 dynamicEffects: false,
                 presentationVisible: stablePresentationVisible,
@@ -9956,17 +16832,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             } satisfies FactoryFlowNode;
           }
           dynamicNodeCount += 1;
-          const ejectorTarget = entity.buildingId === "em_rail_ejector" ? getEjectorOrbitTargetStatus(canvasGame, entity) : null;
+          const ejectorTarget = !nativePresentation && entity.buildingId === "em_rail_ejector"
+            ? getEjectorOrbitTargetStatus(canvasGame, entity)
+            : null;
           const connectedInputItemIds = beltNodeIndex.connectedInputsByTarget.get(entity.id) ?? [];
           const inputBeltCounts = beltNodeIndex.occupancy.input.get(entity.id) ?? {};
           const outputBeltCounts = beltNodeIndex.occupancy.output.get(entity.id) ?? {};
           const blackHolePortConnections = canvasTopology.targetPortItemsByEntity.get(entity.id) ?? {};
-          const targetDysonOrbitLabel = ejectorTarget?.valid ? `轨道：${ejectorTarget.orbit!.name}` : ejectorTarget ? "轨道失效" : undefined;
-          const powerFactor = getEntityPowerFactor(canvasGame, entity, canvasDisplayLookup);
-          const resourceReserve = getResourceReserveSnapshot(canvasGame, entity);
-          const status = getEntityOperatingStatus(canvasGame, entity, canvasDisplayLookup);
-          const outputCapacity = getEntityOutputCapacity(canvasGame, entity);
-          const cycleRatePerSecond = getEntityCycleRatePerSimulationSecond(canvasGame, entity, canvasDisplayLookup);
+          const targetDysonOrbitLabel = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.targetDysonOrbitLabel ?? undefined : undefined
+            : ejectorTarget?.valid ? `轨道：${ejectorTarget.orbit!.name}` : ejectorTarget ? "轨道失效" : undefined;
+          const powerFactor = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.powerFactor : 0
+            : getEntityPowerFactor(canvasGame, entity, canvasDisplayLookup);
+          const resourceReserve = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.resourceReserve : null
+            : getResourceReserveSnapshot(canvasGame, entity);
+          const status = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.status : {
+                code: "unconfigured" as const,
+                label: "原生语义暂不支持",
+                tone: "idle" as const,
+              }
+            : getEntityOperatingStatus(canvasGame, entity, canvasDisplayLookup);
+          const outputCapacity = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.outputCapacity : 0
+            : getEntityOutputCapacity(canvasGame, entity);
+          const cycleRatePerSecond = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.cycleRatePerSecond : 0
+            : getEntityCycleRatePerSimulationSecond(canvasGame, entity, canvasDisplayLookup);
           const connectionViewportFull = Boolean(connectionDraft) && nodeIsInsideConnectionViewport({
             x: entity.position.x,
             y: entity.position.y,
@@ -9993,14 +16887,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               ? "full"
               : canvasPresentationDetailStage;
           const dynamicEffects = lod === "full" && canvasPresentationDetailStage === "full" && !stackPresentation.hidden;
-          const nodeConnectionDraft = connectionPresentation.exposeConnectionDraft ? connectionDraft : null;
-          const acceptedInputItemIds = getAcceptedInputs(entity, canvasGame);
-          const producedOutputItemIds = getProducedOutputs(entity);
+          const nodeConnectionDraft = nativePresentation?.supported === false
+            ? null
+            : connectionPresentation.exposeConnectionDraft ? connectionDraft : null;
+          const acceptedInputItemIds = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.acceptedInputItemIds as readonly ItemId[] : []
+            : getAcceptedInputs(entity, canvasGame);
+          const producedOutputItemIds = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.producedOutputItemIds as readonly ItemId[] : []
+            : getProducedOutputs(entity);
           const connectionClassName = nodeConnectionDraft
             ? entity.id === nodeConnectionDraft.nodeId
               ? "factory-flow-node--connection-origin"
               : nodeConnectionDraft.handleType === "source"
-                ? nodeConnectionDraft.itemId && canEntityAcceptBeltItem(canvasGame, entity, nodeConnectionDraft.itemId)
+                ? nodeConnectionDraft.itemId && (nativePresentation
+                  ? nativePresentation.supported && acceptedInputItemIds.includes(nodeConnectionDraft.itemId)
+                  : canEntityAcceptBeltItem(canvasGame, entity, nodeConnectionDraft.itemId))
                   ? "factory-flow-node--connection-candidate"
                   : undefined
                 : nodeConnectionDraft.itemId === null
@@ -10031,7 +16933,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             status,
             outputCapacity,
             cycleRatePerSecond,
-            lod === "full" ? commonNodeData.cargo : null,
+            lod === "full" ? JSON.stringify(commonNodeData.cargo) : null,
+            lod === "full" ? commonNodeData.inventoryPickupEnabled : null,
+            lod === "full" ? commonNodeData.manualMiningEnabled : null,
             lod === "full" ? commonNodeData.placement : null,
             lod === "full" ? commonNodeData.placementCount : null,
             lod === "full" && commonNodeData.miningEntityId === entity.id,
@@ -10050,6 +16954,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           ].join("|");
           const presentationSignature = [
             getNodeConnectionPresentationToken(nodeConnectionDraft, entity.id, connectionPresentation.exposeConnectionDraft),
+            nativePresentation?.supported ?? true,
             selected,
             className,
             draggable,
@@ -10068,6 +16973,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             stackPresentation.membershipToken,
           ].join("|");
           if (previous?.data.visualSignature === visualSignature && previous.data.presentationSignature === presentationSignature &&
+            previous.data.readOnly === commonNodeData.readOnly &&
+            previous.data.manualMiningEnabled === commonNodeData.manualMiningEnabled &&
+            previous.data.inventoryPickupEnabled === commonNodeData.inventoryPickupEnabled &&
             previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
             previous.selected === selected && previous.className === className && previous.draggable === nodeDraggable &&
             previous.selectable === nodeSelectable && previous.focusable === nodeFocusable && previous.connectable === nodeConnectable &&
@@ -10090,6 +16998,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               ...commonNodeData,
               visualSignature,
               presentationSignature,
+              semanticSupported: nativePresentation?.supported ?? true,
               entity,
               connectedInputItemIds,
               inputBeltCounts,
@@ -10145,7 +17054,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           canvasElement.dataset.changedNodeCount = String(changedNodeCount);
           canvasElement.dataset.stackMembershipTokenCompareCount = String(stackMembershipTokenCompareCount);
           canvasElement.dataset.stackMemberIdReferenceCount = String(stackMemberIdReferenceCount);
-          canvasElement.dataset.projectionRuntimeRevision = String(canvasRenderSnapshot.runtimeRevision);
+          canvasElement.dataset.projectionRuntimeRevision = String(
+            factoryCanvasRows.revision ?? canvasRenderSnapshot.runtimeRevision,
+          );
         }
         if (performanceMonitor.isActive()) {
           performanceMonitor.recordCanvas({
@@ -10165,7 +17076,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, effectiveUiFontScale, factoryCanvasRows.nodePresentationByEntityId, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nativeFactoryPositionWriteReady, nativePlayerAuthorityOwnsRuntime, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   useLayoutEffect(() => {
     const startedAt = canvasNodeCommitStartedAtRef.current;
@@ -10200,7 +17111,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       connectionHandleSpatialIndexRef.current = buildConnectionHandleSpatialIndex(viewportRef.current);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision, connectionGeometryToken, viewportZoom]);
+  }, [canvasRenderSnapshot.topologyRevision, connectionGeometryToken, factoryCanvasPlanetId, viewportZoom]);
 
   const edgeRouteCenters = useMemo(() => {
     if (nodeDragActiveRef.current && edgeRouteCacheRef.current) return edgeRouteCacheRef.current.centers;
@@ -10252,12 +17163,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const item = ITEMS[belt.itemId];
       const capacity = getBeltCapacity(belt);
       const bundle = beltBundleMap.get(belt.id) ?? { index: 0, size: 1 };
-      const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === canvasGame.activePlanetId);
+      const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === factoryCanvasPlanetId);
       const focusTone = lineTraceActive
         ? lineFindUpstreamBeltIds.has(belt.id) ? "line-upstream" : lineFindDownstreamBeltIds.has(belt.id) ? "line-downstream" : "line-dim"
         : highlightedTaskId
         ? taskHighlight.beltIds.has(belt.id) ? "focus" : "dim"
-        : productionLineFocus?.planetId === canvasGame.activePlanetId
+        : productionLineFocus?.planetId === factoryCanvasPlanetId
           ? locatedProductionBeltIds.has(belt.id) ? "focus" : "dim"
         : focusedBeltNetwork
           ? focusedNetworkBeltIds.has(belt.id) ? "focus" : "dim"
@@ -10381,14 +17292,50 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     });
   }, [activePlanetBelts.length, canvasBatchRendererEnabled, canvasRenderSnapshot.runtimeRevision, canvasRenderSnapshot.topologyRevision, edges, endgameExtremeMode, nodes, performanceMonitor.recordCanvas, performanceMonitor.snapshot.active, productionRefreshIntervalMs, projectionFeatureActive]);
 
+  const getFactoryConnectionReadState = useCallback((
+    sourceEntityId: string | null | undefined,
+    targetEntityId: string | null | undefined,
+  ): GameState | null => {
+    const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current &&
+      (!frame || !sourceEntityId || !targetEntityId ||
+        !frame.entityById.has(sourceEntityId) || !frame.entityById.has(targetEntityId))) return null;
+    const result = selectFactoryConnectionReadState(
+      gameRef.current,
+      frame,
+      {
+        sessionId: frame?.sessionId ?? nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+        revision: frame?.revision ?? factoryThinViewExpectedRevision,
+        planetId: frame?.planetId ?? gameRef.current.activePlanetId,
+      },
+      sourceEntityId,
+      targetEntityId,
+    );
+    // The selector intentionally supports a Web fallback for PWA/shadow use.
+    // A native owner may only receive the endpoint-closed Rust frame.
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && frame && result.entities !== frame.entities) return null;
+    return result;
+  }, [factoryThinViewExpectedRevision, nativePlayerAuthorityActiveFrame?.sessionId]);
   const isValidConnection = useCallback((connection: Connection | Edge) => {
     const sourceItem = parseHandleItem(connection.sourceHandle);
     const targetItem = parseHandleItem(connection.targetHandle);
     if (!connection.source || !connection.target || connection.source === connection.target ||
       !sourceItem || (!isUniversalInputHandle(connection.targetHandle) && sourceItem !== targetItem)) return false;
-    const state = gameRef.current;
+    const state = getFactoryConnectionReadState(connection.source, connection.target);
+    if (!state) return false;
     const source = state.entities.find((entity) => entity.id === connection.source);
     const target = state.entities.find((entity) => entity.id === connection.target);
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (!nativeOrdinaryBeltConnectionEnabled || !nativeBeltPlacementTierRef.current ||
+          !connection.sourceHandle?.startsWith("out:") || !connection.targetHandle?.startsWith("in:") ||
+          isUniversalInputHandle(connection.targetHandle) || parseTargetPortIndex(connection.targetHandle) !== undefined) return false;
+      const matchingEndpoint = state.belts.some((candidate) =>
+        candidate.source === connection.source && candidate.target === connection.target &&
+        candidate.itemId === sourceItem);
+      return Boolean(source && target && !source.interactionLocked && !target.interactionLocked &&
+        source.planetId === target.planetId && source.planetId === nativeFactoryProjectionPlanetId &&
+        getProducedOutputs(source).includes(sourceItem) && targetItem === sourceItem && !matchingEndpoint);
+    }
     const draft = connectionDraftRef.current;
     const tier = draft?.tier ?? resolveConnectionBeltTier(state, beltTierMode, beltTier, connection.source, sourceItem);
     const constructionId = getBeltConstructionId(tier);
@@ -10399,13 +17346,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       (!existing || existing.tier === tier) &&
       canConnectBelt(state, connection.source, connection.target, sourceItem, tier, parseTargetPortIndex(connection.targetHandle), requestedLanes) &&
       (state.construction[constructionId] ?? 0) >= requestedLanes);
-  }, [beltTier, beltTierMode]);
+  }, [beltTier, beltTierMode, getFactoryConnectionReadState, nativeFactoryProjectionPlanetId, nativeOrdinaryBeltConnectionEnabled]);
 
   const beginConnectionDraft = useCallback((params: OnConnectStartParams): ConnectionDraft | null => {
     const itemId = parseHandleItem(params.handleId);
     const universalPort = parseTargetPortIndex(params.handleId);
     if (!params.nodeId || !params.handleType || !params.handleId || (!itemId && universalPort === undefined)) return null;
-    const tier = resolveConnectionBeltTier(gameRef.current, beltTierMode, beltTier, params.nodeId, itemId ?? undefined);
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const tier = nativeBeltPlacementTierRef.current;
+      if (!nativeOrdinaryBeltConnectionEnabled || !tier || !itemId || universalPort !== undefined ||
+          (params.handleType === "source" && !params.handleId.startsWith("out:")) ||
+          (params.handleType === "target" && !params.handleId.startsWith("in:"))) return null;
+      const draft = { nodeId: params.nodeId, handleId: params.handleId, itemId, handleType: params.handleType, tier } satisfies ConnectionDraft;
+      updateConnectionDraft(draft);
+      setConnectionHint({
+        label: `${ITEMS[itemId]?.name ?? itemId} · Rust 已锁定 Mk.${tier === 3 ? "III" : tier === 2 ? "II" : "I"} · 只建立一条普通线路`,
+        tone: "ready",
+      });
+      return draft;
+    }
+    const readState = getFactoryConnectionReadState(params.nodeId, params.nodeId);
+    if (!readState) return null;
+    const tier = resolveConnectionBeltTier(readState, beltTierMode, beltTier, params.nodeId, itemId ?? undefined);
     const draft = { nodeId: params.nodeId, handleId: params.handleId, itemId, handleType: params.handleType, tier } satisfies ConnectionDraft;
     updateConnectionDraft(draft);
     const universalLabel = params.handleId.startsWith("in:delivery:")
@@ -10418,7 +17380,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       tone: "ready",
     });
     return draft;
-  }, [beltTier, beltTierMode, updateConnectionDraft]);
+  }, [beltTier, beltTierMode, getFactoryConnectionReadState, nativeOrdinaryBeltConnectionEnabled, updateConnectionDraft]);
 
   const onConnectStart = useCallback((event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
     if (clickConnectionPreviewRef.current) return;
@@ -10498,6 +17460,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const activePreview = clickConnectionPreviewRef.current;
     const selectedHandle = getConnectionHandleTarget(event.target);
     const modifierContinuous = event instanceof MouseEvent && (event.ctrlKey || event.shiftKey);
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (activePreview && (batchConnectionModeRef.current || modifierContinuous) && selectedHandle &&
+          selectedHandle.handleType !== activePreview.draft.handleType) {
+        if (modifierContinuous) activateBatchConnectionMode();
+        return;
+      }
+      if (modifierContinuous) activateBatchConnectionMode();
+      if (activePreview) return;
+      const draft = beginConnectionDraft(params);
+      if (!draft || !selectedHandle) return;
+      startClickConnectionPreview(draft, selectedHandle);
+      return;
+    }
     // React Flow reports every handle click as a possible new connection
     // start. In continuous mode, a compatible opposite handle is another
     // target for the existing source and must not replace that source draft.
@@ -10513,7 +17488,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [activateBatchConnectionMode, beginConnectionDraft, startClickConnectionPreview]);
 
   const longPressBindings = useLongPress<HTMLElement>({
+    disabled: nativeFactoryRouteUnsafe,
+    // Simulation revisions may advance faster than the 520 ms gesture. Only a
+    // route/session identity change or a genuinely unsafe transition cancels it.
+    resetKey: factoryGestureRouteKey,
     getTarget: (event) => {
+      if (nativeFactoryProjectionPendingRef.current) return null;
       if (!coarsePointer || placement || blueprintPlacementId) return null;
       const handle = getConnectionHandleTarget(event.target);
       if (handle?.handleType === "source") return encodeLongPressConnectionTarget(handle);
@@ -10521,6 +17501,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return element?.dataset.id ?? null;
     },
     onLongPress: (targetId) => {
+      if (nativeFactoryProjectionPendingRef.current) return;
       const connectionTarget = decodeLongPressConnectionTarget(targetId);
       if (connectionTarget) {
         const element = [...document.querySelectorAll<HTMLElement>(".factory-canvas .react-flow__handle.source")]
@@ -10576,9 +17557,41 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [clearConnectionPreview]);
 
   const confirmBatchConnection = useCallback(() => {
+    if (nativeFactoryProjectionPendingRef.current) {
+      setBatchConnectionFeedback("原生工厂投影正在刷新，请稍后确认");
+      return;
+    }
     const selections = batchConnectionsRef.current;
     if (selections.length < 1) {
       setBatchConnectionFeedback("尚未选择下游输入接口");
+      return;
+    }
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      if (!frame || nativePlayerAuthorityCommandInFlightRef.current) {
+        setBatchConnectionFeedback("Windows 原生权威正在确认上一项操作，请稍后重试");
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+        createNativeFactoryBeltBatchCommand(baseRevision, selections.map((selection) => ({
+          sourceId: selection.connection.source!,
+          targetId: selection.connection.target!,
+          itemId: selection.itemId,
+          tier: selection.tier,
+          lanes: defaultBeltLanesRef.current,
+        }))),
+        () => {
+          const count = selections.length;
+          const consumed = count * defaultBeltLanesRef.current;
+          clearConnectionPreview(false);
+          recordBasicOnboardingEvent("belt-connected");
+          trackAnalyticsEvent("belt_connect");
+          setNotice(`连续拉线已由 Rust 原子提交：${count} 条，消耗传送带 ${consumed}`);
+          playTone("connect");
+        },
+        () => setBatchConnectionFeedback("Rust 拒绝了整批线路；候选、库存和存档均未改变"),
+      );
+      if (accepted) setBatchConnectionFeedback("正在由 Rust 原子核对全部端点、科技与施工库存…");
       return;
     }
     const before = gameRef.current;
@@ -10601,9 +17614,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     if (!commitGame(() => result.state)) return;
+    const committedBeltIds = [...result.beltIds];
+    const primaryBeltId = committedBeltIds.length === 1 ? committedBeltIds[0] : null;
+    // The controlled React Flow edges arrive one effect after the new game
+    // revision. Publish their intended selection to the synchronous refs first
+    // so the old store's transient empty callback cannot erase it.
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = primaryBeltId;
+    selectedBeltIdsRef.current = committedBeltIds;
     setSelectedEntityIds([]);
-    setSelectedBeltId(result.beltIds.at(-1) ?? null);
-    setSelectedBeltIds(result.beltIds);
+    setSelectedBeltId(primaryBeltId);
+    setSelectedBeltIds(committedBeltIds);
     setInspectorTab("inspect");
     setRightSidebarCollapsed(false);
     const consumed = selections.reduce((sum, selection) => sum + defaultBeltLanesRef.current, 0);
@@ -10612,7 +17633,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     trackAnalyticsEvent("belt_connect");
     setNotice(`连续拉线已原子提交：成功 ${result.created}，跳过 0，消耗传送带 ${consumed}`);
     playTone("connect");
-  }, [clearConnectionPreview, commitGame, playTone]);
+  }, [clearConnectionPreview, commitGame, commitNativeProjectedCommand, playTone]);
 
   useEffect(() => { confirmBatchConnectionRef.current = confirmBatchConnection; }, [confirmBatchConnection]);
   useEffect(() => { cancelBatchConnectionRef.current = cancelBatchConnection; }, [cancelBatchConnection]);
@@ -10642,8 +17663,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (duplicate) {
       return reject("该目标接口已在预览列表中，未重复加入");
     }
+    if (batchConnectionsRef.current.length >= 1_024) return reject("连续拉线单次最多选择 1024 条线路");
     const current = gameRef.current;
-    const check = getBeltConnectionCheck(current, connection.source, connection.target, itemId, draft.tier, targetPortIndex, defaultBeltLanesRef.current);
+    const readState = getFactoryConnectionReadState(connection.source, connection.target);
+    if (!readState) return reject("原生工厂投影尚未确认当前星球，请稍后重试");
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (targetPortIndex !== undefined || !isValidConnection(connection)) {
+        return reject("Windows 原生批量拉线当前只接受普通输入端口");
+      }
+      const next = [...batchConnectionsRef.current, { connection, itemId, tier: draft.tier }];
+      batchConnectionsRef.current = next;
+      setBatchConnections(next);
+      setBatchConnectionFailures([]);
+      setBatchConnectionFeedback(null);
+      setConnectionHint({ label: `${ITEMS[itemId]?.name ?? itemId} · 已选 ${next.length} 个下游；继续点选，Enter 或“确认连接”提交`, tone: "ready" });
+      return true;
+    }
+    const check = getBeltConnectionCheck(readState, connection.source, connection.target, itemId, draft.tier, targetPortIndex, defaultBeltLanesRef.current);
     if (!check.ok) return reject(check.label);
     if (!isValidConnection(connection)) return reject("当前端口、线路等级或并联设置不兼容");
     const request = {
@@ -10691,7 +17727,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setBatchConnectionFeedback(null);
     setConnectionHint({ label: `${ITEMS[itemId].name} · 已选 ${next.length} 个下游；继续点选，Enter 或“确认连接”提交`, tone: "ready" });
     return true;
-  }, [isValidConnection]);
+  }, [getFactoryConnectionReadState, isValidConnection]);
 
   const handleCanvasPointerPosition = useCallback((point: { x: number; y: number }) => {
     pointerRef.current = point;
@@ -10728,23 +17764,61 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setClickConnectionSnapPoint((current) => current && Math.abs(current.x - snapPoint.x) < 0.5 && Math.abs(current.y - snapPoint.y) < 0.5 ? current : snapPoint);
     const connection = connectionFromDraft(preview.draft, handle);
     const connectionItem = parseHandleItem(connection.sourceHandle) ?? preview.draft.itemId;
+    const readState = getFactoryConnectionReadState(connection.source, connection.target);
+    if (!readState) {
+      setConnectionHint({ label: "正在等待原生工厂投影，暂不能校验端口", tone: "blocked" });
+      return;
+    }
     if (tone !== "valid" || !connection.source || !connection.target) {
       const check = connection.source && connection.target && connectionItem
-        ? getBeltConnectionCheck(gameRef.current, connection.source, connection.target, connectionItem, preview.draft.tier,
+        ? getBeltConnectionCheck(readState, connection.source, connection.target, connectionItem, preview.draft.tier,
           parseTargetPortIndex(connection.targetHandle), defaultBeltLanesRef.current)
         : null;
       setConnectionHint({ label: check && !check.ok ? check.label : "当前端口不可连接", tone: "blocked" });
       return;
     }
     if (!connectionItem) return;
-    const forecast = predictBeltConnection(gameRef.current, connection.source, connection.target, connectionItem, preview.draft.tier, defaultBeltLanesRef.current);
+    const forecast = predictBeltConnection(readState, connection.source, connection.target, connectionItem, preview.draft.tier, defaultBeltLanesRef.current);
     setConnectionHint({
       label: forecast ? `${ITEMS[connectionItem].name} · ${forecast.label}` : `${ITEMS[connectionItem].name} · 可以连接`,
       tone: forecast?.tone === "capacity" || forecast?.tone === "starved" ? "blocked" : "ready",
     });
-  }, [connectionHitRadius, isValidConnection, updateConnectionCandidateNode]);
+  }, [connectionHitRadius, getFactoryConnectionReadState, isValidConnection, updateConnectionCandidateNode]);
 
   const onConnectEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const endPoint = getEventPoint(event);
+      const draft = connectionDraftRef.current ?? connectionDraft;
+      const releaseHandle = getConnectionHandleTarget(event.target) ?? (endPoint ? findConnectionHandleAtPoint(
+        endPoint.x,
+        endPoint.y,
+        connectionHitRadius,
+        draft ? (candidate) => isValidConnection(connectionFromDraft(draft, candidate)) : undefined,
+        connectionHandleSpatialIndexRef.current,
+      ) : null);
+      if (state.isValid && clickConnectionSucceededRef.current) {
+        clickConnectionSucceededRef.current = false;
+        updateConnectionDraft(null);
+        setClickConnectionSnapPoint(null);
+        setConnectionHint({ label: "线路请求已交给 Rust，正在核对并持久化…", tone: "ready" });
+        return;
+      }
+      if (draft && releaseHandle) {
+        const snappedConnection = connectionFromDraft(draft, releaseHandle);
+        if (isValidConnection(snappedConnection) && connectRequestRef.current(snappedConnection, draft.tier)) {
+          clickConnectionSucceededRef.current = false;
+          updateConnectionDraft(null);
+          setClickConnectionSnapPoint(null);
+          setConnectionHint({ label: "线路请求已交给 Rust，正在核对并持久化…", tone: "ready" });
+          return;
+        }
+      }
+      clearConnectionPreview(false);
+      setNotice(releaseHandle
+        ? "原生线路未提交：只支持同物品的普通输出端口到普通输入端口"
+        : "已取消运输线连接");
+      return;
+    }
     const endPoint = getEventPoint(event);
     const draft = connectionDraftRef.current ?? connectionDraft;
     const releaseHandle = getConnectionHandleTarget(event.target) ?? (endPoint ? findConnectionHandleAtPoint(
@@ -10791,9 +17865,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const sourceId = fromType === "source" ? fromNodeId : toNodeId;
     const targetId = fromType === "target" ? fromNodeId : toNodeId;
     const current = gameRef.current;
-    const lockedTier = draft?.tier ?? resolveConnectionBeltTier(current, beltTierMode, beltTier, fromNodeId, fromItem ?? undefined);
-    const source = sourceId ? current.entities.find((entity) => entity.id === sourceId) : undefined;
-    const target = targetId ? current.entities.find((entity) => entity.id === targetId) : undefined;
+    const readState = getFactoryConnectionReadState(sourceId, targetId);
+    if (!readState) {
+      setNotice("原生工厂投影尚未确认当前星球，运输线未建立");
+      setConnectionHint({ label: "正在等待原生工厂投影", tone: "blocked" });
+      return;
+    }
+    const lockedTier = draft?.tier ?? resolveConnectionBeltTier(readState, beltTierMode, beltTier, fromNodeId, fromItem ?? undefined);
+    const source = sourceId ? readState.entities.find((entity) => entity.id === sourceId) : undefined;
+    const target = targetId ? readState.entities.find((entity) => entity.id === targetId) : undefined;
     let label = "请释放到设备的同色输入端口";
     if (state.toNode && state.fromNode?.id === state.toNode.id) label = "设备不能连接到自身";
     else if (state.toHandle && !isUniversalInputHandle(state.toHandle.id) && fromItem !== toItem) label = `物品不兼容：需要${fromItem ? ITEMS[fromItem].name : "同一种物品"}`;
@@ -10803,10 +17883,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     else if (source.planetId !== target.planetId) label = "两端必须位于同一行星";
     else if (!fromItem || !getProducedOutputs(source).includes(fromItem)) label = `${fromItem ? ITEMS[fromItem].name : "该物品"}不是当前输出`;
     else {
-      const existing = current.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === fromItem);
+      const existing = readState.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === fromItem);
       if (existing && existing.tier !== lockedTier) label = `已有并行线路使用 Mk.${existing.tier === 3 ? "III" : existing.tier === 2 ? "II" : "I"}，请手动指定同级传送带`;
       else {
-        const check = getBeltConnectionCheck(current, source.id, target.id, fromItem, lockedTier, parseTargetPortIndex(state.toHandle?.id), defaultBeltLanesRef.current);
+        const check = getBeltConnectionCheck(readState, source.id, target.id, fromItem, lockedTier, parseTargetPortIndex(state.toHandle?.id), defaultBeltLanesRef.current);
         if (!check.ok) label = check.label;
       }
     }
@@ -10814,9 +17894,55 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setConnectionHint({ label, tone: "blocked" });
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "连接失败", "warning");
     playTone("alert");
-  }, [beltTier, beltTierMode, coarsePointer, connectionDraft, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+  }, [beltTier, beltTierMode, clearConnectionPreview, coarsePointer, connectionDraft, connectionHitRadius, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
 
   const onClickConnectEnd = useCallback((event: MouseEvent | TouchEvent) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const preview = clickConnectionPreviewRef.current;
+      if (!preview) return;
+      const point = getEventPoint(event);
+      const targetHandle = getConnectionHandleTarget(event.target) ?? (point ? findConnectionHandleAtPoint(
+        point.x,
+        point.y,
+        connectionHitRadius,
+        (candidate) => isValidConnection(connectionFromDraft(preview.draft, candidate)),
+        connectionHandleSpatialIndexRef.current,
+      ) : null);
+      const connection = targetHandle ? connectionFromDraft(preview.draft, targetHandle) : null;
+      const modifierContinuous = event instanceof MouseEvent && (event.ctrlKey || event.shiftKey);
+      const continuous = batchConnectionModeRef.current || modifierContinuous;
+      if (continuous) {
+        if (modifierContinuous) activateBatchConnectionMode();
+        if (clickConnectionSucceededRef.current) {
+          clickConnectionSucceededRef.current = false;
+          setClickConnectionTone("pending");
+          setClickConnectionSnapPoint(null);
+        } else if (connection) {
+          addBatchConnection(connection, preview.draft);
+        }
+        return;
+      }
+      let accepted = clickConnectionSucceededRef.current;
+      if (!accepted && connection && isValidConnection(connection)) {
+        accepted = connectRequestRef.current(connection, preview.draft.tier);
+      }
+      clickConnectionPreviewRef.current = null;
+      clickConnectionSucceededRef.current = false;
+      setClickConnectionPreview(null);
+      setClickConnectionTone("pending");
+      setClickConnectionSnapPoint(null);
+      updateConnectionDraft(null);
+      if (accepted) {
+        setConnectionHint({ label: "线路请求已交给 Rust，正在核对并持久化…", tone: "ready" });
+      } else if (targetHandle) {
+        setNotice("原生线路未提交：只支持同物品的普通输出端口到普通输入端口");
+        setConnectionHint({ label: "当前端口不属于 Rust 普通线路范围", tone: "blocked" });
+      } else {
+        setConnectionHint(null);
+        setNotice("已取消运输线连接");
+      }
+      return;
+    }
     const preview = clickConnectionPreviewRef.current;
     if (!preview) return;
     const point = getEventPoint(event);
@@ -10870,8 +17996,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
     const current = gameRef.current;
     const sourceItem = parseHandleItem(connection?.sourceHandle) ?? preview.draft.itemId;
-    const source = connection?.source ? current.entities.find((entity) => entity.id === connection.source) : undefined;
-    const target = connection?.target ? current.entities.find((entity) => entity.id === connection.target) : undefined;
+    const readState = getFactoryConnectionReadState(connection?.source, connection?.target);
+    if (!readState) {
+      setNotice("原生工厂投影尚未确认当前星球，运输线未建立");
+      setConnectionHint({ label: "正在等待原生工厂投影", tone: "blocked" });
+      return;
+    }
+    const source = connection?.source ? readState.entities.find((entity) => entity.id === connection.source) : undefined;
+    const target = connection?.target ? readState.entities.find((entity) => entity.id === connection.target) : undefined;
     let label = "请选择设备的高亮端口";
     if (targetHandle?.handleType === preview.draft.handleType) label = "输出端口必须连接输入端口";
     else if (connection?.source === connection?.target) label = "设备不能连接到自身";
@@ -10882,11 +18014,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     else if (!sourceItem || !getProducedOutputs(source).includes(sourceItem)) label = `${sourceItem ? ITEMS[sourceItem].name : "该物品"}不是当前输出`;
     else {
       const targetPortIndex = parseTargetPortIndex(connection?.targetHandle);
-      const existing = current.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === sourceItem &&
+      const existing = readState.belts.find((belt) => belt.source === source.id && belt.target === target.id && belt.itemId === sourceItem &&
         belt.targetPortIndex === targetPortIndex);
       if (existing && existing.tier !== preview.draft.tier) label = `已有并行线路使用 Mk.${existing.tier === 3 ? "III" : existing.tier === 2 ? "II" : "I"}，请手动指定同级传送带`;
       else {
-        const check = getBeltConnectionCheck(current, source.id, target.id, sourceItem!, preview.draft.tier, targetPortIndex, defaultBeltLanesRef.current);
+        const check = getBeltConnectionCheck(readState, source.id, target.id, sourceItem!, preview.draft.tier, targetPortIndex, defaultBeltLanesRef.current);
         if (!check.ok) label = check.label;
       }
     }
@@ -10894,9 +18026,115 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setConnectionHint({ label, tone: "blocked" });
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "连接失败", "warning");
     playTone("alert");
-  }, [activateBatchConnectionMode, addBatchConnection, coarsePointer, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+  }, [activateBatchConnectionMode, addBatchConnection, clearConnectionPreview, coarsePointer, connectionHitRadius, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+
+  const requestNativeOrdinaryBeltPlacement = useCallback((connection: Connection, lockedTier?: BeltTier): boolean => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativeBeltPlacementContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次线路未提交");
+      return false;
+    }
+    const identity = nativeFactoryInventoryIdentity;
+    const selectedTier = nativeBeltPlacementTierRef.current;
+    const requestedTier = lockedTier ?? connectionDraftRef.current?.tier ?? selectedTier;
+    const sourceItem = parseHandleItem(connection.sourceHandle);
+    const targetItem = parseHandleItem(connection.targetHandle);
+    const lanes = defaultBeltLanesRef.current;
+    if (!identity || !selectedTier || requestedTier !== selectedTier ||
+        !connection.source || !connection.target || connection.source === connection.target ||
+        !sourceItem || sourceItem !== targetItem || !connection.sourceHandle?.startsWith("out:") ||
+        !connection.targetHandle?.startsWith("in:") || isUniversalInputHandle(connection.targetHandle) ||
+        parseTargetPortIndex(connection.targetHandle) !== undefined ||
+        !Number.isSafeInteger(lanes) || lanes < 1 || lanes > 4096 || !isValidConnection(connection)) {
+      setNotice("原生线路只接受同一物品的普通输出端口到普通输入端口；本次线路未提交");
+      return false;
+    }
+    const generation = nativeBeltPlacementRequestGenerationRef.current + 1;
+    nativeBeltPlacementRequestGenerationRef.current = generation;
+    nativeBeltPlacementContextPendingRef.current = true;
+    setNativeBeltPlacementContextPending(true);
+    void (async () => {
+      try {
+        const context = await readVerifiedNativeConstructionBeltPlacementContext(
+          desktopBridge,
+          identity,
+          {
+            sourceId: connection.source!,
+            targetId: connection.target!,
+            itemId: sourceItem,
+            tier: requestedTier,
+            lanes,
+          },
+        );
+        if (nativeBeltPlacementRequestGenerationRef.current !== generation ||
+            nativeBeltPlacementTierRef.current !== selectedTier || !nativePlayerAuthorityOwnsRuntimeRef.current) return;
+        if (!context) {
+          setNotice("没有取得同一 revision 的 Rust 拉线凭证；存档和施工库存均未改变，请重试");
+          return;
+        }
+        if (!context.support.supported || !context.placement || !context.nextBeltId) {
+          setNotice(nativeBeltPlacementBlockedMessage(context.support.reason ?? "unsupported-belt-domain"));
+          return;
+        }
+        if (context.activePlanetId !== nativeFactoryProjectionPlanetId) {
+          setNotice("拉线凭证所属行星已变化；存档未改变，请等待画布刷新");
+          return;
+        }
+        const tierName = requestedTier === 3 ? "III" : requestedTier === 2 ? "II" : "I";
+        const itemLabel = ITEMS[sourceItem]?.name ?? sourceItem;
+        const accepted = commitNativeProjectedCommand(context.revision, (baseRevision) =>
+          baseRevision === context.revision
+            ? createNativeProjectedOrdinaryBeltPlacementCommand(context)
+            : null,
+          () => {
+            selectedEntityIdsRef.current = [];
+            selectedBeltIdRef.current = context.nextBeltId;
+            selectedBeltIdsRef.current = [context.nextBeltId!];
+            setSelectedEntityIds([]);
+            setSelectedBeltId(context.nextBeltId);
+            setSelectedBeltIds([context.nextBeltId!]);
+            setInspectorTab("inspect");
+            setRightSidebarCollapsed(false);
+            setNotice(`${itemLabel}运输线已由 Rust 建立 · Mk.${tierName} · 并联 ×${lanes}`);
+            spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "运输线已建立", "positive");
+            playTone("connect");
+            recordBasicOnboardingEvent("belt-connected");
+            trackAnalyticsEvent("belt_connect");
+          },
+        );
+        if (!accepted) setConnectionHint({ label: "Rust 没有接受这次线路命令", tone: "blocked" });
+      } finally {
+        if (nativeBeltPlacementRequestGenerationRef.current === generation) {
+          nativeBeltPlacementContextPendingRef.current = false;
+          setNativeBeltPlacementContextPending(false);
+        }
+      }
+    })();
+    clickConnectionSucceededRef.current = true;
+    setConnectionHint({ label: "正在由 Rust 核对端点、科技和施工库存…", tone: "ready" });
+    return true;
+  }, [
+    commitNativeProjectedCommand,
+    desktopBridge,
+    isValidConnection,
+    nativeFactoryInventoryIdentity,
+    nativeFactoryProjectionPlanetId,
+    playTone,
+    spawnInteractionBurst,
+  ]);
 
   const onConnect = useCallback((connection: Connection, lockedTier?: BeltTier): boolean => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (batchConnectionModeRef.current) {
+        const draft = connectionDraftRef.current;
+        if (!draft) return false;
+        const accepted = addBatchConnection(connection, draft);
+        clickConnectionSucceededRef.current = accepted;
+        return accepted;
+      }
+      return requestNativeOrdinaryBeltPlacement(connection, lockedTier);
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("运输线创建")) return false;
     const sourceItem = parseHandleItem(connection.sourceHandle);
     const targetItem = parseHandleItem(connection.targetHandle);
     if (!connection.source || !connection.target || !sourceItem ||
@@ -10904,7 +18142,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice("运输线两端必须使用同一种物品");
       return false;
     }
-    const activeTier = lockedTier ?? connectionDraftRef.current?.tier ?? resolveConnectionBeltTier(gameRef.current, beltTierMode, beltTier, connection.source, sourceItem);
+    const readState = getFactoryConnectionReadState(connection.source, connection.target);
+    if (!readState) {
+      setNotice("原生工厂投影尚未确认当前星球，运输线未建立");
+      return false;
+    }
+    const activeTier = lockedTier ?? connectionDraftRef.current?.tier ?? resolveConnectionBeltTier(readState, beltTierMode, beltTier, connection.source, sourceItem);
     const constructionId = getBeltConstructionId(activeTier);
     const tierName = activeTier === 3 ? "III" : activeTier === 2 ? "II" : "I";
     const requestedLanes = defaultBeltLanesRef.current;
@@ -10915,7 +18158,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return false;
     }
     const targetPortIndex = parseTargetPortIndex(connection.targetHandle);
-    const matchingEndpoint = gameRef.current.belts.find((belt) =>
+    const matchingEndpoint = readState.belts.find((belt) =>
       belt.source === connection.source && belt.target === connection.target && belt.itemId === sourceItem &&
       belt.targetPortIndex === targetPortIndex);
     if (matchingEndpoint && matchingEndpoint.tier !== activeTier) {
@@ -10945,6 +18188,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!commitGame(() => result.state)) return false;
     clickConnectionSucceededRef.current = true;
     flowStore.getState().resetSelectedElements();
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = result.beltId;
+    selectedBeltIdsRef.current = [result.beltId];
     setSelectedEntityIds([]);
     setSelectedBeltId(result.beltId);
     setSelectedBeltIds([result.beltId]);
@@ -10958,7 +18204,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "运输线已建立", "positive");
     playTone("connect");
     return true;
-  }, [beltTier, beltTierMode, coarsePointer, commitGame, flowStore, mobileNavigation.openSheet, nextMobileShell, playTone, spawnInteractionBurst]);
+  }, [addBatchConnection, beltTier, beltTierMode, coarsePointer, commitGame, flowStore, getFactoryConnectionReadState, mobileNavigation.openSheet, nextMobileShell, playTone, rejectLegacyFactoryInteractionWhileNative, requestNativeOrdinaryBeltPlacement, spawnInteractionBurst]);
 
   useEffect(() => { connectRequestRef.current = onConnect; }, [onConnect]);
 
@@ -11076,6 +18322,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [alignmentSpatialIndex]);
 
   const onNodeDrag = useCallback((_event: MouseEvent | TouchEvent, node: FactoryFlowNode, draggedNodes: FactoryFlowNode[]) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     const threshold = 7 / Math.max(0.3, viewportZoom);
     const index = dragAlignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
     const moving = (draggedNodes.length > 0 ? draggedNodes : [node]).map((candidate) => ({
@@ -11095,17 +18342,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // React Flow can emit a transient empty selection while node objects are
     // replaced by a simulation refresh. Pane clicks remain the explicit
     // cancellation path, so preserve a stable browse-mode selection here.
-    if (ids.length === 0 && selectedEdges.length === 0 && selectedEntityIdsRef.current.length > 0 && !selectionModeRef.current && !deleteModeRef.current) return;
+    if (ids.length === 0 && selectedEdges.length === 0 &&
+      (selectedEntityIdsRef.current.length > 0 || selectedBeltIdsRef.current.length > 0 || selectedBeltIdRef.current !== null) &&
+      !selectionModeRef.current && !deleteModeRef.current) return;
     // React Flow emits a transient single-node selection before beginning a
     // drag on an already-selected group. Keep the controlled group intact so
     // drag-start can snapshot every unlocked member and preserve offsets.
     if (selectionModeRef.current && ids.length === 1 && selectedEdges.length === 0 &&
       selectedEntityIdsRef.current.length > 1 && selectedEntityIdsRef.current.includes(ids[0])) return;
-    const nodeIds = new Set(ids);
-    const beltIds = new Set(selectedEdges.map((edge) => edge.id));
-    for (const belt of gameRef.current.belts) {
-      if (belt.planetId === gameRef.current.activePlanetId && nodeIds.has(belt.source) && nodeIds.has(belt.target)) beltIds.add(belt.id);
-    }
+    const beltIds = new Set(collectCanvasSelectionBeltIds(
+      activePlanetBeltsRef.current,
+      ids,
+      selectedEdges.map((edge) => edge.id),
+    ));
     selectedEntityIdsRef.current = ids;
     selectedBeltIdsRef.current = [...beltIds];
     selectedBeltIdRef.current = beltIds.size === 1 ? [...beltIds][0] : null;
@@ -11118,6 +18367,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const onNodeClick: NodeMouseHandler<FactoryFlowNode> = useCallback((event, node) => {
     if (blueprintPlacementId) return;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && (nativePlacementBuildingId ||
+        nativeBlueprintEnqueuePlacementRef.current || nativeBlueprintDirectDeployPlacementRef.current)) {
+      setNotice(nativeBlueprintDirectDeployPlacementRef.current
+        ? "直接部署蓝图只能放在画布空白处；Rust 会重新检查现有建筑与线路重叠"
+        : nativeBlueprintEnqueuePlacementRef.current
+          ? "待建蓝图只能放在画布空白处；Rust 会重新检查建筑与施工队列占位"
+        : "普通建筑只能放在画布空白处；Rust 不会用落点覆盖现有建筑");
+      return;
+    }
     if (!placement && completeClickConnectionAtPoint(event.clientX, event.clientY, batchConnectionModeRef.current || event.ctrlKey || event.shiftKey)) return;
     // Continuous connection owns node/port interaction until the batch is
     // confirmed or cancelled. A bubbled node click must not replace its
@@ -11125,7 +18383,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!placement && batchConnectionModeRef.current) return;
     if (nextMobileShell && mobileCanvasMode === "layout" && !placement) return;
     if (placement) {
-      const entity = gameRef.current.entities.find((candidate) => candidate.id === node.id);
+      if (rejectLegacyFactoryInteractionWhileNative("建筑放置与扩建")) return;
+      const entity = activeEntityById.get(node.id);
       const constructionId = entity?.kind === "vein" && entity.resourceId
         ? getExtractorBuildingId(entity.resourceId)
         : entity?.buildingId;
@@ -11153,7 +18412,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     const mobileSelecting = nextMobileShell && mobileCanvasMode === "select";
-    const clickedEntity = gameRef.current.entities.find((entity) => entity.id === node.id);
+    const clickedEntity = activeEntityById.get(node.id);
     // Network focus is a temporary inspection lens. Selecting a building is a
     // new primary action, so leave that lens instead of retaining a dimming
     // context around the newly expanded card.
@@ -11178,18 +18437,24 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       } else if (nextMobileShell) mobileNavigation.openSheet("inspector", "peek");
       else setMobilePanel("inspector");
     }
-  }, [blueprintPlacementId, completeClickConnectionAtPoint, expandEntityGroup, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, nextMobileShell, openCommandWorkspace, placement, placementCount, selectionMode]);
+  }, [activeEntityById, blueprintPlacementId, completeClickConnectionAtPoint, expandEntityGroup, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, nativePlacementBuildingId, nextMobileShell, openCommandWorkspace, placement, placementCount, rejectLegacyFactoryInteractionWhileNative, selectionMode]);
 
   const onNodeDoubleClick: NodeMouseHandler<FactoryFlowNode> = useCallback((_event, node) => {
-    if (placement || blueprintPlacementId || !gameRef.current.settings.allowDoubleClickZoom) return;
+    if (placement || nativePlacementBuildingId || nativeBlueprintEnqueuePlacementRef.current ||
+        nativeBlueprintDirectDeployPlacementRef.current || blueprintPlacementId ||
+        !gameRef.current.settings.allowDoubleClickZoom) return;
     setSelectedEntityIds([node.id]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
     focusEntityIds([node.id]);
-  }, [blueprintPlacementId, focusEntityIds, placement]);
+  }, [blueprintPlacementId, focusEntityIds, nativePlacementBuildingId, placement]);
 
   const onRegionPointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
     if (!regionMode || event.button !== 0 || placement || blueprintPlacementId || connectionDraftRef.current) return;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && !nativeAuthoritativeFactoryWorkspaceFrame?.workspace) {
+      setNotice("正在等待同一 revision 的 Rust 区域投影；本次拖拽未开始");
+      return;
+    }
     const target = event.target instanceof Element ? event.target : null;
     if (!target?.closest(".react-flow__pane") || target.closest(".canvas-region__label")) return;
     event.preventDefault();
@@ -11199,15 +18464,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     regionPointerRef.current = { pointerId: event.pointerId, start };
     setRegionDraft({ ...start, width: 0, height: 0 });
     setSelectedRegionId(null);
-  }, [blueprintPlacementId, placement, regionMode, screenToFlowPosition]);
+  }, [blueprintPlacementId, nativeAuthoritativeFactoryWorkspaceFrame, placement, regionMode, screenToFlowPosition]);
 
   const onRegionResizeStart = useCallback((event: React.PointerEvent<HTMLButtonElement>, region: CanvasRegion, handle: CanvasRegionResizeHandle) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && !nativeAuthoritativeFactoryWorkspaceFrame?.workspace) {
+      setNotice("正在等待同一 revision 的 Rust 区域投影；本次调整未开始");
+      return;
+    }
     const start = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
-    regionResizeRef.current = { pointerId: event.pointerId, region: { ...region }, handle, start };
+    regionResizeRef.current = { pointerId: event.pointerId, element: event.currentTarget, region: { ...region }, handle, start };
     setRegionResizePreview({ regionId: region.id, rectangle: { x: region.x, y: region.y, width: region.width, height: region.height } });
     setRegionMode(false);
     setRegionDraft(null);
-  }, [screenToFlowPosition]);
+  }, [nativeAuthoritativeFactoryWorkspaceFrame, screenToFlowPosition]);
 
   const onRegionPointerMove = useCallback((event: React.PointerEvent<HTMLElement>) => {
     const resize = regionResizeRef.current;
@@ -11239,7 +18508,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const rectangle = resizeRegionRectangle(resize.region, resize.handle, resize.start, current);
       setRegionResizePreview(null);
       if (!cancelled) {
-        commitGame((currentGame) => resizeCanvasRegion(currentGame, resize.region.id, rectangle));
+        if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+          const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+          if (!frame?.workspace || !commitNativeWorkspaceAction({
+            kind: "region-resize",
+            regionId: resize.region.id,
+            ...rectangle,
+          }, `生产区域已由 Rust 调整为 ${Math.round(rectangle.width)} × ${Math.round(rectangle.height)}`, frame.revision)) return;
+        } else {
+          commitGame((currentGame) => resizeCanvasRegion(currentGame, resize.region.id, rectangle));
+        }
         setNotice(`生产区域已调整为 ${Math.round(rectangle.width)} × ${Math.round(rectangle.height)}`);
       }
       return;
@@ -11258,20 +18536,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice("生产区域至少需要 40 × 40 画布单位");
       return;
     }
-    const regionId = `region_${gameRef.current.nextId}`;
-    commitGame((current) => addCanvasRegion(current, current.activePlanetId, rectangle));
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+      if (!frame?.workspace || !commitNativeWorkspaceAction({
+        kind: "region-add",
+        planetId: frame.workspace.activePlanetId,
+        ...rectangle,
+      }, "生产区域已由 Rust 创建，可在刷新后设置名称和颜色", frame.revision)) return;
+      setSelectedRegionId(null);
+    } else {
+      const regionId = `region_${gameRef.current.nextId}`;
+      commitGame((current) => addCanvasRegion(current, current.activePlanetId, rectangle));
+      setSelectedRegionId(regionId);
+    }
     setRegionMode(false);
-    setSelectedRegionId(regionId);
     setNotice("生产区域已创建，可设置名称、背景色和边框色");
     playTone("place");
-  }, [commitGame, playTone, screenToFlowPosition]);
+  }, [commitGame, commitNativeWorkspaceAction, nativeAuthoritativeFactoryWorkspaceFrame, playTone, screenToFlowPosition]);
 
   const restoreCanvasEntityPositions = useCallback(() => {
     setNodes((current) => current.map((node) => {
-      const entity = gameRef.current.entities.find((candidate) => candidate.id === node.id);
+      const entity = activeEntityById.get(node.id);
       return entity ? { ...node, position: { ...entity.position }, dragging: false } : node;
     }));
-  }, [setNodes]);
+  }, [activeEntityById, setNodes]);
 
   const cancelPendingTouchAction = useCallback(() => {
     stopCanvasPointerMotion();
@@ -11393,6 +18681,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const onPaneClick = useCallback((event: React.MouseEvent) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && nativeBlueprintDirectDeployPlacementRef.current) {
+      const position = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+      nativeBlueprintDirectDeployCanvasSubmitRef.current(
+        position,
+        { x: event.clientX, y: event.clientY },
+      );
+      return;
+    }
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && nativeBlueprintEnqueuePlacementRef.current) {
+      const position = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+      nativeBlueprintEnqueueCanvasSubmitRef.current(
+        position,
+        { x: event.clientX, y: event.clientY },
+      );
+      return;
+    }
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && nativePlacementBuildingId) {
+      const position = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+      void placeNativeOrdinaryBuildingAt(
+        nativePlacementBuildingId,
+        position,
+        { x: event.clientX, y: event.clientY },
+      );
+      return;
+    }
+    if ((placement || blueprintPlacementId) &&
+      rejectLegacyFactoryInteractionWhileNative(blueprintPlacementId ? "蓝图部署" : "建筑放置与扩建")) return;
     if (regionMode) {
       setSelectedRegionId(null);
       return;
@@ -11428,7 +18743,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const deployable = preview.canPlace && compatible;
       const fleetPreview = deployable ? getBlueprintFleetLoadPreview(gameRef.current, blueprintPlacementId) : null;
       const blueprintName = blueprint?.name ?? "蓝图";
-      commitGame((current) => {
+      const committed = commitGame((current) => {
         const currentPreview = getBlueprintPlacementPreview(current, blueprintPlacementId, position, laneOptions);
         const currentCompatible = canQueueBlueprint(current, blueprintPlacementId, current.activePlanetId, position, laneOptions) &&
           Boolean(current.blueprints.find((candidate) => candidate.id === blueprintPlacementId)?.entities.length || currentPreview.matchedResourceAnchors > 0);
@@ -11439,6 +18754,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             : current;
         return next;
       });
+      if (compatible && !committed) {
+        setNotice(`${blueprintName}未部署或入队：主存档正在保存，或点击后目标状态已经变化；存档未改变`);
+        playTone("alert");
+        return;
+      }
       if (deployable) playTone("place");
       setSelectedEntityIds([]);
       const fleetShortfall = fleetPreview
@@ -11467,7 +18787,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         : null;
       if (!canvasBatchRendererEnabled) {
         const nodeById = new Map(nodes.map((node) => [node.id, node]));
-        for (const belt of gameRef.current.belts.filter((candidate) => candidate.planetId === gameRef.current.activePlanetId)) {
+        for (const belt of activePlanetBelts) {
           const source = nodeById.get(belt.source);
           const target = nodeById.get(belt.target);
           if (!source || !target) continue;
@@ -11553,12 +18873,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltIds([]);
     setFocusedBeltNetworkId(null);
     if (nextMobileShell && mobileNavigation.overlay?.kind === "sheet" && mobileNavigation.overlay.id === "inspector") mobileNavigation.requestBack();
-  }, [blueprintAllowOverlap, blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
+  }, [activePlanetBelts, blueprintAllowOverlap, blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nativePlacementBuildingId, nextMobileShell, nodes, placement, placementCount, placeNativeOrdinaryBuildingAt, playTone, regionMode, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
 
   const onCanvasDrop = useCallback((event: React.DragEvent) => {
     const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
     if (!buildingId) return;
     event.preventDefault();
+    if (rejectLegacyFactoryInteractionWhileNative("建筑拖放")) return;
     if (getBuilding(buildingId).kind === "miner") {
       setNotice(minerPlacementHint(buildingId));
       return;
@@ -11571,42 +18892,1800 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     recordBasicOnboardingEvent("building-placed");
     if (placementCount > 1) recordBasicOnboardingEvent("building-stacked");
     setPlacement(null);
-  }, [commitGame, placementCount, playTone, screenToFlowPosition]);
+  }, [commitGame, placementCount, playTone, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition]);
 
-  const selectedEntities = useMemo(() => selectedEntityIds.length === 0
-    ? []
-    : game.entities.filter((entity) => selectedEntityIdSet.has(entity.id) && entity.planetId === game.activePlanetId),
-  [game.activePlanetId, game.entities, selectedEntityIdSet, selectedEntityIds.length]);
-  const selectedEntity = selectedEntities.length === 1 ? selectedEntities[0] : null;
-  const selectedBelt = useMemo(() => selectedBeltId
-    ? canvasGame.belts.find((belt) => belt.id === selectedBeltId && belt.planetId === canvasGame.activePlanetId) ?? null
-    : null,
-  [canvasGame.activePlanetId, canvasGame.belts, selectedBeltId]);
-  const selectedBelts = useMemo(() => {
-    if (selectedBeltIds.length === 0) return [];
-    const selectedIds = new Set(selectedBeltIds);
-    return game.belts.filter((belt) => selectedIds.has(belt.id) && belt.planetId === game.activePlanetId);
-  }, [game.activePlanetId, game.belts, selectedBeltIds]);
-  const dockBeltTier = resolveConnectionBeltTier(game, beltTierMode, beltTier);
-  const blueprintEligibleIds = useMemo(() => selectedEntityIds.length === 0
+  const nativePendingFactoryInteractionRows = useMemo<FactoryInteractionRows>(() => ({
+    source: "native-authoritative",
+    revision: factoryThinViewExpectedRevision,
+    projectionIdentity: null,
+    selectedEntities: [],
+    selectedEntity: null,
+    selectedBelt: null,
+    selectedBelts: [],
+    multiSelectedBelts: [],
+    projectionEntities: [],
+    projectionBelts: [],
+    entityById: new Map<string, FactoryEntity>(),
+    beltById: new Map<string, BeltConnection>(),
+    selectionToolbarReadModel: {
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "native-core",
+      revision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+      projectionIdentity: null,
+      selectedCount: 0,
+      selectedBeltCount: 0,
+      canLock: false,
+      canUnlock: false,
+    },
+    inspectorSummaryReadModel: {
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "native-core",
+      revision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+      entity: null,
+      belt: null,
+    },
+    multiSelectionSummaryReadModel: {
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "native-core",
+      revision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+      projectionIdentity: null,
+      requestedEntityCount: 0,
+      requestedBeltCount: 0,
+      entityRows: { rows: [], totalCount: 0, truncated: false },
+      beltRows: { rows: [], totalCount: 0, truncated: false },
+    },
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId]);
+  const factoryInteractionRows = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryInteractionRows ?? nativePendingFactoryInteractionRows
+      : selectFactoryInteractionRows(
+          nativeAuthoritativeFactoryInteractionRows,
+          () => createWebFactoryInteractionRows(game, {
+            selectedEntityIds,
+            selectedBeltIds,
+            primarySelectedBeltId: selectedBeltId,
+          }),
+        ),
+    [
+      game.activePlanetId,
+      game.belts,
+      game.entities,
+      nativeAuthoritativeFactoryInteractionRows,
+      nativePendingFactoryInteractionRows,
+      nativePlayerAuthorityOwnsRuntime,
+      selectedBeltId,
+      selectedBeltIds,
+      selectedEntityIds,
+    ],
+  );
+  const selectedEntities = factoryInteractionRows.selectedEntities;
+  const selectedEntity = factoryInteractionRows.selectedEntity;
+  const selectedBeltsForMultiSummary = factoryInteractionRows.multiSelectedBelts;
+  const webFactoryMultiSelectionSummaryReadModel = factoryInteractionRows.multiSelectionSummaryReadModel;
+  const factoryMultiSelectionSummaryReadModel = useMemo(
+    () => factoryInteractionRows.source === "native-authoritative"
+      ? factoryInteractionRows.multiSelectionSummaryReadModel
+      : selectFactoryMultiSelectionSummaryReadModel(
+      webFactoryMultiSelectionSummaryReadModel,
+      nativeFactoryThinViewSnapshot,
+      factoryThinViewExpectedRevision,
+      {
+        requestedEntityIds: factoryThinViewSelectedEntityIds,
+        requestedBeltIds: factoryThinViewSelectedBeltIds,
+        requestTruncated:
+          factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+          factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+      }),
+    [
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewExpectedRevision,
+      factoryThinViewSelectedBeltIds,
+      factoryThinViewSelectedEntityIds,
+      nativeFactoryThinViewSnapshot,
+      factoryInteractionRows.source,
+      factoryInteractionRows.multiSelectionSummaryReadModel,
+      webFactoryMultiSelectionSummaryReadModel,
+    ],
+  );
+  const selectedBelt = factoryInteractionRows.selectedBelt;
+  const webFactoryInspectorSummaryReadModel = factoryInteractionRows.inspectorSummaryReadModel;
+  const factoryInspectorSummaryReadModel = useMemo(
+    () => factoryInteractionRows.source === "native-authoritative"
+      ? factoryInteractionRows.inspectorSummaryReadModel
+      : selectFactoryInspectorSummaryReadModel(
+      webFactoryInspectorSummaryReadModel,
+      nativeFactoryThinViewSnapshot,
+      factoryThinViewExpectedRevision,
+      {
+        requestedEntityIds: factoryThinViewSelectedEntityIds,
+        requestedBeltIds: factoryThinViewSelectedBeltIds,
+        requestTruncated:
+          factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+          factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+      }),
+    [
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewExpectedRevision,
+      factoryThinViewSelectedBeltIds,
+      factoryThinViewSelectedEntityIds,
+      nativeFactoryThinViewSnapshot,
+      factoryInteractionRows.source,
+      factoryInteractionRows.inspectorSummaryReadModel,
+      webFactoryInspectorSummaryReadModel,
+    ],
+  );
+  const nativeEntityConfigurationProjectionBinding = useMemo<NativeProjectedEntityConfigurationBinding | null>(() => {
+    if (!nativePlayerAuthorityOwnsRuntime || factoryInteractionRows.source !== "native-authoritative") return null;
+    const identity = factoryInteractionRows.projectionIdentity;
+    const projected = factoryInteractionRows.selectedEntity;
+    const inspectorEntity = factoryInspectorSummaryReadModel.source === "native-core"
+      ? factoryInspectorSummaryReadModel.entity
+      : null;
+    const selectionIdentity = factoryMultiSelectionSummaryReadModel.projectionIdentity;
+    if (!nativePlayerAuthorityActiveFrame || !identity || !selectionIdentity || !projected || !inspectorEntity ||
+        factoryInspectorSummaryReadModel.belt !== null || factoryInteractionRows.revision !== identity.revision ||
+        identity.sessionId !== nativePlayerAuthorityActiveFrame.sessionId ||
+        identity.runId !== nativePlayerAuthorityActiveFrame.runId ||
+        identity.revision !== nativePlayerAuthorityActiveFrame.revision ||
+        identity.planetId !== factoryInspectorSummaryReadModel.activePlanetId ||
+        selectionIdentity.sessionId !== identity.sessionId || selectionIdentity.runId !== identity.runId ||
+        selectionIdentity.revision !== identity.revision || selectionIdentity.planetId !== identity.planetId ||
+        factoryMultiSelectionSummaryReadModel.revision !== identity.revision ||
+        factoryMultiSelectionSummaryReadModel.activePlanetId !== identity.planetId ||
+        factoryMultiSelectionSummaryReadModel.requestedEntityCount !== 1 ||
+        factoryMultiSelectionSummaryReadModel.requestedBeltCount !== 0 ||
+        factoryMultiSelectionSummaryReadModel.entityRows.truncated ||
+        factoryMultiSelectionSummaryReadModel.beltRows.truncated ||
+        factoryMultiSelectionSummaryReadModel.entityRows.totalCount !== 1 ||
+        factoryMultiSelectionSummaryReadModel.entityRows.rows.length !== 1 ||
+        factoryMultiSelectionSummaryReadModel.beltRows.totalCount !== 0 ||
+        factoryMultiSelectionSummaryReadModel.beltRows.rows.length !== 0 ||
+        factoryMultiSelectionSummaryReadModel.entityRows.rows[0]?.entityId !== projected.id ||
+        inspectorEntity.entityId !== projected.id || inspectorEntity.planetId !== projected.planetId ||
+        inspectorEntity.kind !== projected.kind || inspectorEntity.interactionLocked !== projected.interactionLocked ||
+        inspectorEntity.buildingId !== (projected.buildingId ?? null) ||
+        inspectorEntity.fuelItemId !== (projected.fuelItemId ?? null) || projected.planetId !== identity.planetId) {
+      return null;
+    }
+    return Object.freeze({
+      sessionId: identity.sessionId,
+      runId: identity.runId,
+      revision: identity.revision,
+      activePlanetId: identity.planetId,
+      entity: projected,
+    });
+  }, [
+    factoryInspectorSummaryReadModel,
+    factoryInteractionRows,
+    factoryMultiSelectionSummaryReadModel,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  const nativeEntityRecipeProjectionBinding = useMemo<NativeProjectedEntityRecipeBinding | null>(() => {
+    const entityBinding = nativeEntityConfigurationProjectionBinding;
+    const inventoryIdentity = nativeFactoryInventoryIdentity;
+    if (!entityBinding || !inventoryIdentity ||
+        inventoryIdentity.sessionId !== entityBinding.sessionId ||
+        inventoryIdentity.runId !== entityBinding.runId ||
+        inventoryIdentity.revision !== entityBinding.revision) return null;
+    return Object.freeze({
+      sessionId: entityBinding.sessionId,
+      runId: entityBinding.runId,
+      revision: entityBinding.revision,
+      registryFingerprint: inventoryIdentity.registryFingerprint,
+      activePlanetId: entityBinding.activePlanetId,
+      entity: entityBinding.entity,
+    });
+  }, [nativeEntityConfigurationProjectionBinding, nativeFactoryInventoryIdentity]);
+  const nativeEntityRecipeAuthorityObservation = useMemo(() => nativePlayerAuthorityActiveFrame &&
+      typeof nativePlayerAuthorityActiveFrame.sessionId === "string" &&
+      typeof nativePlayerAuthorityActiveFrame.runId === "string" &&
+      typeof nativePlayerAuthorityActiveFrame.revision === "number" &&
+      Number.isSafeInteger(nativePlayerAuthorityActiveFrame.revision)
+    ? Object.freeze({
+        sessionId: nativePlayerAuthorityActiveFrame.sessionId,
+        runId: nativePlayerAuthorityActiveFrame.runId,
+        revision: nativePlayerAuthorityActiveFrame.revision,
+      })
+    : null, [nativePlayerAuthorityActiveFrame]);
+  const nativeBlueprintDirectDeployTopologyObservation = useMemo(() => {
+    const canvas = nativeAuthoritativeFactoryCanvasFrame;
+    const identity = nativeFactoryInventoryIdentity;
+    if (!canvas || !identity || canvas.source !== "native-authoritative" ||
+        canvas.sessionId !== identity.sessionId || canvas.runId !== identity.runId ||
+        canvas.revision !== identity.revision) return null;
+    return Object.freeze({
+      source: "native-authoritative" as const,
+      sessionId: canvas.sessionId,
+      runId: canvas.runId,
+      revision: canvas.revision,
+      registryFingerprint: identity.registryFingerprint,
+      activePlanetId: canvas.planetId,
+    });
+  }, [nativeAuthoritativeFactoryCanvasFrame, nativeFactoryInventoryIdentity]);
+  const {
+    pending: nativeEntityRecipePending,
+    commit: commitNativeEntityRecipeCommand,
+  } = useNativeEntityRecipeCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    projection: nativeEntityRecipeProjectionBinding,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    projectionTargetEntityIdRef: nativeEntityRecipeProjectionTargetEntityIdRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    invalidateProjection: invalidateFactoryAlertProjection,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const {
+    pending: nativeBlueprintTransformPending,
+    commit: commitNativeBlueprintTransformCommand,
+  } = useNativeBlueprintTransformCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    projection: nativeBlueprintTransformBinding,
+    frame: nativeBlueprintWorkspaceFrame,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeBlueprintTransformIntent = useCallback((
+    binding: NativeBlueprintTransformBinding,
+    rotation: NativeBlueprintRotation,
+    mirror: NativeBlueprintMirror,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current) {
+      setNotice("蓝图工作区已关闭或名称修改仍在对账；本次方向变换未提交");
+      return false;
+    }
+    return commitNativeBlueprintTransformCommand(binding, rotation, mirror);
+  }, [commitNativeBlueprintTransformCommand]);
+  const {
+    pending: nativeBlueprintRecipeOverridePending,
+    commit: commitNativeBlueprintRecipeOverrideCommand,
+  } = useNativeBlueprintRecipeOverrideCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    frame: nativeBlueprintWorkspaceFrame,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeBlueprintRecipeOverrideIntent = useCallback((
+    binding: NativeBlueprintRecipeOverrideBinding,
+    targetRecipeId: string,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        !nativeBlueprintRecipeOverrideBindingMatchesFrame(binding, nativeBlueprintWorkspaceFrame)) {
+      setNotice("蓝图工作区、配方组或 revision 已漂移；本次配方覆盖未提交");
+      return false;
+    }
+    return commitNativeBlueprintRecipeOverrideCommand(binding, targetRecipeId);
+  }, [
+    commitNativeBlueprintRecipeOverrideCommand,
+    nativeBlueprintWorkspaceFrame,
+  ]);
+  const {
+    pending: nativeBlueprintDeletePending,
+    commit: commitNativeBlueprintDeleteCommand,
+  } = useNativeBlueprintDeleteCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    frame: nativeBlueprintWorkspaceFrame,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeBlueprintDeleteIntent = useCallback((
+    binding: NativeBlueprintDeleteBinding,
+  ): boolean => {
+    const current = nativeBlueprintDeleteBinding;
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        !current || current.sessionId !== binding.sessionId || current.runId !== binding.runId ||
+        current.revision !== binding.revision ||
+        current.registryFingerprint !== binding.registryFingerprint ||
+        current.blueprintId !== binding.blueprintId ||
+        current.currentRowRevision !== binding.currentRowRevision ||
+        current.libraryTotalCount !== binding.libraryTotalCount) {
+      setNotice("蓝图工作区、选中行或 revision 已漂移；本次删除未提交");
+      return false;
+    }
+    return commitNativeBlueprintDeleteCommand(binding);
+  }, [commitNativeBlueprintDeleteCommand, nativeBlueprintDeleteBinding]);
+  const {
+    pending: nativeConstructionQueueCancelPending,
+    commit: commitNativeConstructionQueueCancelCommand,
+  } = useNativeConstructionQueueCancelCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    frame: nativeBlueprintWorkspaceFrame,
+    membershipSource: nativeBlueprintWorkspaceSource,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeConstructionQueueCancelIntent = useCallback((
+    binding: NativeConstructionQueueCancelBinding,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        !nativeConstructionQueueCancelBindingMatchesFrame(binding, nativeBlueprintWorkspaceFrame)) {
+      setNotice("蓝图工作区、施工队列行或 revision 已漂移；本次取消未提交");
+      return false;
+    }
+    return commitNativeConstructionQueueCancelCommand(binding);
+  }, [commitNativeConstructionQueueCancelCommand, nativeBlueprintWorkspaceFrame]);
+  const {
+    pending: nativeConstructionQueueFundPending,
+    commit: commitNativeConstructionQueueFundCommand,
+  } = useNativeConstructionQueueFundCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    frame: nativeBlueprintWorkspaceFrame,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeConstructionQueueFundIntent = useCallback((
+    binding: NativeConstructionQueueFundBinding,
+    scope: NativeConstructionQueueFundScope,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        !nativeConstructionQueueFundBindingMatchesFrame(binding, nativeBlueprintWorkspaceFrame)) {
+      setNotice("蓝图工作区、待领料行或 revision 已漂移；本次领料未提交");
+      return false;
+    }
+    return commitNativeConstructionQueueFundCommand(binding, scope);
+  }, [commitNativeConstructionQueueFundCommand, nativeBlueprintWorkspaceFrame]);
+  const {
+    pending: nativeConstructionQueueDeployPending,
+    commit: commitNativeConstructionQueueDeployCommand,
+  } = useNativeConstructionQueueDeployCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    frame: nativeBlueprintWorkspaceFrame,
+    membershipSource: nativeBlueprintWorkspaceSource,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeConstructionQueueDeployIntent = useCallback((
+    binding: NativeConstructionQueueDeployBinding,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        !nativeConstructionQueueDeployBindingMatchesFrame(binding, nativeBlueprintWorkspaceFrame)) {
+      setNotice("蓝图工作区、Rust-ready 施工行或 revision 已漂移；本次开始建造未提交");
+      return false;
+    }
+    return commitNativeConstructionQueueDeployCommand(binding);
+  }, [commitNativeConstructionQueueDeployCommand, nativeBlueprintWorkspaceFrame]);
+  const enterNativeBlueprintDirectDeployPlacement = useCallback((
+    binding: NativeBlueprintDirectDeploySelectionBinding,
+  ): boolean => {
+    const currentIdentity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current || !currentIdentity ||
+        currentIdentity.sessionId !== binding.sessionId || currentIdentity.runId !== binding.runId ||
+        currentIdentity.registryFingerprint !== binding.registryFingerprint) {
+      setNotice("蓝图直接部署的权威 lineage 或 registry 已变化；定位未开始");
+      return false;
+    }
+    cancelNativeBlueprintEnqueuePlacement();
+    nativeBlueprintDirectDeployGenerationRef.current += 1;
+    nativeBlueprintDirectDeployPlacementRef.current = binding;
+    setNativeBlueprintDirectDeployPlacement(binding);
+    nativeBlueprintDirectDeployContextPendingRef.current = false;
+    setNativeBlueprintDirectDeployContextPending(false);
+    cancelNativeBuildingPlacement();
+    nativeBeltPlacementRequestGenerationRef.current += 1;
+    nativeBeltPlacementTierRef.current = null;
+    setNativeBeltPlacementTier(null);
+    nativeBeltPlacementContextPendingRef.current = false;
+    setNativeBeltPlacementContextPending(false);
+    setPlacement(null);
+    setBlueprintPlacementId(null);
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    updateConnectionDraft(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setSelectionMode(false);
+    setDeleteMode(false);
+    setRegionMode(false);
+    setRegionDraft(null);
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
+    setSelectedEntityIds([]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setFocusedBeltNetworkId(null);
+    setBlueprintsOpen(false);
+    setNotice(`请在空白画布选择${binding.blueprintName}的直接部署位置；Rust 会在落点时核对材料、重叠和最新 revision`);
+    return true;
+  }, [
+    cancelNativeBlueprintEnqueuePlacement,
+    cancelNativeBuildingPlacement,
+    flowStore,
+    updateConnectionDraft,
+  ]);
+  const {
+    pending: nativeBlueprintDirectDeployPending,
+    commit: commitNativeBlueprintDirectDeployCommand,
+  } = useNativeBlueprintDirectDeployCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    topology: nativeBlueprintDirectDeployTopologyObservation,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const beginNativeBlueprintDirectDeployPlacement = useCallback((
+    binding: NativeBlueprintDirectDeploySelectionBinding,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current ||
+        !nativeBlueprintDirectDeploySelectionBindingMatchesFrame(
+          binding,
+          nativeBlueprintWorkspaceFrame,
+        )) {
+      setNotice("蓝图工作区、ordinary 选中行或权威 lineage 已漂移；直接部署定位未开始");
+      return false;
+    }
+    return enterNativeBlueprintDirectDeployPlacement(binding);
+  }, [
+    enterNativeBlueprintDirectDeployPlacement,
+    nativeBlueprintWorkspaceFrame,
+  ]);
+  const {
+    pending: nativeBlueprintCapturePending,
+    commit: commitNativeBlueprintCaptureCommand,
+  } = useNativeBlueprintCaptureCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    membershipSource: nativeBlueprintWorkspaceSource,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+    onConfirmed: enterNativeBlueprintDirectDeployPlacement,
+  });
+  const confirmNativeBlueprintImport = useCallback((
+    confirmation: NativeBlueprintImportConfirmation,
+  ): void => {
+    setNativeBlueprintImportConfirmation(confirmation);
+    const identity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!identity || identity.sessionId !== confirmation.sessionId ||
+        identity.runId !== confirmation.runId ||
+        identity.registryFingerprint !== confirmation.registryFingerprint) {
+      setNotice("蓝图已由 Rust 安全导入，但界面 lineage 已变化；请重新打开蓝图库查看");
+      return;
+    }
+    const previousTotal = nativeBlueprintWorkspaceFrameRef.current?.libraryPage.totalCount ?? 0;
+    setNativeBlueprintLibraryCursor(
+      Math.floor(previousTotal / NATIVE_BLUEPRINT_PAGE_ROWS) * NATIVE_BLUEPRINT_PAGE_ROWS,
+    );
+    setNativeBlueprintSelectedId(confirmation.blueprintId);
+    setBlueprintsOpen(true);
+    setNotice(`已导入${confirmation.blueprintName}；正在读取 Rust 蓝图库中的新记录`);
+  }, []);
+  const {
+    pending: nativeBlueprintImportPending,
+    commit: commitNativeBlueprintImportCommand,
+  } = useNativeBlueprintImportCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    membershipSource: nativeBlueprintWorkspaceSource,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+    onConfirmed: confirmNativeBlueprintImport,
+  });
+  const submitNativeBlueprintDirectDeployAt = useCallback(async (
+    position: Readonly<{ x: number; y: number }>,
+    screenPoint: Readonly<{ x: number; y: number }>,
+  ): Promise<void> => {
+    const selection = nativeBlueprintDirectDeployPlacementRef.current;
+    const identity = nativeFactoryInventoryIdentity;
+    if (!selection || !identity || nativeBlueprintDirectDeployContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次蓝图直接部署落点未提交");
+      return;
+    }
+    const generation = nativeBlueprintDirectDeployGenerationRef.current;
+    nativeBlueprintDirectDeployContextPendingRef.current = true;
+    setNativeBlueprintDirectDeployContextPending(true);
+    const context = await readVerifiedNativeBlueprintDirectDeployContext(
+      desktopBridge,
+      identity,
+      selection,
+      position,
+    );
+    if (nativeBlueprintDirectDeployGenerationRef.current !== generation ||
+        nativeBlueprintDirectDeployPlacementRef.current !== selection) return;
+    nativeBlueprintDirectDeployContextPendingRef.current = false;
+    setNativeBlueprintDirectDeployContextPending(false);
+    if (!context) {
+      setNotice("没有取得同一 revision/registry/落点的 Rust 蓝图直接部署凭证；存档未改变，请重新落点");
+      return;
+    }
+    if (!context.support.supported) {
+      cancelNativeBlueprintDirectDeployPlacement();
+      setNotice(nativeBlueprintDirectDeployBlockedMessage(
+        context.support.reason ?? "unsupported-blueprint-domain",
+      ));
+      return;
+    }
+    if (context.activePlanetId !== nativeFactoryProjectionPlanetId) {
+      cancelNativeBlueprintDirectDeployPlacement();
+      setNotice("蓝图直接部署凭证所属行星已变化；存档未改变，请等待画布刷新");
+      return;
+    }
+    const accepted = commitNativeBlueprintDirectDeployCommand(context);
+    if (!accepted) return;
+    cancelNativeBlueprintDirectDeployPlacement();
+    playTone("place");
+    spawnInteractionBurst(screenPoint.x, screenPoint.y, "已提交直接部署", "positive");
+  }, [
+    cancelNativeBlueprintDirectDeployPlacement,
+    commitNativeBlueprintDirectDeployCommand,
+    desktopBridge,
+    nativeFactoryInventoryIdentity,
+    nativeFactoryProjectionPlanetId,
+    playTone,
+    spawnInteractionBurst,
+  ]);
+  nativeBlueprintDirectDeployCanvasSubmitRef.current = (position, screenPoint) => {
+    void submitNativeBlueprintDirectDeployAt(position, screenPoint);
+  };
+  const {
+    pending: nativeBlueprintEnqueuePending,
+    commit: commitNativeBlueprintEnqueueCommand,
+  } = useNativeBlueprintEnqueueCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    membershipSource: nativeBlueprintWorkspaceSource,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const beginNativeBlueprintEnqueuePlacement = useCallback((
+    binding: NativeBlueprintEnqueueSelectionBinding,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current ||
+        !nativeBlueprintEnqueueSelectionBindingMatchesFrame(binding, nativeBlueprintWorkspaceFrame)) {
+      setNotice("蓝图工作区、选中行或权威 lineage 已漂移；待建定位未开始");
+      return false;
+    }
+    cancelNativeBlueprintDirectDeployPlacement();
+    nativeBlueprintEnqueueGenerationRef.current += 1;
+    nativeBlueprintEnqueuePlacementRef.current = binding;
+    setNativeBlueprintEnqueuePlacement(binding);
+    nativeBlueprintEnqueueContextPendingRef.current = false;
+    setNativeBlueprintEnqueueContextPending(false);
+    cancelNativeBuildingPlacement();
+    nativeBeltPlacementRequestGenerationRef.current += 1;
+    nativeBeltPlacementTierRef.current = null;
+    setNativeBeltPlacementTier(null);
+    nativeBeltPlacementContextPendingRef.current = false;
+    setNativeBeltPlacementContextPending(false);
+    setPlacement(null);
+    setBlueprintPlacementId(null);
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    updateConnectionDraft(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setSelectionMode(false);
+    setDeleteMode(false);
+    setRegionMode(false);
+    setRegionDraft(null);
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
+    setSelectedEntityIds([]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setFocusedBeltNetworkId(null);
+    setBlueprintsOpen(false);
+    setNotice(`请在空白画布选择${binding.blueprintName}的待建位置；Rust 会按落点时的最新 revision 重新检查`);
+    return true;
+  }, [
+    cancelNativeBuildingPlacement,
+    cancelNativeBlueprintDirectDeployPlacement,
+    flowStore,
+    nativeBlueprintWorkspaceFrame,
+    updateConnectionDraft,
+  ]);
+  const submitNativeBlueprintEnqueueAt = useCallback(async (
+    position: Readonly<{ x: number; y: number }>,
+    screenPoint: Readonly<{ x: number; y: number }>,
+  ): Promise<void> => {
+    const selection = nativeBlueprintEnqueuePlacementRef.current;
+    const identity = nativeFactoryInventoryIdentity;
+    if (!selection || !identity || nativeBlueprintEnqueueContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次蓝图落点未提交");
+      return;
+    }
+    const generation = nativeBlueprintEnqueueGenerationRef.current;
+    nativeBlueprintEnqueueContextPendingRef.current = true;
+    setNativeBlueprintEnqueueContextPending(true);
+    const context = await readVerifiedNativeBlueprintEnqueueContext(
+      desktopBridge,
+      identity,
+      selection,
+    );
+    if (nativeBlueprintEnqueueGenerationRef.current !== generation ||
+        nativeBlueprintEnqueuePlacementRef.current !== selection) return;
+    nativeBlueprintEnqueueContextPendingRef.current = false;
+    setNativeBlueprintEnqueueContextPending(false);
+    if (!context) {
+      setNotice("没有取得同一 revision 的 Rust 蓝图入队凭证；存档未改变，请重新落点");
+      return;
+    }
+    if (!context.support.supported || context.expectedQueueId === null) {
+      cancelNativeBlueprintEnqueuePlacement();
+      setNotice(nativeBlueprintEnqueueBlockedMessage(
+        context.support.reason ?? "unsupported-blueprint-domain",
+      ));
+      return;
+    }
+    if (context.activePlanetId !== nativeFactoryProjectionPlanetId) {
+      cancelNativeBlueprintEnqueuePlacement();
+      setNotice("蓝图入队凭证所属行星已变化；存档未改变，请等待画布刷新");
+      return;
+    }
+    const accepted = commitNativeBlueprintEnqueueCommand(context, position);
+    if (!accepted) return;
+    cancelNativeBlueprintEnqueuePlacement();
+    playTone("place");
+    spawnInteractionBurst(screenPoint.x, screenPoint.y, "已提交待建施工", "positive");
+  }, [
+    cancelNativeBlueprintEnqueuePlacement,
+    commitNativeBlueprintEnqueueCommand,
+    desktopBridge,
+    nativeFactoryInventoryIdentity,
+    nativeFactoryProjectionPlanetId,
+    playTone,
+    spawnInteractionBurst,
+  ]);
+  nativeBlueprintEnqueueCanvasSubmitRef.current = (position, screenPoint) => {
+    void submitNativeBlueprintEnqueueAt(position, screenPoint);
+  };
+  const nativeStationConfigurationProjectionBinding = useMemo<
+    NativeProjectedStationConfigurationBinding | null
+  >(() => {
+    if (!nativePlayerAuthorityOwnsRuntime || !nativePlayerAuthorityActiveFrame ||
+        factoryInteractionRows.source !== "native-authoritative") return null;
+    const commandIdentity = factoryInteractionRows.projectionIdentity;
+    if (!commandIdentity || commandIdentity.sessionId !== nativePlayerAuthorityActiveFrame.sessionId ||
+        commandIdentity.runId !== nativePlayerAuthorityActiveFrame.runId ||
+        commandIdentity.revision !== nativePlayerAuthorityActiveFrame.revision) return null;
+    return selectNativeProjectedStationConfigurationBinding({
+      commandIdentity,
+      inspector: factoryInspectorSummaryReadModel,
+      selection: factoryMultiSelectionSummaryReadModel,
+    });
+  }, [
+    factoryInspectorSummaryReadModel,
+    factoryInteractionRows,
+    factoryMultiSelectionSummaryReadModel,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  const nativeTimeWarpControllerProjectionBinding = useMemo<
+    NativeProjectedTimeWarpControllerBinding | null
+  >(() => {
+    const configuration = nativeEntityConfigurationProjectionBinding;
+    const workspace = nativeAuthoritativeFactoryWorkspaceFrame;
+    const stellarIdentity = nativeStellarProjectionIdentity;
+    if (!configuration || configuration.entity.buildingId !== "time_warp_device" ||
+        !workspace || !stellarIdentity ||
+        workspace.sessionId !== configuration.sessionId ||
+        workspace.revision !== configuration.revision ||
+        workspace.runStatus.activePlanetId !== configuration.activePlanetId ||
+        stellarIdentity.sessionId !== configuration.sessionId ||
+        stellarIdentity.revision !== configuration.revision) return null;
+    return Object.freeze({
+      ...configuration,
+      registryFingerprint: stellarIdentity.registryFingerprint,
+      simulationSpeed: workspace.simulationSpeed,
+      timeWarp: workspace.timeWarp,
+    });
+  }, [
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    nativeEntityConfigurationProjectionBinding,
+    nativeStellarProjectionIdentity,
+  ]);
+  const nativeEjectorOrbitProjectionIdentity = useMemo<
+    NativeProjectedEjectorOrbitIdentity | null
+  >(() => {
+    const configuration = nativeEntityConfigurationProjectionBinding;
+    const workspace = nativeAuthoritativeFactoryWorkspaceFrame;
+    const stellarIdentity = nativeStellarProjectionIdentity;
+    const activePlanet = factoryActivePlanetNavigationRow;
+    if (!configuration || configuration.entity.buildingId !== "em_rail_ejector" ||
+        !workspace || !stellarIdentity || !activePlanet?.active || !activePlanet.systemId ||
+        activePlanet.planetId !== configuration.activePlanetId ||
+        workspace.sessionId !== configuration.sessionId ||
+        workspace.revision !== configuration.revision ||
+        workspace.runStatus.activePlanetId !== configuration.activePlanetId ||
+        stellarIdentity.sessionId !== configuration.sessionId ||
+        stellarIdentity.revision !== configuration.revision) return null;
+    return Object.freeze({
+      ...configuration,
+      registryFingerprint: stellarIdentity.registryFingerprint,
+      activeSystemId: activePlanet.systemId,
+    });
+  }, [
+    factoryActivePlanetNavigationRow,
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    nativeEntityConfigurationProjectionBinding,
+    nativeStellarProjectionIdentity,
+  ]);
+  const [nativeEjectorOrbitFrame, setNativeEjectorOrbitFrame] =
+    useState<NativeProjectedEjectorOrbitFrame | null>(null);
+  useEffect(() => {
+    let current = true;
+    setNativeEjectorOrbitFrame(null);
+    if (!nativeEjectorOrbitProjectionIdentity) return () => { current = false; };
+    void readNativeProjectedEjectorOrbitFrame(
+      desktopBridge,
+      nativeEjectorOrbitProjectionIdentity,
+    ).then((frame) => {
+      if (current) setNativeEjectorOrbitFrame(frame);
+    });
+    return () => { current = false; };
+  }, [desktopBridge, nativeEjectorOrbitProjectionIdentity]);
+  const factorySelectionToolbarReadModel = useMemo(
+    () => factoryInteractionRows.source === "native-authoritative"
+      ? factoryInteractionRows.selectionToolbarReadModel
+      : selectFactorySelectionToolbarReadModel(
+          factoryInteractionRows.selectionToolbarReadModel,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+          {
+            requestedEntityIds: factoryThinViewSelectedEntityIds,
+            requestedBeltIds: factoryThinViewSelectedBeltIds,
+            requestTruncated:
+              factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+              factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+            selectedEntityIds,
+            selectedBeltIds,
+          },
+        ),
+    [
+      factoryInteractionRows.source,
+      factoryInteractionRows.selectionToolbarReadModel,
+      factoryThinViewAllSelectedBeltIds.length,
+      factoryThinViewAllSelectedEntityIds.length,
+      factoryThinViewExpectedRevision,
+      factoryThinViewSelectedBeltIds,
+      factoryThinViewSelectedEntityIds,
+      nativeFactoryThinViewSnapshot,
+      selectedBeltIds,
+      selectedEntityIds,
+    ],
+  );
+  const nativeBlueprintCaptureSelection = useMemo<NativeBlueprintCaptureSelectionBinding | null>(() => {
+    const projectionIdentity = factorySelectionToolbarReadModel.projectionIdentity;
+    if (!nativePlayerAuthorityOwnsRuntime || factoryInteractionRows.source !== "native-authoritative" ||
+        !nativeFactoryInventoryIdentity || !projectionIdentity ||
+        projectionIdentity.sessionId !== nativeFactoryInventoryIdentity.sessionId ||
+        projectionIdentity.runId !== nativeFactoryInventoryIdentity.runId ||
+        projectionIdentity.revision !== nativeFactoryInventoryIdentity.revision ||
+        projectionIdentity.planetId !== factorySelectionToolbarReadModel.activePlanetId ||
+        factorySelectionToolbarReadModel.revision !== nativeFactoryInventoryIdentity.revision ||
+        factorySelectionToolbarReadModel.selectedCount < 1 ||
+        selectedEntityIds.length < 1 || selectedEntityIds.length > 512 ||
+        new Set(selectedEntityIds).size !== selectedEntityIds.length) return null;
+    return Object.freeze({
+      ...nativeFactoryInventoryIdentity,
+      activePlanetId: projectionIdentity.planetId,
+      entityIds: Object.freeze([...selectedEntityIds]),
+    });
+  }, [
+    factoryInteractionRows.source,
+    factorySelectionToolbarReadModel,
+    nativeFactoryInventoryIdentity,
+    nativePlayerAuthorityOwnsRuntime,
+    selectedEntityIds,
+  ]);
+  nativeBlueprintCaptureSelectionRef.current = nativeBlueprintCaptureSelection;
+  useEffect(() => {
+    nativeBlueprintCaptureRequestGenerationRef.current += 1;
+    nativeBlueprintCaptureContextPendingRef.current = false;
+    setNativeBlueprintCaptureContextPending(false);
+    nativeBlueprintImportRequestGenerationRef.current += 1;
+    nativeBlueprintImportContextPendingRef.current = false;
+    setNativeBlueprintImportContextPending(false);
+    nativeBlueprintExportRequestGenerationRef.current += 1;
+    nativeBlueprintExportContextPendingRef.current = false;
+    setNativeBlueprintExportContextPending(false);
+  }, [
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  const commitNativeSelectionInteractionLock = useCallback((targetInteractionLocked: boolean): boolean => {
+    if (factoryInteractionRows.source !== "native-authoritative") {
+      setNotice("原生选区投影尚未完成当前 revision 校验；本次操作未应用");
+      return false;
+    }
+    const selectionProjection = factoryInteractionRows.multiSelectionSummaryReadModel;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const interactionIdentity = factoryInteractionRows.projectionIdentity;
+    if (!commandSource || !routeIdentity || !interactionIdentity ||
+      interactionIdentity.sessionId !== routeIdentity.sessionId || interactionIdentity.runId !== routeIdentity.runId ||
+      interactionIdentity.revision !== routeIdentity.revision || interactionIdentity.planetId !== routeIdentity.planetId ||
+      commandSource.sessionId !== routeIdentity.sessionId ||
+      commandSource.runId !== routeIdentity.runId || commandSource.baseRevision !== routeIdentity.revision) {
+      setNotice("原生选区投影尚未完成当前 revision 校验；本次操作未应用");
+      return false;
+    }
+    return commitNativeProjectedCommand(
+      routeIdentity.revision,
+      () => createNativeProjectedInteractionLockCommandFromReadModels({
+        commandIdentity: routeIdentity,
+        toolbar: factorySelectionToolbarReadModel,
+        selection: selectionProjection,
+        targetInteractionLocked,
+      }),
+      () => setNotice(targetInteractionLocked ? "已由 Windows 原生权威锁定所选建筑" : "已由 Windows 原生权威解锁所选建筑"),
+    );
+  }, [commitNativeProjectedCommand, factoryInteractionRows, factorySelectionToolbarReadModel]);
+  const removeNativeOrdinaryBuilding = useCallback(async (entityId: string): Promise<void> => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativeRemovalContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次回收未提交");
+      return;
+    }
+    const projected = factoryInspectorSummaryReadModel.source === "native-core"
+      ? factoryInspectorSummaryReadModel.entity
+      : null;
+    if (!projected || projected.entityId !== entityId || factoryInspectorSummaryReadModel.belt !== null) {
+      setNotice("没有取得当前建筑的同 revision Rust 摘要；本次回收未提交");
+      return;
+    }
+    const buildingLabel = projected.buildingId
+      ? getConstructionDefinition(projected.buildingId)?.name ?? projected.buildingId
+      : "当前节点";
+    const count = Math.max(0, projected.machineCount);
+    const confirmed = await gameDialog.confirm(
+      `确认让 Rust 安全回收${buildingLabel}整组 ×${count}？只有建筑无缓存、无线路、无喷涂模块且不被施工任务引用时才会执行；材料会原子返还施工托盘。`,
+      { danger: true, confirmLabel: "确认安全回收" },
+    );
+    if (!confirmed) return;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId) {
+      setNotice("选择或权威会话已经变化；本次回收未提交");
+      return;
+    }
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const registryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+    if (!routeIdentity || !commandSource || commandSource.sessionId !== routeIdentity.sessionId ||
+        commandSource.runId !== routeIdentity.runId ||
+        commandSource.baseRevision !== routeIdentity.revision) {
+      setNotice("原生建筑摘要已经过期；请等待当前 revision 刷新后重试");
+      return;
+    }
+    const generation = nativeRemovalRequestGenerationRef.current + 1;
+    nativeRemovalRequestGenerationRef.current = generation;
+    nativeRemovalContextPendingRef.current = true;
+    setNativeRemovalContextPending(true);
+    try {
+      const context = await readVerifiedNativeConstructionRemovalContext(desktopBridge, {
+        sessionId: routeIdentity.sessionId,
+        runId: routeIdentity.runId,
+        revision: routeIdentity.revision,
+        registryFingerprint,
+      }, entityId);
+      if (nativeRemovalRequestGenerationRef.current !== generation) return;
+      if (!context) {
+        setNotice("没有取得同一 revision 的 Rust 回收凭证；存档未改变，请重试");
+        return;
+      }
+      if (!context.support.supported) {
+        setNotice(nativeRemovalBlockedMessage(context.support.reason ?? "unsupported-building-domain"));
+        return;
+      }
+      if (context.buildingId !== projected.buildingId || context.machineCount !== projected.machineCount) {
+        const latestLabel = context.buildingId
+          ? getConstructionDefinition(context.buildingId)?.name ?? context.buildingId
+          : buildingLabel;
+        const stillConfirmed = await gameDialog.confirm(
+          `Rust 最新 revision 显示将完整回收${latestLabel} ×${context.machineCount ?? 0}，施工托盘将从 ${context.currentConstruction ?? 0} 增加到 ${context.refundAfterRemoval ?? 0}。确认按最新结果执行？`,
+          { danger: true, confirmLabel: "按最新结果回收" },
+        );
+        if (!stillConfirmed || nativeRemovalRequestGenerationRef.current !== generation) return;
+      }
+      if (context.activePlanetId !== routeIdentity.planetId ||
+          selectedEntityIdsRef.current.length !== 1 || selectedEntityIdsRef.current[0] !== entityId) {
+        setNotice("建筑或行星在确认期间已经变化；存档未改变，请重试");
+        return;
+      }
+      commitNativeProjectedCommand(context.revision, (baseRevision) =>
+        baseRevision === context.revision
+          ? createNativeProjectedOrdinaryBuildingRemovalCommand(context)
+          : null,
+        () => {
+          selectedEntityIdsRef.current = [];
+          setSelectedEntityIds([]);
+          setNotice(`已由 Rust 安全回收${buildingLabel} ×${context.machineCount ?? count}，并返还施工托盘`);
+          playTone("remove");
+        },
+      );
+    } finally {
+      if (nativeRemovalRequestGenerationRef.current === generation) {
+        nativeRemovalContextPendingRef.current = false;
+        setNativeRemovalContextPending(false);
+      }
+    }
+  }, [
+    commitNativeProjectedCommand,
+    desktopBridge,
+    factoryInspectorSummaryReadModel,
+    playTone,
+  ]);
+  const changeNativeOrdinaryBuildingStack = useCallback(async (
+    entityId: string,
+    targetCount: number,
+  ): Promise<void> => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativeStackContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current || !Number.isSafeInteger(targetCount) || targetCount < 1) {
+      setNotice("Windows 原生权威正在确认上一项操作，或目标数量无效；本次堆叠未提交");
+      return;
+    }
+    const projected = factoryInspectorSummaryReadModel.source === "native-core"
+      ? factoryInspectorSummaryReadModel.entity
+      : null;
+    if (!projected || projected.entityId !== entityId || factoryInspectorSummaryReadModel.belt !== null ||
+        !projected.buildingId || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId) {
+      setNotice("没有取得当前建筑的同 revision Rust 摘要；本次堆叠未提交");
+      return;
+    }
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const registryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+    if (!routeIdentity || !commandSource || commandSource.sessionId !== routeIdentity.sessionId ||
+        commandSource.runId !== routeIdentity.runId || commandSource.baseRevision !== routeIdentity.revision) {
+      setNotice("原生建筑摘要已经过期；请等待当前 revision 刷新后重试");
+      return;
+    }
+    const generation = nativeStackRequestGenerationRef.current + 1;
+    nativeStackRequestGenerationRef.current = generation;
+    nativeStackContextPendingRef.current = true;
+    setNativeStackContextPending(true);
+    try {
+      const context = await readVerifiedNativeConstructionStackContext(desktopBridge, {
+        sessionId: routeIdentity.sessionId,
+        runId: routeIdentity.runId,
+        revision: routeIdentity.revision,
+        registryFingerprint,
+      }, entityId, targetCount);
+      if (nativeStackRequestGenerationRef.current !== generation ||
+          !nativePlayerAuthorityOwnsRuntimeRef.current) return;
+      if (!context) {
+        setNotice("没有取得同一 revision 的 Rust 堆叠凭证；存档和施工库存均未改变，请重试");
+        return;
+      }
+      if (!context.support.supported) {
+        setNotice(nativeStackBlockedMessage(context.support.reason ?? "unsupported-building-domain"));
+        return;
+      }
+      if (context.activePlanetId !== routeIdentity.planetId || context.entityId !== entityId ||
+          context.buildingId !== projected.buildingId || context.currentCount !== projected.machineCount ||
+          selectedEntityIdsRef.current.length !== 1 || selectedEntityIdsRef.current[0] !== entityId) {
+        setNotice("建筑、数量或行星在确认期间已经变化；存档未改变，请等待投影刷新");
+        return;
+      }
+      const label = getConstructionDefinition(context.buildingId)?.name ?? context.buildingId ?? entityId;
+      commitNativeProjectedCommand(context.revision, (baseRevision) =>
+        baseRevision === context.revision
+          ? createNativeProjectedOrdinaryBuildingStackCommand(context)
+          : null,
+        () => {
+          setNotice(`已由 Rust 将${label}堆叠调整为 ×${targetCount}`);
+          playTone(targetCount > projected.machineCount ? "place" : "remove");
+        },
+      );
+    } finally {
+      if (nativeStackRequestGenerationRef.current === generation) {
+        nativeStackContextPendingRef.current = false;
+        setNativeStackContextPending(false);
+      }
+    }
+  }, [
+    commitNativeProjectedCommand,
+    desktopBridge,
+    factoryInspectorSummaryReadModel,
+    playTone,
+  ]);
+  const removeNativeOrdinaryBelt = useCallback(async (beltId: string): Promise<void> => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativeRemovalContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次拆线未提交");
+      return;
+    }
+    const projected = factoryInspectorSummaryReadModel.source === "native-core"
+      ? factoryInspectorSummaryReadModel.belt
+      : null;
+    if (!projected || projected.beltId !== beltId || factoryInspectorSummaryReadModel.entity !== null ||
+        selectedEntityIdsRef.current.length !== 0 || selectedBeltIdsRef.current.length !== 1 ||
+        selectedBeltIdsRef.current[0] !== beltId || selectedBeltIdRef.current !== beltId) {
+      setNotice("没有取得当前线路的同 revision Rust 摘要；本次拆线未提交");
+      return;
+    }
+    const tierName = projected.tier === 3 ? "III" : projected.tier === 2 ? "II" : "I";
+    const confirmed = await gameDialog.confirm(
+      `确认让 Rust 安全回收这条 Mk.${tierName} 线路（并联 ×${projected.lanes}）？Rust 会重新核对端点、等级、数量和施工托盘，再一次性返还材料。`,
+      { danger: true, confirmLabel: "确认安全拆线" },
+    );
+    if (!confirmed || !nativePlayerAuthorityOwnsRuntimeRef.current ||
+        selectedEntityIdsRef.current.length !== 0 || selectedBeltIdsRef.current.length !== 1 ||
+        selectedBeltIdsRef.current[0] !== beltId || selectedBeltIdRef.current !== beltId) return;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const registryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+    if (!routeIdentity || !commandSource || commandSource.sessionId !== routeIdentity.sessionId ||
+        commandSource.runId !== routeIdentity.runId || commandSource.baseRevision !== routeIdentity.revision) {
+      setNotice("原生线路摘要已经过期；请等待当前 revision 刷新后重试");
+      return;
+    }
+    const generation = nativeRemovalRequestGenerationRef.current + 1;
+    nativeRemovalRequestGenerationRef.current = generation;
+    nativeRemovalContextPendingRef.current = true;
+    setNativeRemovalContextPending(true);
+    try {
+      const context = await readVerifiedNativeConstructionBeltRemovalContext(desktopBridge, {
+        sessionId: routeIdentity.sessionId,
+        runId: routeIdentity.runId,
+        revision: routeIdentity.revision,
+        registryFingerprint,
+      }, { beltId });
+      if (nativeRemovalRequestGenerationRef.current !== generation ||
+          !nativePlayerAuthorityOwnsRuntimeRef.current) return;
+      if (!context) {
+        setNotice("没有取得同一 revision 的 Rust 拆线凭证；存档和施工库存均未改变，请重试");
+        return;
+      }
+      if (!context.support.supported) {
+        setNotice(nativeBeltRemovalBlockedMessage(context.support.reason ?? "unsupported-belt-domain"));
+        return;
+      }
+      if (context.activePlanetId !== routeIdentity.planetId || context.planetId !== projected.planetId ||
+          context.beltId !== projected.beltId || context.sourceId !== projected.sourceEntityId ||
+          context.targetId !== projected.targetEntityId || context.tier !== projected.tier ||
+          context.lanes !== projected.lanes || selectedEntityIdsRef.current.length !== 0 ||
+          selectedBeltIdsRef.current.length !== 1 || selectedBeltIdsRef.current[0] !== beltId ||
+          selectedBeltIdRef.current !== beltId) {
+        setNotice("线路、端点、数量或行星在确认期间已经变化；存档未改变，请等待投影刷新");
+        return;
+      }
+      commitNativeProjectedCommand(context.revision, (baseRevision) =>
+        baseRevision === context.revision
+          ? createNativeProjectedOrdinaryBeltRemovalCommand(context)
+          : null,
+        () => {
+          selectedBeltIdRef.current = null;
+          selectedBeltIdsRef.current = [];
+          setSelectedBeltId(null);
+          setSelectedBeltIds([]);
+          setNotice(`已由 Rust 回收 Mk.${tierName} 线路 ×${projected.lanes}，材料已返还施工托盘`);
+          playTone("remove");
+        },
+      );
+    } finally {
+      if (nativeRemovalRequestGenerationRef.current === generation) {
+        nativeRemovalContextPendingRef.current = false;
+        setNativeRemovalContextPending(false);
+      }
+    }
+  }, [
+    commitNativeProjectedCommand,
+    desktopBridge,
+    factoryInspectorSummaryReadModel,
+    playTone,
+  ]);
+  const changeNativeOrdinaryBeltLanes = useCallback(async (
+    beltId: string,
+    targetLanes: number,
+  ): Promise<void> => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativeBeltLaneContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次并联调整未提交");
+      return;
+    }
+    const projected = factoryInspectorSummaryReadModel.source === "native-core"
+      ? factoryInspectorSummaryReadModel.belt
+      : null;
+    if (!projected || projected.beltId !== beltId || !Number.isSafeInteger(targetLanes) ||
+        targetLanes < 1 || factoryInspectorSummaryReadModel.entity !== null ||
+        selectedEntityIdsRef.current.length !== 0 || selectedBeltIdsRef.current.length !== 1 ||
+        selectedBeltIdsRef.current[0] !== beltId || selectedBeltIdRef.current !== beltId) {
+      setNotice("没有取得当前线路的同 revision Rust 摘要；本次并联调整未提交");
+      return;
+    }
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const registryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+    if (!routeIdentity || !commandSource || commandSource.sessionId !== routeIdentity.sessionId ||
+        commandSource.runId !== routeIdentity.runId || commandSource.baseRevision !== routeIdentity.revision) {
+      setNotice("原生线路摘要已经过期；请等待当前 revision 刷新后重试");
+      return;
+    }
+    const generation = nativeBeltLaneRequestGenerationRef.current + 1;
+    nativeBeltLaneRequestGenerationRef.current = generation;
+    nativeBeltLaneContextPendingRef.current = true;
+    setNativeBeltLaneContextPending(true);
+    try {
+      const context = await readVerifiedNativeConstructionBeltLaneContext(desktopBridge, {
+        sessionId: routeIdentity.sessionId,
+        runId: routeIdentity.runId,
+        revision: routeIdentity.revision,
+        registryFingerprint,
+      }, { beltId, targetLanes });
+      if (nativeBeltLaneRequestGenerationRef.current !== generation ||
+          !nativePlayerAuthorityOwnsRuntimeRef.current) return;
+      if (!context) {
+        setNotice("没有取得同一 revision 的 Rust 并联调整凭证；存档和施工库存均未改变");
+        return;
+      }
+      if (!context.support.supported) {
+        setNotice(nativeBeltLaneBlockedMessage(context.support.reason ?? "invalid-belt"));
+        return;
+      }
+      if (context.activePlanetId !== routeIdentity.planetId || context.planetId !== projected.planetId ||
+          context.beltId !== projected.beltId || context.sourceId !== projected.sourceEntityId ||
+          context.targetId !== projected.targetEntityId || context.itemId !== projected.itemId ||
+          context.tier !== projected.tier || context.currentLanes !== projected.lanes ||
+          context.targetLanes !== targetLanes || selectedEntityIdsRef.current.length !== 0 ||
+          selectedBeltIdsRef.current.length !== 1 || selectedBeltIdsRef.current[0] !== beltId ||
+          selectedBeltIdRef.current !== beltId) {
+        setNotice("线路、端点、数量或行星在确认期间已经变化；存档未改变，请等待投影刷新");
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(context.revision, (baseRevision) =>
+        baseRevision === context.revision
+          ? createNativeProjectedOrdinaryBeltLaneCommand(context)
+          : null,
+        () => setNotice(context.laneDelta! > 0
+          ? `已由 Rust 增加并联线路 ×${context.laneDelta}`
+          : `已由 Rust 减少并联线路 ×${Math.abs(context.laneDelta!)}`),
+      );
+      if (!accepted) setNotice("Rust 没有接受这次并联调整；存档未改变");
+    } finally {
+      if (nativeBeltLaneRequestGenerationRef.current === generation) {
+        nativeBeltLaneContextPendingRef.current = false;
+        setNativeBeltLaneContextPending(false);
+      }
+    }
+  }, [
+    commitNativeProjectedCommand,
+    desktopBridge,
+    factoryInspectorSummaryReadModel,
+  ]);
+  const changeNativeOrdinaryBeltPriority = useCallback((
+    beltId: string,
+    targetPriority: 0 | 1 | 2,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次线路优先级未提交");
+      return;
+    }
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!routeIdentity || !commandSource || commandSource.sessionId !== routeIdentity.sessionId ||
+        commandSource.runId !== routeIdentity.runId || commandSource.baseRevision !== routeIdentity.revision ||
+        selectedEntityIdsRef.current.length !== 0 || selectedBeltIdsRef.current.length !== 1 ||
+        selectedBeltIdsRef.current[0] !== beltId || selectedBeltIdRef.current !== beltId) {
+      setNotice("原生线路选择或 revision 已变化；本次优先级未提交");
+      return;
+    }
+    try {
+      const accepted = commitNativeProjectedCommand(routeIdentity.revision, (baseRevision) =>
+        baseRevision === routeIdentity.revision
+          ? createNativeProjectedBeltPriorityCommand({
+            commandIdentity: routeIdentity,
+            inspector: factoryInspectorSummaryReadModel,
+            selection: factoryMultiSelectionSummaryReadModel,
+            targetPriority,
+          })
+          : null,
+        () => setNotice(`已由 Rust 将当前线路优先级设为${targetPriority === 0 ? "低" : targetPriority === 1 ? "标准" : "高"}`),
+      );
+      if (!accepted) setNotice("Rust 没有接受这次线路优先级命令；存档未改变");
+    } catch {
+      setNotice("原生线路投影未通过同 revision 完整性校验；存档未改变");
+    }
+  }, [
+    commitNativeProjectedCommand,
+    factoryInspectorSummaryReadModel,
+    factoryMultiSelectionSummaryReadModel,
+  ]);
+  const changeNativeEntityPowerPriority = useCallback((
+    entityId: string,
+    targetPriority: PowerPriority,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次用电优先级未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生建筑选择、session 或 revision 已变化；本次用电优先级未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedEntityPowerPriorityCommand(binding, targetPriority)
+        : null,
+      () => setNotice(`已由 Rust 将当前建筑用电优先级设为${targetPriority === 3 ? "高" : targetPriority === 2 ? "中" : "低"}`),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次建筑用电优先级命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeSplitterDistributionMode = useCallback((
+    entityId: string,
+    targetMode: NativeProjectedSplitterDistributionMode,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次分流模式未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生分流器选择、session 或 revision 已变化；本次分流模式未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedSplitterDistributionModeCommand(binding, targetMode)
+        : null,
+      () => setNotice(`已由 Rust 将当前分流器设为${targetMode === "balanced" ? "均衡分流" : "优先线路"}`),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次分流模式命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeEnergyExchangerMode = useCallback((
+    entityId: string,
+    targetMode: NativeProjectedEnergyExchangerMode,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次能量枢纽模式未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生能量枢纽选择、session 或 revision 已变化；本次模式未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedEnergyExchangerModeCommand(binding, targetMode)
+        : null,
+      () => setNotice(`已由 Rust 将当前能量枢纽设为${targetMode === "charge" ? "空蓄电器充电" : "满蓄电器放电"}`),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次能量枢纽模式命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeFuelItem = useCallback((
+    entityId: string,
+    targetItemId: ItemId,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次燃料类型未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生燃料建筑选择、session 或 revision 已变化；本次燃料未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedFuelItemCommand(binding, targetItemId)
+        : null,
+      () => setNotice(`已由 Rust 将当前燃料切换为${ITEMS[targetItemId].name}`),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次燃料类型命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeMaterialDeliverySlot = useCallback((
+    entityId: string,
+    slotIndex: number,
+    mode: MaterialDeliverySlotMode,
+    itemId: ItemId | null,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次配送接口修改未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生配送枢纽选择、session 或 revision 已变化；本次接口修改未提交");
+      return;
+    }
+    try {
+      const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+        baseRevision === binding.revision
+          ? createConfirmedNativeMaterialDeliverySlotCommand(binding, slotIndex, mode, itemId)
+          : null,
+        () => setNotice(`已由 Rust 更新物资配送接口 ${slotIndex + 1}`),
+      );
+      if (!accepted) setNotice("Rust 没有接受这次配送接口命令；存档未改变");
+    } catch {
+      setNotice("原生配送接口投影未通过同 revision 完整性校验；存档未改变");
+    }
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const clearNativeOrbitalCargoPort = useCallback((
+    entityId: string,
+    portIndex: number,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次轨道货运接口清空未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生轨道货运终端选择、session 或 revision 已变化；本次接口清空未提交");
+      return;
+    }
+    try {
+      const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+        baseRevision === binding.revision
+          ? createConfirmedNativeOrbitalCargoPortClearCommand(binding, portIndex)
+          : null,
+        () => setNotice(`已由 Rust 安全清空轨道货运接口 ${portIndex + 1}`),
+      );
+      if (!accepted) setNotice("Rust 没有接受这次轨道货运接口命令；存档未改变");
+    } catch {
+      setNotice("原生轨道货运接口投影未通过同 revision 完整性校验；存档未改变");
+    }
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeGalacticExporterPaused = useCallback((
+    entityId: string,
+    paused: boolean,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次银河出口建筑启停未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId ||
+        binding.entity.buildingId !== "galactic_material_exporter" ||
+        typeof binding.entity.galacticExporterPaused !== "boolean" ||
+        !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生银河出口建筑选择、session 或 revision 已变化；本次启停未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedGalacticExporterPauseCommand(binding, paused)
+        : null,
+      () => setNotice(paused ? "银河物资出口建筑已由 Rust 暂停" : "银河物资出口建筑已由 Rust 启动"),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次银河出口建筑命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeEntityRecipe = useCallback((
+    entityId: string,
+    targetRecipeId: RecipeId,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次配方未提交");
+      return;
+    }
+    const binding = nativeEntityRecipeProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生建筑选择、目录、session 或 revision 已变化；本次配方未提交");
+      return;
+    }
+    commitNativeEntityRecipeCommand(binding, targetRecipeId);
+  }, [commitNativeEntityRecipeCommand, nativeEntityRecipeProjectionBinding]);
+  const changeNativeBlackHolePaused = useCallback((
+    entityId: string,
+    paused: boolean,
+  ): void => {
+    void (async () => {
+      if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+        setNotice("Windows 原生权威正在确认上一项操作；本次微型黑洞启停未提交");
+        return;
+      }
+      const binding = nativeEntityConfigurationProjectionBinding;
+      if (!binding || binding.entity.id !== entityId ||
+          binding.entity.buildingId !== "micro_black_hole_connector" ||
+          typeof binding.entity.blackHolePaused !== "boolean" ||
+          typeof binding.entity.blackHoleActivationConfirmed !== "boolean") {
+        setNotice("原生微型黑洞投影不完整；本次启停未提交");
+        return;
+      }
+      let confirmActivation = false;
+      if (!paused && !binding.entity.blackHoleActivationConfirmed) {
+        if (!await gameDialog.confirm("即将启动当前行星上的微型黑洞连接装置。输入物资将被永久销毁且无法找回。", { danger: true, confirmLabel: "继续确认" })) return;
+        if (!await gameDialog.confirm("请再次确认：启动后，传送带送入的物资不会进入任何库存，也无法恢复。", { danger: true, confirmLabel: "确认启动" })) return;
+        confirmActivation = true;
+      }
+      const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+      const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+      if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current ||
+          !routeIdentity || !commandSource ||
+          binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+          binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+          commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+          commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+          selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+          selectedBeltIdRef.current !== null) {
+        setNotice("原生微型黑洞选择、session 或 revision 已变化；本次启停未提交");
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+        baseRevision === binding.revision
+          ? createNativeProjectedBlackHolePausedCommand({
+            baseRevision,
+            entityId,
+            paused,
+            confirmActivation,
+          })
+          : null,
+        (receipt) => setNotice(
+          `已由 Rust ${paused ? "暂停" : "启动"}微型黑洞 · durable revision ${receipt.revision}`,
+        ),
+      );
+      if (!accepted) setNotice("Rust 没有接受这次微型黑洞启停命令；存档未改变");
+    })();
+  }, [commitNativeProjectedCommand, gameDialog, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeTimeWarpEnabled = useCallback((
+    entityId: string,
+    enabled: boolean,
+  ): void => {
+    const binding = nativeTimeWarpControllerProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !binding || !routeIdentity ||
+        !commandSource || binding.entity.id !== entityId ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision ||
+        binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision ||
+        selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId ||
+        selectedBeltIdsRef.current.length !== 0 || selectedBeltIdRef.current !== null ||
+        binding.timeWarp.enabled === enabled) {
+      setNotice("原生时间扭曲主控选择、session 或 revision 已变化；本次启停未提交");
+      return;
+    }
+    // The macro controller owns start/finish ordering. Its toggle command is
+    // now only a controller-bound semantic marker; no renderer-derived power
+    // field is installed before the durable Rust revision returns.
+    handleTimeWarpEnabledChange(enabled);
+  }, [handleTimeWarpEnabledChange, nativeTimeWarpControllerProjectionBinding]);
+  const changeNativeTimeWarpRequestedMultiplier = useCallback((
+    entityId: string,
+    requestedMultiplier: number,
+  ): void => {
+    const binding = nativeTimeWarpControllerProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !binding || !routeIdentity ||
+        !commandSource || binding.entity.id !== entityId ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision ||
+        binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision ||
+        selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId ||
+        selectedBeltIdsRef.current.length !== 0 || selectedBeltIdRef.current !== null) {
+      setNotice("原生时间扭曲主控选择、session 或 revision 已变化；本次倍率未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedTimeWarpRequestedMultiplierCommand(binding, requestedMultiplier)
+        : null,
+      (receipt) => setNotice(
+        `已由 Rust 将时间扭曲请求倍率设为 ${requestedMultiplier}x · durable revision ${receipt.revision}`,
+      ),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次时间扭曲倍率命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeTimeWarpControllerProjectionBinding]);
+  const changeNativeEjectorOrbit = useCallback((
+    entityId: string,
+    orbitId: string,
+  ): void => {
+    const frame = nativeEjectorOrbitFrame;
+    const identity = nativeEjectorOrbitProjectionIdentity;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !frame || !identity || !routeIdentity ||
+        !commandSource || frame.entity.id !== entityId || identity.entity.id !== entityId ||
+        frame.sessionId !== identity.sessionId || frame.runId !== identity.runId ||
+        frame.revision !== identity.revision || frame.activePlanetId !== identity.activePlanetId ||
+        frame.activeSystemId !== identity.activeSystemId ||
+        identity.sessionId !== routeIdentity.sessionId || identity.runId !== routeIdentity.runId ||
+        identity.revision !== routeIdentity.revision ||
+        identity.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== identity.sessionId || commandSource.runId !== identity.runId ||
+        commandSource.baseRevision !== identity.revision ||
+        selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId ||
+        selectedBeltIdsRef.current.length !== 0 || selectedBeltIdRef.current !== null ||
+        !frame.orbitsById.has(orbitId)) {
+      setNotice("原生弹射器选择、轨道页、session 或 revision 已变化；本次目标未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedEjectorOrbitCommand(frame, orbitId)
+        : null,
+      (receipt) => setNotice(
+        `已由 Rust 更新太阳帆目标轨道 · durable revision ${receipt.revision}`,
+      ),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次太阳帆轨道命令；存档未改变");
+  }, [
+    commitNativeProjectedCommand,
+    nativeEjectorOrbitFrame,
+    nativeEjectorOrbitProjectionIdentity,
+  ]);
+  const changeNativeStationConfiguration = useCallback((
+    entityId: string,
+    action: NativeStationConfigurationUiAction,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次物流站配置未提交");
+      return;
+    }
+    const binding = nativeStationConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.entityId !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生物流站选择、session 或 revision 已变化；本次配置未提交");
+      return;
+    }
+    try {
+      const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) => {
+        if (baseRevision !== binding.revision) return null;
+        switch (action.kind) {
+          case "slot-mode":
+            return createNativeProjectedStationSlotModeCommand(
+              binding,
+              action.slotIndex,
+              action.scope,
+              action.target,
+            );
+          case "slot-item":
+            return createNativeProjectedStationSlotItemCommand(binding, action.slotIndex, action.target);
+          case "slot-priority":
+            return createNativeProjectedStationSlotPriorityCommand(binding, action.slotIndex, action.target);
+          case "slot-minimum-load":
+            return createNativeProjectedStationSlotMinimumLoadCommand(binding, action.slotIndex, action.target);
+          case "slot-limits":
+            return createNativeProjectedStationSlotLimitsCommand(
+              binding,
+              action.slotIndex,
+              action.minStock,
+              action.maxStock,
+            );
+          case "slot-route-policy":
+            return createNativeProjectedStationSlotRoutePolicyCommand(binding, action.slotIndex, action.target);
+          case "slot-warper-budget":
+            return createNativeProjectedStationSlotWarperBudgetCommand(binding, action.slotIndex, action.target);
+          case "station-fleet-adjust":
+            return createNativeProjectedStationFleetAdjustmentCommand(
+              binding,
+              action.fleetKind,
+              action.adjustment,
+            );
+          case "station-warper-inventory-adjust":
+            return createNativeProjectedStationWarperInventoryAdjustmentCommand(binding, action.adjustment);
+          case "station-scalar":
+            return createNativeProjectedStationScalarCommand(binding, action);
+        }
+      }, (receipt) => setNotice(
+        `已由 Rust 提交物流站配置 · durable revision ${receipt.revision}`,
+      ));
+      if (!accepted) setNotice("目标值与当前 Rust 投影相同；存档未改变");
+    } catch {
+      setNotice("原生物流站配置未通过同 revision 守恒校验；存档未改变");
+    }
+  }, [commitNativeProjectedCommand, nativeStationConfigurationProjectionBinding]);
+  const selectedBelts = factoryInteractionRows.selectedBelts;
+  const dockBeltTier = nativePlayerAuthorityOwnsRuntime
+    ? nativeBeltPlacementTier ?? beltTier
+    : resolveConnectionBeltTier(game, beltTierMode, beltTier);
+  const blueprintEligibleIds = useMemo(() => nativePlayerAuthorityOwnsRuntime || selectedEntityIds.length === 0
     ? []
     : getBlueprintEligibleEntityIds(game, selectedEntityIds),
-  [game, selectedEntityIds]);
-  const activeBlueprint = game.blueprints.find((blueprint) => blueprint.id === blueprintPlacementId) ?? null;
-  const mobileActionEntity = useMemo(() => mobileActionEntityId
+  [game, nativePlayerAuthorityOwnsRuntime, selectedEntityIds]);
+  const activeBlueprint = nativePlayerAuthorityOwnsRuntime
+    ? null
+    : game.blueprints.find((blueprint) => blueprint.id === blueprintPlacementId) ?? null;
+  const mobileActionEntity = useMemo(() => !nativePlayerAuthorityOwnsRuntime && mobileActionEntityId
     ? game.entities.find((entity) => entity.id === mobileActionEntityId) ?? null
     : null,
-  [game.entities, mobileActionEntityId]);
+  [game.entities, mobileActionEntityId, nativePlayerAuthorityOwnsRuntime]);
   const hasConstructionCenter = useMemo(
     () => game.entities.some((entity) => entity.buildingId === "construction_center"),
     [game.entities],
   );
-  const activePlanetRegionCount = useMemo(
-    () => game.canvasRegions.reduce((count, region) => count + (region.planetId === game.activePlanetId ? 1 : 0), 0),
-    [game.activePlanetId, game.canvasRegions],
+  const factoryCanvasRegions = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime
+      ? (nativeAuthoritativeFactoryWorkspaceFrame?.workspace?.regions.rows ?? [])
+        .filter((region) => region.planetId === factoryConfirmedActivePlanetId) as readonly CanvasRegion[]
+      : canvasGame.canvasRegions.filter((region) => region.planetId === canvasGame.activePlanetId),
+    [canvasGame.activePlanetId, canvasGame.canvasRegions, factoryConfirmedActivePlanetId,
+      nativeAuthoritativeFactoryWorkspaceFrame, nativePlayerAuthorityOwnsRuntime],
   );
+  const activePlanetRegionCount = factoryCanvasRegions.length;
 
   const confirmRemoveSelection = useCallback(async () => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const entityIds = [...selectedEntityIdsRef.current];
+      const beltIds = [...new Set([
+        ...selectedBeltIdsRef.current,
+        ...(selectedBeltIdRef.current ? [selectedBeltIdRef.current] : []),
+      ])];
+      if (entityIds.length === 0 && beltIds.length === 0) {
+        setNotice("当前选区没有可回收内容");
+        return;
+      }
+      const confirmed = await gameDialog.confirm(
+        `确认由 Rust 在当前权威 revision 重新核算并回收 ${entityIds.length} 个建筑节点与 ${beltIds.length} 条已选线路？关联普通线路会一并纳入，任一退款或领域校验失败时整批不改变。`,
+        { danger: true, confirmLabel: "确认原子回收" },
+      );
+      if (!confirmed) return;
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      if (!frame) {
+        setNotice("Windows 原生建筑画面正在刷新；本次回收未提交");
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+          kind: "remove",
+          entityIds,
+          beltIds,
+        }),
+        () => {
+          setSelectedEntityIds([]);
+          setSelectedBeltIds([]);
+          setSelectedBeltId(null);
+          setNotice("Rust 已原子回收选区并重新核算全部施工退款；正在刷新拓扑");
+          playTone("remove");
+        },
+      );
+      if (accepted) setNotice("Rust 正在按当前 revision 核算选区回收与关联线路…");
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("批量回收")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const entityIds = [...selectedEntityIdsRef.current];
     const beltIds = [...new Set([
       ...selectedBeltIdsRef.current,
@@ -11633,6 +20712,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { danger: true, confirmLabel: "确认回收" },
     );
     if (!confirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量回收")) return;
     const current = gameRef.current;
     const next = beltIds.reduce((state, beltId) => removeBelt(state, beltId), removeEntities(current, entityIds));
     if (next === current) {
@@ -11646,9 +20726,47 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltId(null);
     setNotice(`已回收 ${preview.entityCount} 个建筑节点和 ${preview.relatedBeltCount} 条相关传送带`);
     playTone("remove");
-  }, [commitGame, gameDialog, playTone]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, commitNativeProjectedCommand, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const batchIncreaseSelected = useCallback(async (amount: number) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const entityIds = [...selectedEntityIdsRef.current];
+      const beltIds = [...new Set([
+        ...selectedBeltIdsRef.current,
+        ...(selectedBeltIdRef.current ? [selectedBeltIdRef.current] : []),
+      ])];
+      if (entityIds.length === 0 && beltIds.length === 0) {
+        setNotice("请先选择建筑或线路");
+        return;
+      }
+      const confirmed = await gameDialog.confirm(
+        `确认请求每个可增加的所选建筑/线路增加 ${formatQuantityCompact(amount)}？Rust 会按当前 revision 重新检查堆叠上限与施工库存；库存不足时整批不扣料。`,
+        { confirmLabel: "确认原子增加" },
+      );
+      if (!confirmed) return;
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      if (!frame) {
+        setNotice("Windows 原生建筑画面正在刷新；本次批量增加未提交");
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+          kind: "increase",
+          entityIds,
+          beltIds,
+          amount,
+        }),
+        () => {
+          setNotice("Rust 已按当前 revision 原子增加选区数量；正在刷新库存与画布");
+          playTone("confirm");
+        },
+      );
+      if (accepted) setNotice("Rust 正在重新核算批量增加的上限和施工材料…");
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("批量增加建筑与线路")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const entityIds = [...selectedEntityIdsRef.current];
     const beltIds = [...new Set([
       ...selectedBeltIdsRef.current,
@@ -11673,6 +20791,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { confirmLabel: "批量增加" },
     );
     if (!confirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量增加建筑与线路")) return;
     const result = batchIncreaseSelection(gameRef.current, entityIds, beltIds, amount);
     if (!result.ok) {
       setNotice(result.label ?? "批量增加失败，状态未改变");
@@ -11683,9 +20802,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const limitCount = result.buildingAtLimitCount + result.beltAtLimitCount;
     setNotice(`已批量增加 ${result.changedBuildingCount} 个建筑、${result.changedBeltCount} 条传送带${limitCount > 0 ? ` · ${limitCount} 项达到上限` : ""}${result.uniqueBuildingSkippedCount > 0 ? ` · ${result.uniqueBuildingSkippedCount} 座唯一巨构已跳过` : ""}`);
     playTone("confirm");
-  }, [commitGame, gameDialog, playTone]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, commitNativeProjectedCommand, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const changeRemoteStationSlotItem = useCallback(async (entityId: string, slotIndex: number, itemId: ItemId | null) => {
+    if (rejectLegacyFactoryInteractionWhileNative("远程物流槽位设置")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const station = gameRef.current.entities.find((entity) => entity.id === entityId);
     const previousItemId = station ? getStationSlots(station)[slotIndex]?.itemId : undefined;
     if (!station || previousItemId === itemId) return;
@@ -11696,6 +20817,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { danger: Boolean(previousItemId), confirmLabel: "确认修改" },
     );
     if (!confirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "远程物流槽位设置")) return;
     const before = gameRef.current;
     const next = setRemoteStationSlotItem(before, entityId, slotIndex, itemId);
     if (next === before) {
@@ -11705,9 +20827,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     commitGame(() => next);
     setNotice(`已远程修改${getPlanetDisplayName(next, station.planetId)}的物流槽位`);
-  }, [commitGame, gameDialog, playTone]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const changeRemoteCollectorItem = useCallback(async (entityId: string, itemId: ItemId) => {
+    if (rejectLegacyFactoryInteractionWhileNative("远程轨道采集物设置")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const collector = gameRef.current.entities.find((entity) => entity.id === entityId && entity.buildingId === "orbital_collector");
     if (!collector || collector.storedItemId === itemId) return;
     const confirmed = await gameDialog.confirm(
@@ -11715,6 +20839,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { confirmLabel: "确认切换" },
     );
     if (!confirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "远程轨道采集物设置")) return;
     const before = gameRef.current;
     const next = setLogisticsItem(before, entityId, itemId);
     if (next === before) {
@@ -11724,7 +20849,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     commitGame(() => next);
     setNotice(`轨道采集器已切换为${ITEMS[itemId].name}`);
-  }, [commitGame, gameDialog, playTone]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const changeRemoteFleetTarget = useCallback((entityId: string, kind: "drone" | "vessel", target: number) => {
     const result = setRemoteStationFleetTarget(gameRef.current, entityId, kind, target);
@@ -11761,6 +20886,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame, playTone]);
 
   const copyEntitiesAsBlueprint = (entityIds: readonly string[]) => {
+    if (rejectLegacyFactoryInteractionWhileNative("蓝图复制")) return;
     const eligibleIds = getBlueprintEligibleEntityIds(gameRef.current, [...entityIds]);
     if (eligibleIds.length === 0) {
       setNotice("选区中没有可复制的设备");
@@ -11774,7 +20900,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       playTone("alert");
       return;
     }
-    commitGame(() => next);
+    if (!commitGame(() => next)) {
+      setNotice("蓝图未创建：主存档正在保存或当前状态拒绝了这次修改");
+      playTone("alert");
+      return;
+    }
     setBlueprintPlacementId(blueprintId);
     setPlacement(null);
     setSelectionMode(false);
@@ -11783,9 +20913,196 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`已复制 ${eligibleIds.length} 个设备，点击画布粘贴蓝图`);
   };
 
-  const copySelectionAsBlueprint = () => copyEntitiesAsBlueprint(selectedEntityIds);
+  const captureNativeSelectionAsBlueprint = async (): Promise<void> => {
+    const selection = nativeBlueprintCaptureSelectionRef.current;
+    const identity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!selection || !identity || nativeBlueprintCaptureContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("原生选区尚未绑定当前 revision，或上一项操作仍在确认；本次蓝图复制未提交");
+      return;
+    }
+    nativeBlueprintCaptureContextPendingRef.current = true;
+    setNativeBlueprintCaptureContextPending(true);
+    nativeBlueprintCaptureRequestGenerationRef.current += 1;
+    const generation = nativeBlueprintCaptureRequestGenerationRef.current;
+    const context = await readVerifiedNativeBlueprintCaptureContext(
+      desktopBridge,
+      identity,
+      selection,
+    );
+    if (nativeBlueprintCaptureRequestGenerationRef.current !== generation) return;
+    const latestSelection = nativeBlueprintCaptureSelectionRef.current;
+    nativeBlueprintCaptureContextPendingRef.current = false;
+    setNativeBlueprintCaptureContextPending(false);
+    if (latestSelection !== selection) {
+      setNotice("读取 Rust 蓝图捕获凭证时选区或权威 revision 已变化；存档未改变");
+      return;
+    }
+    if (!context) {
+      setNotice("没有取得同一 revision/registry/选区顺序的 Rust 蓝图捕获凭证；存档未改变");
+      return;
+    }
+    if (!context.support.supported) {
+      setNotice(nativeBlueprintCaptureBlockedMessage(
+        context.support.reason ?? "unsupported-blueprint-domain",
+      ));
+      return;
+    }
+    if (context.activePlanetId !== selection.activePlanetId) {
+      setNotice("蓝图捕获凭证所属行星已变化；存档未改变，请等待画布刷新");
+      return;
+    }
+    if (commitNativeBlueprintCaptureCommand(context)) {
+      setNotice("已向 Rust 提交蓝图捕获；等待耐久回执和蓝图库成员证明，期间不会重复发送");
+    }
+  };
+
+  const submitNativeBlueprintImportRaw = async (
+    raw: string,
+  ): Promise<NativeBlueprintImportSubmitOutcome> => {
+    const identity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!blueprintsOpenRef.current || !identity ||
+        nativeBlueprintImportContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current || nativeBlueprintImportPending) {
+      const message = "原生蓝图工作区未绑定当前 revision，或上一项操作仍在确认；本次导入未提交";
+      setNotice(message);
+      return { success: false, message };
+    }
+    nativeBlueprintImportContextPendingRef.current = true;
+    setNativeBlueprintImportContextPending(true);
+    nativeBlueprintImportRequestGenerationRef.current += 1;
+    const generation = nativeBlueprintImportRequestGenerationRef.current;
+    const context = await readVerifiedNativeBlueprintImportContext(desktopBridge, identity, raw);
+    if (nativeBlueprintImportRequestGenerationRef.current !== generation) {
+      return { success: false, message: "权威 lineage 已变化；旧导入读取已安全退役" };
+    }
+    nativeBlueprintImportContextPendingRef.current = false;
+    setNativeBlueprintImportContextPending(false);
+    const latestIdentity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!blueprintsOpenRef.current || !latestIdentity ||
+        latestIdentity.sessionId !== identity.sessionId || latestIdentity.runId !== identity.runId ||
+        latestIdentity.revision !== identity.revision ||
+        latestIdentity.registryFingerprint !== identity.registryFingerprint) {
+      const message = "读取 Rust 导入凭证期间工作区或权威 revision 已变化；存档未改变";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!context) {
+      const message = "没有取得同一 revision/registry/原文摘要的 Rust 蓝图导入凭证；存档未改变";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!context.support.supported) {
+      const message = nativeBlueprintImportBlockedMessage(
+        context.support.reason ?? "invalid-exchange",
+      );
+      setNotice(message);
+      return { success: false, message };
+    }
+    const expectedBlueprintId = context.preparedIntent?.blueprint.id ?? null;
+    if (!expectedBlueprintId) {
+      const message = "Rust 导入凭证缺少规范蓝图 ID；存档未改变";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!commitNativeBlueprintImportCommand(context)) {
+      return { success: false, message: "蓝图导入事务未通过当前权威写入门禁" };
+    }
+    setNativeBlueprintImportConfirmation(null);
+    const message = "已向 Rust 提交标准蓝图导入；等待耐久回执和蓝图库成员证明，绝不会重复发送";
+    setNotice(message);
+    return {
+      success: true,
+      message,
+      sessionId: context.sessionId,
+      runId: context.runId,
+      registryFingerprint: context.registryFingerprint,
+      commandRevision: context.revision,
+      blueprintId: expectedBlueprintId,
+    };
+  };
+
+  const exportNativeBlueprint = async (binding: NativeBlueprintExportBinding): Promise<{
+    success: boolean;
+    message: string;
+  }> => {
+    if (!blueprintsOpenRef.current || nativeBlueprintExportContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      const message = "原生蓝图工作区尚未绑定当前 revision，或另一项操作仍在确认；本次未导出";
+      setNotice(message);
+      return { success: false, message };
+    }
+    nativeBlueprintExportContextPendingRef.current = true;
+    setNativeBlueprintExportContextPending(true);
+    nativeBlueprintExportRequestGenerationRef.current += 1;
+    const generation = nativeBlueprintExportRequestGenerationRef.current;
+    const context = await readVerifiedNativeBlueprintExportContext(desktopBridge, binding);
+    if (nativeBlueprintExportRequestGenerationRef.current !== generation) {
+      return { success: false, message: "权威 lineage 已变化；旧导出读取已安全退役" };
+    }
+    const frame = nativeBlueprintWorkspaceFrameRef.current;
+    const row = frame?.libraryById.get(binding.blueprintId) ?? null;
+    if (!blueprintsOpenRef.current || !frame || frame.sessionId !== binding.sessionId ||
+        frame.runId !== binding.runId || frame.revision !== binding.revision ||
+        frame.registryFingerprint !== binding.registryFingerprint ||
+        frame.selectedBlueprintId !== binding.blueprintId ||
+        row?.revision !== binding.blueprintRevision || row.name !== binding.blueprintName) {
+      nativeBlueprintExportContextPendingRef.current = false;
+      setNativeBlueprintExportContextPending(false);
+      const message = "读取 Rust 导出凭证期间蓝图选中行或权威 revision 已变化；没有生成下载文件";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!context) {
+      nativeBlueprintExportContextPendingRef.current = false;
+      setNativeBlueprintExportContextPending(false);
+      const message = "没有取得同一 revision/registry/蓝图行的 Rust 导出凭证；没有生成下载文件";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!context.support.supported || context.rawExchange === null ||
+        context.blueprintName === null || context.fileNameStem === null) {
+      nativeBlueprintExportContextPendingRef.current = false;
+      setNativeBlueprintExportContextPending(false);
+      const message = nativeBlueprintExportBlockedMessage(
+        context.support.reason ?? "unsupported-blueprint-domain",
+      );
+      setNotice(message);
+      return { success: false, message };
+    }
+    try {
+      await exportTextFile({
+        contents: context.rawExchange,
+        fileName: `${context.fileNameStem}.dspblueprint.json`,
+        title: `导出蓝图：${context.blueprintName}`,
+      });
+      const message = `蓝图已由 Rust 导出：${context.blueprintName}`;
+      setNotice(message);
+      playTone("confirm");
+      return { success: true, message };
+    } catch (error) {
+      const message = error instanceof Error ? `蓝图导出失败：${error.message}` : "蓝图导出失败";
+      setNotice(message);
+      playTone("alert");
+      return { success: false, message };
+    } finally {
+      if (nativeBlueprintExportRequestGenerationRef.current === generation) {
+        nativeBlueprintExportContextPendingRef.current = false;
+        setNativeBlueprintExportContextPending(false);
+      }
+    }
+  };
+
+  const copySelectionAsBlueprint = () => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      void captureNativeSelectionAsBlueprint();
+      return;
+    }
+    copyEntitiesAsBlueprint(selectedEntityIds);
+  };
 
   const deployBlueprint = (blueprintId: string) => {
+    if (rejectLegacyFactoryInteractionWhileNative("蓝图部署")) return;
     setBlueprintPlacementId(blueprintId);
     setBlueprintsOpen(false);
     setDysonPlannerOpen(false);
@@ -11798,6 +21115,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   };
 
   const handleQuickCraftConstruction = (buildingId: ConstructionId, batches = 1) => {
+    if (rejectLegacyFactoryInteractionWhileNative("基础制造")) return;
     const before = gameRef.current;
     const plan = getConstructionQuickCraftPlan(before, buildingId, batches);
     const after = craftConstructionWithUpstream(before, buildingId, batches);
@@ -11819,6 +21137,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   };
 
   const handleDeleteConstructionInventory = async (constructionId: ConstructionId): Promise<boolean> => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeConstructionInventoryFrame;
+      const amount = frame?.rowsByBuildingId.get(constructionId)?.amount ?? 0;
+      if (!frame || amount < 1) {
+        setNotice("当前 Rust 施工库存中该条目已经为 0；未执行删除");
+        return false;
+      }
+      const definition = getConstructionDefinition(constructionId);
+      const confirmed = await gameDialog.confirm(
+        `确认永久删除施工托盘中的${definition?.name ?? constructionId} ×${amount.toLocaleString("zh-CN")}？此操作不返还材料且不可恢复。Rust 会在提交时重新核对当前 revision 和真实数量。`,
+        { confirmLabel: "永久删除" },
+      );
+      if (!confirmed || !nativePlayerAuthorityOwnsRuntimeRef.current) return false;
+      return commitNativeWorkspaceAction(
+        { kind: "construction-discard", constructionId },
+        `已由 Rust 永久删除${definition?.name ?? constructionId}；画布建筑和制造目标未改变`,
+        frame.revision,
+      );
+    }
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const current = gameRef.current;
     const amount = Math.max(0, Math.floor(current.construction[constructionId] ?? 0));
     if (amount < 1) {
@@ -11834,6 +21172,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { confirmLabel: "永久删除" },
     );
     if (!confirmed) return false;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "施工库存删除")) return false;
     const latest = Math.max(0, Math.floor(gameRef.current.construction[constructionId] ?? 0));
     if (latest < 1) {
       setNotice("确认期间库存已变为 0，未执行删除");
@@ -11846,6 +21185,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   };
 
   const handleQuickCraftFleet = (recipeId: RecipeId, batches = 1) => {
+    if (rejectLegacyFactoryInteractionWhileNative("基础制造")) return;
     const before = gameRef.current;
     const plan = getRecursiveHandcraftPlan(before, recipeId, batches);
     const after = handcraftRecipeWithUpstream(before, recipeId, batches);
@@ -11870,11 +21210,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   };
 
   const handleRemoveSprayCoater = async (entityId: string) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const revision = nativePlayerAuthorityCommandBindingRef.current?.source.baseRevision ?? -1;
+      const confirmation = isEnglish
+        ? "Remove the spray module? Rust will recalculate and return the module, buffered proliferator and remaining spray points at the current revision."
+        : "确认拆卸喷涂模块？Rust 会按当前 revision 重新计算并返还模块、缓存增产剂和剩余喷涂点数。";
+      if (!await gameDialog.confirm(confirmation, { confirmLabel: isEnglish ? "Remove" : "确认拆卸" }) ||
+          !nativePlayerAuthorityOwnsRuntimeRef.current) return;
+      if (commitNativeWorkspaceAction(
+        { kind: "spray-detach", entityId },
+        "喷涂模块已由 Rust 拆卸，全部可回收物料已按权威库存返还",
+        revision,
+      )) playTone("remove");
+      return;
+    }
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const refund = getSprayCoaterRemovalRefund(gameRef.current, entityId);
     const confirmation = isEnglish
       ? `Remove the spray module? The module and ${refund?.proliferatorItems ?? 0} remaining proliferator item(s) will be returned.`
       : `确认拆卸喷涂模块？将返还喷涂模块 ×${refund?.sprayCoaters ?? 1}${refund?.proliferatorItemId && refund.proliferatorItems > 0 ? `、${ITEMS[refund.proliferatorItemId].name} ×${refund.proliferatorItems}` : ""}。`;
     if (!refund || !await gameDialog.confirm(confirmation, { confirmLabel: isEnglish ? "Remove" : "确认拆卸" })) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "喷涂模块拆卸")) return;
     commitGame((current) => removeSprayCoater(current, entityId));
     setNotice(`喷涂模块已拆卸并返还${refund.proliferatorItems > 0 ? ` · 未消耗增产剂 ×${refund.proliferatorItems}` : ""}`);
     playTone("remove");
@@ -11928,6 +21284,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     if (id === "construction-center") {
+      if (rejectLegacyFactoryInteractionWhileNative("建筑制造中心")) return;
       closeAllWorkspaces();
       setConstructionCenterOpen(true);
       setMobilePanel(null);
@@ -12014,8 +21371,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             : statisticsOpen ? "statistics"
               : recipesOpen ? "recipes"
                 : technologyOpen ? "technology"
-                  : dysonPlannerOpen ? "dyson"
-                  : null;
+                  : blueprintsOpen ? "blueprints"
+                    : dysonPlannerOpen ? "dyson"
+                    : null;
 
   useEffect(() => {
     // The terminal pure-idle projection disables time warp before its
@@ -12049,22 +21407,49 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const handleFactoryNodeDragStart = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node) => {
     if (blockCanvasTouchRef.current) return;
     const selectedIds = selectedEntityIdsRef.current.includes(node.id) ? selectedEntityIdsRef.current : [node.id];
-    const selectedIdSet = new Set(selectedIds);
-    const members = gameRef.current.entities.filter((entity) => entity.planetId === gameRef.current.activePlanetId &&
-      selectedIdSet.has(entity.id) && !entity.interactionLocked).map((entity) => ({ id: entity.id, position: { ...entity.position } }));
+    const members = collectCanvasDragMembers(activeEntityById, selectedIds);
+    let nativeIdentity: NonNullable<typeof multiDragStartRef.current>["nativeIdentity"] = null;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      const binding = nativePlayerAuthorityCommandBindingRef.current;
+      if (!frame || !binding || nativePlayerAuthorityCommandInFlightRef.current ||
+          frame.sessionId !== binding.source.sessionId || frame.runId !== binding.source.runId ||
+          frame.revision !== binding.source.baseRevision || frame.planetId !== factoryCanvasPlanetId ||
+          members.length < 1 || members.some((member) => {
+            const entity = frame.entityById.get(member.id);
+            return !entity || entity.planetId !== frame.planetId || entity.interactionLocked;
+          })) {
+        setNotice("Windows 原生建筑位置投影正在刷新；本次拖动未提交");
+        return;
+      }
+      nativeIdentity = {
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        planetId: frame.planetId,
+        revision: frame.revision,
+      };
+    }
     const primary = members.find((member) => member.id === node.id) ?? { id: node.id, position: { ...node.position } };
-    multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members };
+    multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members, nativeIdentity };
     setDraggedEntityIds([node.id, ...members.map((member) => member.id).filter((id) => id !== node.id)]);
     if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragActiveCount = String(Math.max(1, members.length));
     nodeDragActiveRef.current = true;
+    nodeDragGestureEpochRef.current = factoryGestureEpochRef.current;
     dragAlignmentSpatialIndexRef.current = alignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
-  }, [alignmentSpatialIndex]);
+  }, [activeEntityById, alignmentSpatialIndex, factoryCanvasPlanetId]);
   const handleFactoryNodeDragStop = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node, draggedNodes) => {
+    const dragGestureEpoch = nodeDragGestureEpochRef.current;
+    nodeDragGestureEpochRef.current = null;
     nodeDragActiveRef.current = false;
     setDraggedEntityIds([]);
     dragAlignmentSpatialIndexRef.current = null;
     setCanvasGeometryRevision((revision) => revision + 1);
     setAlignmentGuides({ x: null, y: null });
+    if (dragGestureEpoch === null || dragGestureEpoch !== factoryGestureEpochRef.current) {
+      multiDragStartRef.current = null;
+      restoreCanvasEntityPositions();
+      return;
+    }
     if (blockCanvasTouchRef.current) {
       multiDragStartRef.current = null;
       restoreCanvasEntityPositions();
@@ -12090,6 +21475,50 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       factoryCanvasRef.current.dataset.dragStopCount = String(++canvasDragStopCountRef.current);
       factoryCanvasRef.current.dataset.dragMovedNodeCount = String(positions.length);
     }
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      const binding = nativePlayerAuthorityCommandBindingRef.current;
+      const identity = multiDrag?.nativeIdentity;
+      const sourceRowsUnchanged = Boolean(frame && multiDrag && multiDrag.members.every((member) => {
+        const entity = frame.entityById.get(member.id);
+        return entity && !entity.interactionLocked && entity.planetId === frame.planetId &&
+          entity.position.x === member.position.x && entity.position.y === member.position.y;
+      }));
+      if (!frame || !binding || !identity || !sourceRowsUnchanged ||
+          frame.sessionId !== identity.sessionId || frame.runId !== identity.runId ||
+          frame.planetId !== identity.planetId || frame.revision < identity.revision ||
+          frame.sessionId !== binding.source.sessionId || frame.runId !== binding.source.runId ||
+          frame.revision !== binding.source.baseRevision) {
+        restoreCanvasEntityPositions();
+        setNotice("拖动期间 Rust 权威投影已变化；位置未提交，请重试");
+        return;
+      }
+      const hasChange = positions.some((target) => {
+        const entity = frame.entityById.get(target.id);
+        return entity && (entity.position.x !== target.position.x || entity.position.y !== target.position.y);
+      });
+      if (!hasChange) {
+        restoreCanvasEntityPositions();
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => createNativeFactoryPositionCommand(frame, baseRevision, positions),
+        () => {
+          setNotice(`Rust 已确认 ${positions.length} 个建筑的新位置；画布已刷新`);
+          window.requestAnimationFrame(() => {
+            connectionHandleSpatialIndexRef.current = buildConnectionHandleSpatialIndex(viewportRef.current);
+          });
+        },
+        () => setNotice("Rust 未确认本次建筑位置；画布已恢复到权威坐标"),
+      );
+      // React Flow owns transient pointer motion only. Never let those local
+      // coordinates become an optimistic second authority while WAL/ACK is in
+      // flight; the next bounded Rust projection installs the durable result.
+      restoreCanvasEntityPositions();
+      if (accepted) setNotice(`正在由 Rust 提交 ${positions.length} 个建筑的位置…`);
+      return;
+    }
     if (!blueprintAllowOverlap && hasExactEntityPositionOverlap(gameRef.current, positions)) {
       if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragOverlapBlocked = "true";
       restoreCanvasEntityPositions();
@@ -12105,7 +21534,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     window.requestAnimationFrame(() => {
       connectionHandleSpatialIndexRef.current = buildConnectionHandleSpatialIndex(viewportRef.current);
     });
-  }, [blueprintAllowOverlap, commitGame, isEnglish, playTone, restoreCanvasEntityPositions]);
+  }, [blueprintAllowOverlap, commitGame, commitNativeProjectedCommand, isEnglish, playTone, restoreCanvasEntityPositions]);
   const handleFactoryFlowMove = useCallback<OnMove>((_event, viewport) => {
     viewportRef.current = viewport;
     if (connectionHandleSpatialIndexRef.current) connectionHandleSpatialIndexRef.current.viewport = viewport;
@@ -12129,8 +21558,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // onMove without a matching onMoveEnd. Keep the same debounced persistence
     // boundary on the live move path so a valid zoom/pan cannot be lost when
     // the gesture-end callback is skipped.
-    persistPlanetViewport(gameRef.current.activePlanetId, viewport);
-  }, [blueprintPlacementId, canvasViewportSize, persistPlanetViewport, scheduleConnectionViewport, viewportZoom]);
+    if (factoryConfirmedActivePlanetId) persistPlanetViewport(factoryConfirmedActivePlanetId, viewport);
+  }, [blueprintPlacementId, canvasViewportSize, factoryConfirmedActivePlanetId, persistPlanetViewport, scheduleConnectionViewport, viewportZoom]);
   const handleFactoryFlowMoveEnd = useCallback<OnMove>((_event, viewport) => {
     viewportRef.current = viewport;
     if (connectionHandleSpatialIndexRef.current) connectionHandleSpatialIndexRef.current.viewport = viewport;
@@ -12150,12 +21579,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     if (blueprintPlacementId) setPendingBlueprintViewport(viewport);
     canvasMiniMapRef.current?.setViewport(viewport);
-    persistPlanetViewport(gameRef.current.activePlanetId, viewport);
-  }, [blueprintPlacementId, canvasViewportSize, persistPlanetViewport, scheduleConnectionViewport]);
+    if (factoryConfirmedActivePlanetId) persistPlanetViewport(factoryConfirmedActivePlanetId, viewport);
+  }, [blueprintPlacementId, canvasViewportSize, factoryConfirmedActivePlanetId, persistPlanetViewport, scheduleConnectionViewport]);
 
   const canvasFlowPresentationToken = [
     canvasGeometryRevision,
-    canvasGame.activePlanetId,
+    factoryCanvasPlanetId,
     `${canvasViewportSize.width}x${canvasViewportSize.height}`,
     canvasDetailPreference,
     canvasPresentationDetailStage,
@@ -12201,7 +21630,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     isEnglish,
     denseMinimapThrottleActive ? `${minimapViewport.x}:${minimapViewport.y}:${minimapViewport.zoom}` : "",
     blueprintPlacementId ? `${pendingBlueprintViewport.x}:${pendingBlueprintViewport.y}:${pendingBlueprintViewport.zoom}` : "",
-    canvasGame.canvasRegions.filter((region) => region.planetId === canvasGame.activePlanetId)
+    factoryCanvasRegions
       .map((region) => `${region.id}:${region.x}:${region.y}:${region.width}:${region.height}:${region.name}`).join(";"),
     canvasGame.constructionQueue.filter((entry) => entry.planetId === canvasGame.activePlanetId)
       .map((entry) => `${entry.id}:${entry.status ?? "pending-materials"}:${entry.position.x}:${entry.position.y}`).join(";"),
@@ -12232,7 +21661,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   ] as const;
   const canvasFlowStaticPresentation = canvasFlowStaticPresentationCandidate;
   const canvasFlowFullyDeferred = canvasFlowStaticPresentation && canvasVisibleNodeCount === 0 &&
-    reactFlowBelts.length === 0 && !placement && !blueprintPlacementId && !selectionMode && !deleteMode &&
+    reactFlowBelts.length === 0 && !placement && !nativePlacementBuildingId &&
+    !nativeBlueprintEnqueuePlacement && !nativeBlueprintDirectDeployPlacement &&
+    !blueprintPlacementId && !selectionMode && !deleteMode &&
     !regionMode && !lineFindMode;
   const flowElementVirtualizationActive = (denseViewportCullingActive || shouldVirtualizeCanvas(activePlanetEntityCount, activePlanetBelts.length)) &&
     !(connectionDraft && connectExpandAll);
@@ -12279,11 +21710,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       <div className="workspace-loading" role="status"><i /><span>正在验证工厂运行时</span></div>
     </main>;
   }
-
   return (
     <ItemReferenceActionsProvider actions={itemReferenceActions} enabled={showItemHover}>
     <main
-      className={`game-shell${placement || blueprintPlacementId ? " game-shell--placing" : ""}${selectionMode ? " game-shell--selecting" : ""}${deleteMode ? " game-shell--deleting" : ""}${regionMode ? " game-shell--regioning" : ""}${mobilePanel ? ` mobile-panel--${mobilePanel} mobile-panel-stage--${mobilePanelStage}` : ""}${leftSidebarCollapsed ? " sidebar-left-collapsed" : ""}${rightSidebarCollapsed ? " sidebar-right-collapsed" : ""}${pureIdleActive ? " game-shell--pure-idle" : ""}`}
+      className={`game-shell${placement || nativePlacementBuildingId || nativeBlueprintEnqueuePlacement || nativeBlueprintDirectDeployPlacement || blueprintPlacementId ? " game-shell--placing" : ""}${selectionMode ? " game-shell--selecting" : ""}${deleteMode ? " game-shell--deleting" : ""}${regionMode ? " game-shell--regioning" : ""}${mobilePanel ? ` mobile-panel--${mobilePanel} mobile-panel-stage--${mobilePanelStage}` : ""}${leftSidebarCollapsed ? " sidebar-left-collapsed" : ""}${rightSidebarCollapsed ? " sidebar-right-collapsed" : ""}${pureIdleActive ? " game-shell--pure-idle" : ""}`}
       onContextMenuCapture={(event) => {
         const target = event.target as HTMLElement | null;
         if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
@@ -12297,8 +21727,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-performance-mode={performanceVisualMode ? "true" : "false"}
       data-performance-auto={automaticPerformanceMode ? "true" : "false"}
       data-mobile-performance={mobilePerformanceMode ? "true" : "false"}
-      data-simulation-paused={game.paused ? "true" : "false"}
+      data-simulation-paused={factoryRunStatusReadModel.paused ? "true" : "false"}
       data-simulation-worker={simulationWorkerActive ? "active" : "fallback"}
+      data-native-authority-mode={nativePlayerAuthorityMacroReadOnly
+        ? "macro-read-only"
+        : nativePlayerAuthorityActiveFrame ? "exact-active" : nativePlayerAuthorityBoundFrame ? "exact-paused" : "unbound"}
+      data-native-authority-macro-phase={nativePlayerAuthorityMacroControllerSnapshot?.phase ??
+        nativePlayerAuthorityMacroStatus?.phase ?? "none"}
       data-runtime-recovery={durableRecoveryLifecycleRef.current}
       data-runtime-recovery-sequence={durableRecoveryHeadRef.current?.sequence ?? -1}
       data-runtime-recovery-revision={durableRecoveryHeadRef.current?.stateRevision ?? -1}
@@ -12343,6 +21778,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-connection-viewport-logical-count={connectionViewportLogicalCount}
       data-connection-viewport-token={connectionViewportToken}
       data-active-planet-node-count={activePlanetEntities.length}
+      data-factory-canvas-source={factoryCanvasRows.source}
+      data-factory-canvas-revision={factoryCanvasRows.revision ?? "web"}
+      data-factory-canvas-cross-boundary-belts={nativeAuthoritativeFactoryCanvasFrame?.omittedCrossBoundaryBeltCount ?? 0}
       data-canvas-extreme-visuals={extremeVisualsActive ? "true" : "false"}
       data-canvas-node-lod={denseNodeLodActive ? "true" : "false"}
       data-canvas-viewport-culling={denseViewportCullingActive ? "true" : "false"}
@@ -12363,7 +21801,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     >
       <RuntimeRenderProfile id="header">
       <HeaderControls
-        game={game}
+        game={nativePlayerAuthorityOwnsRuntime ? null : game}
+        runStatus={factoryRunStatusReadModel}
+        pauseControlAvailable={!nativePlayerAuthorityOwnsRuntime || (
+          typeof desktopBridge?.setNativePlayerAuthorityPaused === "function" &&
+          nativePlayerAuthorityClockSnapshot.currentFrame?.schemaVersion === 1
+        )}
+        constructionCenterVisible={nativePlayerAuthorityOwnsRuntime || game.entities.some((entity) => entity.buildingId === "construction_center")}
         activeWorkspace={headerActiveWorkspace}
         onReturnToMenu={returnToMenuSafely}
         onOpenCampaign={() => {
@@ -12377,6 +21821,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           setNotice("新版手机界面已启用，可在更多工作区切回经典界面");
         }}
         onOpenConstructionCenter={() => {
+          if (!nativePlayerAuthorityOwnsRuntime && rejectLegacyFactoryInteractionWhileNative("建筑制造中心")) return;
           if (constructionCenterOpen) {
             closeAllWorkspaces();
             setNotice(null);
@@ -12413,18 +21858,147 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           else openCommandWorkspace("dyson");
           setNotice(null);
         }}
-        onOpenResources={() => { setMobilePanel((current) => current === "resources" ? null : "resources"); setNotice(null); }}
+        onOpenResources={() => {
+          if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+          setMobilePanel((current) => current === "resources" ? null : "resources");
+          setNotice(null);
+        }}
         onOpenInspector={() => { setMobilePanel((current) => current === "inspector" ? null : "inspector"); setNotice(null); }}
+        onOpenBlueprints={() => { if (blueprintsOpen) closeAllWorkspaces(); else openCommandWorkspace("blueprints"); setNotice(null); }}
         onOpenRecipes={() => { if (recipesOpen) closeAllWorkspaces(); else openCommandWorkspace("recipes"); setCampaignFocusItemId(null); setNotice(null); }}
         onOpenTechnology={() => { if (technologyOpen) closeAllWorkspaces(); else openCommandWorkspace("technology"); setCampaignFocusTechId(null); setNotice(null); }}
         onOpenStatistics={() => { if (statisticsOpen) closeAllWorkspaces(); else openCommandWorkspace("statistics"); setStatisticsFocusTab(null); setNotice(null); }}
         onOpenStarMap={() => { if (starMapOpen) closeAllWorkspaces(); else openCommandWorkspace("star-map"); setNotice(null); }}
       />
       </RuntimeRenderProfile>
-      <MobileGameShell
+      {nativePlayerAuthorityOwnsRuntime ? <NativeMobileGameShell
         enabled={nextMobileShell}
         layout={compactLayout}
+        frame={nativeAuthoritativeFactoryWorkspaceFrame}
+        inventoryFrame={nativeFactoryInventoryFrame}
+        constructionFrame={nativeConstructionInventoryFrame}
+        pending={nativePlacementContextPending || nativeBeltPlacementContextPending ||
+          nativePlayerAuthorityCommandPending || !nativePlayerAuthorityCommandSource ||
+          !nativeFactoryInventoryWritesEnabled || !nativeConstructionInventoryWritesEnabled}
+        alertCount={alertCount}
+        route={mobileNavigation.route}
+        overlay={mobileNavigation.overlay}
+        tools={{
+          mode: activeMobileCanvasMode,
+          blueprintCount: nativeBlueprintWorkspaceFrame?.libraryPage.totalCount ?? 0,
+          beltCount: nativeAuthoritativeFactoryCanvasFrame?.planetTotals.belts ?? 0,
+          regionCount: activePlanetRegionCount,
+          canUndo: nativePlayerAuthorityHistory?.canUndo === true,
+          canRedo: nativePlayerAuthorityHistory?.canRedo === true,
+          canUndoAutoLayout: false,
+          minimapOpen: !minimapCollapsed,
+          batchConnectionMode,
+        }}
+        toolActions={{
+          onBrowse: () => {
+            setMobileCanvasMode("browse");
+            setSelectionMode(false);
+            setRegionMode(false);
+            setRegionDraft(null);
+            selectNativeBuildingPlacement(null);
+          },
+          onSelect: () => {
+            setMobileCanvasMode("select");
+            setSelectionMode(true);
+            setRegionMode(false);
+            setRegionDraft(null);
+            selectNativeBuildingPlacement(null);
+          },
+          onRegion: () => {
+            setMobileCanvasMode("region");
+            setRegionMode(true);
+            setRegionDraft(null);
+            setSelectionMode(false);
+            selectNativeBuildingPlacement(null);
+            setSelectedEntityIds([]);
+            setSelectedBeltIds([]);
+            setSelectedBeltId(null);
+            setNotice("在空白画布拖拽创建生产区域；松手后由 Rust 原子保存");
+          },
+          onLayout: () => {
+            setMobileCanvasMode("layout");
+            setSelectionMode(false);
+            setRegionMode(false);
+            setRegionDraft(null);
+            selectNativeBuildingPlacement(null);
+            setNotice("布局模式：拖动节点后由 Rust 在同一 revision 原子保存位置");
+          },
+          onOpenBlueprints: () => openMobileWorkspace("blueprints"),
+          onOpenNetworks: () => openMobileStatistics("networks"),
+          onBatchConnectionModeChange: (enabled) => {
+            if (!enabled) {
+              cancelBatchConnection();
+              return;
+            }
+            activateBatchConnectionMode();
+            setMobileCanvasMode("browse");
+            setNotice("连续拉线已开启；候选只保留在界面中，确认时整批交给 Rust 原子提交");
+          },
+          onAutoLayout: () => autoLayoutEntities(),
+          onUndoAutoLayout: undoAutoLayout,
+          onUndo: undoGame,
+          onRedo: redoGame,
+          onZoomIn: () => void zoomIn({ duration: game.settings.reducedMotion ? 0 : 140 }),
+          onZoomOut: () => void zoomOut({ duration: game.settings.reducedMotion ? 0 : 140 }),
+          onFitView: () => void fitView({ padding: .18, minZoom: canvasMinimumZoom, duration: game.settings.reducedMotion ? 0 : 220 }),
+          onToggleMinimap: () => setMinimapCollapsed((collapsed) => !collapsed),
+        }}
+        selectedBuildingId={nativePlacementBuildingId}
+        selectedBeltTier={nativeBeltPlacementTier}
+        beltLanes={defaultBeltLanes}
+        hasConstructionCenter={Boolean(
+          nativeAuthoritativeFactoryWorkspaceFrame?.constructionWorkspace.nativeCenterWorkspace?.centers.totalCount,
+        )}
+        onPlacementChange={selectNativeBuildingPlacement}
+        onBeltPlacementChange={selectNativeBeltPlacement}
+        onBeltLanesChange={updateDefaultBeltLanes}
+        onDeleteConstruction={(buildingId) => void handleDeleteConstructionInventory(buildingId as ConstructionId)}
+        onOpenFabricator={() => {
+          setInspectorTab("fabricate");
+          openMobileSheet("inspector");
+        }}
+        onPickTray={takeNativeTrayItem}
+        onDropCargo={returnNativeCargo}
+        onStowEntityInventory={handleDraggedItemToTray}
+        entityDepositEnabled={nativeEntityInventoryDepositEnabled}
+        onSetTrayItemLimit={setNativeTrayItemLimit}
+        onSetProductionBufferLimit={setNativeProductionBufferLimit}
+        onDiscardTrayItem={(itemId, amount) => void discardNativeTrayItem(itemId, amount)}
+        onFactory={() => {
+          if (mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay) {
+            void fitView({ padding: .18, minZoom: canvasMinimumZoom, duration: game.settings.reducedMotion ? 0 : 220 });
+          } else mobileNavigation.goFactory();
+        }}
+        onOpenHub={() => {
+          setNotice(null);
+          if (mobileNavigation.route.kind === "hub") mobileNavigation.goFactory();
+          else mobileNavigation.openHub();
+        }}
+        onOpenSheet={openMobileSheet}
+        onSheetSnap={mobileNavigation.setSheetSnap}
+        onOpenWorkspace={openMobileWorkspace}
+        onOpenOrbitalStation={() => openMobileWorkspace("orbital-station")}
+        onOpenStatistics={openMobileStatistics}
+        onOpenOperations={openMobileOperations}
+        onOpenGalaxy={openMobileGalaxy}
+        onOpenCommandPalette={openCommandPalette}
+        onBack={mobileNavigation.requestBack}
+        onTogglePause={togglePause}
+        onPlanetChange={onPlanetChange}
+        onConfirmExit={returnToMenuSafely}
+        onDismissExit={mobileNavigation.dismissExit}
+        onRequestExit={mobileNavigation.requestExit}
+        onSwitchLegacy={switchToLegacyMobileUi}
+      /> : <MobileGameShell
+        enabled={nextMobileShell && !nativePlayerAuthorityOwnsRuntime}
+        layout={compactLayout}
         game={game}
+        factoryGame={panelGame}
         alertCount={alertCount}
         planetAlertCounts={planetAlertCounts}
         route={mobileNavigation.route}
@@ -12436,9 +22010,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           blueprintCount: game.blueprints.length,
           beltCount: activePlanetBelts.length,
           regionCount: activePlanetRegionCount,
-          canUndo: gameHistoryRef.current.canUndo,
-          canRedo: gameHistoryRef.current.canRedo,
-          canUndoAutoLayout: Boolean(autoLayoutUndo && autoLayoutUndo.planetId === game.activePlanetId),
+          canUndo: !nativePlayerAuthorityOwnsRuntime && gameHistoryRef.current.canUndo,
+          canRedo: !nativePlayerAuthorityOwnsRuntime && gameHistoryRef.current.canRedo,
+          canUndoAutoLayout: !nativePlayerAuthorityOwnsRuntime && Boolean(autoLayoutUndo && autoLayoutUndo.planetId === game.activePlanetId),
           minimapOpen: !minimapCollapsed,
           batchConnectionMode,
         }}
@@ -12460,6 +22034,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setBlueprintPlacementId(null);
           },
           onRegion: () => {
+            if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
             setMobileCanvasMode("region");
             setRegionMode(true);
             setRegionDraft(null);
@@ -12472,6 +22047,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setNotice("在空白画布拖拽创建生产区域");
           },
           onLayout: () => {
+            if (rejectLegacyFactoryInteractionWhileNative("建筑位置编辑")) return;
             setMobileCanvasMode("layout");
             setSelectionMode(false);
             setRegionMode(false);
@@ -12506,10 +22082,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           beltTierMode,
           selectedEntity,
           selectedBelt,
-          selectedCount: selectedEntities.length,
+          selectedCount: factorySelectionToolbarReadModel.selectedCount,
+          inspectorReadModel: factoryInspectorSummaryReadModel,
         }}
         factoryActions={{
           onPlacement: (buildingId) => {
+            if (rejectLegacyFactoryInteractionWhileNative("建筑放置与扩建")) return;
             setPlacement(buildingId);
             setBlueprintPlacementId(null);
             setSelectionMode(false);
@@ -12531,10 +22109,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onCraftFleet: handleQuickCraftFleet,
           onMissingCraft: handleMissingConstructionCraft,
           onDeleteConstruction: handleDeleteConstructionInventory,
-          onPickTray: (itemId) => commitGame((current) => pickFromTray(current, itemId)),
+          onPickTray: (itemId) => {
+            if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+            commitGame((current) => pickFromTray(current, itemId));
+          },
           onDropCargo: handleStowCargo,
-          onDiscardTrayItems: (requests) => commitGame((current) => discardPlanetTrayItems(current, current.activePlanetId, requests)),
-          onSetTrayItemLimit: (value) => commitGame((current) => setPlanetTrayItemLimit(current, current.activePlanetId, value)),
+          onDiscardTrayItems: (requests) => {
+            if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+            commitGame((current) => discardPlanetTrayItems(current, current.activePlanetId, requests));
+          },
+          onSetTrayItemLimit: (value) => {
+            if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+            commitGame((current) => setPlanetTrayItemLimit(current, current.activePlanetId, value));
+          },
           onFocusSelection: () => {
             if (selectedEntityIds.length > 0) focusEntityIds(selectedEntityIds);
             else if (selectedBeltId) focusBeltNetwork(selectedBeltId);
@@ -12612,16 +22199,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onDismissExit={mobileNavigation.dismissExit}
         onRequestExit={mobileNavigation.requestExit}
         onSwitchLegacy={switchToLegacyMobileUi}
-      />
+      />}
       {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay ? <MobilePlacementBar
         mode={activeMobileCanvasMode}
-        buildingId={placement}
-        inventory={placement ? Math.floor(game.construction[placement] ?? 0) : 0}
-        placementCount={placementCount}
-        continuous={mobileContinuousPlacement}
+        buildingId={nativePlayerAuthorityOwnsRuntime ? nativePlacementBuildingId : placement}
+        inventory={nativePlayerAuthorityOwnsRuntime
+          ? nativePlacementBuildingId
+            ? nativeConstructionInventoryFrame?.rowsByBuildingId.get(nativePlacementBuildingId)?.amount ?? 0
+            : 0
+          : placement ? Math.floor(game.construction[placement] ?? 0) : 0}
+        placementCount={nativePlayerAuthorityOwnsRuntime ? 1 : placementCount}
+        continuous={nativePlayerAuthorityOwnsRuntime ? false : mobileContinuousPlacement}
+        singlePlacementOnly={nativePlayerAuthorityOwnsRuntime}
         connectionLabel={connectionHint?.label ?? (connectionDraft ? `${connectionDraft.itemId ? ITEMS[connectionDraft.itemId].name : "任意物资"}${connectionDraft.handleType === "source" ? "输出" : "输入"}：请选择匹配端口` : null)}
-        selectionCount={selectedEntityIds.length}
-        beltCount={selectedBeltIds.length}
+        selectionCount={factorySelectionToolbarReadModel.selectedCount}
+        beltCount={factorySelectionToolbarReadModel.selectedBeltCount}
         onCountChange={setPlacementCount}
         onContinuousChange={setMobileContinuousPlacement}
         onCancel={() => {
@@ -12635,7 +22227,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             updateConnectionDraft(null);
             setConnectionHint(null);
           }
-          setPlacement(null);
+          if (nativePlayerAuthorityOwnsRuntime) {
+            selectNativeBuildingPlacement(null);
+            selectNativeBeltPlacement(null);
+          } else setPlacement(null);
           setMobileContinuousPlacement(false);
           setMobileCanvasMode("browse");
         }}
@@ -12673,31 +22268,56 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         {batchConnectionFailures.length > 0 ? <p className="mobile-batch-connection-actions__error" role="alert">最终复核未通过：{batchConnectionFailures.map((failure) => `第 ${failure.index + 1} 条：${failure.label}`).join("；")}</p> : null}
       </section> : null}
       {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && activeMobileCanvasMode === "select" ? <MobileSelectionContextBar
-        selectedCount={selectedEntityIds.length}
-        beltCount={selectedBeltIds.length}
-        canUpgrade={canUpgradeEntities(game, selectedEntityIds)}
-        canUpgradeBelts={selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
-        canLock={selectedEntities.some((entity) => !entity.interactionLocked)}
-        canUnlock={selectedEntities.some((entity) => entity.interactionLocked)}
+        model={factorySelectionToolbarReadModel}
+        canUpgrade={nativePlayerAuthorityOwnsRuntime ? selectedEntityIds.length > 0 : canUpgradeEntities(game, selectedEntityIds)}
+        canUpgradeBelts={nativePlayerAuthorityOwnsRuntime ? selectedBeltIds.length > 0 : selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
         onFocus={() => focusEntityIds(selectedEntityIds)}
         onCopy={copySelectionAsBlueprint}
         onUpgrade={() => {
+          if (nativePlayerAuthorityOwnsRuntime) {
+            const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+            if (!frame) return;
+            commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+              createNativeFactoryBatchCommand(baseRevision, {
+                kind: "upgrade-buildings",
+                entityIds: [...selectedEntityIdsRef.current],
+              }), () => { setNotice("Rust 已原子升级移动端选区建筑"); playTone("upgrade"); });
+            return;
+          }
           commitGame((current) => upgradeEntities(current, selectedEntityIds));
           setNotice("已批量升级选区内可升级设备");
           playTone("upgrade");
         }}
         onUpgradeBelts={() => {
+          if (nativePlayerAuthorityOwnsRuntime) {
+            const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+            if (!frame) return;
+            commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+              createNativeFactoryBatchCommand(baseRevision, {
+                kind: "upgrade-belts",
+                beltIds: [...selectedBeltIdsRef.current],
+              }), () => { setNotice("Rust 已原子升级移动端选区线路"); playTone("upgrade"); });
+            return;
+          }
           commitGame((current) => selectedBeltIds.reduce((next, beltId) => upgradeBelt(next, beltId), current));
           setNotice(`已升级选区内 ${selectedBeltIds.length} 条传送带`);
           playTone("upgrade");
         }}
         onBatchIncrease={(amount) => void batchIncreaseSelected(amount)}
         onLock={() => {
+          if (nativePlayerAuthorityOwnsRuntime) {
+            commitNativeSelectionInteractionLock(true);
+            return;
+          }
           const ids = selectedEntities.filter((entity) => !entity.interactionLocked).map((entity) => entity.id);
           commitGame((current) => setEntitiesInteractionLocked(current, ids, true));
           setNotice(`已锁定 ${ids.length} 个建筑`);
         }}
         onUnlock={() => {
+          if (nativePlayerAuthorityOwnsRuntime) {
+            commitNativeSelectionInteractionLock(false);
+            return;
+          }
           const ids = selectedEntities.filter((entity) => entity.interactionLocked).map((entity) => entity.id);
           commitGame((current) => setEntitiesInteractionLocked(current, ids, false));
           setNotice(`已解锁 ${ids.length} 个建筑`);
@@ -12709,7 +22329,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       /> : null}
       <div className="game-workspace">
         <RuntimeRenderProfile id="resource-rail">
-        <StableResourceRail
+        {nativePlayerAuthorityOwnsRuntime ? <NativeResourceRail
+          frame={nativeFactoryInventoryFrame}
+          pending={nativePlayerAuthorityCommandPending || !nativePlayerAuthorityCommandSource ||
+            !nativeFactoryInventoryWritesEnabled}
+          onPickTray={takeNativeTrayItem}
+          onDropCargo={returnNativeCargo}
+          onStowEntityInventory={handleDraggedItemToTray}
+          entityDepositEnabled={nativeEntityInventoryDepositEnabled}
+          onSetTrayItemLimit={setNativeTrayItemLimit}
+          onSetProductionBufferLimit={setNativeProductionBufferLimit}
+          onDiscardTrayItem={(itemId, amount) => void discardNativeTrayItem(itemId, amount)}
+        /> : <StableResourceRail
           game={panelGame}
           onOpenCampaign={openCampaign}
           onOpenDysonPlanner={() => {
@@ -12721,7 +22352,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onSetTrayItemLimit={(value) => commitGame((current) => setPlanetTrayItemLimit(current, current.activePlanetId, value))}
           onDiscardTrayItems={(requests) => commitGame((current) => discardPlanetTrayItems(current, current.activePlanetId, requests))}
           onDropDraggedItem={handleDraggedItemToTray}
-        />
+        />}
         </RuntimeRenderProfile>
         <button className={`sidebar-edge-toggle sidebar-edge-toggle--left${leftSidebarCollapsed ? " is-collapsed" : ""}`} type="button" onClick={() => setLeftSidebarCollapsed((collapsed) => !collapsed)} title={leftSidebarCollapsed ? "边缘按钮：展开左侧物资面板" : "边缘按钮：收起左侧物资面板"} aria-label={leftSidebarCollapsed ? "边缘按钮：展开左侧物资面板" : "边缘按钮：收起左侧物资面板"}>{leftSidebarCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}</button>
         <RuntimeRenderProfile id="canvas-shell">
@@ -12733,21 +22364,31 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             data-detail-stage={canvasPresentationDetailStage}
             data-flow-commit-static={canvasFlowStaticPresentation ? "true" : "false"}
             data-flow-fully-deferred={canvasFlowFullyDeferred ? "true" : "false"}
+            data-native-projection-pending={nativeFactoryProjectionPending ? "true" : "false"}
+            aria-busy={nativeFactoryProjectionPending}
             aria-label="生产网络画布"
             ref={factoryCanvasRef}
             onPointerDownCapture={(event) => {
+              if (nativeFactoryProjectionPending) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+              }
               longPressBindings.onPointerDownCapture?.(event);
               if (beginCanvasMultiTouch(event)) return;
               beginPlacementPointerMotion(event);
               onRegionPointerDown(event);
             }}
             onPointerMoveCapture={(event) => {
+              if (nativeFactoryProjectionPending) return;
               if (moveCanvasMultiTouch(event)) return;
               movePlacementPointerMotion(event);
               // A pressed primary pointer is panning the viewport. Re-running
               // Canvas belt hit-testing for every drag sample cannot produce a
               // useful hover target and competes directly with the pan frame.
-              if (canvasBatchRendererEnabled && event.pointerType !== "touch" && event.buttons === 0 && !placement && !blueprintPlacementId && !connectionDraft) {
+              if (canvasBatchRendererEnabled && event.pointerType !== "touch" && event.buttons === 0 &&
+                  !placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+                  !nativeBlueprintDirectDeployPlacement && !blueprintPlacementId && !connectionDraft) {
                 const target = event.target instanceof Element ? event.target : null;
                 if (!target?.closest(".react-flow__node, .react-flow__edge, .react-flow__controls, .react-flow__minimap, .canvas-selection-tools, .planet-navigator")) {
                   const flowPoint = screenToFlowPosition({ x: event.clientX, y: event.clientY });
@@ -12762,6 +22403,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               longPressBindings.onPointerUpCapture?.(event);
               stopCanvasPointerMotion();
               if (endCanvasMultiTouch(event)) return;
+              if (nativeFactoryProjectionPending) {
+                finishRegionPointer(event, true);
+                return;
+              }
               finishRegionPointer(event);
             }}
             onPointerCancelCapture={(event) => {
@@ -12781,13 +22426,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setFocusedNodeId(nextNode?.dataset.id ?? null);
           }}
           onClickCapture={(event) => {
+            if (nativeFactoryProjectionPending) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
             if (!placement && !blueprintPlacementId && clickConnectionPreviewRef.current &&
               completeClickConnectionAtPoint(event.clientX, event.clientY, batchConnectionModeRef.current || event.ctrlKey || event.shiftKey)) {
               event.preventDefault();
               event.stopPropagation();
               return;
             }
-            if (!placement && !blueprintPlacementId) return;
+            if (!placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+                !nativeBlueprintDirectDeployPlacement && !blueprintPlacementId) return;
             const target = event.target instanceof Element ? event.target : null;
             if (!target?.closest(".react-flow") || target.closest(".react-flow__node, .react-flow__controls, .react-flow__minimap, .canvas-selection-tools, .canvas-placement-options, .planet-navigator")) return;
             event.preventDefault();
@@ -12795,11 +22446,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onPaneClick(event);
           }}
           onDoubleClick={(event) => {
-            if (game.settings.allowDoubleClickZoom && !regionMode && event.target instanceof Element && event.target.classList.contains("react-flow__pane") && !placement && !blueprintPlacementId) {
+            if (nativeFactoryProjectionPending) return;
+            if (game.settings.allowDoubleClickZoom && !regionMode && event.target instanceof Element &&
+                event.target.classList.contains("react-flow__pane") && !placement &&
+                !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+                !nativeBlueprintDirectDeployPlacement && !blueprintPlacementId) {
               void fitView({ padding: 0.18, minZoom: canvasMinimumZoom, duration: game.settings.reducedMotion ? 0 : 260 });
             }
           }}
         >
+          {nativeFactoryProjectionPending ? (
+            <div
+              className="native-factory-projection-pending"
+              role="status"
+              aria-live="polite"
+              style={{ position: "absolute", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", background: "rgba(8, 13, 12, 0.88)", color: "#d8f7ec", pointerEvents: "all" }}
+            >
+              正在核对 Windows 原生星球数据，请稍候…
+            </div>
+          ) : null}
           <CanvasFlowCommitBoundary
             nodes={renderedFlowNodes}
             edges={renderedFlowEdges}
@@ -12830,6 +22495,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onNodeDrag={onNodeDrag}
             onNodeDragStop={handleFactoryNodeDragStop}
             onEdgeClick={(_event, edge) => {
+              if (nativePlayerAuthorityOwnsRuntimeRef.current && (nativePlacementBuildingId ||
+                  nativeBlueprintEnqueuePlacementRef.current || nativeBlueprintDirectDeployPlacementRef.current)) {
+                setNotice(nativeBlueprintDirectDeployPlacementRef.current
+                  ? "直接部署蓝图只能放在画布空白处；Rust 不会把落点附着到运输线上"
+                  : nativeBlueprintEnqueuePlacementRef.current
+                    ? "待建蓝图只能放在画布空白处；Rust 不会把落点附着到运输线上"
+                  : "普通建筑只能放在画布空白处；Rust 不会把落点附着到运输线上");
+                return;
+              }
               if (nextMobileShell && mobileCanvasMode === "select") {
                 setSelectedBeltIds((current) => current.includes(edge.id) ? current.filter((id) => id !== edge.id) : [...current, edge.id]);
                 setSelectedBeltId(null);
@@ -12845,6 +22519,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onEdgeMouseEnter={(_event, edge) => setHoveredBeltId(edge.id)}
             onEdgeMouseLeave={(_event, edge) => setHoveredBeltId((current) => current === edge.id ? null : current)}
             onEdgeDoubleClick={(_event, edge) => {
+              if (nativePlayerAuthorityOwnsRuntimeRef.current && (nativePlacementBuildingId ||
+                  nativeBlueprintEnqueuePlacementRef.current || nativeBlueprintDirectDeployPlacementRef.current)) return;
               setFocusedBeltNetworkId((current) => current === edge.id ? null : edge.id);
               setHighlightedTaskId(null);
               const snapshot = analyzeBeltNetwork(gameRef.current, edge.id);
@@ -12856,13 +22532,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             minZoom={canvasMinimumZoom}
             maxZoom={1.8}
             connectionRadius={connectionFlowRadius}
+            nodesConnectable={!nativePlayerAuthorityOwnsRuntime || nativeOrdinaryBeltConnectionEnabled}
             snapToGrid
             snapGrid={FACTORY_FLOW_SNAP_GRID}
-            autoPanOnConnect={!coarsePointer}
+            autoPanOnConnect={(!nativePlayerAuthorityOwnsRuntime || nativeOrdinaryBeltConnectionEnabled) && !coarsePointer}
             autoPanOnNodeDrag={!coarsePointer}
             connectionLineStyle={{ stroke: "#62b5ae", strokeWidth: 2, strokeDasharray: "6 5" }}
             connectionLineComponent={FactoryConnectionLine}
-            connectOnClick
+            connectOnClick={!nativePlayerAuthorityOwnsRuntime || nativeOrdinaryBeltConnectionEnabled}
             defaultViewport={initialViewport}
             onMove={handleFactoryFlowMove}
             onMoveEnd={handleFactoryFlowMoveEnd}
@@ -12874,7 +22551,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             selectionKeyCode={null}
             multiSelectionKeyCode="Shift"
             elementsSelectable={!(coarsePointer && selectionMode)}
-            nodesDraggable={nextMobileShell ? mobileCanvasMode === "layout" : !(coarsePointer && selectionMode)}
+            nodesDraggable={(!nativePlayerAuthorityOwnsRuntime || nativeFactoryPositionWriteReady) &&
+              (nextMobileShell ? mobileCanvasMode === "layout" : !(coarsePointer && selectionMode))}
             zoomOnDoubleClick={false}
             deleteKeyCode={null}
             fitViewOptions={factoryFlowFitViewOptions}
@@ -12889,7 +22567,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               endpoints={canvasLineEndpoints}
               routeCenters={edgeRouteCenters}
               topologyRevision={canvasTopology.revision}
-              planetId={canvasGame.activePlanetId}
+              planetId={factoryCanvasPlanetId}
               // The dense layer paints in screen space and receives every live
               // pan/zoom through its imperative handle. Read the same mutable
               // viewport ref here so a deferred React render cannot replay the
@@ -12899,17 +22577,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               width={canvasViewportSize.width}
               height={canvasViewportSize.height}
               selectedBeltIds={selectedBeltIdSet}
+              flowActivityByBeltId={canvasBeltFlowActivity}
               onUnavailable={handleCanvasBatchUnavailable}
             /> : null}
             <ViewportPortal>
-              <PendingBlueprintLayer
+              {!nativePlayerAuthorityOwnsRuntime ? <PendingBlueprintLayer
+                key={`blueprint:${factoryGestureSurfaceKey}`}
                 game={game}
-                planetId={canvasGame.activePlanetId}
+                planetId={factoryCanvasPlanetId}
                 viewport={pendingBlueprintViewport}
                 canvasSize={canvasViewportSize}
-              />
+              /> : null}
               <CanvasRegionLayer
-                regions={canvasGame.canvasRegions.filter((region) => region.planetId === canvasGame.activePlanetId)}
+                key={`regions:${factoryGestureSurfaceKey}`}
+                regions={factoryCanvasRegions}
                 draft={regionDraft}
                 selectedRegionId={selectedRegionId}
                 resizePreview={regionResizePreview}
@@ -12921,8 +22602,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               {alignmentGuides.y != null ? <i className="alignment-guide alignment-guide--horizontal" style={{ top: alignmentGuides.y }} /> : null}
             </ViewportPortal>
             {!minimapCollapsed ? denseMinimapThrottleActive && !minimapCanvasFailed ? <CanvasMiniMap
+              key={`minimap:${factoryGestureSurfaceKey}`}
               ref={canvasMiniMapRef}
-              nodes={canvasTopology.entities}
+              nodes={factoryMiniMapEntities}
+              worldBounds={factoryViewportReadModel.planetTotals.entities > 0
+                ? factoryMiniMapWorldBounds
+                : undefined}
+              projectionSource={factoryMiniMapProjectionIsNative ? "native-core" : "web-game-state"}
+              projectionRevision={factoryMiniMapProjectionIsNative ? factoryViewportReadModel.revision : null}
+              planetEntityCount={factoryViewportReadModel.planetTotals.entities}
+              planetBeltCount={factoryViewportReadModel.planetTotals.belts}
               viewport={minimapViewport}
               canvasWidth={canvasViewportSize.width}
               canvasHeight={canvasViewportSize.height}
@@ -12949,7 +22638,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             <i aria-hidden="true"><b style={{ transform: `scaleX(${canvasDetailProgressSnapshot.ratio})` }} /></i>
             {canvasStackGrouping.groupCount > 0 ? <small>{canvasStackGrouping.groupCount} 组重叠 · {canvasStackGrouping.markerCount} 个标记 · {canvasStackGrouping.hiddenCount} 个隐藏成员</small> : null}
           </div>
-          {game.mode === "normal" && isSpaceStationFeatureEnabled() ? <div className="canvas-global-navigation nodrag nopan">
+          {!nativePlayerAuthorityOwnsRuntime && game.mode === "normal" && isSpaceStationFeatureEnabled() ? <div className="canvas-global-navigation nodrag nopan">
             <button
               className={`orbital-station-entry${orbitalStationOpen ? " active" : ""}${game.orbitalStation.contractBoard.accepted.some((contract) => contract.status === "claimable") ? " claimable" : ""}`}
               type="button"
@@ -12964,20 +22653,24 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               <i><Satellite size={18} /></i>
               <span><strong>空间站</strong><small>{game.orbitalStation.contractBoard.accepted.some((contract) => contract.status === "claimable") ? "合同奖励待领取" : orbitalStationStatusLabel(game.orbitalStation.status)}</small></span>
             </button>
-            <StablePlanetNavigator game={panelGame} onPlanetChange={onPlanetChange} />
-          </div> : <StablePlanetNavigator game={panelGame} onPlanetChange={onPlanetChange} />}
+            <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />
+          </div> : <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />}
 
           <CanvasSelectionTools
             selectionMode={selectionMode}
             regionMode={regionMode}
             lineFindMode={lineFindMode}
             batchConnectionMode={batchConnectionMode}
-            blueprintCount={game.blueprints.length}
-            beltCount={game.belts.filter((belt) => belt.planetId === game.activePlanetId).length}
-            regionCount={game.canvasRegions.filter((region) => region.planetId === game.activePlanetId).length}
-            canUndo={gameHistoryRef.current.canUndo}
-            canRedo={gameHistoryRef.current.canRedo}
-            canUndoAutoLayout={Boolean(autoLayoutUndo && autoLayoutUndo.planetId === game.activePlanetId)}
+            blueprintCount={nativePlayerAuthorityOwnsRuntime ? 0 : game.blueprints.length}
+            beltCount={factoryActivePlanetNavigationRow?.beltCount ?? 0}
+            regionCount={factoryCanvasRegions.length}
+            canUndo={nativePlayerAuthorityOwnsRuntime
+              ? nativePlayerAuthorityHistory?.canUndo === true
+              : gameHistoryRef.current.canUndo}
+            canRedo={nativePlayerAuthorityOwnsRuntime
+              ? nativePlayerAuthorityHistory?.canRedo === true
+              : gameHistoryRef.current.canRedo}
+            canUndoAutoLayout={!nativePlayerAuthorityOwnsRuntime && Boolean(autoLayoutUndo && autoLayoutUndo.planetId === game.activePlanetId)}
             leftSidebarCollapsed={leftSidebarCollapsed}
             rightSidebarCollapsed={rightSidebarCollapsed}
             onUndo={undoGame}
@@ -13045,7 +22738,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onAutoLayout={() => autoLayoutEntities()}
             onUndoAutoLayout={undoAutoLayout}
           />
-          {blueprintPlacementId ? <section className="canvas-placement-options nodrag nopan" aria-label={isEnglish ? "Blueprint placement options" : "蓝图放置选项"}>
+          {!nativePlayerAuthorityOwnsRuntime && blueprintPlacementId ? <section className="canvas-placement-options nodrag nopan" aria-label={isEnglish ? "Blueprint placement options" : "蓝图放置选项"}>
             <label>
               <input type="checkbox" checked={blueprintAllowOverlap} onChange={(event) => setBlueprintAllowOverlap(event.target.checked)} />
               <span><strong>{isEnglish ? "Allow overlapping placement" : "允许重叠放置"}</strong><small>{isEnglish ? "Only bypasses exact snapped-position collision" : "仅绕过完全相同吸附坐标的碰撞检查"}</small></span>
@@ -13070,11 +22763,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             <footer><button className="primary" type="button" disabled={batchConnections.length < 1} onClick={confirmBatchConnection}><Check size={14} />确认连接</button><button type="button" disabled={batchConnections.length < 1} onClick={clearBatchConnectionCandidates}><Trash2 size={14} />清空候选</button><button type="button" disabled={batchConnections.length < 1} onClick={undoLastBatchConnection} title="撤销最近一条候选"><X size={14} />撤销</button><button type="button" onClick={cancelBatchConnection}><X size={14} />取消</button></footer>
             <small>整批原子提交：任一线路非法或材料不足时全部不创建、全部不扣料。Ctrl/Shift 可临时保持连续拉线。</small>
           </section> : null}
-          {game.canvasRegions.find((region) => region.id === selectedRegionId && region.planetId === game.activePlanetId) ? <CanvasRegionEditor
-            region={game.canvasRegions.find((region) => region.id === selectedRegionId && region.planetId === game.activePlanetId)!}
-            onChange={(changes) => commitGame((current) => updateCanvasRegion(current, selectedRegionId!, changes))}
+          {factoryCanvasRegions.find((region) => region.id === selectedRegionId) ? <CanvasRegionEditor
+            region={factoryCanvasRegions.find((region) => region.id === selectedRegionId)!}
+            onChange={(changes) => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+                if (frame?.workspace) commitNativeWorkspaceAction({
+                  kind: "region-update",
+                  regionId: selectedRegionId!,
+                  ...changes,
+                }, "生产区域外观已由 Rust 保存", frame.revision);
+                return;
+              }
+              commitGame((current) => updateCanvasRegion(current, selectedRegionId!, changes));
+            }}
             onRemove={() => {
-              commitGame((current) => removeCanvasRegion(current, selectedRegionId!));
+              if (nativePlayerAuthorityOwnsRuntime) {
+                const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+                if (!frame?.workspace || !commitNativeWorkspaceAction({
+                  kind: "region-remove",
+                  regionId: selectedRegionId!,
+                }, "生产区域已由 Rust 删除", frame.revision)) return;
+              } else commitGame((current) => removeCanvasRegion(current, selectedRegionId!));
               setSelectedRegionId(null);
               setNotice("生产区域已删除");
               playTone("remove");
@@ -13082,33 +22792,93 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onClose={() => setSelectedRegionId(null)}
           /> : null}
           <SelectionToolbar
-            selectedCount={selectedEntityIds.length}
-            selectedBeltCount={selectedBelts.length}
-            eligibleCount={blueprintEligibleIds.length}
-            canUpgrade={canUpgradeEntities(game, selectedEntityIds)}
-            canUpgradeBelts={selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
-            canLock={selectedEntities.some((entity) => !entity.interactionLocked)}
-            canUnlock={selectedEntities.some((entity) => entity.interactionLocked)}
+            model={factorySelectionToolbarReadModel}
+            unsafeActionsEnabled={!nativePlayerAuthorityOwnsRuntime || Boolean(
+              nativeAuthoritativeFactoryCanvasFrame && !nativePlayerAuthorityCommandPending,
+            )}
+            copyActionEnabled={!nativePlayerAuthorityOwnsRuntime || Boolean(
+              nativeBlueprintCaptureSelection && !nativeBlueprintCaptureContextPending &&
+              !nativePlayerAuthorityCommandPending && !nativeBlueprintCapturePending,
+            )}
+            eligibleCount={nativePlayerAuthorityOwnsRuntime
+              ? nativeBlueprintCaptureSelection?.entityIds.length ?? 0
+              : blueprintEligibleIds.length}
+            canUpgrade={nativePlayerAuthorityOwnsRuntime
+              ? selectedEntityIds.length > 0
+              : canUpgradeEntities(game, selectedEntityIds)}
+            canUpgradeBelts={nativePlayerAuthorityOwnsRuntime
+              ? selectedBeltIds.length > 0
+              : selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
             onFocus={() => focusEntityIds(selectedEntityIds)}
             onAutoLayout={() => autoLayoutEntities(selectedEntityIds)}
             onCopy={copySelectionAsBlueprint}
             onUpgrade={() => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+                if (!frame) {
+                  setNotice("Windows 原生建筑画面正在刷新；升级未提交");
+                  return;
+                }
+                const entityIds = [...selectedEntityIdsRef.current];
+                const accepted = commitNativeProjectedCommand(
+                  frame.revision,
+                  (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+                    kind: "upgrade-buildings",
+                    entityIds,
+                  }),
+                  () => {
+                    setNotice("Rust 已原子升级选区内所有可升级设备；材料与返还已重新核算");
+                    playTone("upgrade");
+                  },
+                );
+                if (accepted) setNotice("Rust 正在核算选区建筑升级…");
+                return;
+              }
               commitGame((current) => upgradeEntities(current, selectedEntityIds));
               setNotice("已批量升级选区内可升级设备");
               playTone("upgrade");
             }}
             onUpgradeBelts={() => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+                if (!frame) {
+                  setNotice("Windows 原生线路画面正在刷新；升级未提交");
+                  return;
+                }
+                const beltIds = [...selectedBeltIdsRef.current];
+                const accepted = commitNativeProjectedCommand(
+                  frame.revision,
+                  (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+                    kind: "upgrade-belts",
+                    beltIds,
+                  }),
+                  () => {
+                    setNotice("Rust 已原子升级选区内可升级线路；原连接保持不变");
+                    playTone("upgrade");
+                  },
+                );
+                if (accepted) setNotice("Rust 正在核算选区线路升级…");
+                return;
+              }
               commitGame((current) => selectedBeltIds.reduce((next, beltId) => upgradeBelt(next, beltId), current));
               setNotice(`已升级选区内 ${selectedBeltIds.length} 条可升级传送带，原连接保持不变`);
               playTone("upgrade");
             }}
             onBatchIncrease={(amount) => void batchIncreaseSelected(amount)}
             onLock={() => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                commitNativeSelectionInteractionLock(true);
+                return;
+              }
               const ids = selectedEntities.filter((entity) => !entity.interactionLocked).map((entity) => entity.id);
               commitGame((current) => setEntitiesInteractionLocked(current, ids, true));
               setNotice(`已锁定 ${ids.length} 个建筑`);
             }}
             onUnlock={() => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                commitNativeSelectionInteractionLock(false);
+                return;
+              }
               const ids = selectedEntities.filter((entity) => entity.interactionLocked).map((entity) => entity.id);
               commitGame((current) => setEntitiesInteractionLocked(current, ids, false));
               setNotice(`已解锁 ${ids.length} 个建筑`);
@@ -13139,7 +22909,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               <button type="button" onClick={() => setFocusedBeltNetworkId(null)} aria-label="关闭运输网络聚焦">×</button>
             </div>
           ) : null}
-          {productionLineFocus?.planetId === game.activePlanetId ? (
+          {productionLineFocus?.planetId === factoryCanvasPlanetId ? (
             <div className="production-line-focus-indicator nodrag nopan">
               <span>物品产线定位</span>
               <strong>{ITEMS[productionLineFocus.itemId].name}</strong>
@@ -13154,23 +22924,125 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             </div>
           ) : null}
           <div className="canvas-status">
-            <span className={game.paused ? "paused" : "running"}>{game.paused ? "模拟暂停" : "实时运行"}</span>
-            <strong>{getPlanetDisplayName(game, game.activePlanetId)} · {getPlanet(game.activePlanetId).code}工厂区</strong>
+            <FactoryRunStatus model={factoryRunStatusReadModel} />
+            {nativePlayerAuthorityMacroDisplay ? (
+              <span
+                className="paused native-player-authority-macro-status"
+                role="status"
+                aria-live="polite"
+                data-phase={nativePlayerAuthorityMacroDisplay.phase}
+                data-deadline-ms={nativePlayerAuthorityMacroDisplay.deadlineMilliseconds}
+                data-paused-reason={nativePlayerAuthorityMacroDisplay.pausedReason}
+              >
+                Windows 原生宏观结算（只读） · 阶段 {nativePlayerAuthorityMacroDisplay.phase}
+                {` · 模拟进度 ${nativePlayerAuthorityMacroDisplay.simulationProgress}`}
+                {` · 墙钟进度 ${nativePlayerAuthorityMacroDisplay.wallProgress}`}
+                {` · 截止时钟 ${nativePlayerAuthorityMacroDisplay.deadline}`}
+                {` · 暂停原因 ${nativePlayerAuthorityMacroDisplay.pausedReason}`}
+                <button
+                  type="button"
+                  onClick={() => handleTimeWarpEnabledChange(false)}
+                  disabled={nativePlayerAuthorityMacroControllerSnapshot?.requested === false}
+                >安全停止原生纯挂机</button>
+              </span>
+            ) : null}
+            <strong>{factoryActivePlanetNavigationRow?.displayName ?? factoryPlanetNavigationReadModel.activePlanetId} · {factoryActivePlanetNavigationRow?.code ?? factoryPlanetNavigationReadModel.activePlanetId}工厂区</strong>
           </div>
           <RecipeFocusPanel
-            game={game}
+            model={recipeFocusReadModel}
+            readOnly={nativePlayerAuthorityOwnsRuntime &&
+              (!nativeRecipeFocusReadModel || nativePlayerAuthorityCommandPending)}
             onClear={() => onRecipeFocusChange(null)}
-            onModeChange={(mode) => commitGame((current) => setRecipeFocusMode(current, mode))}
+            onModeChange={onRecipeFocusModeChange}
             onOpen={openRecipeFocus}
-            onPositionChange={(position) => commitGame((current) => setRecipeFocusPosition(current, position))}
+            onPositionChange={onRecipeFocusPositionChange}
           />
         </section>
         </RuntimeRenderProfile>
         <RuntimeRenderProfile id="inspector">
-        <StableInspectorPanel
+        {nativePlayerAuthorityOwnsRuntime ? <NativeFactoryInspectorPanel
+          inspector={factoryInspectorSummaryReadModel}
+          multiSelection={factoryMultiSelectionSummaryReadModel}
+          entityConfiguration={nativeEntityConfigurationProjectionBinding}
+          entityRecipeBinding={nativeEntityRecipeProjectionBinding}
+          timeWarpController={nativeTimeWarpControllerProjectionBinding}
+          ejectorOrbitFrame={nativeEjectorOrbitFrame}
+          stationConfiguration={nativeStationConfigurationProjectionBinding}
+          tab={inspectorTab}
+          onTabChange={setInspectorTab}
+          workspace={nativeAuthoritativeFactoryWorkspaceFrame?.workspace ?? null}
+          onQueueHandcraft={(recipeId, batches) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            if (!frame?.workspace) return;
+            commitNativeWorkspaceAction({ kind: "handcraft-enqueue", recipeId, batches },
+              "手工制造任务已由 Rust 加入权威队列", frame.revision);
+          }}
+          onCancelHandcraft={(entryId) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            if (!frame?.workspace) return;
+            commitNativeWorkspaceAction({ kind: "handcraft-cancel", entryId },
+              "手工制造任务已由 Rust 从队列取消", frame.revision);
+          }}
+          pending={nativeRemovalContextPending || nativeStackContextPending || nativeBeltLaneContextPending ||
+            nativePlayerAuthorityCommandPending || nativeEntityRecipePending !== null}
+          onEntityLockChange={(_entityId, locked) => void commitNativeSelectionInteractionLock(locked)}
+          onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
+          onUpgradeEntity={(entityId) => {
+            const revision = factoryInspectorSummaryReadModel.revision;
+            if (revision === null) return;
+            commitNativeProjectedCommand(
+              revision,
+              (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+                kind: "upgrade-buildings",
+                entityIds: [entityId],
+              }),
+              () => { setNotice("设备已由 Rust 原子升级"); playTone("upgrade"); },
+            );
+          }}
+          onRemoveSprayCoater={handleRemoveSprayCoater}
+          onQuantumAttachment={(entityId) => {
+            commitNativeWorkspaceAction(
+              { kind: "quantum-attach", entityIds: [entityId] },
+              "量子网络交接已由 Rust 建立；旧航线尾货会在安全边界结清",
+            );
+          }}
+          onOrbitalCollectorQuantumMode={(entityId, enabled) => {
+            commitNativeWorkspaceAction(
+              { kind: "collector-quantum-mode", entityIds: [entityId], enabled },
+              `轨道采集器已提交${enabled ? "量子" : "传统"}模式交接`,
+            );
+          }}
+          onOrbitalCollectorItemChange={(entityId, itemId) => {
+            commitNativeWorkspaceAction(
+              { kind: "collector-item", entityId, itemId },
+              "轨道采集物已由 Rust 更新，旧缓存和线路已安全返还",
+            );
+          }}
+          onStackCountChange={(entityId, targetCount) => void changeNativeOrdinaryBuildingStack(entityId, targetCount)}
+          onEntityPowerPriorityChange={changeNativeEntityPowerPriority}
+          onSplitterDistributionModeChange={changeNativeSplitterDistributionMode}
+          onEnergyExchangerModeChange={changeNativeEnergyExchangerMode}
+          onFuelItemChange={changeNativeFuelItem}
+          onEntityRecipeChange={changeNativeEntityRecipe}
+          onBlackHolePausedChange={changeNativeBlackHolePaused}
+          onGalacticExporterPausedChange={changeNativeGalacticExporterPaused}
+          onMaterialDeliverySlotChange={changeNativeMaterialDeliverySlot}
+          onOrbitalCargoPortClear={clearNativeOrbitalCargoPort}
+          onTimeWarpEnabledChange={changeNativeTimeWarpEnabled}
+          onTimeWarpRequestedMultiplierChange={changeNativeTimeWarpRequestedMultiplier}
+          onEjectorOrbitChange={changeNativeEjectorOrbit}
+          onStationConfigurationChange={changeNativeStationConfiguration}
+          onBeltLaneCountChange={(beltId, targetLanes) => void changeNativeOrdinaryBeltLanes(beltId, targetLanes)}
+          onBeltPriorityChange={changeNativeOrdinaryBeltPriority}
+          onRemoveBelt={(beltId) => void removeNativeOrdinaryBelt(beltId)}
+        /> : <StableInspectorPanel
           game={panelGame}
+          readOnly={false}
+          inspectorReadModel={factoryInspectorSummaryReadModel}
+          multiSelectionReadModel={factoryMultiSelectionSummaryReadModel}
+          multiSelectedBelts={selectedBeltsForMultiSummary as BeltConnection[]}
           fabricatorFocusItemId={fabricatorFocusItemId}
-          selectedEntities={selectedEntities}
+          selectedEntities={selectedEntities as FactoryEntity[]}
           selectedEntity={selectedEntity}
           selectedBelt={selectedBelt}
           onEntityLockChange={(entityId, locked) => {
@@ -13181,6 +23053,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           tab={inspectorTab}
           onTabChange={setInspectorTab}
           onOpenConstructionCenter={() => {
+            if (rejectLegacyFactoryInteractionWhileNative("建筑制造中心")) return;
             if (constructionCenterOpen) closeAllWorkspaces();
             else {
               closeAllWorkspaces();
@@ -13241,7 +23114,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onOpenOrbitalStation={openOrbitalStation}
           onOrbitalCargoPortClear={(entityId, portIndex) => void clearOrbitalCargoTerminalPort(entityId, portIndex)}
           onGalacticExporterPausedChange={(entityId, paused) => commitGame((current) => setGalacticMaterialExporterPaused(current, entityId, paused))}
-          onBlackHolePausedChange={(entityId, paused, confirmActivation) => commitGame((current) => setBlackHolePaused(current, entityId, paused, confirmActivation))}
+          onBlackHolePausedChange={(entityId, paused, confirmActivation) => {
+            if (rejectLegacyFactoryInteractionWhileNative("微型黑洞启停")) return;
+            commitGame((current) => setBlackHolePaused(current, entityId, paused, confirmActivation));
+          }}
           onTimeWarpControllerChange={(entityId) => commitGame((current) => setTimeWarpController(current, entityId))}
           onTimeWarpEnabledChange={handleTimeWarpEnabledChange}
           onTimeWarpRequestedMultiplierChange={(multiplier) => commitGame((current) => setTimeWarpRequestedMultiplier(current, multiplier))}
@@ -13381,18 +23257,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setSelectedBeltId(null);
             playTone("remove");
           }}
-        />
+        />}
         </RuntimeRenderProfile>
         <button className={`sidebar-edge-toggle sidebar-edge-toggle--right${rightSidebarCollapsed ? " is-collapsed" : ""}`} type="button" onClick={() => setRightSidebarCollapsed((collapsed) => !collapsed)} title={rightSidebarCollapsed ? "边缘按钮：展开右侧检查器面板" : "边缘按钮：收起右侧检查器面板"} aria-label={rightSidebarCollapsed ? "边缘按钮：展开右侧检查器面板" : "边缘按钮：收起右侧检查器面板"}>{rightSidebarCollapsed ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}</button>
       </div>
       <RuntimeRenderProfile id="construction-dock">
-      <StableConstructionDock
+      {nativePlayerAuthorityOwnsRuntime ? <NativeConstructionDock
+        frame={nativeConstructionInventoryFrame}
+        selectedBuildingId={nativePlacementBuildingId}
+        selectedBeltTier={nativeBeltPlacementTier}
+        beltLanes={defaultBeltLanes}
+        pending={nativePlacementContextPending || nativeBeltPlacementContextPending || nativePlayerAuthorityCommandPending ||
+          !nativePlayerAuthorityCommandSource || !nativeConstructionInventoryWritesEnabled ||
+          typeof desktopBridge?.getNativeCoreConstructionPlacementContext !== "function" ||
+          typeof desktopBridge?.getNativeCoreConstructionBeltPlacementContext !== "function"}
+        onPlacementChange={selectNativeBuildingPlacement}
+        onBeltPlacementChange={selectNativeBeltPlacement}
+        onBeltLanesChange={updateDefaultBeltLanes}
+        onOpenFabricator={() => {
+          setInspectorTab("fabricate");
+          if (nextMobileShell) openMobileSheet("inspector");
+          else setMobilePanel("inspector");
+        }}
+        onDeleteConstruction={(buildingId) => void handleDeleteConstructionInventory(buildingId as ConstructionId)}
+      /> : <StableConstructionDock
         game={panelGame}
         placement={placement}
         beltTier={dockBeltTier}
         beltTierMode={beltTierMode}
         placementCount={placementCount}
         onPlacementChange={(buildingId) => {
+          if (rejectLegacyFactoryInteractionWhileNative("建筑放置与扩建")) return;
           setPlacement(buildingId);
           setBlueprintPlacementId(null);
           setSelectionMode(false);
@@ -13416,14 +23311,92 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onStowCargo={handleStowCargo}
         onMissingCraftNavigate={handleMissingConstructionCraft}
         onDeleteConstruction={handleDeleteConstructionInventory}
-      />
+      />}
       </RuntimeRenderProfile>
-      <RuntimeRenderProfile id="onboarding">
+      {!nativePlayerAuthorityOwnsRuntime ? <RuntimeRenderProfile id="onboarding">
       <OnboardingCoach game={panelGame} onAction={runOnboardingAction} compact={nextMobileShell} />
-      </RuntimeRenderProfile>
-      <BlueprintWorkspace
+      </RuntimeRenderProfile> : null}
+      <NativeBlueprintWorkspace
+        open={blueprintsOpen && (nativePlayerAuthorityOwnsRuntime ||
+          nativeBlueprintRenamePendingIdentity !== null || nativeBlueprintRenameResolution !== null ||
+          nativeBlueprintTransformPending !== null || nativeBlueprintRecipeOverridePending !== null ||
+          nativeBlueprintDeletePending !== null ||
+          nativeConstructionQueueCancelPending !== null || nativeConstructionQueueFundPending !== null ||
+          nativeConstructionQueueDeployPending !== null ||
+          nativeBlueprintEnqueuePending !== null || nativeBlueprintDirectDeployPending !== null ||
+          nativeBlueprintImportPending !== null || nativeBlueprintExportContextPending)}
+        status={nativeBlueprintWorkspaceSnapshot.status}
+        frame={nativeBlueprintWorkspaceFrame}
+        latestIdentity={nativeFactoryInventoryIdentity}
+        onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setBlueprintsOpen(false)}
+        onSelectBlueprint={setNativeBlueprintSelectedId}
+        onLibraryCursorChange={(cursor) => {
+          if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
+              nativeBlueprintRecipeOverridePending || nativeBlueprintDeletePending ||
+              nativeConstructionQueueCancelPending || nativeConstructionQueueFundPending ||
+              nativeConstructionQueueDeployPending ||
+              nativeBlueprintEnqueuePending || nativeBlueprintDirectDeployPending ||
+              nativeBlueprintImportPending ||
+              nativeBlueprintExportContextPending ||
+              nativePlayerAuthorityCommandPending) return;
+          setNativeBlueprintSelectedId(null);
+          setNativeBlueprintLibraryCursor(cursor);
+        }}
+        onQueueCursorChange={(cursor) => {
+          if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
+              nativeBlueprintRecipeOverridePending || nativeBlueprintDeletePending ||
+              nativeConstructionQueueCancelPending || nativeConstructionQueueFundPending ||
+              nativeConstructionQueueDeployPending ||
+              nativeBlueprintEnqueuePending || nativeBlueprintDirectDeployPending ||
+              nativeBlueprintImportPending ||
+              nativeBlueprintExportContextPending ||
+              nativePlayerAuthorityCommandPending) return;
+          setNativeBlueprintQueueCursor(cursor);
+        }}
+        onSubmitRenameIntent={submitNativeBlueprintRenameIntent}
+        onSubmitTransformIntent={submitNativeBlueprintTransformIntent}
+        onSubmitRecipeOverrideIntent={submitNativeBlueprintRecipeOverrideIntent}
+        onSubmitDeleteIntent={submitNativeBlueprintDeleteIntent}
+        onSubmitQueueCancelIntent={submitNativeConstructionQueueCancelIntent}
+        onSubmitQueueFundIntent={submitNativeConstructionQueueFundIntent}
+        onSubmitQueueDeployIntent={submitNativeConstructionQueueDeployIntent}
+        onBeginQueuePlacement={beginNativeBlueprintEnqueuePlacement}
+        onBeginDirectPlacement={beginNativeBlueprintDirectDeployPlacement}
+        onSubmitImportRaw={submitNativeBlueprintImportRaw}
+        onExportBlueprint={exportNativeBlueprint}
+        pendingIdentity={nativeBlueprintRenamePendingIdentity}
+        transformPending={nativeBlueprintTransformPending}
+        recipeOverridePending={nativeBlueprintRecipeOverridePending}
+        deletePending={nativeBlueprintDeletePending}
+        queueCancelPending={nativeConstructionQueueCancelPending}
+        queueFundPending={nativeConstructionQueueFundPending}
+        queueDeployPending={nativeConstructionQueueDeployPending}
+        enqueuePending={nativeBlueprintEnqueuePending}
+        directDeployPending={nativeBlueprintDirectDeployPending}
+        importPending={nativeBlueprintImportPending}
+        importConfirmation={nativeBlueprintImportConfirmation}
+        resolution={nativeBlueprintRenameResolution}
+        onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}
+        commandPending={nativePlayerAuthorityCommandPending || nativeBlueprintEnqueueContextPending ||
+          nativeBlueprintDirectDeployContextPending || nativeBlueprintImportContextPending ||
+          nativeBlueprintExportContextPending || !nativeBlueprintWorkspaceWritesEnabled}
+      />
+      {!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&
+        !nativeBlueprintTransformPending &&
+        !nativeBlueprintRecipeOverridePending &&
+        !nativeBlueprintDeletePending &&
+        !nativeConstructionQueueCancelPending &&
+        !nativeConstructionQueueFundPending &&
+        !nativeConstructionQueueDeployPending &&
+        !nativeBlueprintEnqueuePending &&
+        !nativeBlueprintDirectDeployPending &&
+        !nativeBlueprintImportPending &&
+        !nativeBlueprintExportContextPending &&
+        !nativeBlueprintRenameResolution ? <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}
+        factoryHeadlineReadModel={factoryConstructionHeadlineReadModel}
+        constructionReadModel={factoryConstructionWorkspaceReadModel}
         mobile={nextMobileShell}
         mobileSubview={mobileWorkspaceSubview}
         onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}
@@ -13438,13 +23411,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onRecipeOverride={(blueprintId, sourceRecipeId, targetRecipeId) => commitGame((current) => setBlueprintRecipeOverride(current, blueprintId, sourceRecipeId, targetRecipeId))}
         onFundQueue={(entryId, scope) => commitGame((current) => fundConstructionQueueEntry(current, entryId, scope))}
         onFundAllQueues={() => commitGame((current) => fundAllConstructionQueueEntries(current))}
-        onCancelQueue={(entryId) => commitGame((current) => cancelConstructionQueueEntry(current, entryId))}
+        onCancelQueue={(entryId) => {
+          if (rejectLegacyFactoryInteractionWhileNative("蓝图施工订单取消")) return;
+          commitGame((current) => cancelConstructionQueueEntry(current, entryId));
+        }}
         onExport={downloadBlueprint}
         onImport={importBlueprint}
-      />
+      /> : null}
       <CommandPalette
         open={commandPaletteOpen}
-        game={game}
+        webEntities={nativePlayerAuthorityOwnsRuntime ? null : game.entities}
+        paused={factoryRunStatusReadModel.paused}
+        performanceMode={game.settings.performanceMode}
+        reducedMotion={game.settings.reducedMotion}
         onClose={closeCommandPalette}
         onOpenWorkspace={openCommandWorkspace}
         onFocusRecipe={openRecipeFocus}
@@ -13453,18 +23432,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onPauseToggle={togglePause}
         onTogglePerformance={() => updateSettings({ performanceMode: !gameRef.current.settings.performanceMode })}
         onToggleReducedMotion={() => updateSettings({ reducedMotion: !gameRef.current.settings.reducedMotion })}
+        entitySearchMode={nativePlayerAuthorityBoundFrame ? "native" : "web"}
+        nativeEntitySearch={nativeCommandPaletteEntitySearchReadModel}
+        nativeEntitySearchStatus={commandPaletteEntitySearchStatus}
+        onEntitySearchRequest={updateCommandPaletteEntitySearchRequest}
       />
       <Suspense fallback={<WorkspaceLoading />}>
-        {constructionCenterOpen ? (
+        {constructionCenterOpen ? nativePlayerAuthorityOwnsRuntime ? (
+          <NativeConstructionCenterWorkspace
+            open
+            frame={nativeConstructionCenterWorkspaceFrame}
+            latestIdentity={nativeConstructionCenterLatestIdentity}
+            readStatus={nativeConstructionCenterReadStatus}
+            pendingIdentity={nativeConstructionCenterUiPendingIdentity}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setConstructionCenterOpen(false)}
+            onSubmitEnabledIntent={submitNativeConstructionCenterEnabledIntent}
+            onSubmitQuantumSupplyIntent={submitNativeConstructionCenterQuantumSupplyIntent}
+            onSubmitBatchBuildingTargetStockIntent={submitNativeConstructionCenterBatchBuildingTargetStockIntent}
+            onSubmitTargetStockIntent={submitNativeConstructionCenterTargetStockIntent}
+          />
+        ) : (
           <ConstructionCenterWorkspace
             open
             game={game}
+            constructionReadModel={factoryConstructionWorkspaceReadModel}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setConstructionCenterOpen(false)}
             onEnabledChange={(enabled) => commitGame((current) => setConstructionAutomationEnabled(current, enabled))}
             onQuantumSourceChange={(enabled) => commitGame((current) => setConstructionAutomationQuantumSourceEnabled(current, enabled))}
             onTargetChange={(constructionId: ConstructionAutomationTargetId, target: number) => commitGame((current) => setConstructionAutomationTarget(current, constructionId, target))}
             onBatchTargetChange={async (target) => {
+              const authorityEpoch = captureLegacyFactoryInteractionEpoch();
               if (!await gameDialog.confirm(`将把所有已解锁建筑的自动补足目标统一设置为 ${target.toLocaleString("zh-CN")}。不会生成建筑，也不会取消现有制造任务。是否继续？`, { confirmLabel: "应用全部目标" })) return;
+              if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "建筑制造中心批量目标设置")) return;
               const result = setConstructionAutomationTargetsForBuildings(gameRef.current, target);
               if (!result.ok) {
                 setNotice(result.label ?? "批量目标设置失败");
@@ -13477,11 +23476,31 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }}
           />
         ) : null}
-        {galaxyOpen ? (
+        {galaxyOpen ? nativePlayerAuthorityOwnsRuntime ? (
+          <NativeGalaxyWorkspace
+            key={nativeCampaignGalaxyIdentity
+              ? `${nativeCampaignGalaxyIdentity.sessionId}\u0000${nativeCampaignGalaxyIdentity.runId}\u0000${nativeCampaignGalaxyIdentity.registryFingerprint}`
+              : "native-galaxy-unbound"}
+            open
+            accountState={accountState}
+            frame={nativeGalaxyWorkspaceFrame}
+            latestIdentity={nativeCampaignGalaxyIdentity}
+            status={nativeGalaxyWorkspaceReadStatus}
+            focusTab={galaxyFocusTab}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setGalaxyOpen(false)}
+            onUpdateProfile={updateGalaxyProfile}
+            onUpdateCloudBinding={updateNativeGalaxyCloudBinding}
+            onCreateAccount={createGalaxyAccount}
+            onSwitchAccount={switchGalaxyAccount}
+            exportPending={nativePlayerAuthorityCommandPending}
+            onExportIntent={submitNativeGalacticExportIntent}
+          />
+        ) : (
           <GalaxyWorkspace
             open
             accountState={accountState}
             game={game}
+            nativeAuthorityReadOnly={nativePlayerAuthorityOwnsRuntime}
             focusTab={galaxyFocusTab}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setGalaxyOpen(false)}
             onUpdateProfile={updateGalaxyProfile}
@@ -13491,16 +23510,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onRestoreCloudSave={restoreCloudSave}
           />
         ) : null}
-        {technologyOpen ? (
+        {technologyOpen ? (technologyWorkspaceReadModel ? (
           <TechnologyWorkspace
+            key={nativeTechnologyWorkspaceIdentity
+              ? `${nativeTechnologyWorkspaceIdentity.sessionId}\u0000${nativeTechnologyWorkspaceIdentity.runId}\u0000${nativeTechnologyWorkspaceIdentity.registryFingerprint}`
+              : "technology-web"}
             open
-            game={game}
+            readModel={technologyWorkspaceReadModel}
+            nativeAuthorityRequired={Boolean(nativePlayerAuthorityBoundFrame)}
+            nativeCommandPending={nativePlayerAuthorityCommandPending ||
+              nativePlayerAuthorityOwnsRuntime && nativeTechnologyWorkspaceReadStatus !== "ready"}
             mobile={nextMobileShell}
             mobileSubview={mobileWorkspaceSubview}
             onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}
             focusTechId={campaignFocusTechId}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setTechnologyOpen(false)}
             onSelect={(techId) => {
+              if (nativePlayerAuthorityBoundFrame) {
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                const accepted = commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedSelectTechnologyCommand({ baseRevision, projection, techId }));
+                if (!accepted) return;
+                trackAnalyticsEvent("research_queue");
+                recordBasicOnboardingEvent("research-selected");
+                return;
+              }
               const before = gameRef.current;
               const next = selectTechnology(before, techId);
               if (next === before) return;
@@ -13509,26 +23547,157 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               recordBasicOnboardingEvent("research-selected");
             }}
             onPauseResearch={() => {
+              if (nativePlayerAuthorityBoundFrame) {
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedPauseResearchCommand({ baseRevision, projection }), () => {
+                    setNotice("科研已暂停，已投入矩阵与科技进度均已保留");
+                  });
+                return;
+              }
               commitGame((current) => pauseCurrentResearch(current));
               setNotice("科研已暂停，已投入矩阵与科技进度均已保留");
             }}
             onCancelResearch={() => {
+              if (nativePlayerAuthorityBoundFrame) {
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedCancelResearchCommand({ baseRevision, projection }), () => {
+                    setNotice("当前科研已取消，重新选择时会从已有进度继续");
+                  });
+                return;
+              }
               commitGame((current) => cancelCurrentResearch(current));
               setNotice("当前科研已取消，重新选择时会从已有进度继续");
             }}
             onResumeResearch={() => {
+              if (nativePlayerAuthorityBoundFrame) {
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedResumeResearchCommand({ baseRevision, projection }), () => {
+                    setNotice("已从保留进度继续科研");
+                  });
+                return;
+              }
               commitGame((current) => resumePausedResearch(current));
               setNotice("已从保留进度继续科研");
             }}
-            onRemoveQueued={(techId) => commitGame((current) => removeQueuedTechnology(current, techId))}
-            onSelectInfiniteResearch={(researchId: InfiniteResearchId) => commitGame((current) => selectInfiniteResearch(current, researchId))}
-            onInfiniteResearchAutomation={(enabled) => commitGame((current) => setInfiniteResearchAutomation(current, enabled))}
-            onLayoutChange={(technologyLayout) => updateSettings({ technologyLayout })}
+            onRemoveQueued={(techId) => {
+              if (!nativePlayerAuthorityBoundFrame) {
+                commitGame((current) => removeQueuedTechnology(current, techId));
+                return;
+              }
+              const projection = nativeTechnologyCommandProjection;
+              if (!projection) {
+                setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                return;
+              }
+              commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                createNativeProjectedRemoveQueuedTechnologyCommand({ baseRevision, projection, techId }));
+            }}
+            onSelectInfiniteResearch={(researchId: InfiniteResearchId) => {
+              if (nativePlayerAuthorityBoundFrame) {
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedSelectInfiniteResearchCommand({ baseRevision, projection, researchId }));
+                return;
+              }
+              commitGame((current) => selectInfiniteResearch(current, researchId));
+            }}
+            onInfiniteResearchAutomation={(enabled) => {
+              if (!nativePlayerAuthorityBoundFrame) {
+                commitGame((current) => setInfiniteResearchAutomation(current, enabled));
+                return;
+              }
+              const projection = nativeTechnologyCommandProjection;
+              if (!projection) {
+                setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                return;
+              }
+              commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                createNativeProjectedInfiniteResearchAutomationCommand({ baseRevision, projection, enabled }));
+            }}
+            onLayoutChange={(technologyLayout) => {
+              if (nativePlayerAuthorityBoundFrame) {
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedTechnologyLayoutCommand({
+                    baseRevision,
+                    projection,
+                    layout: technologyLayout,
+                  }));
+                return;
+              }
+              updateSettings({ technologyLayout });
+            }}
           />
-        ) : null}
-        {statisticsOpen ? (authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : <StatisticsWorkspace
+        ) : <WorkspaceLoading label="正在同步权威科研状态…" />) : null}
+        {statisticsOpen ? (nativePlayerAuthorityOwnsRuntime ? <NativeStatisticsWorkspace
+          key={nativeStatisticsWorkspaceIdentity
+            ? `${nativeStatisticsWorkspaceIdentity.sessionId}\u0000${nativeStatisticsWorkspaceIdentity.runId}\u0000${nativeStatisticsWorkspaceIdentity.registryFingerprint}`
+            : "native-statistics-unbound"}
+          open
+          frame={nativeStatisticsWorkspaceFrame}
+          latestIdentity={nativeStatisticsWorkspaceIdentity}
+          status={nativeStatisticsWorkspaceReadStatus}
+          workspace={nativeAuthoritativeFactoryWorkspaceFrame?.workspace ?? null}
+          currentViewport={{ ...viewportRef.current }}
+          workspacePending={nativePlayerAuthorityCommandPending}
+          onAddCanvasBookmark={(name, viewport) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            if (!frame?.workspace) return;
+            commitNativeWorkspaceAction({
+              kind: "bookmark-add",
+              planetId: frame.workspace.activePlanetId,
+              x: viewport.x,
+              y: viewport.y,
+              zoom: viewport.zoom,
+              name,
+            }, "当前画布视角已由 Rust 加入书签", frame.revision);
+          }}
+          onRenameCanvasBookmark={(bookmarkId, name) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            const trimmed = name.trim().slice(0, 28);
+            if (!frame?.workspace || !trimmed) return;
+            commitNativeWorkspaceAction({ kind: "bookmark-rename", bookmarkId, name: trimmed },
+              "画布书签名称已由 Rust 保存", frame.revision);
+          }}
+          onOpenCanvasBookmark={(bookmarkId) => {
+            const bookmark = nativeAuthoritativeFactoryWorkspaceFrame?.workspace?.bookmarks.rows
+              .find((row) => row.id === bookmarkId);
+            if (bookmark) openCanvasBookmark(bookmark as CanvasBookmark);
+          }}
+          onRemoveCanvasBookmark={(bookmarkId) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            if (!frame?.workspace) return;
+            commitNativeWorkspaceAction({ kind: "bookmark-remove", bookmarkId },
+              "画布书签已由 Rust 删除", frame.revision);
+          }}
+          onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setStatisticsOpen(false)}
+        /> : authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : <StatisticsWorkspace
           open
           game={game}
+          productionHistory={statisticsHistory ?? game.productionHistory}
           contentPackRuntimeSnapshot={contentPackRuntimeSnapshotRef.current}
           mobile={nextMobileShell}
           galacticActivityStatus={galacticActivityStatus}
@@ -13600,8 +23769,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onOpenCanvasBookmark={openCanvasBookmark}
           onRemoveCanvasBookmark={(bookmarkId) => commitGame((current) => removeCanvasBookmark(current, bookmarkId))}
         />) : null}
-        {recipesOpen ? <RecipeWorkspace open game={game} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateProductionLine} /> : null}
-        {campaignOpen ? (
+        {recipesOpen ? <RecipeWorkspace key={nativeRecipeWorkspaceIdentity
+          ? `${nativeRecipeWorkspaceIdentity.sessionId}\u0000${nativeRecipeWorkspaceIdentity.runId}\u0000${nativeRecipeWorkspaceIdentity.registryFingerprint}`
+          : "recipe-web"} open readOnly={nativePlayerAuthorityOwnsRuntime && (!nativeRecipeFocusReadModel || nativePlayerAuthorityCommandPending || nativeRecipeWorkspaceReadStatus !== "ready")} readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
+        {campaignOpen ? nativePlayerAuthorityOwnsRuntime ? (
+          <NativeCampaignWorkspace
+            key={nativeCampaignGalaxyIdentity
+              ? `${nativeCampaignGalaxyIdentity.sessionId}\u0000${nativeCampaignGalaxyIdentity.runId}\u0000${nativeCampaignGalaxyIdentity.registryFingerprint}`
+              : "native-campaign-unbound"}
+            open
+            frame={nativeCampaignWorkspaceFrame}
+            latestIdentity={nativeCampaignGalaxyIdentity}
+            status={nativeCampaignWorkspaceReadStatus}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setCampaignOpen(false)}
+            onNavigate={navigateFromNativeCampaign}
+          />
+        ) : (
           <CampaignWorkspace
             open
             game={game}
@@ -13610,10 +23793,92 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onSelectTask={onSelectCampaignTask}
           />
         ) : null}
-        {starMapOpen ? (
+        {starMapOpen ? nativePlayerAuthorityOwnsRuntime ? (
+          <NativeStarMapWorkspace
+            open
+            mapCatalogFrame={nativeStarMapCatalogFrame}
+            mapCatalogStatus={nativeStarMapCatalogStatus}
+            readModel={nativeStarMapWorkspaceReadModel}
+            readStatus={nativeStarMapWorkspaceReadStatus}
+            quantumReadModel={nativeStellarQuantumReadModel}
+            quantumReadStatus={nativeStellarQuantumReadStatus}
+            industryReadRequest={starMapIndustryReadRequest}
+            onIndustryReadRequest={updateStarMapIndustryReadRequest}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setStarMapOpen(false)}
+            onNativeRoleChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, planetId, currentRole, targetRole) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedPlanetRoleCommand({ baseRevision, planetId, currentRole, targetRole }))
+              : undefined}
+            onNativeQuantumItemCapacityChange={nativeStellarQuantumWritesEnabled
+              ? (projectedRevision, itemId, currentCapacity, targetCapacity) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedQuantumItemCapacityCommand({ baseRevision, itemId, currentCapacity, targetCapacity }))
+              : undefined}
+            onNativeStationPriorityChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))
+              : undefined}
+            onNativeStationMinimumLoadChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationMinimumLoadCommand({ baseRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot }))
+              : undefined}
+            onNativeStationRoutePolicyChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentRoutePolicy, targetRoutePolicy) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationRoutePolicyCommand({ baseRevision, stationId, slotIndex, currentRoutePolicy, targetRoutePolicy }))
+              : undefined}
+            onNativeStationWarperBudgetChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentWarperBudget, requestedWarperBudget) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationWarperBudgetCommand({ baseRevision, stationId, slotIndex, currentWarperBudget, requestedWarperBudget }))
+              : undefined}
+            onNativeStationLimitsChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))
+              : undefined}
+            onFocusStation={focusStellarStation}
+            onOpenSystemSpaceStation={openSystemSpaceStation}
+            nativeCommandPending={nativePlayerAuthorityCommandPending}
+            onNativeExplore={(projectedRevision, systemId) => commitNativeWorkspaceAction(
+              { kind: "system-explore", systemId },
+              "恒星勘探任务已由 Rust 权威启动",
+              projectedRevision,
+            )}
+            onNativeColonize={(projectedRevision, planetId) => commitNativeWorkspaceAction(
+              { kind: "planet-colonize", planetId },
+              "行星殖民前哨已由 Rust 权威建立",
+              projectedRevision,
+            )}
+            onNativeTravel={onPlanetChange}
+            onNativePlanetMetadataChange={(projectedRevision, planetId, metadata) => commitNativeWorkspaceAction(
+              { kind: "planet-metadata", planetId, ...metadata },
+              "行星资料已保存到 Rust 权威存档",
+              projectedRevision,
+            )}
+            onNativeSystemNameChange={(projectedRevision, systemId, name) => commitNativeWorkspaceAction(
+              { kind: "system-rename", systemId, name },
+              "恒星系名称已保存到 Rust 权威存档",
+              projectedRevision,
+            )}
+            onNativeUpgradeStations={(projectedRevision, systemId) => commitNativeWorkspaceAction(
+              { kind: "station-upgrade-scope", systemId },
+              systemId ? "本恒星系物流站已由 Rust 批量升级" : "全星区物流站已由 Rust 批量升级",
+              projectedRevision,
+            )}
+            onNativeAttachQuantumStations={(projectedRevision, systemId) => commitNativeWorkspaceAction(
+              { kind: "quantum-attach-scope", systemId },
+              systemId ? "本恒星系物流站已由 Rust 批量接入量子网络" : "全星区物流站已由 Rust 批量接入量子网络",
+              projectedRevision,
+            )}
+            onNativeCollectorQuantumMode={(projectedRevision, systemId, enabled) => commitNativeWorkspaceAction(
+              { kind: "collector-quantum-scope", systemId, enabled },
+              `${systemId ? "本恒星系" : "全星区"}轨道采集器已由 Rust 批量${enabled ? "接入量子网络" : "切回传统模式"}`,
+              projectedRevision,
+            )}
+          />
+        ) : (
           <StarMapWorkspace
             open
             game={game}
+            industryReadRequest={starMapIndustryReadRequest}
+            onIndustryReadRequest={updateStarMapIndustryReadRequest}
             mobile={nextMobileShell}
             mobileSubview={mobileWorkspaceSubview}
             onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}
@@ -13637,9 +23902,45 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onStationMinimumLoadChange={(entityId: string, slotIndex: number, minimumLoad: StationMinimumLoad) => commitGame((current) => setStationSlotMinimumLoad(current, entityId, slotIndex, minimumLoad))}
             onStationLimitsChange={(entityId: string, slotIndex: number, minStock: number, maxStock: number) => commitGame((current) => setStationSlotLimits(current, entityId, slotIndex, minStock, maxStock))}
             onFocusStation={focusStellarStation}
+            onOpenSystemSpaceStation={openSystemSpaceStation}
           />
         ) : null}
-        {systemSpaceStationOpen && systemSpaceStationId ? <SystemSpaceStationWorkspace
+        {systemSpaceStationOpen && systemSpaceStationId ? nativePlayerAuthorityOwnsRuntime ? <NativeSystemSpaceStationWorkspace
+          open
+          identity={nativeSystemSpaceStationIdentity}
+          fetchProjection={nativeSystemSpaceStationFetchProjection}
+          mobile={nextMobileShell}
+          pending={nativePlayerAuthorityCommandPending}
+          commandsAvailable={typeof desktopBridge?.commitNativeSystemSpaceStationIntent === "function"}
+          onClose={() => { setSystemSpaceStationOpen(false); setSystemSpaceStationId(null); }}
+          onStartConstruction={(systemId) => systemId === nativeSystemSpaceStationIdentity?.systemId
+            ? commitNativeSystemSpaceStationIntent({ type: "start", systemId }, "系统空间站施工已由 Rust 耐久启动")
+            : false}
+          onDeliverMaterial={(systemId, planetId, itemId, amount) => systemId === nativeSystemSpaceStationIdentity?.systemId
+            ? commitNativeSystemSpaceStationIntent({
+              type: "deliver-from-tray",
+              systemId,
+              planetId,
+              itemId,
+              requestedAmount: amount,
+            }, "空间站施工物料已由 Rust 守恒交付")
+            : false}
+          onSetModuleCount={(systemId, module, target) => systemId === nativeSystemSpaceStationIdentity?.systemId
+            ? commitNativeSystemSpaceStationIntent({ type: "module-target", systemId, module, target }, "空间站模块数量已由 Rust 更新")
+            : false}
+          onUpgradeStation={(entityId) => commitNativeSystemSpaceStationIntent({ type: "upgrade-one", entityId }, "星际物流站已由 Rust 升级")}
+          onUpgradeAllStations={(systemId) => systemId === nativeSystemSpaceStationIdentity?.systemId
+            ? commitNativeSystemSpaceStationIntent({ type: "upgrade-all", systemId }, "本恒星系物流站升级已由 Rust 耐久提交")
+            : false}
+          onRequestMode={(entityId, mode) => commitNativeSystemSpaceStationIntent({ type: "mode-target", entityId, mode }, "物流站运行模式已由 Rust 更新")}
+          onSetOutput={(entityId, portIndex, itemId) => commitNativeSystemSpaceStationIntent({
+            type: "output-target",
+            entityId,
+            portIndex,
+            itemId,
+            confirmations: 2,
+          }, "太空电梯输出口已由 Rust 守恒更新")}
+        /> : <SystemSpaceStationWorkspace
           open
           game={game}
           systemId={systemSpaceStationId}
@@ -13650,20 +23951,71 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onUpgradeStation={handleUpgradeInterstellarStation}
           onUpgradeAllStations={handleUpgradeAllInterstellarStations}
           onRequestMode={(entityId, mode) => commitGame((current) => requestStationOperationMode(current, entityId, mode))}
-          onSetOutput={(entityId, portIndex, itemId) => commitGame((current) => setElevatorOutputItem(current, entityId, portIndex, itemId, 2))}
+          onSetOutput={(entityId, portIndex, itemId) => {
+            if (rejectLegacyFactoryInteractionWhileNative("系统空间站输出口设置")) return;
+            commitGame((current) => setElevatorOutputItem(current, entityId, portIndex, itemId, 2));
+          }}
           onSetModuleCount={(systemId, module, count) => commitGame((current) => setSystemSpaceStationModuleCount(current, systemId, module, count))}
         /> : null}
-        {orbitalStationOpen && isSpaceStationFeatureEnabled() ? <OrbitalStationWorkspace
+        {orbitalStationOpen && isSpaceStationFeatureEnabled() && nativePlayerAuthorityOwnsRuntime ? <NativeOrbitalContractWorkspace
+          open
+          identity={nativeOrbitalContractIdentity}
+          fetchProjection={nativeOrbitalContractFetchProjection}
+          pending={nativePlayerAuthorityCommandPending}
+          commandsAvailable={typeof desktopBridge?.commitNativeOrbitalContractIntent === "function"}
+          mobile={compactLayout.isMobileShell}
+          onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setOrbitalStationOpen(false)}
+          onIntent={commitNativeOrbitalContractIntent}
+        /> : null}
+        {orbitalStationOpen && isSpaceStationFeatureEnabled() && !nativePlayerAuthorityOwnsRuntime ? <OrbitalStationWorkspace
           game={game}
           mobile={compactLayout.isMobileShell}
           mobileSubview={mobileNavigation.route.kind === "workspace" && mobileNavigation.route.id === "orbital-station" ? mobileNavigation.route.subview : undefined}
           initialTab={orbitalStationInitialTab}
           onOpenMobileSubview={nextMobileShell ? mobileNavigation.openWorkspaceSubview : undefined}
           onMobileBack={nextMobileShell ? mobileNavigation.requestBack : undefined}
-          onGameChange={commitGame}
+          onGameChange={(updater) => {
+            if (rejectLegacyFactoryInteractionWhileNative("轨道空间站操作")) return false;
+            return commitGame(updater);
+          }}
           onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setOrbitalStationOpen(false)}
         /> : null}
-        {dysonPlannerOpen ? (authorityWorkspaceSync === "dyson" ? <WorkspaceLoading label="正在同步权威戴森规划…" /> : (
+        {dysonPlannerOpen ? nativePlayerAuthorityBoundFrame ? (
+          <NativeDysonPlannerWorkspace
+            key={nativeDysonWorkspaceIdentity
+              ? `${nativeDysonWorkspaceIdentity.sessionId}\u0000${nativeDysonWorkspaceIdentity.runId}\u0000${nativeDysonWorkspaceIdentity.registryFingerprint}`
+              : "native-dyson-unbound"}
+            frame={nativeDysonWorkspaceFrame}
+            latestIdentity={nativeDysonWorkspaceIdentity}
+            status={nativeDysonWorkspaceReadStatus}
+            selectedSystemId={nativeDysonEffectiveSystemId}
+            pending={nativePlayerAuthorityCommandPending}
+            onSelectSystem={setNativeDysonSelectedSystemId}
+            onSelectLayer={onNativeDysonSelectLayer}
+            onSelectOrbit={onNativeDysonSelectOrbit}
+            onOrbitChange={onNativeDysonOrbitChange}
+            onLaunchModeChange={onNativeDysonLaunchModeChange}
+            onLaunchThrottleChange={onNativeDysonLaunchThrottleChange}
+            onLaunchEnabledChange={onNativeDysonLaunchEnabledChange}
+            onAddLayer={onNativeDysonAddLayer}
+            onLayerChange={onNativeDysonLayerChange}
+            onRemoveLayer={onNativeDysonRemoveLayer}
+            onAddNode={onNativeDysonAddNode}
+            onRemoveNode={onNativeDysonRemoveNode}
+            onConnectNodes={onNativeDysonConnectNodes}
+            onPasteLayer={onNativeDysonPasteLayer}
+            onAddOrbit={onNativeDysonAddOrbit}
+            onRemoveOrbit={onNativeDysonRemoveOrbit}
+            onAutoConnect={onNativeDysonAutoConnect}
+            onPlanShell={onNativeDysonPlanShell}
+            onClearShell={onNativeDysonClearShell}
+            onClose={() => {
+              setNativeDysonSelectedSystemId(null);
+              if (nextMobileShell) mobileNavigation.requestBack();
+              else setDysonPlannerOpen(false);
+            }}
+          />
+        ) : authorityWorkspaceSync === "dyson" ? <WorkspaceLoading label="正在同步权威戴森规划…" /> : (
           <DysonPlannerWorkspace
             open
             game={game}
@@ -13699,8 +24051,42 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onSwarmOrbitChange={(systemId, orbitId, changes) => commitGame((current) => setDysonSwarmOrbit(current, systemId, orbitId, changes))}
             onRemoveSwarmOrbit={(systemId, orbitId) => commitGame((current) => removeDysonSwarmOrbit(current, systemId, orbitId))}
           />
-        )) : null}
-        {operationsOpen ? (
+        ) : null}
+        {operationsOpen && nativePlayerAuthorityOwnsRuntime ? (
+          <NativeOperationsWorkspace
+            open
+            tab={operationsTab}
+            onTabChange={setOperationsTab}
+            identity={nativeOperationsIdentity}
+            fetchProjection={nativeOperationsFetchProjection}
+            subscribeProjection={nativeOperationsSubscribeProjection}
+            fetchProjectionDiagnostics={nativeOperationsFetchProjectionDiagnostics}
+            commitSetting={nativeOperationsCommitSetting}
+            theme={themeMode}
+            fontScale={nativeFontScale}
+            factoryAlertsEnabled={factoryAlertsEnabled}
+            canvasDetailPreference={canvasDetailPreference}
+            connectionPointSize={connectionPointSize}
+            connectionHitArea={connectionHitArea}
+            defaultBeltLanes={defaultBeltLanes}
+            locale={appLocale}
+            onThemeChange={updateNativeThemePreference}
+            onFontScaleChange={updateNativeFontScalePreference}
+            onFactoryAlertsEnabledChange={updateFactoryAlertsEnabled}
+            onCanvasDetailPreferenceChange={setCanvasDetailPreference}
+            onConnectionPointSizeChange={setConnectionPointSize}
+            onConnectionHitAreaChange={setConnectionHitArea}
+            onDefaultBeltLanesChange={updateDefaultBeltLanes}
+            onLocaleChange={setAppLocale}
+            onManualCheckpoint={manualSave}
+            onExportV47={downloadSave}
+            onAlertSelect={selectNativeOperationsAlert}
+            onOpenTutorial={() => { setTutorialSectionId(undefined); setTutorialOpen(true); }}
+            onOpenReleaseNotes={onOpenReleaseNotes}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setOperationsOpen(false)}
+          />
+        ) : null}
+        {operationsOpen && !nativePlayerAuthorityOwnsRuntime ? (
           <OperationsWorkspace
             open
             tab={operationsTab}
@@ -13837,7 +24223,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }}
         {...mobilePanelSwipe.bindings}
       ><i /></button> : null}
-      {mobileActionEntity ? <div className="mobile-action-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setMobileActionEntityId(null); }}>
+      {mobileActionEntity && !nativePlayerAuthorityOwnsRuntime ? <div className="mobile-action-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setMobileActionEntityId(null); }}>
         <section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="设备快捷操作">
           <header><span><small>长按快捷操作</small><strong>{mobileActionEntity.buildingId ? getBuilding(mobileActionEntity.buildingId).name : mobileActionEntity.resourceId ? ITEMS[mobileActionEntity.resourceId].name : mobileActionEntity.id}</strong></span><button type="button" onClick={() => setMobileActionEntityId(null)} aria-label="关闭快捷操作"><X size={16} /></button></header>
           <div>
@@ -13849,7 +24235,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }} disabled={!mobileActionEntity.resourceId && !mobileActionEntity.recipeId && !Object.values(RECIPES).some((candidate) => candidate.buildingId === mobileActionEntity.buildingId)}><BookOpen size={17} /><span>查看配方</span></button>
             <button type="button" disabled={getBlueprintEligibleEntityIds(game, [mobileActionEntity.id]).length === 0} onClick={() => { copyEntitiesAsBlueprint([mobileActionEntity.id]); setMobileActionEntityId(null); }}><Copy size={17} /><span>{mobileActionEntity.kind === "vein" ? "收录采矿布局" : "复制设备"}</span></button>
             <button type="button" onClick={() => { focusPlacedEntity(mobileActionEntity.id); setMobileActionEntityId(null); }}><Focus size={17} /><span>定位检查</span></button>
-            <button type="button" disabled={!canUpgradeEntities(game, [mobileActionEntity.id])} onClick={() => { commitGame((current) => upgradeEntities(current, [mobileActionEntity.id])); setMobileActionEntityId(null); playTone("upgrade"); }}><ArrowUp size={17} /><span>升级设备</span></button>
+            <button type="button" disabled={!canUpgradeEntities(game, [mobileActionEntity.id])} onClick={() => { if (rejectLegacyFactoryInteractionWhileNative("建筑升级")) return; commitGame((current) => upgradeEntities(current, [mobileActionEntity.id])); setMobileActionEntityId(null); playTone("upgrade"); }}><ArrowUp size={17} /><span>升级设备</span></button>
             <button className="danger" type="button" disabled={mobileActionEntity.kind === "vein" && mobileActionEntity.minerCount < 1} onClick={() => { handleRemoveEntity(mobileActionEntity.id); setSelectedEntityIds([]); setMobileActionEntityId(null); }}><Trash2 size={17} /><span>{mobileActionEntity.kind === "vein" ? `回收采集设备 ×${mobileActionEntity.minerCount}` : "回收设备"}</span></button>
           </div>
         </section>
@@ -13878,9 +24264,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       <CanvasInteractionOverlay
         active={pointerOverlayActive}
         placement={placement}
+        nativePlacementLabel={nativePlacementLabel}
         placementCount={placementCount}
-        cargo={game.cargo}
-        blueprint={activeBlueprint}
+        cargo={canvasPointerCargo}
+        blueprint={nativePlayerAuthorityOwnsRuntime ? null : activeBlueprint}
         ctrlHeld={ctrlHeld}
         clickConnectionPreview={clickConnectionPreview}
         clickConnectionTone={clickConnectionTone}
@@ -13888,8 +24275,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         connectionHint={connectionHint}
         onPointerPosition={handleCanvasPointerPosition}
       />
-      <SpeedrunStatusPanel game={game} />
+      {!nativePlayerAuthorityOwnsRuntime ? <SpeedrunStatusPanel game={game} /> : null}
       {interactionBursts.map((burst) => <div className={`interaction-burst interaction-burst--${burst.tone}`} style={{ left: burst.x, top: burst.y }} key={burst.id}><i>{burst.tone === "warning" ? <Sparkles size={13} /> : <Check size={13} />}</i><span>{burst.label}</span></div>)}
+      {nativeAuthorityDurableRestartRevision !== null ? <aside
+        className="save-emergency-warning"
+        role="alert"
+        aria-live="assertive"
+        data-native-authority-durable-restart
+      >
+        <AlertTriangle size={20} />
+        <span>
+          <strong>Rust 权威已停在故障恢复边界，当前画面保持只读。</strong>
+          <small>不会回到旧 JavaScript 镜像；可让应用从当前 durable revision 重新打开。</small>
+        </span>
+        <button
+          type="button"
+          disabled={nativeAuthorityDurableRestartPending ||
+            typeof desktopBridge?.restartNativePlayerAuthorityFromDurable !== "function"}
+          onClick={() => void restartNativeAuthorityFromDurable()}
+        >
+          <RefreshCw size={15} /><span>{nativeAuthorityDurableRestartPending ? "正在重启" : "从检查点重启"}</span>
+        </button>
+      </aside> : null}
       {saveFailure ? <aside className="save-emergency-warning" role="alert" aria-live="assertive">
         <AlertTriangle size={20} />
         <span><strong>{saveFailure.code === "quota" ? "本地存储空间不足，当前进度尚未保存。请立即导出存档。" : saveFailure.message}</strong><small>{saveFailure.code === "read-only" ? "本页不会自动保存；关闭其他标签页后使用顶部接管按钮，或立即导出当前进度。" : saveFailure.code === "conflict" ? "双方版本都已保存；请先在顶部冲突提示中选择，不会静默覆盖。" : "自动保存会继续重试，导出文件不会删除或覆盖现有存档。"}</small></span>

@@ -1,0 +1,338 @@
+// @vitest-environment jsdom
+
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  DesktopNativeCoreOperationsWorkspaceProjectionResult,
+  DesktopNativeCoreProjectionSubscriptionEvent,
+} from "../desktop";
+import { NativeOperationsWorkspace, type NativeOperationsWorkspaceProps } from "./NativeOperationsWorkspace";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+function projection(overrides: Partial<DesktopNativeCoreOperationsWorkspaceProjectionResult> = {}): DesktopNativeCoreOperationsWorkspaceProjectionResult {
+  return {
+    schemaVersion: 1, projectionType: "operations-workspace-v1", source: "native-core",
+    stateVersion: 47, sessionId: "session-1", runId: "run-1", revision: 7,
+    registryFingerprint: "7df8cf3a", truncated: false,
+    settings: {
+      simulationSpeed: 1, technologyLayout: "standard", defaultBeltRouteMode: "auto",
+      productionBufferLimit: 1000, logisticsBufferLimit: 1000,
+      beltBufferLimit: 1000, proliferatorBufferLimit: 1,
+    },
+    summary: {
+      paused: false, elapsedSeconds: 10, entityCount: 1, beltCount: 0,
+      activePlanetId: "home", activePlanetEntityCount: 1,
+      activePlanetBeltCount: 0, constructionQueueCount: 0,
+    },
+    alerts: {
+      status: "complete", totalCount: 1, criticalCount: 1, warningCount: 0,
+      rows: [{ entityId: "entity-1", planetId: "home", buildingId: "arc_smelter", recipeId: null, resourceId: null, severity: "critical", code: "no-power", label: "无供电" }],
+    },
+    factoryExecution: null,
+    limits: { alertRows: 1024, projectionBytes: 524288 }, ...overrides,
+  };
+}
+
+function props(overrides: Partial<NativeOperationsWorkspaceProps> = {}): NativeOperationsWorkspaceProps {
+  return {
+    open: true,
+    tab: "alerts", onTabChange: vi.fn(),
+    identity: { sessionId: "session-1", runId: "run-1", expectedRevision: 7, expectedRegistryFingerprint: "7df8cf3a" },
+    fetchProjection: vi.fn(async () => projection()), subscribeProjection: null,
+    fetchProjectionDiagnostics: null,
+    commitSetting: vi.fn(async () => ({})),
+    theme: "dark", fontScale: 1, factoryAlertsEnabled: true,
+    canvasDetailPreference: "auto", connectionPointSize: "default",
+    connectionHitArea: "auto", defaultBeltLanes: 1,
+    locale: "zh-CN",
+    onThemeChange: vi.fn(), onFontScaleChange: vi.fn(), onFactoryAlertsEnabledChange: vi.fn(),
+    onCanvasDetailPreferenceChange: vi.fn(), onConnectionPointSizeChange: vi.fn(),
+    onConnectionHitAreaChange: vi.fn(), onDefaultBeltLanesChange: vi.fn(),
+    onLocaleChange: vi.fn(),
+    onManualCheckpoint: vi.fn(), onExportV47: vi.fn(), onAlertSelect: vi.fn(),
+    onOpenTutorial: vi.fn(), onOpenReleaseNotes: vi.fn(), onClose: vi.fn(), ...overrides,
+  };
+}
+
+function button(host: HTMLElement, text: string): HTMLButtonElement {
+  const value = [...host.querySelectorAll("button")].find((entry) => entry.textContent?.includes(text));
+  if (!(value instanceof HTMLButtonElement)) throw new Error(`missing button ${text}`);
+  return value;
+}
+
+function selectInLabel(host: HTMLElement, text: string): HTMLSelectElement {
+  const value = [...host.querySelectorAll("label")].find((label) => label.textContent?.includes(text))?.querySelector("select");
+  if (!(value instanceof HTMLSelectElement)) throw new Error(`missing select ${text}`);
+  return value;
+}
+
+function inputInLabel(host: HTMLElement, text: string): HTMLInputElement {
+  const value = [...host.querySelectorAll("label")].find((label) => label.textContent?.includes(text))?.querySelector("input");
+  if (!(value instanceof HTMLInputElement)) throw new Error(`missing input ${text}`);
+  return value;
+}
+
+function setInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  if (!setter) throw new Error("missing native input value setter");
+  setter.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+async function subscriptionFrame(
+  value: DesktopNativeCoreOperationsWorkspaceProjectionResult,
+): Promise<Extract<DesktopNativeCoreProjectionSubscriptionEvent, { kind: "frame" }>> {
+  const bodyBuffer = new TextEncoder().encode(JSON.stringify(value)).buffer;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bodyBuffer));
+  const sha256 = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return {
+    kind: "frame",
+    transfer: {
+      header: {
+        schemaVersion: 1,
+        sessionId: value.sessionId,
+        revision: value.revision,
+        sequence: value.revision + 1,
+        projectionType: "operations-workspace-v1",
+        payloadLength: bodyBuffer.byteLength,
+        sha256,
+      },
+      bodyBuffer,
+    },
+    metrics: {
+      channel: "telemetry",
+      coalescedCount: 0,
+      readMs: 0.2,
+      encodeMs: 0.1,
+      validationMs: 0.1,
+    },
+  };
+}
+
+describe("NativeOperationsWorkspace", () => {
+  let host: HTMLDivElement;
+  let root: Root;
+  beforeEach(() => { host = document.createElement("div"); document.body.append(host); root = createRoot(host); });
+  afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
+
+  it("renders same-revision alerts and routes only the selected row", async () => {
+    const value = props();
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    expect(host.textContent).toContain("无供电");
+    await act(async () => button(host, "无供电").click());
+    expect(value.onAlertSelect).toHaveBeenCalledWith(expect.objectContaining({ entityId: "entity-1" }));
+  });
+
+  it("keeps one ACK-gated telemetry subscription across authority revisions and releases it on close", async () => {
+    let listener: ((event: DesktopNativeCoreProjectionSubscriptionEvent) => unknown) | null = null;
+    const handle = { update: vi.fn(), close: vi.fn() };
+    const subscribeProjection: NonNullable<NativeOperationsWorkspaceProps["subscribeProjection"]> = vi.fn((_request, nextListener) => {
+      listener = nextListener;
+      return handle;
+    });
+    const value = props({ subscribeProjection, fetchProjection: vi.fn(async () => projection()) });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    expect(subscribeProjection).toHaveBeenCalledTimes(1);
+    expect(value.fetchProjection).not.toHaveBeenCalled();
+    await act(async () => { await listener?.(await subscriptionFrame(projection())); });
+    expect(host.textContent).toContain("REV 7");
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{
+        sessionId: "session-1",
+        runId: "run-1",
+        expectedRevision: 8,
+        expectedRegistryFingerprint: "7df8cf3a",
+      }} />); });
+    expect(subscribeProjection).toHaveBeenCalledTimes(1);
+    expect(handle.update).toHaveBeenCalledWith({
+      runId: "run-1",
+      expectedRevision: 8,
+      expectedRegistryFingerprint: "7df8cf3a",
+    });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} open={false} />); });
+    expect(handle.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires an old projection when authority identity switches", async () => {
+    let resolveOld!: (value: DesktopNativeCoreOperationsWorkspaceProjectionResult) => void;
+    const old = new Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>((resolve) => { resolveOld = resolve; });
+    const value = props({ fetchProjection: vi.fn(() => old) });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-2", runId: "run-2", expectedRevision: 9, expectedRegistryFingerprint: "7df8cf3a" }}
+      fetchProjection={vi.fn(async () => projection({ sessionId: "session-2", runId: "run-2", revision: 9 }))} />); });
+    expect(host.textContent).toContain("REV 9");
+    await act(async () => resolveOld(projection()));
+    expect(host.textContent).not.toContain("REV 7");
+  });
+
+  it("shows no partial rows on overflow and keeps dangerous actions disabled", async () => {
+    const overflow = projection({ alerts: { status: "overflow", totalCount: 1025, criticalCount: 1025, warningCount: 0, rows: [] } });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...props({ fetchProjection: vi.fn(async () => overflow) })} />); });
+    expect(host.textContent).toContain("不会显示任何行");
+    await act(async () => { root.render(<NativeOperationsWorkspace {...props({ tab: "saves", fetchProjection: vi.fn(async () => overflow) })} />); });
+    expect(button(host, "导入 / 确认导入").disabled).toBe(true);
+    expect(button(host, "恢复 / 覆盖").disabled).toBe(true);
+    expect(host.textContent).not.toContain("无供电");
+  });
+
+  it("submits one semantic leaf intent without a patch", async () => {
+    const commitSetting = vi.fn(async (_request: unknown) => ({}));
+    await act(async () => { root.render(<NativeOperationsWorkspace {...props({ tab: "settings", commitSetting })} />); });
+    const select = selectInLabel(host, "模拟速度");
+    await act(async () => { select.value = "2"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(commitSetting).toHaveBeenCalledWith({
+      expectedSessionId: "session-1", expectedRunId: "run-1", expectedRevision: 7,
+      expectedRegistryFingerprint: "7df8cf3a", intent: { type: "set-simulation-speed", value: 2 },
+    });
+    expect(JSON.stringify(commitSetting.mock.calls[0][0])).not.toContain("topLevelChanges");
+  });
+
+  it("shares the controlled operations tab with App shortcuts", async () => {
+    const onTabChange = vi.fn();
+    const value = props({ onTabChange });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    expect(host.textContent).toContain("工厂警报");
+    await act(async () => button(host, "设置").click());
+    expect(onTabChange).toHaveBeenCalledWith("settings");
+    expect(host.textContent).toContain("工厂警报");
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} tab="settings" />); });
+    expect(host.textContent).toContain("权威叶设置");
+  });
+
+  it("preserves an in-progress numeric draft across ordinary authority revisions", async () => {
+    const value = props({ tab: "settings" });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    const buffer = inputInLabel(host, "生产缓冲");
+    await act(async () => {
+      setInputValue(buffer, "4321");
+    });
+    expect(inputInLabel(host, "生产缓冲").value).toBe("4321");
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-1", runId: "run-1", expectedRevision: 8, expectedRegistryFingerprint: "7df8cf3a" }}
+      fetchProjection={vi.fn(async () => projection({
+        revision: 8,
+        settings: { ...projection().settings, productionBufferLimit: 9000 },
+      }))} />); });
+    expect(host.textContent).toContain("REV 8");
+    expect(inputInLabel(host, "生产缓冲").value).toBe("4321");
+  });
+
+  it("keeps the same focused input mounted while a newer same-lineage projection is pending", async () => {
+    let resolveRevision8!: (value: DesktopNativeCoreOperationsWorkspaceProjectionResult) => void;
+    const revision8 = new Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>((resolve) => { resolveRevision8 = resolve; });
+    const fetchProjection = vi.fn((request: Parameters<NonNullable<NativeOperationsWorkspaceProps["fetchProjection"]>>[0]) =>
+      request.expectedRevision === 8 ? revision8 : Promise.resolve(projection()));
+    const value = props({ tab: "settings", fetchProjection });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    const original = inputInLabel(host, "生产缓冲");
+    original.focus();
+    await act(async () => setInputValue(original, "4321"));
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-1", runId: "run-1", expectedRevision: 8, expectedRegistryFingerprint: "7df8cf3a" }} />); });
+    expect(inputInLabel(host, "生产缓冲")).toBe(original);
+    expect(document.activeElement).toBe(original);
+    expect(original.value).toBe("4321");
+    expect(host.textContent).toContain("当前保持显示已验证的 revision 7");
+
+    await act(async () => resolveRevision8(projection({
+      revision: 8,
+      settings: { ...projection().settings, productionBufferLimit: 9000 },
+    })));
+    expect(inputInLabel(host, "生产缓冲")).toBe(original);
+    expect(document.activeElement).toBe(original);
+    expect(original.value).toBe("4321");
+    expect(host.textContent).toContain("REV 8");
+  });
+
+  it("binds a stale-view intent to the current authority revision and never regresses on a late response", async () => {
+    let resolveRevision8!: (value: DesktopNativeCoreOperationsWorkspaceProjectionResult) => void;
+    const revision8 = new Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>((resolve) => { resolveRevision8 = resolve; });
+    const commitSetting = vi.fn(async () => ({}));
+    const fetchProjection = vi.fn((request: Parameters<NonNullable<NativeOperationsWorkspaceProps["fetchProjection"]>>[0]) => {
+      if (request.expectedRevision === 8) return revision8;
+      if (request.expectedRevision === 9) return Promise.resolve(projection({ revision: 9 }));
+      return Promise.resolve(projection());
+    });
+    const value = props({ tab: "settings", fetchProjection, commitSetting });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-1", runId: "run-1", expectedRevision: 8, expectedRegistryFingerprint: "7df8cf3a" }} />); });
+
+    const speed = selectInLabel(host, "模拟速度");
+    await act(async () => { speed.value = "2"; speed.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(commitSetting).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 8 }));
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-1", runId: "run-1", expectedRevision: 9, expectedRegistryFingerprint: "7df8cf3a" }} />); });
+    expect(host.textContent).toContain("REV 9");
+    await act(async () => resolveRevision8(projection({ revision: 8 })));
+    expect(host.textContent).toContain("REV 9");
+    expect(host.textContent).not.toContain("REV 8");
+  });
+
+  it("keeps a durable ACK locked until a newer projection and rejects consecutive intents", async () => {
+    let resolveCommit!: (value: unknown) => void;
+    const commitSetting = vi.fn(() => new Promise((resolve) => { resolveCommit = resolve; }));
+    const value = props({ tab: "settings", commitSetting });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    const speed = selectInLabel(host, "模拟速度");
+    await act(async () => {
+      speed.value = "2";
+      speed.dispatchEvent(new Event("change", { bubbles: true }));
+      speed.value = "4";
+      speed.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(commitSetting).toHaveBeenCalledTimes(1);
+    expect(selectInLabel(host, "模拟速度").disabled).toBe(true);
+
+    await act(async () => resolveCommit({}));
+    expect(host.textContent).toContain("等待新 authority revision");
+    expect(selectInLabel(host, "模拟速度").disabled).toBe(true);
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-1", runId: "run-1", expectedRevision: 8, expectedRegistryFingerprint: "7df8cf3a" }}
+      fetchProjection={vi.fn(async () => projection({ revision: 8, settings: { ...projection().settings, simulationSpeed: 2 } }))} />); });
+    expect(host.textContent).toContain("REV 8");
+    expect(selectInLabel(host, "模拟速度").disabled).toBe(false);
+    expect(selectInLabel(host, "模拟速度").value).toBe("2");
+  });
+
+  it("resets controlled drafts on projection identity and ignores a stale commit completion", async () => {
+    let resolveCommit!: (value: unknown) => void;
+    const commitSetting = vi.fn(() => new Promise((resolve) => { resolveCommit = resolve; }));
+    const value = props({ tab: "settings", commitSetting });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    const buffer = inputInLabel(host, "生产缓冲");
+    await act(async () => {
+      buffer.value = "4321";
+      buffer.dispatchEvent(new Event("input", { bubbles: true }));
+      buffer.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(inputInLabel(host, "生产缓冲").value).toBe("4321");
+    const speed = selectInLabel(host, "模拟速度");
+    await act(async () => {
+      speed.value = "2";
+      speed.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-2", runId: "run-2", expectedRevision: 9, expectedRegistryFingerprint: "7df8cf3a" }}
+      fetchProjection={vi.fn(async () => projection({
+        sessionId: "session-2", runId: "run-2", revision: 9,
+        settings: { ...projection().settings, productionBufferLimit: 9000 },
+      }))} />); });
+    expect(inputInLabel(host, "生产缓冲").value).toBe("9000");
+    expect(selectInLabel(host, "模拟速度").disabled).toBe(false);
+
+    await act(async () => resolveCommit({}));
+    expect(host.textContent).not.toContain("等待新 authority revision");
+    expect(inputInLabel(host, "生产缓冲").value).toBe("9000");
+  });
+});

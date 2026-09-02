@@ -1,9 +1,12 @@
 import { ArrowUp, BoxSelect, Check, ChevronLeft, ChevronRight, Clock3, Copy, Download, FlipHorizontal2, Focus, Layers3, ListChecks, Lock, MousePointer2, PackageCheck, PackageOpen, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Redo2, RotateCw, Route, Trash2, Truck, Undo2, Unlock, Upload, WandSparkles, X } from "lucide-react";
 import { getConstructionDefinition, getItem, getPlanet, getRecipe, getRecipesForBuilding } from "../game/content";
 import { canPlaceBlueprint, canQueueBlueprint, getBlueprintFleetLoadPreview, getBlueprintRequirements, getConstructionQueueDetails, isTechnologyCompleted, transformBlueprintOffset } from "../game/engine";
+import type { FactoryConstructionHeadlineReadModel, FactoryConstructionWorkspaceReadModel, FactorySelectionToolbarReadModel } from "../game/factoryReadModels";
+import { blueprintExchangeFileFailureMessage, dispatchBlueprintExchangeFile } from "../game/blueprintExchangeFile";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { BlueprintDefinition, BlueprintMirror, BlueprintRotation, CanvasRegion, CanvasViewport, GameState, PlanetId, RecipeId } from "../game/types";
 import { Fragment, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { BlueprintFactoryHeadline } from "./BlueprintFactoryHeadline";
 import { useGameDialog } from "./GameDialogProvider";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { StableTextArea, StableTextInput, clearStableTextDraft } from "./CompositionSafeInput";
@@ -96,7 +99,7 @@ const CANVAS_REGION_RESIZE_LABELS: Record<CanvasRegionResizeHandle, string> = {
 };
 
 export function CanvasRegionLayer({ regions, draft, selectedRegionId, resizePreview, resizeHandleSize = 16, onSelect, onResizeStart }: {
-  regions: CanvasRegion[];
+  regions: readonly CanvasRegion[];
   draft: CanvasRegionRectangle | null;
   selectedRegionId: string | null;
   resizePreview?: { regionId: string; rectangle: CanvasRegionRectangle } | null;
@@ -162,22 +165,23 @@ export function CanvasRegionEditor({ region, onChange, onRemove, onClose }: {
     <section className="canvas-region-editor nodrag nopan" aria-label="生产区域设置">
       <Palette size={15} />
       <label><span>区域名称</span><StableTextInput commitOnBlur draftId={`canvas-region-name:${region.id}`} value={region.name} onValueChange={(name) => onChange({ name })} maxLength={28} onBlur={() => clearStableTextDraft(`canvas-region-name:${region.id}`)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>
-      <label className="canvas-region-editor__color"><span>背景</span><input type="color" value={region.fillColor} onChange={(event) => onChange({ fillColor: event.target.value })} /></label>
-      <label className="canvas-region-editor__color"><span>边框</span><input type="color" value={region.borderColor} onChange={(event) => onChange({ borderColor: event.target.value })} /></label>
+      <label className="canvas-region-editor__color"><span>背景</span><input type="color" value={region.fillColor} onInput={(event) => onChange({ fillColor: event.currentTarget.value })} /></label>
+      <label className="canvas-region-editor__color"><span>边框</span><input type="color" value={region.borderColor} onInput={(event) => onChange({ borderColor: event.currentTarget.value })} /></label>
       <button className="danger" type="button" onClick={onRemove} title="删除生产区域" aria-label="删除生产区域"><Trash2 size={14} /></button>
       <button type="button" onClick={onClose} title="关闭区域设置" aria-label="关闭区域设置"><X size={14} /></button>
     </section>
   );
 }
 
-export function SelectionToolbar({ selectedCount, selectedBeltCount, eligibleCount, canUpgrade, canUpgradeBelts, canLock, canUnlock, onFocus, onAutoLayout, onCopy, onUpgrade, onUpgradeBelts, onBatchIncrease, onLock, onUnlock, onRemove, onClear, onDone }: {
-  selectedCount: number;
-  selectedBeltCount: number;
+export function SelectionToolbar({ model, eligibleCount, canUpgrade, canUpgradeBelts, unsafeActionsEnabled = true, copyActionEnabled = unsafeActionsEnabled, onFocus, onAutoLayout, onCopy, onUpgrade, onUpgradeBelts, onBatchIncrease, onLock, onUnlock, onRemove, onClear, onDone }: {
+  model: FactorySelectionToolbarReadModel;
   eligibleCount: number;
   canUpgrade: boolean;
   canUpgradeBelts: boolean;
-  canLock: boolean;
-  canUnlock: boolean;
+  /** Defaults to the historical full toolbar; native authority can opt into lock-only mutations. */
+  unsafeActionsEnabled?: boolean;
+  /** Native authority may expose only the Rust-backed capture action. */
+  copyActionEnabled?: boolean;
   onFocus: () => void;
   onAutoLayout: () => void;
   onCopy: () => void;
@@ -190,29 +194,37 @@ export function SelectionToolbar({ selectedCount, selectedBeltCount, eligibleCou
   onClear: () => void;
   onDone: () => void;
 }) {
+  const { selectedCount, selectedBeltCount, canLock, canUnlock } = model;
   const [customIncrease, setCustomIncrease] = useState("");
   const applyCustomIncrease = () => {
+    if (!unsafeActionsEnabled) return;
     if (!/^\d+$/.test(customIncrease.trim())) return;
     const amount = Number(customIncrease.trim());
     if (Number.isSafeInteger(amount) && amount >= 1 && amount <= 1_000_000) onBatchIncrease(amount);
   };
   if (selectedCount + selectedBeltCount === 0) return null;
   return (
-    <div className="selection-toolbar nodrag nopan" role="toolbar" aria-label="选区操作">
+    <div
+      className="selection-toolbar nodrag nopan"
+      role="toolbar"
+      aria-label="选区操作"
+      data-factory-read-model-source={model.source}
+      data-factory-read-model-revision={model.revision ?? "web"}
+    >
       <span><BoxSelect size={14} /><strong>{selectedCount}</strong> 节点 · <strong>{selectedBeltCount}</strong> 线路</span>
       <button type="button" disabled={selectedCount === 0} onClick={onFocus} title="定位到所选设备" aria-label="定位到所选设备"><Focus size={16} /></button>
-      <button type="button" disabled={selectedCount === 0} onClick={onAutoLayout} title="按物流上下游整理所选设备" aria-label="自动整理所选设备"><WandSparkles size={16} /></button>
-      <button type="button" disabled={eligibleCount === 0} onClick={onCopy} title="复制所选设备为蓝图并进入粘贴" aria-label="复制所选为蓝图"><Copy size={16} /></button>
-      <button type="button" disabled={!canUpgrade} onClick={onUpgrade} title="批量升级所有可升级设备" aria-label="批量升级所选设备"><ArrowUp size={16} /></button>
-      <button type="button" disabled={!canUpgradeBelts} onClick={onUpgradeBelts} title="一键升级所有选中传送带并保持连接" aria-label="一键升级所选传送带"><Route size={16} /><ArrowUp size={12} /></button>
-      <div className="selection-toolbar__batch" role="group" aria-label="批量增加建筑或传送带数量">
-        {[1, 10, 100].map((amount) => <button type="button" key={amount} onClick={() => onBatchIncrease(amount)} title={`批量增加 ${amount}`}><Plus size={13} />{amount}</button>)}
-        <input value={customIncrease} onChange={(event) => setCustomIncrease(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); applyCustomIncrease(); } }} inputMode="numeric" pattern="[0-9]*" min={1} max={1_000_000} placeholder="自定义" aria-label="自定义批量增加量" />
-        <button type="button" onClick={applyCustomIncrease} title="应用自定义增加量" aria-label="应用自定义增加量"><Check size={13} /></button>
+      <button type="button" disabled={!unsafeActionsEnabled || selectedCount === 0} onClick={onAutoLayout} title="按物流上下游整理所选设备" aria-label="自动整理所选设备"><WandSparkles size={16} /></button>
+      <button type="button" disabled={!copyActionEnabled || eligibleCount === 0} onClick={onCopy} title="复制所选设备为蓝图并进入粘贴" aria-label="复制所选为蓝图"><Copy size={16} /></button>
+      <button type="button" disabled={!unsafeActionsEnabled || !canUpgrade} onClick={onUpgrade} title="批量升级所有可升级设备" aria-label="批量升级所选设备"><ArrowUp size={16} /></button>
+      <button type="button" disabled={!unsafeActionsEnabled || !canUpgradeBelts} onClick={onUpgradeBelts} title="一键升级所有选中传送带并保持连接" aria-label="一键升级所选传送带"><Route size={16} /><ArrowUp size={12} /></button>
+      <div className="selection-toolbar__batch" role="group" aria-label="批量增加建筑或传送带数量" aria-disabled={!unsafeActionsEnabled}>
+        {[1, 10, 100].map((amount) => <button type="button" key={amount} disabled={!unsafeActionsEnabled} onClick={() => onBatchIncrease(amount)} title={`批量增加 ${amount}`}><Plus size={13} />{amount}</button>)}
+        <input disabled={!unsafeActionsEnabled} value={customIncrease} onChange={(event) => setCustomIncrease(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); applyCustomIncrease(); } }} inputMode="numeric" pattern="[0-9]*" min={1} max={1_000_000} placeholder="自定义" aria-label="自定义批量增加量" />
+        <button type="button" disabled={!unsafeActionsEnabled} onClick={applyCustomIncrease} title="应用自定义增加量" aria-label="应用自定义增加量"><Check size={13} /></button>
       </div>
       <button type="button" disabled={!canLock} onClick={onLock} title="锁定所选建筑" aria-label="锁定所选建筑"><Lock size={16} /></button>
       <button type="button" disabled={!canUnlock} onClick={onUnlock} title="解锁所选建筑" aria-label="解锁所选建筑"><Unlock size={16} /></button>
-      <button className="danger" type="button" onClick={onRemove} title="批量回收所选设备与线路" aria-label="批量回收所选设备与线路"><Trash2 size={16} /></button>
+      <button className="danger" type="button" disabled={!unsafeActionsEnabled} onClick={onRemove} title="批量回收所选设备与线路" aria-label="批量回收所选设备与线路"><Trash2 size={16} /></button>
       <button type="button" onClick={onClear} title="清空当前选择" aria-label="清空选择"><X size={16} /></button>
       <button className="confirm" type="button" onClick={onDone} title="完成多选并返回指针模式" aria-label="完成多选"><Check size={16} /></button>
     </div>
@@ -444,9 +456,11 @@ function formatSimulationTime(seconds: number): string {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
-export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, onRename, onTransform, onRecipeOverride, onFundQueue, onFundAllQueues, onCancelQueue, onExport, onImport, mobile = false, mobileSubview, onMobileOpenDetail }: {
+export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, constructionReadModel, onClose, onDeploy, onRemove, onRename, onTransform, onRecipeOverride, onFundQueue, onFundAllQueues, onCancelQueue, onExport, onImport, mobile = false, mobileSubview, onMobileOpenDetail }: {
   open: boolean;
   game: GameState;
+  factoryHeadlineReadModel: FactoryConstructionHeadlineReadModel;
+  constructionReadModel: FactoryConstructionWorkspaceReadModel;
   onClose: () => void;
   onDeploy: (blueprintId: string) => void;
   onRemove: (blueprintId: string) => void;
@@ -498,12 +512,15 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
   if (!open) return null;
   const detailBlueprintId = mobile && mobileSubview?.startsWith("blueprint:") ? mobileSubview.slice(10) : null;
   const visibleBlueprints = detailBlueprintId ? game.blueprints.filter((blueprint) => blueprint.id === detailBlueprintId) : game.blueprints;
-  const pendingCount = game.constructionQueue.length;
+  const pendingCount = constructionReadModel.queue.totalCount;
+  const nativeQueueRows = constructionReadModel.source === "native-core"
+    ? new Map(constructionReadModel.queue.rows.map((row) => [row.queueId, row] as const))
+    : null;
   return (
     <WorkspaceFrame className={`blueprint-workspace${mobile ? ` mobile-workspace mobile-blueprints${detailBlueprintId ? " mobile-workspace--detail" : ""}` : ""}`} ariaLabel="蓝图与待建施工" onRequestClose={onClose}>
       <header className="blueprint-header">
         <div className="blueprint-title"><i><Layers3 size={20} /></i><div><span>生产网络模板</span><strong>{activeTab === "library" ? "蓝图库" : "待建与补足"}</strong></div></div>
-        <div className="blueprint-headline"><span>模板 <strong>{game.blueprints.length}</strong></span><span>施工队列 <strong>{game.constructionQueue.length}</strong></span><span>部署行星 <strong>{getPlanet(game.activePlanetId).name}</strong></span></div>
+        <div className="blueprint-headline"><span>模板 <strong>{game.blueprints.length}</strong></span><BlueprintFactoryHeadline model={factoryHeadlineReadModel} /></div>
         <div className="blueprint-header-actions">{activeTab === "library" ? <>
           <div className="blueprint-view-mode" role="group" aria-label="蓝图卡片显示模式">
             <button className={viewMode === "compact" ? "active" : ""} type="button" aria-pressed={viewMode === "compact"} onClick={() => setBlueprintViewMode("compact")} title="只显示部署所需摘要">精简</button>
@@ -521,7 +538,15 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
         <button className={activeTab === "pending" ? "active" : ""} type="button" onClick={() => setActiveTab("pending")}><ListChecks size={14} />待建与补足{pendingCount > 0 ? <em>{pendingCount}</em> : null}</button>
       </nav>
       {activeTab === "library" ? <>
-      <input ref={fileInputRef} className="blueprint-import-file" type="file" accept="application/json,.json" aria-label="选择要导入的蓝图文件" onChange={async (event) => { const file = event.target.files?.[0]; if (file) importRaw(await file.text()); event.target.value = ""; }} />
+      <input ref={fileInputRef} className="blueprint-import-file" type="file" accept="application/json,.json" aria-label="选择要导入的蓝图文件" onChange={async (event) => {
+        const input = event.currentTarget;
+        const file = input.files?.[0];
+        if (file) {
+          const result = await dispatchBlueprintExchangeFile(file, importRaw);
+          if (!result.ok) setImportMessage(blueprintExchangeFileFailureMessage(result.reason));
+        }
+        input.value = "";
+      }} />
       {mobile && !detailBlueprintId ? <div className="mobile-blueprint-library-actions">
         <button type="button" onClick={() => {
           setImportOpen(true);
@@ -599,7 +624,12 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
         })}
       </div>
       </div>
-      </> : <section className="pending-construction-workspace" aria-label="待建与补足">
+      </> : <section
+        className="pending-construction-workspace"
+        aria-label="待建与补足"
+        data-factory-read-model-source={constructionReadModel.source}
+        data-factory-read-model-revision={constructionReadModel.revision ?? "web"}
+      >
         <header>
           <div><ListChecks size={17} /><span><strong>施工订单</strong><small>按创建顺序稳定分配施工托盘与随身载具</small></span></div>
           <button type="button" disabled={pendingCount === 0} onClick={onFundAllQueues}><PackageCheck size={14} />一键补足全部</button>
@@ -607,6 +637,7 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
         {pendingCount === 0 ? <div className="blueprint-empty"><PackageCheck size={28} /><strong>没有待处理施工订单</strong><span>缺料蓝图会保留在画布，并在这里显示补足与取消状态。</span></div> : <div className="pending-construction-list">
           {[...game.constructionQueue].sort((left, right) => left.queuedAt - right.queuedAt || left.id.localeCompare(right.id)).map((entry) => {
             const details = getConstructionQueueDetails(game, entry.id);
+            const displayEntry = nativeQueueRows?.get(entry.id);
             const constructionReady = details.status === "pending-materials" && details.requirements.every((item) => item.missing === 0);
             const constructionAvailable = details.status === "pending-materials" && details.requirements.some((item) => item.missing > 0 && item.available > 0);
             const fleetAvailable = details.fleet.some((item) => item.missing > 0 && item.available > 0);
@@ -621,23 +652,24 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
                 : fleetUnavailable ? "随身物流载具暂无可用库存；载具到位后可一键补足" : undefined);
             return <article className={`pending-construction-order pending-construction-order--${details.status}`} key={entry.id}>
               <header>
-                <div><i><Layers3 size={16} /></i><span><strong>{entry.blueprintName}</strong><small>{getPlanet(entry.planetId).name} · 坐标 {Math.round(entry.position.x)}, {Math.round(entry.position.y)}</small></span></div>
-                <em>{details.status === "waiting-fleet" ? "建筑完成 · 等待载具" : details.compatible ? "灰模待建" : "施工阻塞"}</em>
+                <div><i><Layers3 size={16} /></i><span><strong>{displayEntry?.blueprintName ?? entry.blueprintName}</strong><small>{getPlanet((displayEntry?.planetId ?? entry.planetId) as PlanetId).name} · 坐标 {Math.round(entry.position.x)}, {Math.round(entry.position.y)}</small></span></div>
+                <em>{(displayEntry?.status ?? details.status) === "waiting-fleet" ? "建筑完成 · 等待载具" : details.compatible ? "灰模待建" : "施工阻塞"}</em>
               </header>
               <dl className="pending-construction-meta">
-                <div><dt>放置时间</dt><dd>运行 {formatSimulationTime(entry.queuedAt)}</dd></div>
-                <div><dt>方向</dt><dd>{entry.rotation}°{entry.mirror === "horizontal" ? " · 水平镜像" : ""}</dd></div>
-                <div><dt>版本</dt><dd>r{entry.blueprintRevision ?? details.blueprint?.revision ?? 1}</dd></div>
+                <div><dt>放置时间</dt><dd>运行 {formatSimulationTime(displayEntry?.queuedAt ?? entry.queuedAt)}</dd></div>
+                <div><dt>方向</dt><dd>{displayEntry?.rotation ?? entry.rotation}°{(displayEntry?.mirror ?? entry.mirror) === "horizontal" ? " · 水平镜像" : ""}</dd></div>
+                <div><dt>版本</dt><dd>r{displayEntry?.blueprintRevision ?? entry.blueprintRevision ?? details.blueprint?.revision ?? 1}</dd></div>
               </dl>
               {fundingHint ? <p className="pending-construction-blocked">{fundingHint}</p> : null}
               {details.requirements.length > 0 ? <section className="pending-construction-materials">
                 <strong>建筑与线路</strong>
                 <div>{details.requirements.map((item) => {
-                  const exact = `${formatQuantityExact(item.reserved)} / ${formatQuantityExact(item.total)}，剩余 ${formatQuantityExact(item.missing)}，托盘可用 ${formatQuantityExact(item.available)}`;
+                  const reserved = displayEntry?.reservedConstruction.rows.find((row) => row.constructionId === item.constructionId)?.amount ?? item.reserved;
+                  const exact = `${formatQuantityExact(reserved)} / ${formatQuantityExact(item.total)}，剩余 ${formatQuantityExact(item.missing)}，托盘可用 ${formatQuantityExact(item.available)}`;
                   return <span className={item.missing === 0 ? "ready" : ""} key={item.constructionId} title={exact}>
                     {item.missing === 0 ? <Check size={12} /> : <PackageOpen size={12} />}
                     <b>{getConstructionDefinition(item.constructionId)?.name ?? item.constructionId}</b>
-                    <em>{formatQuantityCompact(item.reserved)}/{formatQuantityCompact(item.total)}</em>
+                    <em>{formatQuantityCompact(reserved)}/{formatQuantityCompact(item.total)}</em>
                     <small>剩 {formatQuantityCompact(item.missing)} · 可用 {formatQuantityCompact(item.available)}</small>
                   </span>;
                 })}</div>
@@ -645,11 +677,12 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
               {details.fleet.length > 0 ? <section className="pending-construction-materials pending-construction-fleet">
                 <strong>物流载具</strong>
                 <div>{details.fleet.map((item) => {
-                  const exact = `${formatQuantityExact(item.installedOrReserved)} / ${formatQuantityExact(item.total)}，剩余 ${formatQuantityExact(item.missing)}，随身可用 ${formatQuantityExact(item.available)}`;
+                  const installedOrReserved = displayEntry?.reservedFleet.rows.find((row) => row.itemId === item.itemId)?.amount ?? item.installedOrReserved;
+                  const exact = `${formatQuantityExact(installedOrReserved)} / ${formatQuantityExact(item.total)}，剩余 ${formatQuantityExact(item.missing)}，随身可用 ${formatQuantityExact(item.available)}`;
                   return <span className={item.missing === 0 ? "ready" : ""} key={item.itemId} title={exact}>
                     {item.missing === 0 ? <Check size={12} /> : <Truck size={12} />}
                     <b>{getItem(item.itemId).name}</b>
-                    <em>{formatQuantityCompact(item.installedOrReserved)}/{formatQuantityCompact(item.total)}</em>
+                    <em>{formatQuantityCompact(installedOrReserved)}/{formatQuantityCompact(item.total)}</em>
                     <small>剩 {formatQuantityCompact(item.missing)} · 可用 {formatQuantityCompact(item.available)}</small>
                   </span>;
                 })}</div>

@@ -134,6 +134,8 @@ for (const fontScale of [0.8, 1, 1.25, 1.5, 2] as const) {
 }
 
 test("continuous connection mode previews multiple targets and commits them atomically", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
   await seedFactory(page, "storage-network");
   const seeded = (await readPersistedPrimaryState(page)).entities
     .filter((entity) => entity.buildingId === "storage_mk1")
@@ -161,6 +163,9 @@ test("continuous connection mode previews multiple targets and commits them atom
   await preview.getByRole("button", { name: "确认连接" }).click();
   await expect(preview).toHaveCount(0);
   await expect(page.locator(".react-flow__edge")).toHaveCount(2);
+  await expect(page.locator(".react-flow__edge.selected")).toHaveCount(2);
+  await page.waitForTimeout(100);
+  expect(pageErrors).toEqual([]);
   await page.getByLabel("保存并返回主菜单").click();
   await expect(page.locator(".start-menu")).toBeVisible();
   const afterState = await readPersistedPrimaryState(page);

@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
 
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::CoreState;
 
 const EPSILON: f64 = 0.0001;
@@ -15,6 +16,7 @@ const DYSON_SHELL_CAPACITY_PER_STRUCTURE: f64 = 40.0;
 const DYSON_SAIL_ABSORPTION_PER_STRUCTURE_PER_SECOND: f64 = 0.1;
 const DYSON_SAIL_LAUNCH_ENERGY_MJ: f64 = 21.6;
 const DYSON_ROCKET_LAUNCH_ENERGY_MJ: f64 = 108.0;
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const SYSTEM_IDS: [&str; 8] = [
     "helios",
     "borealis",
@@ -32,6 +34,43 @@ pub(crate) struct Reception {
     pub efficiency_by_entity: HashMap<String, f64>,
     pub ray_power_by_entity: HashMap<String, f64>,
     pub receiver_load_kw: f64,
+    pub(crate) receiver_indices: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct RayReceiverReceptionProbe {
+    entity_index: usize,
+    planet_index: usize,
+    machine_count: f64,
+    ray_power: bool,
+}
+
+#[derive(Debug)]
+enum RayReceiverSettlementDelta {
+    Noop,
+    Update {
+        power_output_kw: f64,
+        progress: Option<f64>,
+        utilization: f64,
+        production_rate: f64,
+        critical_photon_output: Option<f64>,
+        produced: f64,
+    },
+}
+
+#[derive(Debug)]
+struct RayReceiverSettlementOutcome {
+    entity_index: usize,
+    delta: RayReceiverSettlementDelta,
+}
+
+struct RayReceiverSettlementEnvironment<'a> {
+    state: &'a CoreState,
+    base: &'a Map<String, Value>,
+    entities: &'a [Value],
+    seconds: f64,
+    credits: &'a crate::belts::OutputCredits,
+    reception: &'a Reception,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +107,25 @@ fn set_number(object: &mut Map<String, Value>, key: &str, value: f64) -> anyhow:
         object.insert(key.to_owned(), value);
     }
     Ok(())
+}
+
+fn strict_non_negative_number(
+    object: &Map<String, Value>,
+    key: &str,
+    label: &str,
+    require_integer: bool,
+) -> anyhow::Result<f64> {
+    let value = object.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    if !value.is_finite()
+        || !(0.0..=MAX_SAFE_INTEGER).contains(&value)
+        || require_integer && value.fract().abs() > f64::EPSILON
+    {
+        bail!(
+            "{label} is not a non-negative safe {}",
+            if require_integer { "integer" } else { "number" }
+        );
+    }
+    Ok(value)
 }
 
 fn load(base: &Map<String, Value>) -> anyhow::Result<DysonState> {
@@ -154,7 +212,7 @@ fn luminosity(base: &Map<String, Value>, system_id: &str) -> f64 {
         .unwrap_or(1.0)
 }
 
-fn sail_power(base: &Map<String, Value>, system_id: &str) -> f64 {
+pub(crate) fn sail_power(base: &Map<String, Value>, system_id: &str) -> f64 {
     SOLAR_SAIL_POWER_KW * power_multiplier(base) * luminosity(base, system_id)
 }
 
@@ -362,7 +420,7 @@ fn shell_active(layer: &Map<String, Value>, shell: &Map<String, Value>) -> bool 
     })
 }
 
-fn reconcile_plan(plan: &mut Map<String, Value>) -> anyhow::Result<()> {
+pub(crate) fn reconcile_plan(plan: &mut Map<String, Value>) -> anyhow::Result<()> {
     let structure_points = finite(plan.get("structurePoints")).floor().max(0.0);
     set_number(plan, "structurePoints", structure_points)?;
     let mut structure_cursor: f64 = 0.0;
@@ -504,23 +562,9 @@ fn plan_shell_capacity(plan: &Map<String, Value>) -> f64 {
     }
 }
 
-fn update_generation(base: &Map<String, Value>, state: &mut DysonState) -> anyhow::Result<()> {
-    sync_swarm(base, state)?;
-    sync_sphere(state)?;
-    let structure = state
-        .plans
-        .values()
-        .filter_map(Value::as_object)
-        .map(|plan| finite(plan.get("structurePoints")))
-        .sum::<f64>();
-    let shell_sails = state
-        .plans
-        .values()
-        .filter_map(Value::as_object)
-        .map(|plan| finite(plan.get("shellSails")))
-        .sum::<f64>();
+fn derived_sphere_generation(base: &Map<String, Value>, state: &DysonState) -> f64 {
     let multiplier = power_multiplier(base);
-    let generation = SYSTEM_IDS
+    SYSTEM_IDS
         .iter()
         .filter_map(|system_id| {
             state
@@ -535,10 +579,35 @@ fn update_generation(base: &Map<String, Value>, state: &mut DysonState) -> anyho
                 })
         })
         .sum::<f64>()
-        .floor();
+        .floor()
+}
+
+fn update_sphere_generation(
+    base: &Map<String, Value>,
+    state: &mut DysonState,
+) -> anyhow::Result<()> {
+    sync_sphere(state)?;
+    let structure = state
+        .plans
+        .values()
+        .filter_map(Value::as_object)
+        .map(|plan| finite(plan.get("structurePoints")))
+        .sum::<f64>();
+    let shell_sails = state
+        .plans
+        .values()
+        .filter_map(Value::as_object)
+        .map(|plan| finite(plan.get("shellSails")))
+        .sum::<f64>();
+    let generation = derived_sphere_generation(base, state);
     set_number(&mut state.sphere, "structurePoints", structure)?;
     set_number(&mut state.sphere, "shellSails", shell_sails)?;
     set_number(&mut state.sphere, "generationKw", generation)
+}
+
+fn update_generation(base: &Map<String, Value>, state: &mut DysonState) -> anyhow::Result<()> {
+    sync_swarm(base, state)?;
+    update_sphere_generation(base, state)
 }
 
 fn consume_orbit_sails(
@@ -797,62 +866,112 @@ fn ray_receiver_runnable(
     output_capacity(state, base, entity) - current + EPSILON >= 1.0
 }
 
-pub(crate) fn calculate_reception(
+fn collect_ordered_receiver_probes_with_runtime<R, F>(
+    runtime: &DeterministicRuntime,
+    entity_indices: &[usize],
+    probe: F,
+) -> anyhow::Result<Vec<R>>
+where
+    R: Send,
+    F: Fn(usize) -> anyhow::Result<R> + Send + Sync,
+{
+    runtime
+        .indexed_map(entity_indices, |_, entity_index| probe(*entity_index))
+        .into_iter()
+        .collect()
+}
+
+fn probe_receiver_reception(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    entity_index: usize,
+) -> anyhow::Result<Option<RayReceiverReceptionProbe>> {
+    let Some(entity) = entities.get(entity_index).and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    if text(entity, "kind") != Some("machine")
+        || text(entity, "buildingId") != Some("ray_receiver")
+        || finite(entity.get("machineCount")) <= 0.0
+        || !matches!(
+            text(entity, "recipeId"),
+            Some("ray_power" | "critical_photon")
+        )
+        || !ray_receiver_runnable(state, base, entity)
+    {
+        return Ok(None);
+    }
+    let planet_index = state.factory_topology.entity_planet_indices[entity_index];
+    if planet_index == usize::MAX || state.catalog.planets.get(planet_index).is_none() {
+        bail!("native Dyson receiver planet is unknown");
+    }
+    Ok(Some(RayReceiverReceptionProbe {
+        entity_index,
+        planet_index,
+        machine_count: finite(entity.get("machineCount")),
+        ray_power: text(entity, "recipeId") == Some("ray_power"),
+    }))
+}
+
+fn calculate_reception_with_runtime(
+    runtime: &DeterministicRuntime,
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &[Value],
 ) -> anyhow::Result<Reception> {
     let dyson = load(base)?;
     let rated = receiver_capacity(base);
-    let receivers = entities
-        .iter()
-        .filter_map(Value::as_object)
-        .filter(|entity| {
-            text(entity, "kind") == Some("machine")
-                && text(entity, "buildingId") == Some("ray_receiver")
-                && finite(entity.get("machineCount")) > 0.0
-                && matches!(
-                    text(entity, "recipeId"),
-                    Some("ray_power" | "critical_photon")
-                )
-                && ray_receiver_runnable(state, base, entity)
-        })
+    // The immutable topology owns the persisted-order receiver rows. Probe
+    // only those R rows while retaining all exact runtime eligibility checks;
+    // record commands rebuild the topology before another admitted advance.
+    let receiver_indices = &state.factory_topology.ray_receiver_indices;
+    let receivers =
+        collect_ordered_receiver_probes_with_runtime(runtime, receiver_indices, |entity_index| {
+            probe_receiver_reception(state, base, entities, entity_index)
+        })?
+        .into_iter()
+        .flatten()
         .collect::<Vec<_>>();
     let mut generation_by_system = HashMap::<String, f64>::new();
     let mut capacity_by_system = HashMap::<String, f64>::new();
     for receiver in &receivers {
-        let system_id = system_for_planet(state, text(receiver, "planetId").unwrap_or_default())
-            .ok_or_else(|| anyhow!("native Dyson receiver planet is unknown"))?;
+        let system_id = &state.catalog.planets[receiver.planet_index].system_id;
         generation_by_system
-            .entry(system_id.to_owned())
+            .entry(system_id.clone())
             .or_insert_with(|| system_generation(base, &dyson, system_id));
-        *capacity_by_system.entry(system_id.to_owned()).or_default() +=
-            rated * finite(receiver.get("machineCount"));
+        *capacity_by_system.entry(system_id.clone()).or_default() += rated * receiver.machine_count;
     }
-    let mut result = Reception::default();
+    let mut result = Reception {
+        receiver_indices: receiver_indices.clone(),
+        ..Reception::default()
+    };
     let mut receiver_load = 0.0;
     for receiver in receivers {
-        let entity_id = text(receiver, "id").unwrap_or_default();
-        let system_id = system_for_planet(state, text(receiver, "planetId").unwrap_or_default())
-            .ok_or_else(|| anyhow!("native Dyson receiver planet is unknown"))?;
+        let entity = entities[receiver.entity_index]
+            .as_object()
+            .expect("indexed native ray receiver disappeared");
+        let entity_id = text(entity, "id").unwrap_or_default();
+        let system_id = &state.catalog.planets[receiver.planet_index].system_id;
         let capacity = capacity_by_system.get(system_id).copied().unwrap_or(0.0);
         let efficiency = if capacity <= EPSILON {
             0.0
         } else {
             (generation_by_system.get(system_id).copied().unwrap_or(0.0) / capacity).min(1.0)
         };
-        let allocation = rated * finite(receiver.get("machineCount")) * efficiency;
+        let allocation = rated * receiver.machine_count * efficiency;
         result
             .allocation_by_entity
             .insert(entity_id.to_owned(), allocation);
         result
             .efficiency_by_entity
             .insert(entity_id.to_owned(), efficiency);
-        if text(receiver, "recipeId") == Some("ray_power") {
+        if receiver.ray_power {
             result
                 .ray_power_by_entity
                 .insert(entity_id.to_owned(), allocation);
         }
+        // This accumulation order is observable at high counts. Keep replay
+        // in the original entity order instead of reducing worker-local sums.
         receiver_load += allocation;
     }
     result.receiver_load_kw = receiver_load;
@@ -861,6 +980,14 @@ pub(crate) fn calculate_reception(
         .ok_or_else(|| anyhow!("native Dyson swarm is missing"))?
         .insert("receiverLoadKw".to_owned(), Value::from(receiver_load));
     Ok(result)
+}
+
+pub(crate) fn calculate_reception(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &[Value],
+) -> anyhow::Result<Reception> {
+    calculate_reception_with_runtime(deterministic_runtime(), state, base, entities)
 }
 
 pub(crate) fn valid_ejector_target(
@@ -908,9 +1035,88 @@ pub(crate) fn launch_factor(base: &Map<String, Value>, recipe_id: &str) -> f64 {
     finite(engineering.get("launchThrottle")).clamp(0.0, 1.0)
 }
 
-pub(crate) fn launch(
+/// Dyson launch state owned by one exact simulation step.
+///
+/// Launcher entities still enter this runtime in persisted entity order. The
+/// runtime intentionally applies every launch, reconciliation, generation
+/// refresh, and energy rounding separately; it only removes the deep
+/// clone/load/save cycle that used to surround every active launcher.
+pub(crate) struct LaunchStepRuntime {
+    dyson: DysonState,
+}
+
+impl LaunchStepRuntime {
+    fn load(base: &Map<String, Value>) -> anyhow::Result<Self> {
+        Ok(Self { dyson: load(base)? })
+    }
+
+    fn launch(
+        &mut self,
+        state: &CoreState,
+        base: &Map<String, Value>,
+        entity: &Map<String, Value>,
+        recipe_id: &str,
+        cycles: f64,
+    ) -> anyhow::Result<()> {
+        let system_id = system_for_planet(state, text(entity, "planetId").unwrap_or_default())
+            .ok_or_else(|| anyhow!("native Dyson launcher planet is unknown"))?;
+        if recipe_id == "solar_sail_launch" {
+            sync_swarm(base, &mut self.dyson)?;
+            let target_id = text(entity, "targetDysonOrbitId")
+                .ok_or_else(|| anyhow!("native Dyson ejector target is missing"))?;
+            let per_sail = sail_power(base, system_id);
+            let orbit = orbits_for_mut(&mut self.dyson, system_id)?
+                .iter_mut()
+                .filter_map(Value::as_object_mut)
+                .find(|orbit| text(orbit, "id") == Some(target_id))
+                .ok_or_else(|| anyhow!("native Dyson ejector target disappeared"))?;
+            let sails = finite(orbit.get("sailsInOrbit"));
+            let launched = finite(orbit.get("totalLaunched"));
+            set_number(orbit, "sailsInOrbit", (sails + cycles).floor())?;
+            set_number(orbit, "totalLaunched", (launched + cycles).floor())?;
+            set_number(orbit, "generationKw", (sails + cycles).floor() * per_sail)?;
+            aggregate_swarm(&mut self.dyson)?;
+        } else {
+            sync_sphere(&mut self.dyson)?;
+            let plan = self
+                .dyson
+                .plans
+                .get_mut(system_id)
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native Dyson launcher plan is missing"))?;
+            let structure = finite(plan.get("structurePoints"));
+            set_number(plan, "structurePoints", structure + cycles.floor())?;
+            let total = finite(self.dyson.sphere.get("totalRocketsLaunched"));
+            set_number(
+                &mut self.dyson.sphere,
+                "totalRocketsLaunched",
+                (total + cycles).floor(),
+            )?;
+            reconcile_plan(plan)?;
+            update_generation(base, &mut self.dyson)?;
+        }
+        let spent = finite(self.dyson.engineering.get("launchEnergySpentMj"));
+        let per_cycle = if recipe_id == "solar_sail_launch" {
+            DYSON_SAIL_LAUNCH_ENERGY_MJ
+        } else {
+            DYSON_ROCKET_LAUNCH_ENERGY_MJ
+        };
+        set_number(
+            &mut self.dyson.engineering,
+            "launchEnergySpentMj",
+            rounded(spent + per_cycle * cycles, 3),
+        )
+    }
+
+    fn commit(self, base: &mut Map<String, Value>) {
+        save(base, self.dyson);
+    }
+}
+
+pub(crate) fn launch_deferred(
+    runtime: &mut Option<LaunchStepRuntime>,
     state: &CoreState,
-    base: &mut Map<String, Value>,
+    base: &Map<String, Value>,
     entity: &Map<String, Value>,
     recipe_id: &str,
     cycles: f64,
@@ -918,57 +1124,1086 @@ pub(crate) fn launch(
     if cycles <= 0.0 || !matches!(recipe_id, "solar_sail_launch" | "carrier_rocket_launch") {
         return Ok(());
     }
-    let system_id = system_for_planet(state, text(entity, "planetId").unwrap_or_default())
-        .ok_or_else(|| anyhow!("native Dyson launcher planet is unknown"))?;
-    let snapshot = base.clone();
+    if runtime.is_none() {
+        *runtime = Some(LaunchStepRuntime::load(base)?);
+    }
+    runtime
+        .as_mut()
+        .expect("native Dyson launch runtime disappeared")
+        .launch(state, base, entity, recipe_id, cycles)
+}
+
+pub(crate) fn commit_deferred_launches(
+    base: &mut Map<String, Value>,
+    runtime: Option<LaunchStepRuntime>,
+) {
+    if let Some(runtime) = runtime {
+        runtime.commit(base);
+    }
+}
+
+/// Returns the largest whole-second horizon for a stable per-system rocket
+/// rate without crossing any public JavaScript safe-integer counter. This is
+/// intentionally narrower than ordinary `launch`: it neither consumes entity
+/// caches nor infers production, and is callable only after `pure_idle` has
+/// proved the matching material sink.
+pub(crate) fn certified_rocket_launch_capacity_seconds(
+    base: &Map<String, Value>,
+    launches_per_second_by_system: &BTreeMap<String, i128>,
+) -> anyhow::Result<i128> {
+    if launches_per_second_by_system.is_empty() {
+        bail!("certified rocket rate has no target system");
+    }
+    let dyson = load(base)?;
+    validate_certified_dyson_commit(base, &dyson)?;
+    let max_safe = MAX_SAFE_INTEGER as i128;
+    let global_structure = strict_non_negative_number(
+        &dyson.sphere,
+        "structurePoints",
+        "dysonSphere.structurePoints",
+        true,
+    )? as i128;
+    let global_shell =
+        strict_non_negative_number(&dyson.sphere, "shellSails", "dysonSphere.shellSails", true)?
+            as i128;
+    let rockets_launched = strict_non_negative_number(
+        &dyson.sphere,
+        "totalRocketsLaunched",
+        "dysonSphere.totalRocketsLaunched",
+        true,
+    )? as i128;
+    let launch_energy = strict_non_negative_number(
+        &dyson.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
+
+    let mut planned_structure = 0_i128;
+    let mut planned_shell = 0_i128;
+    for (system_id, plan) in &dyson.plans {
+        let plan = plan
+            .as_object()
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} is not an object"))?;
+        planned_structure = planned_structure
+            .checked_add(strict_non_negative_number(
+                plan,
+                "structurePoints",
+                &format!("dysonPlans.{system_id}.structurePoints"),
+                true,
+            )? as i128)
+            .ok_or_else(|| anyhow!("Dyson planned structure total overflowed"))?;
+        planned_shell = planned_shell
+            .checked_add(strict_non_negative_number(
+                plan,
+                "shellSails",
+                &format!("dysonPlans.{system_id}.shellSails"),
+                true,
+            )? as i128)
+            .ok_or_else(|| anyhow!("Dyson planned shell total overflowed"))?;
+    }
+    if planned_structure != global_structure || planned_shell != global_shell {
+        bail!("global Dyson sphere counters are not derived from the current per-system plans");
+    }
+    let current_generation = strict_non_negative_number(
+        &dyson.sphere,
+        "generationKw",
+        "dysonSphere.generationKw",
+        true,
+    )?;
+    let derived_generation = derived_sphere_generation(base, &dyson);
+    if !derived_generation.is_finite()
+        || derived_generation > MAX_SAFE_INTEGER
+        || (current_generation - derived_generation).abs() > EPSILON
+    {
+        bail!("Dyson generation is not the safe derived value for current plans");
+    }
+
+    let mut horizon = max_safe;
+    let mut total_rate = 0_i128;
+    let mut generation_rate = 0.0_f64;
+    for (system_id, rate) in launches_per_second_by_system {
+        if *rate <= 0 || *rate > max_safe {
+            bail!("dysonPlans.{system_id} has an invalid certified rocket rate");
+        }
+        if !SYSTEM_IDS.contains(&system_id.as_str()) {
+            bail!("dysonPlans.{system_id} is not a supported Dyson target system");
+        }
+        let plan = dyson
+            .plans
+            .get(system_id)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} disappeared"))?;
+        let current = strict_non_negative_number(
+            plan,
+            "structurePoints",
+            &format!("dysonPlans.{system_id}.structurePoints"),
+            true,
+        )? as i128;
+        horizon = horizon.min(max_safe.saturating_sub(current) / rate);
+        total_rate = total_rate
+            .checked_add(*rate)
+            .ok_or_else(|| anyhow!("certified rocket rate sum overflowed"))?;
+        generation_rate += *rate as f64
+            * DYSON_STRUCTURE_POWER_KW
+            * power_multiplier(base)
+            * luminosity(base, system_id);
+    }
+    if total_rate <= 0 || total_rate > max_safe {
+        bail!("certified rocket rate sum is invalid");
+    }
+    horizon = horizon
+        .min(max_safe.saturating_sub(global_structure) / total_rate)
+        .min(max_safe.saturating_sub(rockets_launched) / total_rate);
+
+    let launch_energy_rate = total_rate as f64 * DYSON_ROCKET_LAUNCH_ENERGY_MJ;
+    if !launch_energy_rate.is_finite() || launch_energy_rate <= 0.0 {
+        bail!("certified rocket launch-energy rate is invalid");
+    }
+    horizon =
+        horizon.min(((MAX_SAFE_INTEGER - launch_energy) / launch_energy_rate).floor() as i128);
+    if !generation_rate.is_finite() || generation_rate <= 0.0 {
+        bail!("certified rocket generation rate is invalid");
+    }
+    horizon =
+        horizon.min(((MAX_SAFE_INTEGER - derived_generation) / generation_rate).floor() as i128);
+    Ok(horizon.max(0))
+}
+
+fn validate_certified_dyson_commit(
+    base: &Map<String, Value>,
+    state: &DysonState,
+) -> anyhow::Result<()> {
+    let global_structure = strict_non_negative_number(
+        &state.sphere,
+        "structurePoints",
+        "dysonSphere.structurePoints",
+        true,
+    )? as i128;
+    let global_shell =
+        strict_non_negative_number(&state.sphere, "shellSails", "dysonSphere.shellSails", true)?
+            as i128;
+    strict_non_negative_number(
+        &state.sphere,
+        "totalRocketsLaunched",
+        "dysonSphere.totalRocketsLaunched",
+        true,
+    )?;
+    strict_non_negative_number(
+        &state.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
+
+    let mut planned_structure = 0_i128;
+    let mut planned_shell = 0_i128;
+    for (system_id, plan) in &state.plans {
+        let plan = plan
+            .as_object()
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} is not an object"))?;
+        planned_structure = planned_structure
+            .checked_add(strict_non_negative_number(
+                plan,
+                "structurePoints",
+                &format!("dysonPlans.{system_id}.structurePoints"),
+                true,
+            )? as i128)
+            .ok_or_else(|| anyhow!("Dyson planned structure total overflowed"))?;
+        planned_shell = planned_shell
+            .checked_add(strict_non_negative_number(
+                plan,
+                "shellSails",
+                &format!("dysonPlans.{system_id}.shellSails"),
+                true,
+            )? as i128)
+            .ok_or_else(|| anyhow!("Dyson planned shell total overflowed"))?;
+    }
+    if planned_structure != global_structure || planned_shell != global_shell {
+        bail!("certified Dyson commit counters are not derived from the per-system plans");
+    }
+
+    let generation = strict_non_negative_number(
+        &state.sphere,
+        "generationKw",
+        "dysonSphere.generationKw",
+        true,
+    )?;
+    let derived_generation = derived_sphere_generation(base, state);
+    if !derived_generation.is_finite()
+        || !(0.0..=MAX_SAFE_INTEGER).contains(&derived_generation)
+        || (generation - derived_generation).abs() > EPSILON
+    {
+        bail!("certified Dyson commit generation is not the safe derived value");
+    }
+    Ok(())
+}
+
+/// Atomically commits an already funded whole-rocket vector. All mutable
+/// Dyson data stays in a private clone until plan reconciliation and derived
+/// power succeed; the caller's map is unchanged on error.
+pub(crate) fn apply_certified_rocket_launches(
+    base: &mut Map<String, Value>,
+    launches_by_system: &BTreeMap<String, i128>,
+) -> anyhow::Result<i128> {
+    if launches_by_system.is_empty() {
+        return Ok(0);
+    }
+    if certified_rocket_launch_capacity_seconds(base, launches_by_system)? < 1 {
+        bail!("certified rocket launch vector exceeds a safe Dyson counter boundary");
+    }
     let mut dyson = load(base)?;
-    if recipe_id == "solar_sail_launch" {
-        sync_swarm(&snapshot, &mut dyson)?;
-        let target_id = text(entity, "targetDysonOrbitId")
-            .ok_or_else(|| anyhow!("native Dyson ejector target is missing"))?;
-        let per_sail = sail_power(&snapshot, system_id);
-        let orbit = orbits_for_mut(&mut dyson, system_id)?
-            .iter_mut()
-            .filter_map(Value::as_object_mut)
-            .find(|orbit| text(orbit, "id") == Some(target_id))
-            .ok_or_else(|| anyhow!("native Dyson ejector target disappeared"))?;
-        let sails = finite(orbit.get("sailsInOrbit"));
-        let launched = finite(orbit.get("totalLaunched"));
-        set_number(orbit, "sailsInOrbit", (sails + cycles).floor())?;
-        set_number(orbit, "totalLaunched", (launched + cycles).floor())?;
-        set_number(orbit, "generationKw", (sails + cycles).floor() * per_sail)?;
-        aggregate_swarm(&mut dyson)?;
-    } else {
-        sync_sphere(&mut dyson)?;
+    let mut total = 0_i128;
+    for (system_id, amount) in launches_by_system {
         let plan = dyson
             .plans
             .get_mut(system_id)
             .and_then(Value::as_object_mut)
-            .ok_or_else(|| anyhow!("native Dyson launcher plan is missing"))?;
-        let structure = finite(plan.get("structurePoints"));
-        set_number(plan, "structurePoints", structure + cycles.floor())?;
-        let total = finite(dyson.sphere.get("totalRocketsLaunched"));
-        set_number(
-            &mut dyson.sphere,
-            "totalRocketsLaunched",
-            (total + cycles).floor(),
-        )?;
-        reconcile_plan(plan)?;
-        update_generation(&snapshot, &mut dyson)?;
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} disappeared before commit"))?;
+        let current = strict_non_negative_number(
+            plan,
+            "structurePoints",
+            &format!("dysonPlans.{system_id}.structurePoints"),
+            true,
+        )? as i128;
+        let next = current
+            .checked_add(*amount)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id}.structurePoints overflowed"))?;
+        set_number(plan, "structurePoints", next as f64)?;
+        total = total
+            .checked_add(*amount)
+            .ok_or_else(|| anyhow!("certified rocket launch total overflowed"))?;
     }
-    let spent = finite(dyson.engineering.get("launchEnergySpentMj"));
-    let per_cycle = if recipe_id == "solar_sail_launch" {
-        DYSON_SAIL_LAUNCH_ENERGY_MJ
-    } else {
-        DYSON_ROCKET_LAUNCH_ENERGY_MJ
-    };
+    let launched = strict_non_negative_number(
+        &dyson.sphere,
+        "totalRocketsLaunched",
+        "dysonSphere.totalRocketsLaunched",
+        true,
+    )? as i128;
+    set_number(
+        &mut dyson.sphere,
+        "totalRocketsLaunched",
+        launched
+            .checked_add(total)
+            .ok_or_else(|| anyhow!("dysonSphere.totalRocketsLaunched overflowed"))? as f64,
+    )?;
+    let spent = strict_non_negative_number(
+        &dyson.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
     set_number(
         &mut dyson.engineering,
         "launchEnergySpentMj",
-        rounded(spent + per_cycle * cycles, 3),
+        rounded(spent + total as f64 * DYSON_ROCKET_LAUNCH_ENERGY_MJ, 3),
     )?;
+    update_sphere_generation(base, &mut dyson)?;
+    validate_certified_dyson_commit(base, &dyson)?;
     save(base, dyson);
-    Ok(())
+    Ok(total)
+}
+
+/// Returns a conservative whole-second horizon for a certified, stable
+/// per-orbit solar-sail launch schedule. Existing orbit stock is reserved once
+/// for every monotonic lifecycle counter it can still enter; future launches
+/// are then bounded by their certified rate. This deliberately underestimates
+/// the horizon near a safe-integer boundary instead of relying on expiry or
+/// absorption timing to make a larger window happen to fit.
+pub(crate) fn certified_sail_launch_capacity_seconds(
+    base: &Map<String, Value>,
+    launches_per_second_by_orbit: &BTreeMap<String, BTreeMap<String, i128>>,
+) -> anyhow::Result<i128> {
+    if launches_per_second_by_orbit.is_empty() {
+        bail!("certified solar-sail rate has no target orbit");
+    }
+    let dyson = load(base)?;
+    validate_certified_dyson_commit(base, &dyson)?;
+    let max_safe = MAX_SAFE_INTEGER as i128;
+    let mut horizon = max_safe;
+    let mut total_rate = 0_i128;
+    let mut total_orbit_stock = 0_i128;
+    let mut total_orbit_launched = 0_i128;
+    let mut total_orbit_expired = 0_i128;
+    let mut current_swarm_generation = 0.0;
+    let mut future_generation_rate = 0.0;
+    let mut potential_shell_generation_from_existing_stock = 0.0;
+
+    let reserve_counter = |horizon: &mut i128,
+                           current: i128,
+                           one_time_reserve: i128,
+                           rate: i128,
+                           label: &str|
+     -> anyhow::Result<()> {
+        if current < 0 || current > max_safe || one_time_reserve < 0 || rate < 0 {
+            bail!("{label} has an invalid certified counter bound");
+        }
+        let room = max_safe - current;
+        if one_time_reserve > room {
+            *horizon = 0;
+        } else if rate > 0 {
+            *horizon = (*horizon).min((room - one_time_reserve) / rate);
+        }
+        Ok(())
+    };
+
+    for (system_id, orbit_rates) in launches_per_second_by_orbit {
+        if !SYSTEM_IDS.contains(&system_id.as_str()) || orbit_rates.is_empty() {
+            bail!("certified solar-sail target system {system_id} is invalid");
+        }
+    }
+    for system_id in SYSTEM_IDS {
+        let orbit_rates = launches_per_second_by_orbit.get(system_id);
+        let orbits = orbits_for(&dyson, system_id);
+        let mut seen_orbits = HashSet::new();
+        let mut system_stock = 0_i128;
+        let mut system_rate = 0_i128;
+        let per_sail_generation = sail_power(base, system_id);
+        if !per_sail_generation.is_finite() || per_sail_generation <= 0.0 {
+            bail!("certified solar-sail power for {system_id} is invalid");
+        }
+        for (orbit_index, orbit) in orbits.iter().enumerate() {
+            let orbit = orbit.as_object().ok_or_else(|| {
+                anyhow!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_index} is invalid")
+            })?;
+            let orbit_id = text(orbit, "id")
+                .filter(|orbit_id| !orbit_id.is_empty())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.id is invalid"
+                    )
+                })?;
+            if !seen_orbits.insert(orbit_id.to_owned()) {
+                bail!("dysonEngineering.orbitsBySystem.{system_id} repeats orbit {orbit_id}");
+            }
+            let rate = orbit_rates
+                .and_then(|rates| rates.get(orbit_id))
+                .copied()
+                .unwrap_or(0);
+            if rate < 0 || rate > max_safe {
+                bail!("certified solar-sail rate {system_id}.{orbit_id} is invalid");
+            }
+            let stock = strict_non_negative_number(
+                orbit,
+                "sailsInOrbit",
+                &format!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.sailsInOrbit"),
+                true,
+            )? as i128;
+            let launched = strict_non_negative_number(
+                orbit,
+                "totalLaunched",
+                &format!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.totalLaunched"),
+                true,
+            )? as i128;
+            let expired = strict_non_negative_number(
+                orbit,
+                "totalExpired",
+                &format!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.totalExpired"),
+                true,
+            )? as i128;
+            if launched < stock {
+                bail!(
+                    "certified solar-sail orbit {system_id}.{orbit_id} has less launches than stock"
+                );
+            }
+            reserve_counter(
+                &mut horizon,
+                stock,
+                0,
+                rate,
+                &format!("{system_id}.{orbit_id}.sailsInOrbit"),
+            )?;
+            reserve_counter(
+                &mut horizon,
+                launched,
+                0,
+                rate,
+                &format!("{system_id}.{orbit_id}.totalLaunched"),
+            )?;
+            reserve_counter(
+                &mut horizon,
+                expired,
+                stock,
+                rate,
+                &format!("{system_id}.{orbit_id}.totalExpired"),
+            )?;
+
+            let orbit_generation = stock as f64 * per_sail_generation;
+            let orbit_generation_rate = rate as f64 * per_sail_generation;
+            if !orbit_generation.is_finite()
+                || orbit_generation > MAX_SAFE_INTEGER
+                || !orbit_generation_rate.is_finite()
+            {
+                horizon = 0;
+            } else if orbit_generation_rate > 0.0 {
+                horizon = horizon.min(
+                    ((MAX_SAFE_INTEGER - orbit_generation) / orbit_generation_rate).floor() as i128,
+                );
+            }
+            system_stock = system_stock
+                .checked_add(stock)
+                .ok_or_else(|| anyhow!("certified solar-sail system stock overflowed"))?;
+            system_rate = system_rate
+                .checked_add(rate)
+                .ok_or_else(|| anyhow!("certified solar-sail system rate overflowed"))?;
+            total_orbit_stock = total_orbit_stock
+                .checked_add(stock)
+                .ok_or_else(|| anyhow!("certified solar-sail orbit stock overflowed"))?;
+            total_orbit_launched = total_orbit_launched
+                .checked_add(launched)
+                .ok_or_else(|| anyhow!("certified solar-sail orbit launch total overflowed"))?;
+            total_orbit_expired = total_orbit_expired
+                .checked_add(expired)
+                .ok_or_else(|| anyhow!("certified solar-sail orbit expiry total overflowed"))?;
+            current_swarm_generation += orbit_generation;
+            future_generation_rate += orbit_generation_rate;
+            potential_shell_generation_from_existing_stock += orbit_generation;
+        }
+        if let Some(orbit_rates) = orbit_rates {
+            for (orbit_id, rate) in orbit_rates {
+                if *rate <= 0 || *rate > max_safe {
+                    bail!("certified solar-sail rate {system_id}.{orbit_id} is invalid");
+                }
+                if !seen_orbits.contains(orbit_id) {
+                    bail!("certified solar-sail target {system_id}.{orbit_id} disappeared");
+                }
+            }
+        }
+
+        let plan = dyson
+            .plans
+            .get(system_id)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id} disappeared"))?;
+        let shell = strict_non_negative_number(
+            plan,
+            "shellSails",
+            &format!("dysonPlans.{system_id}.shellSails"),
+            true,
+        )? as i128;
+        reserve_counter(
+            &mut horizon,
+            shell,
+            system_stock,
+            system_rate,
+            &format!("dysonPlans.{system_id}.shellSails"),
+        )?;
+        total_rate = total_rate
+            .checked_add(system_rate)
+            .ok_or_else(|| anyhow!("certified solar-sail rate sum overflowed"))?;
+    }
+    if total_rate <= 0 || total_rate > max_safe {
+        bail!("certified solar-sail rate sum is invalid");
+    }
+    let swarm_stock = strict_non_negative_number(
+        &dyson.swarm,
+        "sailsInOrbit",
+        "dysonSwarm.sailsInOrbit",
+        true,
+    )? as i128;
+    let swarm_launched = strict_non_negative_number(
+        &dyson.swarm,
+        "totalLaunched",
+        "dysonSwarm.totalLaunched",
+        true,
+    )? as i128;
+    let swarm_expired = strict_non_negative_number(
+        &dyson.swarm,
+        "totalExpired",
+        "dysonSwarm.totalExpired",
+        true,
+    )? as i128;
+    if swarm_stock != total_orbit_stock
+        || swarm_launched != total_orbit_launched
+        || swarm_expired != total_orbit_expired
+    {
+        bail!("certified solar-sail global counters do not match the orbit ledger");
+    }
+    reserve_counter(
+        &mut horizon,
+        swarm_stock,
+        0,
+        total_rate,
+        "dysonSwarm.sailsInOrbit",
+    )?;
+    reserve_counter(
+        &mut horizon,
+        swarm_launched,
+        0,
+        total_rate,
+        "dysonSwarm.totalLaunched",
+    )?;
+    reserve_counter(
+        &mut horizon,
+        swarm_expired,
+        total_orbit_stock,
+        total_rate,
+        "dysonSwarm.totalExpired",
+    )?;
+    for (key, label) in [
+        ("totalSailsAbsorbed", "dysonSphere.totalSailsAbsorbed"),
+        ("shellSails", "dysonSphere.shellSails"),
+    ] {
+        let current = strict_non_negative_number(&dyson.sphere, key, label, true)? as i128;
+        reserve_counter(&mut horizon, current, total_orbit_stock, total_rate, label)?;
+    }
+
+    if !current_swarm_generation.is_finite()
+        || current_swarm_generation > MAX_SAFE_INTEGER
+        || !future_generation_rate.is_finite()
+    {
+        horizon = 0;
+    } else if future_generation_rate > 0.0 {
+        horizon = horizon.min(
+            ((MAX_SAFE_INTEGER - current_swarm_generation) / future_generation_rate).floor()
+                as i128,
+        );
+    }
+    let current_sphere_generation = derived_sphere_generation(base, &dyson);
+    if !current_sphere_generation.is_finite()
+        || current_sphere_generation > MAX_SAFE_INTEGER
+        || !potential_shell_generation_from_existing_stock.is_finite()
+        || potential_shell_generation_from_existing_stock
+            > MAX_SAFE_INTEGER - current_sphere_generation
+    {
+        horizon = 0;
+    } else if future_generation_rate > 0.0 {
+        horizon = horizon.min(
+            ((MAX_SAFE_INTEGER
+                - current_sphere_generation
+                - potential_shell_generation_from_existing_stock)
+                / future_generation_rate)
+                .floor() as i128,
+        );
+    }
+    let launch_energy = strict_non_negative_number(
+        &dyson.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
+    let launch_energy_rate = total_rate as f64 * DYSON_SAIL_LAUNCH_ENERGY_MJ;
+    if !launch_energy_rate.is_finite() || launch_energy_rate <= 0.0 {
+        bail!("certified solar-sail launch-energy rate is invalid");
+    }
+    horizon =
+        horizon.min(((MAX_SAFE_INTEGER - launch_energy) / launch_energy_rate).floor() as i128);
+    Ok(horizon.max(0))
+}
+
+const MAX_CERTIFIED_SAIL_UNBATCHED_STEPS: u64 = 32_768;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CertifiedSailOrbitDynamic {
+    system_id: String,
+    orbit_id: String,
+    stock: i128,
+    decay_progress_bits: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CertifiedSailSystemDynamic {
+    system_id: String,
+    absorption_progress_bits: u64,
+    shell_open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CertifiedSailLifecycleSignature {
+    systems: Vec<CertifiedSailSystemDynamic>,
+    orbits: Vec<CertifiedSailOrbitDynamic>,
+}
+
+#[derive(Debug, Clone)]
+struct CertifiedSailLifecycleCounters {
+    shell_by_system: BTreeMap<String, i128>,
+    launched_by_orbit: BTreeMap<(String, String), i128>,
+    expired_by_orbit: BTreeMap<(String, String), i128>,
+    total_absorbed: i128,
+}
+
+fn certified_sail_cycle_snapshot(
+    state: &DysonState,
+) -> anyhow::Result<(
+    CertifiedSailLifecycleSignature,
+    CertifiedSailLifecycleCounters,
+)> {
+    let progress_by_system = state
+        .engineering
+        .get("absorptionProgressBySystem")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native Dyson absorption progress is missing"))?;
+    let mut systems = Vec::with_capacity(SYSTEM_IDS.len());
+    let mut orbits_dynamic = Vec::new();
+    let mut shell_by_system = BTreeMap::new();
+    let mut launched_by_orbit = BTreeMap::new();
+    let mut expired_by_orbit = BTreeMap::new();
+    for system_id in SYSTEM_IDS {
+        let plan = state
+            .plans
+            .get(system_id)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native Dyson plan is missing: {system_id}"))?;
+        let shell = strict_non_negative_number(
+            plan,
+            "shellSails",
+            &format!("dysonPlans.{system_id}.shellSails"),
+            true,
+        )? as i128;
+        let shell_capacity = plan_shell_capacity(plan).floor();
+        if !shell_capacity.is_finite() || !(0.0..=MAX_SAFE_INTEGER).contains(&shell_capacity) {
+            bail!("dysonPlans.{system_id} has an invalid shell capacity");
+        }
+        let absorption_progress = progress_by_system
+            .get(system_id)
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if !absorption_progress.is_finite() || !(0.0..1.0 + EPSILON).contains(&absorption_progress)
+        {
+            bail!("Dyson absorption progress for {system_id} is invalid");
+        }
+        systems.push(CertifiedSailSystemDynamic {
+            system_id: system_id.to_owned(),
+            absorption_progress_bits: absorption_progress.to_bits(),
+            shell_open: shell_capacity - shell as f64 >= 1.0,
+        });
+        shell_by_system.insert(system_id.to_owned(), shell);
+
+        let mut seen = HashSet::new();
+        for (orbit_index, orbit) in orbits_for(state, system_id).iter().enumerate() {
+            let orbit = orbit.as_object().ok_or_else(|| {
+                anyhow!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_index} is invalid")
+            })?;
+            let orbit_id = text(orbit, "id")
+                .filter(|orbit_id| !orbit_id.is_empty())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "dysonEngineering.orbitsBySystem.{system_id}.{orbit_index}.id is invalid"
+                    )
+                })?;
+            if !seen.insert(orbit_id.to_owned()) {
+                bail!("dysonEngineering.orbitsBySystem.{system_id} repeats orbit {orbit_id}");
+            }
+            let stock = strict_non_negative_number(
+                orbit,
+                "sailsInOrbit",
+                &format!("{system_id}.{orbit_id}.sailsInOrbit"),
+                true,
+            )? as i128;
+            let launched = strict_non_negative_number(
+                orbit,
+                "totalLaunched",
+                &format!("{system_id}.{orbit_id}.totalLaunched"),
+                true,
+            )? as i128;
+            let expired = strict_non_negative_number(
+                orbit,
+                "totalExpired",
+                &format!("{system_id}.{orbit_id}.totalExpired"),
+                true,
+            )? as i128;
+            let decay_progress = orbit
+                .get("decayProgress")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            if !decay_progress.is_finite() || !(0.0..1.0 + EPSILON).contains(&decay_progress) {
+                bail!("Dyson decay progress for {system_id}.{orbit_id} is invalid");
+            }
+            let key = (system_id.to_owned(), orbit_id.to_owned());
+            orbits_dynamic.push(CertifiedSailOrbitDynamic {
+                system_id: key.0.clone(),
+                orbit_id: key.1.clone(),
+                stock,
+                decay_progress_bits: decay_progress.to_bits(),
+            });
+            launched_by_orbit.insert(key.clone(), launched);
+            expired_by_orbit.insert(key, expired);
+        }
+    }
+    let total_absorbed = strict_non_negative_number(
+        &state.sphere,
+        "totalSailsAbsorbed",
+        "dysonSphere.totalSailsAbsorbed",
+        true,
+    )? as i128;
+    Ok((
+        CertifiedSailLifecycleSignature {
+            systems,
+            orbits: orbits_dynamic,
+        },
+        CertifiedSailLifecycleCounters {
+            shell_by_system,
+            launched_by_orbit,
+            expired_by_orbit,
+            total_absorbed,
+        },
+    ))
+}
+
+fn certified_sail_counter_deltas<K: Ord + Clone>(
+    before: &BTreeMap<K, i128>,
+    after: &BTreeMap<K, i128>,
+    label: &str,
+) -> anyhow::Result<BTreeMap<K, i128>> {
+    if before.keys().ne(after.keys()) {
+        bail!("{label} keys changed inside a certified lifecycle cycle");
+    }
+    before
+        .iter()
+        .map(|(key, before)| {
+            let after = after
+                .get(key)
+                .expect("certified lifecycle counter key remains present");
+            let delta = after
+                .checked_sub(*before)
+                .ok_or_else(|| anyhow!("{label} counter regressed"))?;
+            Ok((key.clone(), delta))
+        })
+        .collect()
+}
+
+fn repeat_certified_sail_cycle(
+    base: &Map<String, Value>,
+    state: &mut DysonState,
+    launches_per_second_by_orbit: &BTreeMap<String, BTreeMap<String, i128>>,
+    before: &CertifiedSailLifecycleCounters,
+    after: &CertifiedSailLifecycleCounters,
+    cycle_seconds: u64,
+    requested_repetitions: u64,
+) -> anyhow::Result<u64> {
+    if cycle_seconds == 0 || requested_repetitions == 0 {
+        return Ok(0);
+    }
+    let shell_deltas = certified_sail_counter_deltas(
+        &before.shell_by_system,
+        &after.shell_by_system,
+        "Dyson shell",
+    )?;
+    let launch_deltas = certified_sail_counter_deltas(
+        &before.launched_by_orbit,
+        &after.launched_by_orbit,
+        "solar-sail launch",
+    )?;
+    let expiry_deltas = certified_sail_counter_deltas(
+        &before.expired_by_orbit,
+        &after.expired_by_orbit,
+        "solar-sail expiry",
+    )?;
+    let absorbed_delta = after
+        .total_absorbed
+        .checked_sub(before.total_absorbed)
+        .ok_or_else(|| anyhow!("solar-sail absorption counter regressed"))?;
+    let cycle_seconds = i128::from(cycle_seconds);
+    let mut launch_sum = 0_i128;
+    for ((system_id, orbit_id), delta) in &launch_deltas {
+        let rate = launches_per_second_by_orbit
+            .get(system_id)
+            .and_then(|orbits| orbits.get(orbit_id))
+            .copied()
+            .unwrap_or(0);
+        let expected = rate
+            .checked_mul(cycle_seconds)
+            .ok_or_else(|| anyhow!("certified solar-sail cycle launch rate overflowed"))?;
+        if *delta != expected {
+            bail!(
+                "certified solar-sail cycle launched {delta} instead of {expected} for {system_id}.{orbit_id}"
+            );
+        }
+        launch_sum = launch_sum
+            .checked_add(*delta)
+            .ok_or_else(|| anyhow!("certified solar-sail cycle launch total overflowed"))?;
+    }
+    let expected_launch_sum = launches_per_second_by_orbit
+        .values()
+        .flat_map(BTreeMap::values)
+        .try_fold(0_i128, |total, rate| total.checked_add(*rate))
+        .ok_or_else(|| anyhow!("certified solar-sail cycle rate sum overflowed"))?
+        .checked_mul(cycle_seconds)
+        .ok_or_else(|| anyhow!("certified solar-sail cycle launch total overflowed"))?;
+    if launch_sum != expected_launch_sum {
+        bail!("certified solar-sail cycle does not close its launch ledger");
+    }
+    let shell_sum = shell_deltas
+        .values()
+        .try_fold(0_i128, |total, delta| total.checked_add(*delta))
+        .ok_or_else(|| anyhow!("certified Dyson shell cycle total overflowed"))?;
+    if shell_sum != absorbed_delta {
+        bail!("certified solar-sail cycle does not close its absorption ledger");
+    }
+    let expiry_sum = expiry_deltas
+        .values()
+        .try_fold(0_i128, |total, delta| total.checked_add(*delta))
+        .ok_or_else(|| anyhow!("certified solar-sail cycle expiry total overflowed"))?;
+    if launch_sum
+        != expiry_sum
+            .checked_add(absorbed_delta)
+            .ok_or_else(|| anyhow!("certified solar-sail cycle terminal total overflowed"))?
+    {
+        bail!("certified solar-sail cycle does not close its terminal flow ledger");
+    }
+
+    let mut repetitions = i128::from(requested_repetitions);
+    for (system_id, delta) in &shell_deltas {
+        if *delta == 0 {
+            continue;
+        }
+        let plan = state
+            .plans
+            .get(system_id)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native Dyson plan disappeared: {system_id}"))?;
+        let current = strict_non_negative_number(
+            plan,
+            "shellSails",
+            &format!("dysonPlans.{system_id}.shellSails"),
+            true,
+        )? as i128;
+        let capacity = plan_shell_capacity(plan).floor();
+        if !capacity.is_finite() || !(0.0..=MAX_SAFE_INTEGER).contains(&capacity) {
+            bail!("dysonPlans.{system_id} has an invalid shell capacity");
+        }
+        repetitions = repetitions.min((capacity as i128).saturating_sub(current) / delta);
+    }
+    if repetitions <= 0 {
+        return Ok(0);
+    }
+
+    for (system_id, delta) in shell_deltas {
+        if delta == 0 {
+            continue;
+        }
+        let plan = state
+            .plans
+            .get_mut(&system_id)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native Dyson plan disappeared: {system_id}"))?;
+        let current = strict_non_negative_number(
+            plan,
+            "shellSails",
+            &format!("dysonPlans.{system_id}.shellSails"),
+            true,
+        )? as i128;
+        let added = delta
+            .checked_mul(repetitions)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id}.shellSails cycle overflowed"))?;
+        let next = current
+            .checked_add(added)
+            .ok_or_else(|| anyhow!("dysonPlans.{system_id}.shellSails overflowed"))?;
+        set_number(plan, "shellSails", next as f64)?;
+        reconcile_plan(plan)?;
+    }
+    for system_id in SYSTEM_IDS {
+        for orbit in orbits_for_mut(state, system_id)?
+            .iter_mut()
+            .filter_map(Value::as_object_mut)
+        {
+            let orbit_id = text(orbit, "id")
+                .ok_or_else(|| anyhow!("native Dyson orbit ID disappeared"))?
+                .to_owned();
+            let key = (system_id.to_owned(), orbit_id.clone());
+            for (field, deltas, label) in [
+                ("totalLaunched", &launch_deltas, "solar-sail launch"),
+                ("totalExpired", &expiry_deltas, "solar-sail expiry"),
+            ] {
+                let delta = deltas
+                    .get(&key)
+                    .copied()
+                    .ok_or_else(|| anyhow!("{label} cycle orbit disappeared"))?;
+                if delta == 0 {
+                    continue;
+                }
+                let current = strict_non_negative_number(
+                    orbit,
+                    field,
+                    &format!("{system_id}.{orbit_id}.{field}"),
+                    true,
+                )? as i128;
+                let added = delta
+                    .checked_mul(repetitions)
+                    .ok_or_else(|| anyhow!("{label} cycle overflowed"))?;
+                let next = current
+                    .checked_add(added)
+                    .ok_or_else(|| anyhow!("{label} counter overflowed"))?;
+                set_number(orbit, field, next as f64)?;
+            }
+        }
+    }
+    if absorbed_delta > 0 {
+        let added = absorbed_delta
+            .checked_mul(repetitions)
+            .ok_or_else(|| anyhow!("solar-sail absorption cycle overflowed"))?;
+        let current = strict_non_negative_number(
+            &state.sphere,
+            "totalSailsAbsorbed",
+            "dysonSphere.totalSailsAbsorbed",
+            true,
+        )? as i128;
+        set_number(
+            &mut state.sphere,
+            "totalSailsAbsorbed",
+            current
+                .checked_add(added)
+                .ok_or_else(|| anyhow!("solar-sail absorption counter overflowed"))?
+                as f64,
+        )?;
+    }
+    // The per-orbit counters are authoritative for this private cycle jump.
+    // Synchronize their legacy aggregate before `update_generation` calls
+    // `sync_swarm`, otherwise that compatibility path would interpret the
+    // still-stale global total as an instruction to remove the skipped events.
+    aggregate_swarm(state)?;
+    update_generation(base, state)?;
+    validate_certified_dyson_commit(base, state)?;
+    u64::try_from(repetitions)
+        .map_err(|_| anyhow!("certified solar-sail cycle repetition cannot be represented"))
+}
+
+/// Advances only the Dyson sail lifecycle for a same-window-funded launch
+/// schedule. Each second follows the exact engine's observable order:
+/// absorption/decay first, then ejector launches. The factory, launcher caches
+/// and production totals are owned by the caller's closed material ledger.
+pub(crate) fn apply_certified_sail_launch_schedule(
+    base: &mut Map<String, Value>,
+    launches_per_second_by_orbit: &BTreeMap<String, BTreeMap<String, i128>>,
+    seconds: i128,
+) -> anyhow::Result<i128> {
+    if seconds < 0 {
+        bail!("certified solar-sail schedule has a negative duration");
+    }
+    if seconds == 0 {
+        return Ok(0);
+    }
+    if certified_sail_launch_capacity_seconds(base, launches_per_second_by_orbit)? < seconds {
+        bail!("certified solar-sail schedule exceeds a safe counter boundary");
+    }
+    let seconds = u64::try_from(seconds)
+        .map_err(|_| anyhow!("certified solar-sail duration cannot be iterated"))?;
+    let snapshot = base.clone();
+    let mut dyson = load(base)?;
+    sync_swarm(&snapshot, &mut dyson)?;
+    sync_sphere(&mut dyson)?;
+    let total_rate = launches_per_second_by_orbit
+        .values()
+        .flat_map(BTreeMap::values)
+        .try_fold(0_i128, |total, rate| {
+            total
+                .checked_add(*rate)
+                .ok_or_else(|| anyhow!("certified solar-sail rate sum overflowed"))
+        })?;
+    let mut step = 0_u64;
+    let mut unbatched_steps = 0_u64;
+    // Brent's detector keeps a single prior dynamic state. Retaining every
+    // visited state would consume O(orbits * search steps) memory in the large
+    // saves this path is intended to protect.
+    let (mut cycle_anchor, mut cycle_anchor_counters) = certified_sail_cycle_snapshot(&dyson)?;
+    let mut cycle_power = 1_u64;
+    let mut cycle_length = 0_u64;
+    while step < seconds {
+        if unbatched_steps >= MAX_CERTIFIED_SAIL_UNBATCHED_STEPS {
+            bail!(
+                "certified solar-sail lifecycle did not reach a safely repeatable cycle within {MAX_CERTIFIED_SAIL_UNBATCHED_STEPS} steps (step={step}, power={cycle_power}, length={cycle_length})"
+            );
+        }
+        absorb(&snapshot, &mut dyson, 1.0)?;
+        decay(&snapshot, &mut dyson, 1.0)?;
+        for (system_id, orbit_rates) in launches_per_second_by_orbit {
+            let per_sail = sail_power(&snapshot, system_id);
+            let orbits = orbits_for_mut(&mut dyson, system_id)?;
+            for (orbit_id, rate) in orbit_rates {
+                let orbit = orbits
+                    .iter_mut()
+                    .filter_map(Value::as_object_mut)
+                    .find(|orbit| text(orbit, "id") == Some(orbit_id.as_str()))
+                    .ok_or_else(|| {
+                        anyhow!("certified solar-sail target {system_id}.{orbit_id} disappeared")
+                    })?;
+                let stock = strict_non_negative_number(
+                    orbit,
+                    "sailsInOrbit",
+                    &format!("dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.sailsInOrbit"),
+                    true,
+                )? as i128;
+                let launched = strict_non_negative_number(
+                    orbit,
+                    "totalLaunched",
+                    &format!(
+                        "dysonEngineering.orbitsBySystem.{system_id}.{orbit_id}.totalLaunched"
+                    ),
+                    true,
+                )? as i128;
+                let next_stock = stock
+                    .checked_add(*rate)
+                    .ok_or_else(|| anyhow!("certified solar-sail orbit stock overflowed"))?;
+                let next_launched = launched
+                    .checked_add(*rate)
+                    .ok_or_else(|| anyhow!("certified solar-sail launch counter overflowed"))?;
+                set_number(orbit, "sailsInOrbit", next_stock as f64)?;
+                set_number(orbit, "totalLaunched", next_launched as f64)?;
+                set_number(orbit, "generationKw", next_stock as f64 * per_sail)?;
+            }
+        }
+        // Keep the legacy/global fields synchronized before the next exact
+        // lifecycle second; otherwise sync_swarm would interpret the newly
+        // launched orbit stock as a legacy aggregate mismatch.
+        aggregate_swarm(&mut dyson)?;
+        step += 1;
+        unbatched_steps += 1;
+        cycle_length = cycle_length
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("certified solar-sail cycle length overflowed"))?;
+
+        let (signature, counters) = certified_sail_cycle_snapshot(&dyson)?;
+        if signature == cycle_anchor {
+            let repetitions = (seconds - step) / cycle_length;
+            let repeated = repeat_certified_sail_cycle(
+                &snapshot,
+                &mut dyson,
+                launches_per_second_by_orbit,
+                &cycle_anchor_counters,
+                &counters,
+                cycle_length,
+                repetitions,
+            )?;
+            if repeated > 0 {
+                step =
+                    step.checked_add(cycle_length.checked_mul(repeated).ok_or_else(|| {
+                        anyhow!("certified solar-sail cycle duration overflowed")
+                    })?)
+                    .ok_or_else(|| anyhow!("certified solar-sail duration overflowed"))?;
+                unbatched_steps = 0;
+            }
+            // A skip can land exactly on a shell-capacity boundary. Restart
+            // from the actual post-skip state so the next phase is detected
+            // independently; a zero-repeat match likewise gets one exact step
+            // to cross its pending boundary instead of rediscovering forever.
+            (cycle_anchor, cycle_anchor_counters) = certified_sail_cycle_snapshot(&dyson)?;
+            cycle_power = 1;
+            cycle_length = 0;
+        } else if cycle_length == cycle_power {
+            cycle_anchor = signature;
+            cycle_anchor_counters = counters;
+            cycle_power = cycle_power.saturating_mul(2);
+            cycle_length = 0;
+        }
+    }
+    let launched = total_rate
+        .checked_mul(i128::from(seconds))
+        .ok_or_else(|| anyhow!("certified solar-sail schedule total overflowed"))?;
+    let spent = strict_non_negative_number(
+        &dyson.engineering,
+        "launchEnergySpentMj",
+        "dysonEngineering.launchEnergySpentMj",
+        false,
+    )?;
+    set_number(
+        &mut dyson.engineering,
+        "launchEnergySpentMj",
+        rounded(spent + launched as f64 * DYSON_SAIL_LAUNCH_ENERGY_MJ, 3),
+    )?;
+    update_generation(&snapshot, &mut dyson)?;
+    validate_certified_dyson_commit(&snapshot, &dyson)?;
+    save(base, dyson);
+    Ok(launched)
 }
 
 pub(crate) fn finalize(base: &mut Map<String, Value>) -> anyhow::Result<()> {
@@ -976,6 +2211,231 @@ pub(crate) fn finalize(base: &mut Map<String, Value>) -> anyhow::Result<()> {
     let mut state = load(base)?;
     update_generation(&snapshot, &mut state)?;
     save(base, state);
+    Ok(())
+}
+
+fn validate_receiver_number(value: f64) -> anyhow::Result<f64> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        bail!("native Dyson simulation produced a non-finite number")
+    }
+}
+
+fn probe_ray_receiver_settlement(
+    environment: &RayReceiverSettlementEnvironment<'_>,
+    entity_index: usize,
+) -> anyhow::Result<RayReceiverSettlementDelta> {
+    let Some(entity) = environment
+        .entities
+        .get(entity_index)
+        .and_then(Value::as_object)
+    else {
+        return Ok(RayReceiverSettlementDelta::Noop);
+    };
+    if text(entity, "kind") != Some("machine") || text(entity, "buildingId") != Some("ray_receiver")
+    {
+        return Ok(RayReceiverSettlementDelta::Noop);
+    }
+    let entity_id = text(entity, "id").unwrap_or_default();
+    let recipe_id = text(entity, "recipeId").unwrap_or_default();
+    let allocation = environment
+        .reception
+        .allocation_by_entity
+        .get(entity_id)
+        .copied()
+        .unwrap_or(0.0);
+    let power_output_kw = validate_receiver_number(rounded(allocation, 2))?;
+    let baseline = |progress| RayReceiverSettlementDelta::Update {
+        power_output_kw,
+        progress,
+        utilization: 0.0,
+        production_rate: 0.0,
+        critical_photon_output: None,
+        produced: 0.0,
+    };
+    let Some(recipe) = environment.state.catalog.recipes.get(recipe_id) else {
+        return Ok(baseline(Some(0.0)));
+    };
+    if recipe
+        .required_tech_id
+        .as_deref()
+        .is_some_and(|id| !completed(environment.base, id))
+    {
+        return Ok(baseline(Some(0.0)));
+    }
+    let efficiency = environment
+        .reception
+        .efficiency_by_entity
+        .get(entity_id)
+        .copied()
+        .unwrap_or(0.0);
+    if recipe_id == "ray_power" {
+        return Ok(RayReceiverSettlementDelta::Update {
+            power_output_kw,
+            progress: Some(0.0),
+            utilization: validate_receiver_number(efficiency)?,
+            production_rate: 0.0,
+            critical_photon_output: None,
+            produced: 0.0,
+        });
+    }
+    if recipe_id != "critical_photon" || allocation <= EPSILON {
+        return Ok(baseline(None));
+    }
+    let building = environment
+        .state
+        .catalog
+        .buildings
+        .get("ray_receiver")
+        .ok_or_else(|| anyhow!("native ray receiver catalog is missing"))?;
+    let cycles_per_second = building.speed * finite(entity.get("machineCount")) / recipe.duration;
+    let potential = cycles_per_second * environment.seconds * efficiency;
+    let current = entity
+        .get("outputs")
+        .and_then(Value::as_object)
+        .and_then(|outputs| outputs.get("critical_photon"))
+        .map(|value| finite(Some(value)))
+        .unwrap_or(0.0);
+    let maximum = ((output_capacity(environment.state, environment.base, entity) - current)
+        .max(0.0)
+        + crate::belts::output_credit(
+            environment.state,
+            environment.credits,
+            entity_id,
+            "critical_photon",
+        )
+        + EPSILON)
+        .floor();
+    if maximum < 1.0 || potential <= EPSILON {
+        return Ok(baseline(None));
+    }
+    let progress = finite(entity.get("progress"));
+    let work = potential.min((maximum - progress).max(0.0));
+    let progressed = rounded(progress + work, 6);
+    let cycles = maximum.min((progressed + EPSILON).floor());
+    let critical_photon_output = if cycles > 0.0 {
+        if entity.get("outputs").and_then(Value::as_object).is_none() {
+            bail!("native ray receiver outputs are missing");
+        }
+        Some(validate_receiver_number((current + cycles).floor())?)
+    } else {
+        None
+    };
+    let next_progress = validate_receiver_number(rounded((progressed - cycles).max(0.0), 6))?;
+    let activity = if potential > EPSILON {
+        (work / potential).min(1.0)
+    } else {
+        0.0
+    };
+    let utilization = validate_receiver_number(rounded(efficiency * activity, 4))?;
+    let production_rate =
+        validate_receiver_number(rounded(cycles_per_second * 60.0 * utilization, 2))?;
+    Ok(RayReceiverSettlementDelta::Update {
+        power_output_kw,
+        progress: Some(next_progress),
+        utilization,
+        production_rate,
+        critical_photon_output,
+        produced: cycles,
+    })
+}
+
+fn replay_ray_receiver_settlement(
+    entity: &mut Value,
+    delta: RayReceiverSettlementDelta,
+) -> anyhow::Result<f64> {
+    let RayReceiverSettlementDelta::Update {
+        power_output_kw,
+        progress,
+        utilization,
+        production_rate,
+        critical_photon_output,
+        produced,
+    } = delta
+    else {
+        return Ok(0.0);
+    };
+    let entity = entity
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("native ray receiver entity disappeared before replay"))?;
+    set_number(entity, "powerOutputKw", power_output_kw)?;
+    set_number(entity, "productionRate", production_rate)?;
+    set_number(entity, "utilization", utilization)?;
+    if let Some(progress) = progress {
+        set_number(entity, "progress", progress)?;
+    }
+    if let Some(output) = critical_photon_output {
+        entity
+            .get_mut("outputs")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native ray receiver outputs are missing"))?
+            .insert("critical_photon".to_owned(), Value::from(output));
+    }
+    Ok(produced)
+}
+
+fn run_ray_receivers_with_runtime(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    seconds: f64,
+    credits: &crate::belts::OutputCredits,
+    reception: &Reception,
+) -> anyhow::Result<()> {
+    let outcomes = collect_ordered_receiver_probes_with_runtime(
+        runtime,
+        &reception.receiver_indices,
+        |entity_index| {
+            probe_ray_receiver_settlement(
+                &RayReceiverSettlementEnvironment {
+                    state,
+                    base,
+                    entities,
+                    seconds,
+                    credits,
+                    reception,
+                },
+                entity_index,
+            )
+            .map(|delta| RayReceiverSettlementOutcome {
+                entity_index,
+                delta,
+            })
+        },
+    )?;
+    // Validate the one shared write before replaying any entity. Probe errors
+    // and a malformed total record therefore leave both inputs untouched.
+    let mut produced = 0.0;
+    for outcome in &outcomes {
+        if let RayReceiverSettlementDelta::Update {
+            produced: amount, ..
+        } = &outcome.delta
+            && *amount > 0.0
+        {
+            produced += *amount;
+        }
+    }
+    let total_update = if produced > 0.0 {
+        let total = base
+            .get("totalProduced")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native total production record is missing"))?;
+        let current = finite(total.get("critical_photon"));
+        Some(validate_receiver_number((current + produced).floor())?)
+    } else {
+        None
+    };
+    for outcome in outcomes {
+        replay_ray_receiver_settlement(&mut entities[outcome.entity_index], outcome.delta)?;
+    }
+    if let Some(total_update) = total_update {
+        base.get_mut("totalProduced")
+            .and_then(Value::as_object_mut)
+            .expect("validated native total production record disappeared")
+            .insert("critical_photon".to_owned(), Value::from(total_update));
+    }
     Ok(())
 }
 
@@ -987,116 +2447,15 @@ pub(crate) fn run_ray_receivers(
     credits: &crate::belts::OutputCredits,
     reception: &Reception,
 ) -> anyhow::Result<()> {
-    let mut produced = 0.0;
-    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
-        if text(entity, "kind") != Some("machine")
-            || text(entity, "buildingId") != Some("ray_receiver")
-        {
-            continue;
-        }
-        let entity_id = text(entity, "id").unwrap_or_default().to_owned();
-        let recipe_id = text(entity, "recipeId").unwrap_or_default().to_owned();
-        let allocation = reception
-            .allocation_by_entity
-            .get(&entity_id)
-            .copied()
-            .unwrap_or(0.0);
-        set_number(entity, "powerOutputKw", rounded(allocation, 2))?;
-        set_number(entity, "productionRate", 0.0)?;
-        set_number(entity, "utilization", 0.0)?;
-        let Some(recipe) = state.catalog.recipes.get(&recipe_id) else {
-            set_number(entity, "progress", 0.0)?;
-            continue;
-        };
-        if recipe
-            .required_tech_id
-            .as_deref()
-            .is_some_and(|id| !completed(base, id))
-        {
-            set_number(entity, "progress", 0.0)?;
-            continue;
-        }
-        let efficiency = reception
-            .efficiency_by_entity
-            .get(&entity_id)
-            .copied()
-            .unwrap_or(0.0);
-        if recipe_id == "ray_power" {
-            set_number(entity, "progress", 0.0)?;
-            set_number(entity, "utilization", efficiency)?;
-            continue;
-        }
-        if recipe_id != "critical_photon" || allocation <= EPSILON {
-            continue;
-        }
-        let building = state
-            .catalog
-            .buildings
-            .get("ray_receiver")
-            .ok_or_else(|| anyhow!("native ray receiver catalog is missing"))?;
-        let cycles_per_second =
-            building.speed * finite(entity.get("machineCount")) / recipe.duration;
-        let potential = cycles_per_second * seconds * efficiency;
-        let current = entity
-            .get("outputs")
-            .and_then(Value::as_object)
-            .and_then(|outputs| outputs.get("critical_photon"))
-            .map(|value| finite(Some(value)))
-            .unwrap_or(0.0);
-        let maximum = ((output_capacity(state, base, entity) - current).max(0.0)
-            + crate::belts::output_credit(state, credits, &entity_id, "critical_photon")
-            + EPSILON)
-            .floor();
-        if maximum < 1.0 || potential <= EPSILON {
-            continue;
-        }
-        let progress = finite(entity.get("progress"));
-        let work = potential.min((maximum - progress).max(0.0));
-        let progressed = rounded(progress + work, 6);
-        let cycles = maximum.min((progressed + EPSILON).floor());
-        if cycles > 0.0 {
-            entity
-                .get_mut("outputs")
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| anyhow!("native ray receiver outputs are missing"))?
-                .insert(
-                    "critical_photon".to_owned(),
-                    Value::from((current + cycles).floor()),
-                );
-            produced += cycles;
-        }
-        set_number(
-            entity,
-            "progress",
-            rounded((progressed - cycles).max(0.0), 6),
-        )?;
-        let activity = if potential > EPSILON {
-            (work / potential).min(1.0)
-        } else {
-            0.0
-        };
-        set_number(entity, "utilization", rounded(efficiency * activity, 4))?;
-        set_number(
-            entity,
-            "productionRate",
-            rounded(
-                cycles_per_second * 60.0 * rounded(efficiency * activity, 4),
-                2,
-            ),
-        )?;
-    }
-    if produced > 0.0 {
-        let total = base
-            .get_mut("totalProduced")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| anyhow!("native total production record is missing"))?;
-        let current = finite(total.get("critical_photon"));
-        total.insert(
-            "critical_photon".to_owned(),
-            Value::from((current + produced).floor()),
-        );
-    }
-    Ok(())
+    run_ray_receivers_with_runtime(
+        deterministic_runtime(),
+        state,
+        base,
+        entities,
+        seconds,
+        credits,
+        reception,
+    )
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
@@ -1130,4 +2489,1133 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{
+        BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemAmount, ItemDefinition,
+        PlanetDefinition, RecipeDefinition, RuntimeCatalog,
+    };
+    use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use crate::state::CoreCheckpointIdentity;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+    fn fixture_checksum(bytes: &[u8]) -> String {
+        let mut hash = 0x811c9dc5_u32;
+        for byte in bytes {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        format!("{hash:08x}")
+    }
+
+    fn fixture_catalog() -> RuntimeCatalog {
+        RuntimeCatalog::validate(
+            CatalogSnapshot {
+                protocol_version: 1,
+                registry_fingerprint: "dyson-receiver-test".to_owned(),
+                planets: [("home", "helios", 0), ("ice", "borealis", 1)]
+                    .into_iter()
+                    .map(|(id, system_id, simulation_order)| PlanetDefinition {
+                        id: id.to_owned(),
+                        name: id.to_owned(),
+                        system_id: system_id.to_owned(),
+                        kind: "terrestrial".to_owned(),
+                        orbit_index: simulation_order + 1,
+                        simulation_order,
+                        orbital_yields: HashMap::new(),
+                    })
+                    .collect(),
+                items: vec![ItemDefinition {
+                    id: "critical_photon".to_owned(),
+                    name: "critical_photon".to_owned(),
+                    kind: "solid".to_owned(),
+                    fuel_energy_mj: 0.0,
+                }],
+                buildings: vec![BuildingDefinition {
+                    id: "ray_receiver".to_owned(),
+                    kind: "machine".to_owned(),
+                    speed: 2.5,
+                    input_capacity: 0.0,
+                    output_capacity: 100.0,
+                    power_demand_kw: 0.0,
+                    power_generation_kw: 0.0,
+                    power_charge_kw: 0.0,
+                    energy_capacity_mj: 0.0,
+                    fuel_item_ids: Vec::new(),
+                    fuel_efficiency: 1.0,
+                    family: Some("particle".to_owned()),
+                    accepts: None,
+                }],
+                recipes: vec![
+                    RecipeDefinition {
+                        id: "ray_power".to_owned(),
+                        name: "ray_power".to_owned(),
+                        building_id: "ray_receiver".to_owned(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: Vec::new(),
+                        outputs: Vec::new(),
+                    },
+                    RecipeDefinition {
+                        id: "critical_photon".to_owned(),
+                        name: "critical_photon".to_owned(),
+                        building_id: "ray_receiver".to_owned(),
+                        duration: 1.5,
+                        required_tech_id: Some("dirac_inversion".to_owned()),
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: Vec::new(),
+                        outputs: vec![ItemAmount {
+                            item_id: "critical_photon".to_owned(),
+                            amount: 1.0,
+                        }],
+                    },
+                ],
+                constructions: Vec::new(),
+                belts: vec![BeltDefinition {
+                    tier: 1,
+                    speed: 6.0,
+                }],
+                proliferators: Vec::new(),
+                technologies: Vec::new(),
+            },
+            "dyson-receiver-test",
+        )
+        .unwrap()
+    }
+
+    fn fixture_base() -> Value {
+        json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "home",
+            "elapsedSeconds": 0,
+            "paused": false,
+            "settings": { "productionBufferLimit": 1000 },
+            "research": {
+                "completedTechIds": ["dirac_inversion", "ray_transmission_1"]
+            },
+            "endgame": {
+                "infiniteResearch": { "stellar_harnessing": { "level": 2 } }
+            },
+            "galaxy": {
+                "systemProfiles": {
+                    "helios": { "luminosity": 1.0 },
+                    "borealis": { "luminosity": 1.35 }
+                }
+            },
+            "dysonSwarm": {
+                "sailsInOrbit": 0,
+                "totalLaunched": 0,
+                "totalExpired": 0,
+                "decayProgress": 0,
+                "generationKw": 0,
+                "receiverLoadKw": 0,
+                "mod:swarm/opaque": { "signedZero": -0.0 }
+            },
+            "dysonSphere": {
+                "structurePoints": 0,
+                "totalRocketsLaunched": 0,
+                "shellSails": 0,
+                "totalSailsAbsorbed": 0,
+                "absorptionProgress": 0,
+                "generationKw": 0
+            },
+            "dysonEngineering": {
+                "orbitsBySystem": {
+                    "helios": [{ "generationKw": 6000000 }],
+                    "borealis": [{ "generationKw": 8500000 }]
+                }
+            },
+            "dysonPlans": {
+                "helios": { "structurePoints": 1200, "shellSails": 800 },
+                "borealis": { "structurePoints": 900, "shellSails": 700 }
+            },
+            "totalProduced": { "critical_photon": 123 },
+            "mod:base/opaque": { "text": "保持原样", "signedZero": -0.0 }
+        })
+    }
+
+    fn receiver_entity(index: usize) -> Value {
+        let mut entity = json!({
+            "id": format!("mod:receiver/{index:05}/Ω🚀"),
+            "kind": "machine",
+            "planetId": if index.is_multiple_of(2) { "home" } else { "ice" },
+            "powerGridId": "grid-a",
+            "buildingId": "ray_receiver",
+            "recipeId": if index.is_multiple_of(3) { "ray_power" } else { "critical_photon" },
+            "machineCount": 1 + index % 4,
+            "inputs": {},
+            "outputs": { "critical_photon": index % 9 },
+            "progress": (index % 17) as f64 / 17.0,
+            "powerOutputKw": -1,
+            "productionRate": -1,
+            "utilization": -1,
+            "mod:receiver/opaque": {
+                "index": index,
+                "signedZero": -0.0,
+                "text": "保持原样"
+            }
+        });
+        match index % 41 {
+            0 => entity["machineCount"] = Value::from(0),
+            1 => entity["outputs"]["critical_photon"] = Value::from(400),
+            2 => entity["recipeId"] = Value::from("mod:unknown-receiver-recipe"),
+            _ => {}
+        }
+        entity
+    }
+
+    fn receiver_matrix(count: usize) -> Vec<Value> {
+        (0..count).map(receiver_entity).collect()
+    }
+
+    fn non_receiver_entity(index: usize) -> Value {
+        json!({
+            "id": format!("mod:vein/{index:05}/非接收器"),
+            "kind": "vein",
+            "planetId": if index.is_multiple_of(2) { "home" } else { "ice" },
+            "powerGridId": "grid-a",
+            "resourceId": "critical_photon",
+            "minerCount": 1,
+            "inputs": {},
+            "outputs": { "critical_photon": index % 11 },
+            "mod:vein/opaque": {
+                "index": index,
+                "signedZero": -0.0,
+                "text": "必须保持原样"
+            }
+        })
+    }
+
+    fn sparse_receiver_matrix(non_receiver_count: usize) -> (Vec<Value>, Vec<usize>) {
+        let total = non_receiver_count + 7;
+        let receiver_indices = vec![
+            0,
+            17,
+            PARALLEL_MIN_ITEMS - 1,
+            PARALLEL_MIN_ITEMS,
+            non_receiver_count / 2,
+            total - 2,
+            total - 1,
+        ];
+        let entities = (0..total)
+            .map(|index| {
+                if receiver_indices.binary_search(&index).is_ok() {
+                    receiver_entity(index)
+                } else {
+                    non_receiver_entity(index)
+                }
+            })
+            .collect();
+        (entities, receiver_indices)
+    }
+
+    fn fixture_state(entities: &[Value]) -> CoreState {
+        let entity_count = entities.len();
+        let base = serde_json::to_vec(&fixture_base()).unwrap();
+        let entities = serde_json::to_vec(entities).unwrap();
+        let belts = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
+        let chunks = [
+            ("base", "base", &base, 0, 1),
+            ("entities:00000000", "entities", &entities, 0, entity_count),
+            ("belts:00000000", "belts", &belts, 0, 0),
+        ]
+        .into_iter()
+        .map(|(id, kind, bytes, offset, count)| {
+            json!({
+                "id": id,
+                "kind": kind,
+                "offset": offset,
+                "count": count,
+                "checksum": fixture_checksum(bytes),
+                "bytes": bytes.len()
+            })
+        })
+        .collect::<Vec<_>>();
+        let manifest = serde_json::to_vec(&json!({
+            "formatVersion": 1,
+            "envelopeFormatVersion": 2,
+            "mode": "normal",
+            "slot": "main",
+            "stateVersion": 47,
+            "savedAt": 1,
+            "basePrimaryChecksum": "12345678",
+            "chunkRootChecksum": "12345678",
+            "totalBytes": base.len() + entities.len() + belts.len(),
+            "entityCount": entity_count,
+            "beltCount": 0,
+            "chunks": chunks
+        }))
+        .unwrap();
+        let records = BTreeMap::from([
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.manifest".to_owned(),
+                manifest,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.base".to_owned(),
+                base,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
+                    .to_owned(),
+                entities,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.belts%3A00000000".to_owned(),
+                belts,
+            ),
+        ]);
+        CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "dyson-receiver-test".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            &records,
+            fixture_catalog(),
+        )
+        .unwrap()
+    }
+
+    fn launch_fixture_base() -> Map<String, Value> {
+        let mut base = fixture_base().as_object().cloned().unwrap();
+        let mut orbits_by_system = Map::new();
+        let mut active_orbit_by_system = Map::new();
+        let mut plans = Map::new();
+        for system_id in SYSTEM_IDS {
+            let orbit_id = format!("orbit-{system_id}");
+            orbits_by_system.insert(
+                system_id.to_owned(),
+                json!([{
+                    "id": orbit_id,
+                    "name": system_id,
+                    "radius": 50000,
+                    "inclination": 0,
+                    "longitude": 0,
+                    "sailsInOrbit": 0,
+                    "totalLaunched": 0,
+                    "totalExpired": 0,
+                    "decayProgress": 0,
+                    "generationKw": 0
+                }]),
+            );
+            active_orbit_by_system.insert(system_id.to_owned(), Value::from(orbit_id));
+            plans.insert(
+                system_id.to_owned(),
+                json!({
+                    "structurePoints": 0,
+                    "shellSails": 0,
+                    "layers": []
+                }),
+            );
+        }
+        base.insert(
+            "dysonEngineering".to_owned(),
+            json!({
+                "launchEnabled": true,
+                "launchMode": "balanced",
+                "launchThrottle": 1,
+                "launchEnergySpentMj": 0,
+                "orbitsBySystem": orbits_by_system,
+                "activeOrbitBySystem": active_orbit_by_system
+            }),
+        );
+        base.insert("dysonPlans".to_owned(), Value::Object(plans));
+        base
+    }
+
+    fn launch_entity(planet_id: &str, target_orbit_id: Option<&str>) -> Map<String, Value> {
+        let mut entity = json!({ "planetId": planet_id })
+            .as_object()
+            .cloned()
+            .unwrap();
+        if let Some(target_orbit_id) = target_orbit_id {
+            entity.insert(
+                "targetDysonOrbitId".to_owned(),
+                Value::from(target_orbit_id),
+            );
+        }
+        entity
+    }
+
+    fn legacy_launch_per_entity(
+        state: &CoreState,
+        base: &mut Map<String, Value>,
+        entity: &Map<String, Value>,
+        recipe_id: &str,
+        cycles: f64,
+    ) -> anyhow::Result<()> {
+        if cycles <= 0.0 || !matches!(recipe_id, "solar_sail_launch" | "carrier_rocket_launch") {
+            return Ok(());
+        }
+        let system_id = system_for_planet(state, text(entity, "planetId").unwrap_or_default())
+            .ok_or_else(|| anyhow!("native Dyson launcher planet is unknown"))?;
+        let snapshot = base.clone();
+        let mut dyson = load(base)?;
+        if recipe_id == "solar_sail_launch" {
+            sync_swarm(&snapshot, &mut dyson)?;
+            let target_id = text(entity, "targetDysonOrbitId")
+                .ok_or_else(|| anyhow!("native Dyson ejector target is missing"))?;
+            let per_sail = sail_power(&snapshot, system_id);
+            let orbit = orbits_for_mut(&mut dyson, system_id)?
+                .iter_mut()
+                .filter_map(Value::as_object_mut)
+                .find(|orbit| text(orbit, "id") == Some(target_id))
+                .ok_or_else(|| anyhow!("native Dyson ejector target disappeared"))?;
+            let sails = finite(orbit.get("sailsInOrbit"));
+            let launched = finite(orbit.get("totalLaunched"));
+            set_number(orbit, "sailsInOrbit", (sails + cycles).floor())?;
+            set_number(orbit, "totalLaunched", (launched + cycles).floor())?;
+            set_number(orbit, "generationKw", (sails + cycles).floor() * per_sail)?;
+            aggregate_swarm(&mut dyson)?;
+        } else {
+            sync_sphere(&mut dyson)?;
+            let plan = dyson
+                .plans
+                .get_mut(system_id)
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native Dyson launcher plan is missing"))?;
+            let structure = finite(plan.get("structurePoints"));
+            set_number(plan, "structurePoints", structure + cycles.floor())?;
+            let total = finite(dyson.sphere.get("totalRocketsLaunched"));
+            set_number(
+                &mut dyson.sphere,
+                "totalRocketsLaunched",
+                (total + cycles).floor(),
+            )?;
+            reconcile_plan(plan)?;
+            update_generation(&snapshot, &mut dyson)?;
+        }
+        let spent = finite(dyson.engineering.get("launchEnergySpentMj"));
+        let per_cycle = if recipe_id == "solar_sail_launch" {
+            DYSON_SAIL_LAUNCH_ENERGY_MJ
+        } else {
+            DYSON_ROCKET_LAUNCH_ENERGY_MJ
+        };
+        set_number(
+            &mut dyson.engineering,
+            "launchEnergySpentMj",
+            rounded(spent + per_cycle * cycles, 3),
+        )?;
+        save(base, dyson);
+        Ok(())
+    }
+
+    #[test]
+    fn deferred_launch_runtime_matches_per_entity_commits_with_interleaved_targets_and_research() {
+        let state = fixture_state(&[]);
+        let mut legacy = launch_fixture_base();
+        let mut deferred = legacy.clone();
+        let mut runtime = None;
+        let events = [
+            (
+                launch_entity("home", Some("orbit-helios")),
+                "solar_sail_launch",
+                3.0,
+            ),
+            (launch_entity("ice", None), "carrier_rocket_launch", 2.0),
+            (launch_entity("home", None), "carrier_rocket_launch", 4.0),
+            (
+                launch_entity("ice", Some("orbit-borealis")),
+                "solar_sail_launch",
+                5.0,
+            ),
+            (launch_entity("ice", None), "carrier_rocket_launch", 7.0),
+        ];
+        for (index, (entity, recipe_id, cycles)) in events.iter().enumerate() {
+            legacy_launch_per_entity(&state, &mut legacy, entity, recipe_id, *cycles).unwrap();
+            launch_deferred(&mut runtime, &state, &deferred, entity, recipe_id, *cycles).unwrap();
+            if index == 1 {
+                for base in [&mut legacy, &mut deferred] {
+                    base.get_mut("endgame")
+                        .and_then(Value::as_object_mut)
+                        .and_then(|endgame| endgame.get_mut("infiniteResearch"))
+                        .and_then(Value::as_object_mut)
+                        .and_then(|research| research.get_mut("stellar_harnessing"))
+                        .and_then(Value::as_object_mut)
+                        .unwrap()
+                        .insert("level".to_owned(), Value::from(9));
+                    base.get_mut("research")
+                        .and_then(Value::as_object_mut)
+                        .and_then(|research| research.get_mut("completedTechIds"))
+                        .and_then(Value::as_array_mut)
+                        .unwrap()
+                        .push(Value::from("dyson_absorption_1"));
+                }
+            }
+        }
+        commit_deferred_launches(&mut deferred, runtime);
+        assert_eq!(
+            serde_json::to_vec(&deferred).unwrap(),
+            serde_json::to_vec(&legacy).unwrap()
+        );
+    }
+
+    #[test]
+    fn deferred_launch_runtime_does_not_touch_base_without_material_cycles() {
+        let state = fixture_state(&[]);
+        let mut base = launch_fixture_base();
+        let expected = serde_json::to_vec(&base).unwrap();
+        let entity = launch_entity("home", None);
+        let mut runtime = None;
+        launch_deferred(
+            &mut runtime,
+            &state,
+            &base,
+            &entity,
+            "carrier_rocket_launch",
+            0.0,
+        )
+        .unwrap();
+        commit_deferred_launches(&mut base, runtime);
+        assert_eq!(serde_json::to_vec(&base).unwrap(), expected);
+    }
+
+    #[test]
+    fn deferred_launch_runtime_is_byte_identical_at_one_five_and_sixty_second_boundaries() {
+        let state = fixture_state(&[]);
+        let rocket = launch_entity("ice", None);
+        let sail = launch_entity("home", Some("orbit-helios"));
+        let run = |segments: &[usize]| {
+            let mut base = launch_fixture_base();
+            for &seconds in segments {
+                assert!(matches!(seconds, 1 | 5 | 60));
+                let mut runtime = None;
+                launch_deferred(
+                    &mut runtime,
+                    &state,
+                    &base,
+                    &rocket,
+                    "carrier_rocket_launch",
+                    seconds as f64 * 3.0,
+                )
+                .unwrap();
+                launch_deferred(
+                    &mut runtime,
+                    &state,
+                    &base,
+                    &sail,
+                    "solar_sail_launch",
+                    seconds as f64 * 7.0,
+                )
+                .unwrap();
+                commit_deferred_launches(&mut base, runtime);
+            }
+            serde_json::to_vec(&base).unwrap()
+        };
+
+        let one_sixty_second_boundary = run(&[60]);
+        assert_eq!(run(&[5; 12]), one_sixty_second_boundary);
+        assert_eq!(run(&[1; 60]), one_sixty_second_boundary);
+    }
+
+    fn legacy_calculate_reception(
+        state: &CoreState,
+        base: &mut Map<String, Value>,
+        entities: &[Value],
+    ) -> anyhow::Result<Reception> {
+        let dyson = load(base)?;
+        let rated = receiver_capacity(base);
+        let receivers = entities
+            .iter()
+            .filter_map(Value::as_object)
+            .filter(|entity| {
+                text(entity, "kind") == Some("machine")
+                    && text(entity, "buildingId") == Some("ray_receiver")
+                    && finite(entity.get("machineCount")) > 0.0
+                    && matches!(
+                        text(entity, "recipeId"),
+                        Some("ray_power" | "critical_photon")
+                    )
+                    && ray_receiver_runnable(state, base, entity)
+            })
+            .collect::<Vec<_>>();
+        let mut generation_by_system = HashMap::<String, f64>::new();
+        let mut capacity_by_system = HashMap::<String, f64>::new();
+        for receiver in &receivers {
+            let system_id =
+                system_for_planet(state, text(receiver, "planetId").unwrap_or_default())
+                    .ok_or_else(|| anyhow!("native Dyson receiver planet is unknown"))?;
+            generation_by_system
+                .entry(system_id.to_owned())
+                .or_insert_with(|| system_generation(base, &dyson, system_id));
+            *capacity_by_system.entry(system_id.to_owned()).or_default() +=
+                rated * finite(receiver.get("machineCount"));
+        }
+        let mut result = Reception::default();
+        let mut receiver_load = 0.0;
+        for receiver in receivers {
+            let entity_id = text(receiver, "id").unwrap_or_default();
+            let system_id =
+                system_for_planet(state, text(receiver, "planetId").unwrap_or_default())
+                    .ok_or_else(|| anyhow!("native Dyson receiver planet is unknown"))?;
+            let capacity = capacity_by_system.get(system_id).copied().unwrap_or(0.0);
+            let efficiency = if capacity <= EPSILON {
+                0.0
+            } else {
+                (generation_by_system.get(system_id).copied().unwrap_or(0.0) / capacity).min(1.0)
+            };
+            let allocation = rated * finite(receiver.get("machineCount")) * efficiency;
+            result
+                .allocation_by_entity
+                .insert(entity_id.to_owned(), allocation);
+            result
+                .efficiency_by_entity
+                .insert(entity_id.to_owned(), efficiency);
+            if text(receiver, "recipeId") == Some("ray_power") {
+                result
+                    .ray_power_by_entity
+                    .insert(entity_id.to_owned(), allocation);
+            }
+            receiver_load += allocation;
+        }
+        result.receiver_load_kw = receiver_load;
+        base.get_mut("dysonSwarm")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native Dyson swarm is missing"))?
+            .insert("receiverLoadKw".to_owned(), Value::from(receiver_load));
+        Ok(result)
+    }
+
+    fn legacy_run_ray_receivers(
+        state: &CoreState,
+        base: &mut Map<String, Value>,
+        entities: &mut [Value],
+        seconds: f64,
+        credits: &crate::belts::OutputCredits,
+        reception: &Reception,
+    ) -> anyhow::Result<()> {
+        let mut produced = 0.0;
+        for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
+            if text(entity, "kind") != Some("machine")
+                || text(entity, "buildingId") != Some("ray_receiver")
+            {
+                continue;
+            }
+            let entity_id = text(entity, "id").unwrap_or_default().to_owned();
+            let recipe_id = text(entity, "recipeId").unwrap_or_default().to_owned();
+            let allocation = reception
+                .allocation_by_entity
+                .get(&entity_id)
+                .copied()
+                .unwrap_or(0.0);
+            set_number(entity, "powerOutputKw", rounded(allocation, 2))?;
+            set_number(entity, "productionRate", 0.0)?;
+            set_number(entity, "utilization", 0.0)?;
+            let Some(recipe) = state.catalog.recipes.get(&recipe_id) else {
+                set_number(entity, "progress", 0.0)?;
+                continue;
+            };
+            if recipe
+                .required_tech_id
+                .as_deref()
+                .is_some_and(|id| !completed(base, id))
+            {
+                set_number(entity, "progress", 0.0)?;
+                continue;
+            }
+            let efficiency = reception
+                .efficiency_by_entity
+                .get(&entity_id)
+                .copied()
+                .unwrap_or(0.0);
+            if recipe_id == "ray_power" {
+                set_number(entity, "progress", 0.0)?;
+                set_number(entity, "utilization", efficiency)?;
+                continue;
+            }
+            if recipe_id != "critical_photon" || allocation <= EPSILON {
+                continue;
+            }
+            let building = state
+                .catalog
+                .buildings
+                .get("ray_receiver")
+                .ok_or_else(|| anyhow!("native ray receiver catalog is missing"))?;
+            let cycles_per_second =
+                building.speed * finite(entity.get("machineCount")) / recipe.duration;
+            let potential = cycles_per_second * seconds * efficiency;
+            let current = entity
+                .get("outputs")
+                .and_then(Value::as_object)
+                .and_then(|outputs| outputs.get("critical_photon"))
+                .map(|value| finite(Some(value)))
+                .unwrap_or(0.0);
+            let maximum = ((output_capacity(state, base, entity) - current).max(0.0)
+                + crate::belts::output_credit(state, credits, &entity_id, "critical_photon")
+                + EPSILON)
+                .floor();
+            if maximum < 1.0 || potential <= EPSILON {
+                continue;
+            }
+            let progress = finite(entity.get("progress"));
+            let work = potential.min((maximum - progress).max(0.0));
+            let progressed = rounded(progress + work, 6);
+            let cycles = maximum.min((progressed + EPSILON).floor());
+            if cycles > 0.0 {
+                entity
+                    .get_mut("outputs")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| anyhow!("native ray receiver outputs are missing"))?
+                    .insert(
+                        "critical_photon".to_owned(),
+                        Value::from((current + cycles).floor()),
+                    );
+                produced += cycles;
+            }
+            set_number(
+                entity,
+                "progress",
+                rounded((progressed - cycles).max(0.0), 6),
+            )?;
+            let activity = if potential > EPSILON {
+                (work / potential).min(1.0)
+            } else {
+                0.0
+            };
+            set_number(entity, "utilization", rounded(efficiency * activity, 4))?;
+            set_number(
+                entity,
+                "productionRate",
+                rounded(
+                    cycles_per_second * 60.0 * rounded(efficiency * activity, 4),
+                    2,
+                ),
+            )?;
+        }
+        if produced > 0.0 {
+            let total = base
+                .get_mut("totalProduced")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native total production record is missing"))?;
+            let current = finite(total.get("critical_photon"));
+            total.insert(
+                "critical_photon".to_owned(),
+                Value::from((current + produced).floor()),
+            );
+        }
+        Ok(())
+    }
+
+    fn run_legacy_receiver_matrix(
+        state: &CoreState,
+        source: &[Value],
+    ) -> (Value, Vec<Value>, Reception) {
+        let mut base = fixture_base();
+        let base = base.as_object_mut().unwrap();
+        let mut entities = source.to_vec();
+        let reception = legacy_calculate_reception(state, base, &entities).unwrap();
+        legacy_run_ray_receivers(
+            state,
+            base,
+            &mut entities,
+            1.75,
+            &crate::belts::OutputCredits::default(),
+            &reception,
+        )
+        .unwrap();
+        (Value::Object(base.clone()), entities, reception)
+    }
+
+    fn run_receiver_matrix(
+        state: &CoreState,
+        source: &[Value],
+        worker_count: usize,
+    ) -> (Value, Vec<Value>, Reception) {
+        let runtime = DeterministicRuntime::for_test(worker_count);
+        let mut base = fixture_base();
+        let base = base.as_object_mut().unwrap();
+        let mut entities = source.to_vec();
+        let reception = calculate_reception_with_runtime(&runtime, state, base, &entities).unwrap();
+        run_ray_receivers_with_runtime(
+            &runtime,
+            state,
+            base,
+            &mut entities,
+            1.75,
+            &crate::belts::OutputCredits::default(),
+            &reception,
+        )
+        .unwrap();
+        (Value::Object(base.clone()), entities, reception)
+    }
+
+    #[test]
+    fn ray_receiver_reception_and_settlement_are_byte_exact_at_all_worker_limits() {
+        let source = receiver_matrix(PARALLEL_MIN_ITEMS + 257);
+        let state = fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+        let legacy = run_legacy_receiver_matrix(&state, &source);
+        let baseline = run_receiver_matrix(&state, &source, 1);
+        let baseline_bytes = serde_json::to_vec(&(&baseline.0, &baseline.1)).unwrap();
+        assert_eq!(
+            baseline_bytes,
+            serde_json::to_vec(&(&legacy.0, &legacy.1)).unwrap(),
+            "parallel probe and stable replay must match the prior serial settlement"
+        );
+        assert_eq!(
+            baseline.2.allocation_by_entity,
+            legacy.2.allocation_by_entity
+        );
+        assert_eq!(
+            baseline.2.efficiency_by_entity,
+            legacy.2.efficiency_by_entity
+        );
+        assert_eq!(baseline.2.ray_power_by_entity, legacy.2.ray_power_by_entity);
+        assert_eq!(baseline.2.receiver_load_kw, legacy.2.receiver_load_kw);
+        let baseline_hash = fixture_checksum(&baseline_bytes);
+        assert_eq!(baseline_hash, "8cfa2421");
+        assert_eq!(
+            baseline.2.receiver_indices,
+            (0..source.len()).collect::<Vec<_>>(),
+            "settlement index must retain inactive receivers for status reset"
+        );
+        for worker_count in [2, 4, 8] {
+            let observed = run_receiver_matrix(&state, &source, worker_count);
+            let observed_bytes = serde_json::to_vec(&(&observed.0, &observed.1)).unwrap();
+            assert_eq!(
+                fixture_checksum(&observed_bytes),
+                baseline_hash,
+                "ray receiver state hash diverged for {worker_count} workers"
+            );
+            assert_eq!(observed_bytes, baseline_bytes);
+            assert_eq!(
+                observed.2.allocation_by_entity,
+                baseline.2.allocation_by_entity
+            );
+            assert_eq!(
+                observed.2.efficiency_by_entity,
+                baseline.2.efficiency_by_entity
+            );
+            assert_eq!(
+                observed.2.ray_power_by_entity,
+                baseline.2.ray_power_by_entity
+            );
+            assert_eq!(observed.2.receiver_load_kw, baseline.2.receiver_load_kw);
+            assert_eq!(observed.2.receiver_indices, baseline.2.receiver_indices);
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+        assert!(
+            finite(
+                baseline
+                    .0
+                    .get("totalProduced")
+                    .and_then(|total| total.get("critical_photon"))
+            ) > 123.0
+        );
+        for (before, after) in source.iter().zip(&baseline.1) {
+            assert_eq!(
+                serde_json::to_vec(&before["mod:receiver/opaque"]).unwrap(),
+                serde_json::to_vec(&after["mod:receiver/opaque"]).unwrap()
+            );
+        }
+        assert_eq!(
+            serde_json::to_vec(&fixture_base()["mod:base/opaque"]).unwrap(),
+            serde_json::to_vec(&baseline.0["mod:base/opaque"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn sparse_receiver_topology_probes_only_receivers_and_matches_serial_oracle() {
+        let (source, expected_receiver_indices) =
+            sparse_receiver_matrix(PARALLEL_MIN_ITEMS * 4 + 37);
+        let state = fixture_state(&source);
+        assert_eq!(
+            state.factory_topology.ray_receiver_indices,
+            expected_receiver_indices
+        );
+        assert_eq!(
+            state.factory_topology.ray_receiver_indices.capacity(),
+            expected_receiver_indices.len(),
+            "receiver topology capacity should be trimmed after load"
+        );
+        assert!(
+            state.factory_topology.non_station_indices.len()
+                > state.factory_topology.ray_receiver_indices.len() * 2_000
+        );
+
+        for worker_count in [1, 2, 4, 8] {
+            let probe_count = AtomicUsize::new(0);
+            let observed_indices = collect_ordered_receiver_probes_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &state.factory_topology.ray_receiver_indices,
+                |entity_index| {
+                    probe_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    Ok(entity_index)
+                },
+            )
+            .unwrap();
+            assert_eq!(observed_indices, expected_receiver_indices);
+            assert_eq!(
+                probe_count.load(AtomicOrdering::SeqCst),
+                expected_receiver_indices.len(),
+                "discovery work must be O(receivers), worker_count={worker_count}"
+            );
+        }
+
+        let state_hash = state.canonical_sha256().unwrap();
+        let legacy = run_legacy_receiver_matrix(&state, &source);
+        let baseline = run_receiver_matrix(&state, &source, 1);
+        let baseline_bytes = serde_json::to_vec(&(&baseline.0, &baseline.1)).unwrap();
+        let baseline_hash = fixture_checksum(&baseline_bytes);
+        assert_eq!(baseline_hash, "8a1a308f");
+        assert_eq!(
+            baseline_bytes,
+            serde_json::to_vec(&(&legacy.0, &legacy.1)).unwrap()
+        );
+        assert_eq!(
+            baseline.2.allocation_by_entity,
+            legacy.2.allocation_by_entity
+        );
+        assert_eq!(
+            baseline.2.efficiency_by_entity,
+            legacy.2.efficiency_by_entity
+        );
+        assert_eq!(baseline.2.ray_power_by_entity, legacy.2.ray_power_by_entity);
+        assert_eq!(baseline.2.receiver_load_kw, legacy.2.receiver_load_kw);
+        assert_eq!(baseline.2.receiver_indices, expected_receiver_indices);
+
+        for worker_count in [2, 4, 8] {
+            let observed = run_receiver_matrix(&state, &source, worker_count);
+            let observed_bytes = serde_json::to_vec(&(&observed.0, &observed.1)).unwrap();
+            assert_eq!(fixture_checksum(&observed_bytes), baseline_hash);
+            assert_eq!(observed_bytes, baseline_bytes);
+            assert_eq!(
+                observed.2.allocation_by_entity,
+                baseline.2.allocation_by_entity
+            );
+            assert_eq!(
+                observed.2.efficiency_by_entity,
+                baseline.2.efficiency_by_entity
+            );
+            assert_eq!(
+                observed.2.ray_power_by_entity,
+                baseline.2.ray_power_by_entity
+            );
+            assert_eq!(observed.2.receiver_load_kw, baseline.2.receiver_load_kw);
+            assert_eq!(observed.2.receiver_indices, baseline.2.receiver_indices);
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+    }
+
+    #[test]
+    fn indexed_receiver_still_applies_runtime_semantic_filtering() {
+        let source = receiver_matrix(6);
+        let state = fixture_state(&source);
+        let stale_index = state.factory_topology.ray_receiver_indices[5];
+        let mut runtime_entities = source.clone();
+        runtime_entities[stale_index]["kind"] = Value::from("vein");
+        runtime_entities[stale_index]["buildingId"] = Value::Null;
+        let untouched = serde_json::to_vec(&runtime_entities[stale_index]).unwrap();
+        let mut base = fixture_base();
+        let reception = calculate_reception_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &state,
+            base.as_object_mut().unwrap(),
+            &runtime_entities,
+        )
+        .unwrap();
+        assert_eq!(reception.receiver_indices, (0..6).collect::<Vec<_>>());
+        assert!(
+            !reception
+                .allocation_by_entity
+                .contains_key("mod:receiver/00005/Ω🚀")
+        );
+        run_ray_receivers_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut runtime_entities,
+            1.75,
+            &crate::belts::OutputCredits::default(),
+            &reception,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&runtime_entities[stale_index]).unwrap(),
+            untouched
+        );
+    }
+
+    #[test]
+    fn locked_receiver_resets_progress_without_producing_or_losing_mod_data() {
+        let mut source = vec![receiver_entity(5)];
+        source[0]["recipeId"] = Value::from("critical_photon");
+        source[0]["progress"] = Value::from(0.75);
+        let state = fixture_state(&source);
+        let mut base = fixture_base();
+        base["research"]["completedTechIds"] = json!([]);
+        let base = base.as_object_mut().unwrap();
+        let original_mod = serde_json::to_vec(&source[0]["mod:receiver/opaque"]).unwrap();
+        let reception = calculate_reception_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &state,
+            base,
+            &source,
+        )
+        .unwrap();
+        let mut candidate = source.clone();
+        run_ray_receivers_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &state,
+            base,
+            &mut candidate,
+            1.75,
+            &crate::belts::OutputCredits::default(),
+            &reception,
+        )
+        .unwrap();
+
+        assert_eq!(finite(candidate[0].get("progress")), 0.0);
+        assert_eq!(finite(candidate[0].get("productionRate")), 0.0);
+        assert_eq!(base["totalProduced"]["critical_photon"], Value::from(123));
+        assert_eq!(
+            serde_json::to_vec(&candidate[0]["mod:receiver/opaque"]).unwrap(),
+            original_mod
+        );
+    }
+
+    #[test]
+    fn receiver_probe_failure_uses_lowest_index_waits_and_keeps_sources_atomic() {
+        let mut source = receiver_matrix(PARALLEL_MIN_ITEMS + 97);
+        for index in [7, PARALLEL_MIN_ITEMS + 41] {
+            source[index]["recipeId"] = Value::from("critical_photon");
+            source[index]["machineCount"] = Value::from(2);
+            source[index]["planetId"] = Value::from(format!("mod:unknown-planet/{index}"));
+            source[index]["outputs"]["critical_photon"] = Value::from(0);
+        }
+        let state = fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+        let source_bytes = serde_json::to_vec(&source).unwrap();
+        let receiver_indices = state.factory_topology.ray_receiver_indices.clone();
+        for worker_count in [1, 2, 4, 8] {
+            let mut base = fixture_base();
+            let base_bytes = serde_json::to_vec(&base).unwrap();
+            let later_visited = AtomicBool::new(false);
+            let error = collect_ordered_receiver_probes_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &receiver_indices,
+                |entity_index| {
+                    if entity_index == PARALLEL_MIN_ITEMS + 41 {
+                        later_visited.store(true, AtomicOrdering::SeqCst);
+                    }
+                    probe_receiver_reception(
+                        &state,
+                        base.as_object().unwrap(),
+                        &source,
+                        entity_index,
+                    )
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "native Dyson receiver planet is unknown");
+            assert!(later_visited.load(AtomicOrdering::SeqCst));
+            assert_eq!(serde_json::to_vec(&source).unwrap(), source_bytes);
+            assert_eq!(serde_json::to_vec(&base).unwrap(), base_bytes);
+            assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+
+            let error = calculate_reception_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &state,
+                base.as_object_mut().unwrap(),
+                &source,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "native Dyson receiver planet is unknown");
+            assert_eq!(serde_json::to_vec(&base).unwrap(), base_bytes);
+        }
+    }
+
+    #[test]
+    fn ray_receiver_settlement_failure_is_atomic_at_all_worker_limits() {
+        let mut source = receiver_matrix(PARALLEL_MIN_ITEMS + 113);
+        let first_failure = 7;
+        let later_failure = PARALLEL_MIN_ITEMS + 51;
+        for index in [first_failure, later_failure] {
+            source[index]["recipeId"] = Value::from("critical_photon");
+            source[index]["machineCount"] = Value::from(3);
+            source[index]["outputs"] = Value::Null;
+            source[index]["progress"] = Value::from(0.95);
+        }
+        let state = fixture_state(&source);
+        let state_hash = state.canonical_sha256().unwrap();
+        for worker_count in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(worker_count);
+            let mut base = fixture_base();
+            let base = base.as_object_mut().unwrap();
+            let reception =
+                calculate_reception_with_runtime(&runtime, &state, base, &source).unwrap();
+            let mut candidate = source.clone();
+            let candidate_bytes = serde_json::to_vec(&candidate).unwrap();
+            let base_bytes = serde_json::to_vec(&base).unwrap();
+            let later_visited = AtomicBool::new(false);
+            let environment = RayReceiverSettlementEnvironment {
+                state: &state,
+                base,
+                entities: &candidate,
+                seconds: 1.75,
+                credits: &crate::belts::OutputCredits::default(),
+                reception: &reception,
+            };
+            let error = collect_ordered_receiver_probes_with_runtime(
+                &runtime,
+                &reception.receiver_indices,
+                |entity_index| {
+                    if entity_index == later_failure {
+                        later_visited.store(true, AtomicOrdering::SeqCst);
+                    }
+                    probe_ray_receiver_settlement(&environment, entity_index)
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "native ray receiver outputs are missing");
+            assert!(later_visited.load(AtomicOrdering::SeqCst));
+            let error = run_ray_receivers_with_runtime(
+                &runtime,
+                &state,
+                base,
+                &mut candidate,
+                1.75,
+                &crate::belts::OutputCredits::default(),
+                &reception,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "native ray receiver outputs are missing");
+            assert_eq!(serde_json::to_vec(&candidate).unwrap(), candidate_bytes);
+            assert_eq!(serde_json::to_vec(&base).unwrap(), base_bytes);
+            assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+        }
+    }
+
+    #[test]
+    fn small_receiver_probe_batches_stay_serial_and_ordered() {
+        let indices = (0..31).collect::<Vec<_>>();
+        let saw_rayon_worker = AtomicBool::new(false);
+        let observed = collect_ordered_receiver_probes_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &indices,
+            |entity_index| {
+                if rayon::current_thread_index().is_some() {
+                    saw_rayon_worker.store(true, AtomicOrdering::SeqCst);
+                }
+                Ok(entity_index)
+            },
+        )
+        .unwrap();
+        assert_eq!(observed, indices);
+        assert!(!saw_rayon_worker.load(AtomicOrdering::SeqCst));
+    }
 }

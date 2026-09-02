@@ -208,6 +208,7 @@ function normalizedDefaultBeltLanes(value: unknown): number {
 export const DEFAULT_PLANET_TRAY_ITEM_LIMIT = 1_000_000;
 export const MIN_CANVAS_REGION_SIZE = 40;
 const EPSILON = 0.0001;
+const UTF8_ORDER_ENCODER = new TextEncoder();
 const TIME_WARP_MINIMUM_MULTIPLIER = 4;
 const TIME_WARP_BASE_POWER_KW = 100_000;
 
@@ -1874,13 +1875,15 @@ interface IndexedStationSlot {
 
 interface IndexedBeltRoute {
   belt: BeltConnection;
+  /** Zero-based row in the persisted belt array; global capacity tie-break. */
+  persistedIndex: number;
   source?: FactoryEntity;
   target?: FactoryEntity;
   capacity: number;
   compatible: boolean;
   targetCapacityIndex?: number;
   sourceGroupIndex?: number;
-  /** Stable locale order inside one source/item group for deterministic batching. */
+  /** Stable UTF-8 byte order inside one source/item group for deterministic batching. */
   stableSourceOrder?: number;
   targetInputCapacity?: number;
   /** Per-call exact-settlement scratch; runtime-only and never serialized. */
@@ -1919,6 +1922,8 @@ export interface SimulationBeltRuntimeIndex {
   routeGroups: IndexedBeltRouteGroup[];
   routeGroupByKey: Map<string, IndexedBeltRouteGroup>;
   groupKeyByBeltId: Map<string, string>;
+  /** Built-in legacy station sources with at least one routed item group. */
+  trackedStationSourceIds: Set<string>;
   /** Groups carrying persisted runtime state; rebuilt from belt fields on cache creation. */
   activeGroupKeys: Set<string>;
   /** Enabled only when the rebuilt index proves a meaningful dormant cohort. */
@@ -2154,6 +2159,7 @@ export function createSimulationLookupContext(
       routeGroups: [],
       routeGroupByKey: new Map(),
       groupKeyByBeltId: new Map(),
+      trackedStationSourceIds: new Set(),
       activeGroupKeys: new Set(),
       activeQueueEnabled: false,
       initiallyDormantRouteCount: 0,
@@ -2278,7 +2284,7 @@ export function createSimulationLookupContext(
     if (itemBelts) itemBelts.push(belt);
     else planetRuntime.itemToBelts.set(belt.itemId, [belt]);
   }
-  context.beltRoutes = context.sortedBelts.map((belt) => {
+  context.beltRoutes = context.sortedBelts.map((belt, persistedIndex) => {
     const source = context.entityById.get(belt.source);
     const target = context.entityById.get(belt.target);
     const compatible = Boolean(source && target && source.planetId === target.planetId &&
@@ -2286,6 +2292,7 @@ export function createSimulationLookupContext(
       targetConsumes(state, target, belt.itemId, belt.targetPortIndex));
     return {
       belt,
+      persistedIndex,
       source,
       target,
       capacity: getBeltCapacity(belt),
@@ -2309,6 +2316,8 @@ export function createSimulationLookupContext(
     const key = `${route.belt.source}:${route.belt.itemId}`;
     let group = context.beltRuntime.routeGroupByKey.get(key);
     if (!group) {
+      const trackedBuiltinLogisticsStation = Boolean(route.source &&
+        isTrackedBuiltinLogisticsStation(state, route.source));
       group = {
         index: context.beltRuntime.routeGroups.length,
         key,
@@ -2316,10 +2325,16 @@ export function createSimulationLookupContext(
         source: route.source,
         itemId: route.belt.itemId,
         routes: [],
-        potentiallyProduces: Boolean(route.source && beltSourceMayProduceDuringStep(route.source, route.belt.itemId)),
+        potentiallyProduces: Boolean(route.source && (
+          beltSourceMayProduceDuringStep(route.source, route.belt.itemId) ||
+          route.source.kind === "station" && !trackedBuiltinLogisticsStation
+        )),
       };
       context.beltRuntime.routeGroupByKey.set(key, group);
       context.beltRuntime.routeGroups.push(group);
+      if (trackedBuiltinLogisticsStation && route.source) {
+        context.beltRuntime.trackedStationSourceIds.add(route.source.id);
+      }
     }
     group.routes.push(route);
     route.sourceGroupIndex = group.index;
@@ -2329,7 +2344,7 @@ export function createSimulationLookupContext(
   let initiallyDormantRouteCount = 0;
   for (const group of context.beltRuntime.routeGroups) {
     [...group.routes]
-      .sort((left, right) => left.belt.id.localeCompare(right.belt.id))
+      .sort((left, right) => compareUtf8(left.belt.id, right.belt.id))
       .forEach((route, index) => { route.stableSourceOrder = index; });
     const sourceAmount = group.source?.outputs[group.itemId] ?? 0;
     // Input settlement establishes this step's belt credit before production.
@@ -4632,6 +4647,138 @@ function beltSourceMayProduceDuringStep(source: FactoryEntity, itemId: ItemId): 
     (source.kind === "station" && isQuantumStation(source));
 }
 
+/**
+ * Only the built-in five-slot legacy PLS/ILS shape has a closed inventory-writer
+ * proof. Every opaque, modded, transitioning, quantum, or elevator-like station
+ * remains conservatively awake so a fallback scan cannot change gameplay.
+ */
+function isTrackedBuiltinLogisticsStation(state: GameState, source: FactoryEntity): boolean {
+  const record = source as FactoryEntity & Record<string, unknown>;
+  const buildingId = source.buildingId;
+  if (source.kind !== "station" ||
+    buildingId !== "planetary_logistics_station" && buildingId !== "interstellar_logistics_station" ||
+    state.contentPacks.length > 0 || BUILDINGS[buildingId].kind !== "station" || isElevatorStation(source) ||
+    record.quantumMode !== undefined && record.quantumMode !== "legacy" ||
+    record.stationOperationMode !== undefined && record.stationOperationMode !== "legacy" ||
+    record.stationModeTransition !== undefined && record.stationModeTransition !== null ||
+    record.quantumTransition !== undefined && record.quantumTransition !== null ||
+    !Number.isFinite(source.machineCount) || source.machineCount < 1 ||
+    !record.inputs || typeof record.inputs !== "object" || Array.isArray(record.inputs) ||
+    !record.outputs || typeof record.outputs !== "object" || Array.isArray(record.outputs) ||
+    !Array.isArray(record.stationRoutes) || !Array.isArray(record.stationSlots) || record.stationSlots.length !== 5) {
+    return false;
+  }
+  const configuredItems = new Set<string>();
+  return record.stationSlots.every((rawSlot) => {
+    if (!rawSlot || typeof rawSlot !== "object" || Array.isArray(rawSlot)) return false;
+    const slot = rawSlot as unknown as Record<string, unknown>;
+    const localMode = nullishStringOrDefault(slot.localMode, "storage");
+    const remoteMode = nullishStringOrDefault(slot.remoteMode, "storage");
+    const routePolicy = nullishStringOrDefault(slot.routePolicy, "relay-preferred");
+    if (!localMode || !remoteMode || !routePolicy ||
+      !["supply", "demand", "storage"].includes(localMode) ||
+      !["supply", "demand", "storage"].includes(remoteMode) ||
+      !["direct", "relay-preferred", "relay-required"].includes(routePolicy) ||
+      ![0.1, 0.25, 0.5, 1].includes(slot.minimumLoad as number)) return false;
+    const itemId = slot.itemId;
+    if (itemId === undefined || itemId === null) return true;
+    if (typeof itemId !== "string" || !Object.prototype.hasOwnProperty.call(ITEMS, itemId) ||
+      configuredItems.has(itemId)) return false;
+    configuredItems.add(itemId);
+    return true;
+  });
+}
+
+function nullishStringOrDefault(value: unknown, fallback: string): string | undefined {
+  if (value === undefined || value === null) return fallback;
+  return typeof value === "string" ? value : undefined;
+}
+
+/** Match Rust `str::cmp` for well-formed Unicode without locale-dependent ordering. */
+function compareUtf8(left: string, right: string): number {
+  const leftBytes = UTF8_ORDER_ENCODER.encode(left);
+  const rightBytes = UTF8_ORDER_ENCODER.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    const delta = leftBytes[index] - rightBytes[index];
+    if (delta !== 0) return delta;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+/** Preserve full/fallback row order while omitting only proven-dormant tracked station item groups. */
+function selectFallbackBeltRoutes(
+  state: GameState,
+  routes: IndexedBeltRoute[],
+  provenTrackedSourceIds?: ReadonlySet<string>,
+  allowanceCaps?: ReadonlyMap<string, number>,
+): IndexedBeltRoute[] {
+  const trackedSourceIds = provenTrackedSourceIds ?? new Set(state.entities
+    .filter((entity) => isTrackedBuiltinLogisticsStation(state, entity))
+    .map((entity) => entity.id));
+  if (trackedSourceIds.size === 0) return routes;
+  const trackedGroupKeys = new Set<string>();
+  const activeTrackedGroupKeys = new Set<string>();
+  for (const route of routes) {
+    const source = route.source;
+    if (!source || !trackedSourceIds.has(source.id)) continue;
+    const key = `${source.id}:${route.belt.itemId}`;
+    trackedGroupKeys.add(key);
+    if ((source.outputs[route.belt.itemId] ?? 0) > EPSILON || beltHasRuntimeSignal(route.belt) ||
+      allowanceCaps?.has(route.belt.id)) activeTrackedGroupKeys.add(key);
+  }
+  if (trackedGroupKeys.size === 0) return routes;
+  return routes.filter((route) => {
+    const key = `${route.belt.source}:${route.belt.itemId}`;
+    return !trackedGroupKeys.has(key) || activeTrackedGroupKeys.has(key);
+  });
+}
+
+/**
+ * Independent flat-oracle spelling of the only route class allowed to sleep.
+ * The oracle still visits every persisted row for O(all) accounting, but it
+ * must not manufacture clock credit for a built-in legacy station item group
+ * that has no cargo, persisted signal, or explicit reservation evidence.
+ * Keep this separate from the indexed activity set so differential tests can
+ * catch a stale or incomplete runtime index.
+ */
+function collectFlatOracleDormantStationGroups(
+  state: GameState,
+  routes: readonly IndexedBeltRoute[],
+  allowanceCaps?: ReadonlyMap<string, number>,
+): ReadonlyMap<FactoryEntity, ReadonlySet<ItemId>> {
+  const activeBySource = new Map<FactoryEntity, Map<ItemId, boolean>>();
+  for (const route of routes) {
+    const source = route.source;
+    if (!source || !isTrackedBuiltinLogisticsStation(state, source)) continue;
+    let activeByItem = activeBySource.get(source);
+    if (!activeByItem) {
+      activeByItem = new Map<ItemId, boolean>();
+      activeBySource.set(source, activeByItem);
+    }
+    const active = (source.outputs[route.belt.itemId] ?? 0) > EPSILON ||
+      beltHasRuntimeSignal(route.belt) || allowanceCaps?.has(route.belt.id) === true;
+    activeByItem.set(route.belt.itemId, activeByItem.get(route.belt.itemId) === true || active);
+  }
+  const dormantBySource = new Map<FactoryEntity, ReadonlySet<ItemId>>();
+  for (const [source, activeByItem] of activeBySource) {
+    const dormantItems = new Set<ItemId>();
+    for (const [itemId, active] of activeByItem) {
+      if (!active) dormantItems.add(itemId);
+    }
+    if (dormantItems.size > 0) dormantBySource.set(source, dormantItems);
+  }
+  return dormantBySource;
+}
+
+function flatOracleRouteIsProvenDormant(
+  dormantBySource: ReadonlyMap<FactoryEntity, ReadonlySet<ItemId>> | undefined,
+  route: IndexedBeltRoute,
+): boolean {
+  const source = route.source;
+  return Boolean(source && dormantBySource?.get(source)?.has(route.belt.itemId));
+}
+
 function activeBeltSettlementRoutes(
   lookup: SimulationLookupContext,
   seconds: number,
@@ -4659,7 +4806,16 @@ function activeBeltSettlementRoutes(
     groupKeys.add(group.key);
     routes.push(...group.routes);
   }
-  return { routes, groupKeys };
+  return { routes: restorePersistedBeltRouteOrder(routes), groupKeys };
+}
+
+function restorePersistedBeltRouteOrder(routes: IndexedBeltRoute[]): IndexedBeltRoute[] {
+  for (let index = 1; index < routes.length; index += 1) {
+    if (routes[index - 1].persistedIndex <= routes[index].persistedIndex) continue;
+    routes.sort((left, right) => left.persistedIndex - right.persistedIndex);
+    break;
+  }
+  return routes;
 }
 
 function refreshActiveBeltGroups(lookup: SimulationLookupContext, groupKeys: ReadonlySet<string>): void {
@@ -4697,14 +4853,14 @@ function staticBeltTargetInputCapacity(state: GameState, target: FactoryEntity, 
   return getEntityItemInputCapacity(state, target, itemId);
 }
 
-function createIndexedBeltRoutes(state: GameState, sorted = false): IndexedBeltRoute[] {
+function createIndexedBeltRoutes(state: GameState): IndexedBeltRoute[] {
   const entityById = new Map(state.entities.map((entity) => [entity.id, entity]));
-  const belts = sorted ? [...state.belts].sort((left, right) => left.id.localeCompare(right.id)) : state.belts;
-  return belts.map((belt) => {
+  return state.belts.map((belt, persistedIndex) => {
     const source = entityById.get(belt.source);
     const target = entityById.get(belt.target);
     return {
       belt,
+      persistedIndex,
       source,
       target,
       capacity: getBeltCapacity(belt),
@@ -4724,6 +4880,7 @@ function transferBelts(
   lookup?: SimulationLookupContext,
   skippedBeltIds?: ReadonlySet<string>,
   profiler?: SimulationProfiler,
+  forceFlatRouteOracle = false,
 ): void {
   const runtimeEpoch = lookup ? ++lookup.beltRuntime.settlementEpoch : 0;
   const distributionEntries: Array<IndexedBeltRoute | RuntimeBeltTransferGroup> = lookup
@@ -4777,10 +4934,21 @@ function transferBelts(
       planetRuntime.powerLimitedBelts.clear();
     }
   }
-  const activeSelection = lookup?.beltRuntime.activeQueueEnabled
+  const allRoutes = lookup?.beltRoutes ?? createIndexedBeltRoutes(state);
+  const activeSelection = !forceFlatRouteOracle && lookup?.beltRuntime.activeQueueEnabled
     ? activeBeltSettlementRoutes(lookup, seconds, allowanceCaps)
     : null;
-  const routes = activeSelection?.routes ?? lookup?.beltRoutes ?? createIndexedBeltRoutes(state);
+  const routes = forceFlatRouteOracle
+    ? allRoutes
+    : activeSelection?.routes ?? selectFallbackBeltRoutes(
+      state,
+      allRoutes,
+      lookup?.beltRuntime.trackedStationSourceIds,
+      allowanceCaps,
+    );
+  const flatDormantGroups = forceFlatRouteOracle
+    ? collectFlatOracleDormantStationGroups(state, routes, allowanceCaps)
+    : undefined;
   if (profiler) {
     profiler.beltRouteChecks += routes.length;
     profiler.beltStableRoutesSkipped += Math.max(0, (lookup?.beltRoutes.length ?? routes.length) - routes.length);
@@ -4789,6 +4957,7 @@ function transferBelts(
   for (const route of routes) {
     const belt = route.belt;
     if (skippedBeltIds?.has(belt.id)) continue;
+    if (flatOracleRouteIsProvenDormant(flatDormantGroups, route)) continue;
     const planetRuntime = lookup?.beltRuntime.activeQueueEnabled
       ? lookup.beltRuntime.byPlanet.get(belt.planetId)
       : undefined;
@@ -4939,7 +5108,8 @@ function transferBelts(
       group.source.routingCursor = 0;
       return available;
     }
-    const candidates = requestedCandidates.filter(candidateUsable).sort((left, right) => left.belt.id.localeCompare(right.belt.id));
+    const candidates = requestedCandidates.filter(candidateUsable)
+      .sort((left, right) => compareUtf8(left.belt.id, right.belt.id));
     if (candidates.length === 0) return available;
     let cursor = group.source.routingCursor % candidates.length;
     while (available > 0) {
@@ -5067,7 +5237,8 @@ function transferBelts(
     let available = group.available;
 
     if (lookup) {
-      group.candidates.sort((left, right) => left.stableSourceOrder - right.stableSourceOrder || left.belt.id.localeCompare(right.belt.id));
+      group.candidates.sort((left, right) => left.stableSourceOrder - right.stableSourceOrder ||
+        compareUtf8(left.belt.id, right.belt.id));
       if (group.candidates.length === 1 || group.source.kind === "splitter" && group.source.distributionMode !== "priority") {
         available = distributeFairIndexed(group, group.candidates, available);
       } else {
@@ -5124,13 +5295,16 @@ function reserveBeltStepOutputCapacity(
   lookup?: SimulationLookupContext,
   skippedBeltIds?: ReadonlySet<string>,
   profiler?: SimulationProfiler,
+  forceFlatRouteOracle = false,
 ): BeltStepOutputReservation {
   const startedAt = profiler ? profileNow() : 0;
   const allowanceByBelt = new Map<string, number>();
   const outputCredits = new Map<string, number>();
   const remainingTargetCapacity = new Map<string, number>();
-  const routes = lookup?.beltRuntime.activeQueueEnabled
-    ? lookup.beltRuntime.routeGroups.flatMap((group) => {
+  const routes = forceFlatRouteOracle
+    ? lookup?.beltRoutes ?? createIndexedBeltRoutes(state)
+    : lookup?.beltRuntime.activeQueueEnabled
+    ? restorePersistedBeltRouteOrder(lookup.beltRuntime.routeGroups.flatMap((group) => {
       // Reservation runs after production. Re-admit a previously dormant
       // group when its output buffer now contains cargo, even if no belt had a
       // persisted flow signal at lookup construction time.
@@ -5139,13 +5313,19 @@ function reserveBeltStepOutputCapacity(
       return lookup.beltRuntime.activeGroupKeys.has(group.key) || hasCurrentOutput || hasRuntimeSignal
         ? group.routes
         : [];
-    })
-    : lookup
-      ? lookup.beltRoutes
-    : createIndexedBeltRoutes(state, true);
+    }))
+    : selectFallbackBeltRoutes(
+      state,
+      lookup?.beltRoutes ?? createIndexedBeltRoutes(state),
+      lookup?.beltRuntime.trackedStationSourceIds,
+    );
+  const flatDormantGroups = forceFlatRouteOracle
+    ? collectFlatOracleDormantStationGroups(state, routes)
+    : undefined;
   for (const route of routes) {
     const belt = route.belt;
     if (skippedBeltIds?.has(belt.id)) continue;
+    if (flatOracleRouteIsProvenDormant(flatDormantGroups, route)) continue;
     const source = route.source;
     const target = route.target;
     if (!route.compatible || !source || !target) continue;
@@ -7313,6 +7493,7 @@ function simulateStep(
   batchPowerStorage = true,
   batchConstructionAutomation = true,
   contractExperiment?: SimulationContractExperiment,
+  forceFlatRouteOracle = false,
 ): void {
   const elapsedBeforeStep = state.elapsedSeconds;
   const projectedElapsed = round(elapsedBeforeStep + seconds);
@@ -7338,10 +7519,26 @@ function simulateStep(
   if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
   subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforeInputBelts?.(state);
-  transferBelts(state, seconds, true, undefined, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
+  transferBelts(
+    state,
+    seconds,
+    true,
+    undefined,
+    seconds,
+    lookup,
+    contractExperiment?.skippedBeltIds,
+    profiler,
+    forceFlatRouteOracle,
+  );
   contractExperiment?.afterInputBelts?.(state);
   if (profiler) profiler.beltsMs += profileNow() - subsystemStartedAt;
-  const beltStepReservation = reserveBeltStepOutputCapacity(state, lookup, contractExperiment?.skippedBeltIds, profiler);
+  const beltStepReservation = reserveBeltStepOutputCapacity(
+    state,
+    lookup,
+    contractExperiment?.skippedBeltIds,
+    profiler,
+    forceFlatRouteOracle,
+  );
   runOrbitalCollectors(state, seconds, beltStepReservation.outputCredits, lookup);
   subsystemStartedAt = profiler ? profileNow() : 0;
   drainMaterialDeliveryHubs(state, seconds, lookup);
@@ -7383,7 +7580,17 @@ function simulateStep(
   }
   subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforeOutputBelts?.(state);
-  transferBelts(state, 0, false, beltStepReservation.allowanceByBelt, seconds, lookup, contractExperiment?.skippedBeltIds, profiler);
+  transferBelts(
+    state,
+    0,
+    false,
+    beltStepReservation.allowanceByBelt,
+    seconds,
+    lookup,
+    contractExperiment?.skippedBeltIds,
+    profiler,
+    forceFlatRouteOracle,
+  );
   contractExperiment?.afterOutputBelts?.(state);
   if (profiler) profiler.beltsMs += profileNow() - subsystemStartedAt;
   drainMaterialDeliveryHubs(state, seconds, lookup);
@@ -7586,6 +7793,8 @@ export interface SimulationAdvanceSession {
   lookup?: SimulationLookupContext;
   profiler?: SimulationProfiler;
   contractExperiment?: SimulationContractExperiment;
+  /** Test-only independent O(all) belt oracle; never persisted or enabled by product callers. */
+  forceFlatRouteOracle: boolean;
 }
 
 /**
@@ -7655,6 +7864,8 @@ function fastForwardQuiescentState(session: SimulationAdvanceSession): void {
 
 export interface SimulationAdvanceOptions {
   indexedLogistics?: boolean;
+  /** Test-only: bypass every active/dormant route filter and scan persisted belt rows. */
+  forceFlatRouteOracle?: boolean;
   batchPowerStorage?: boolean;
   batchConstructionAutomation?: boolean;
   profiler?: SimulationProfiler;
@@ -7752,11 +7963,12 @@ export function createSimulationAdvanceSession(state: GameState, seconds: number
     batchPowerStorage: options.batchPowerStorage !== false,
     batchConstructionAutomation: options.batchConstructionAutomation !== false,
     changed: totalSeconds > 0 || totalWallSeconds > 0,
-    lookup: totalSeconds > 0 && options.indexedLogistics !== false
+    lookup: totalSeconds > 0 && options.indexedLogistics !== false && options.forceFlatRouteOracle !== true
       ? options.lookup ?? createSimulationLookupContext(sessionState, options.profiler)
       : undefined,
     profiler: options.profiler,
     contractExperiment: options.contractExperiment,
+    forceFlatRouteOracle: options.forceFlatRouteOracle === true,
   };
 }
 
@@ -7807,6 +8019,7 @@ export function advanceSimulationSession(session: SimulationAdvanceSession, maxi
       session.batchPowerStorage,
       session.batchConstructionAutomation,
       session.contractExperiment,
+      session.forceFlatRouteOracle,
     );
     const wallStep = Math.min(session.remainingWallSeconds, step * wallPerSimulationSecond);
     if (session.state.speedrun?.enabled) {
@@ -10696,10 +10909,13 @@ export function pickFromEntity(state: GameState, entityId: string, itemId: ItemI
   const total = Math.floor((entity?.outputs[itemId] ?? 0) + EPSILON);
   const available = Math.max(0, total - reserved);
   if (!entity || available < 1 || (state.cargo && state.cargo.itemId !== itemId)) return state;
+  const currentCargo = Math.max(0, Math.floor(state.cargo?.amount ?? 0));
+  const remainingCargoCapacity = Math.max(0, 100 - currentCargo);
+  if (remainingCargoCapacity < 1) return state;
   const next = copyState(state);
   const target = next.entities.find((item) => item.id === entityId)!;
-  const currentCargo = next.cargo?.amount ?? 0;
-  const taken = Math.floor(Math.min(available, amount, 100 - currentCargo));
+  const taken = Math.floor(Math.min(available, amount, remainingCargoCapacity));
+  if (taken < 1) return state;
   target.outputs[itemId] = total - taken;
   next.cargo = {
     itemId,
@@ -10713,10 +10929,13 @@ export function pickFromEntityInput(state: GameState, entityId: string, itemId: 
   const entity = state.entities.find((item) => item.id === entityId);
   const available = Math.floor((entity?.inputs[itemId] ?? 0) + EPSILON);
   if (!entity || available < 1 || (state.cargo && state.cargo.itemId !== itemId)) return state;
+  const currentCargo = Math.max(0, Math.floor(state.cargo?.amount ?? 0));
+  const remainingCargoCapacity = Math.max(0, 100 - currentCargo);
+  if (remainingCargoCapacity < 1) return state;
   const next = copyState(state);
   const target = next.entities.find((item) => item.id === entityId)!;
-  const currentCargo = next.cargo?.amount ?? 0;
-  const taken = Math.floor(Math.min(available, amount, 100 - currentCargo));
+  const taken = Math.floor(Math.min(available, amount, remainingCargoCapacity));
+  if (taken < 1) return state;
   target.inputs[itemId] = available - taken;
   next.cargo = {
     itemId,
@@ -10849,9 +11068,12 @@ export function dropCargoToTray(state: GameState): GameState {
 export function pickFromTray(state: GameState, itemId: ItemId, amount = 100): GameState {
   const available = Math.floor((state.tray[itemId] ?? 0) + EPSILON);
   if (available < 1 || (state.cargo && state.cargo.itemId !== itemId)) return state;
+  const currentCargo = Math.max(0, Math.floor(state.cargo?.amount ?? 0));
+  const remainingCargoCapacity = Math.max(0, 100 - currentCargo);
+  if (remainingCargoCapacity < 1) return state;
   const next = copyState(state);
-  const currentCargo = next.cargo?.amount ?? 0;
-  const taken = Math.floor(Math.min(available, amount, 100 - currentCargo));
+  const taken = Math.floor(Math.min(available, amount, remainingCargoCapacity));
+  if (taken < 1) return state;
   next.tray[itemId] = available - taken;
   next.cargo = { itemId, amount: Math.floor(currentCargo + taken), origin: { kind: "tray" } };
   return next;

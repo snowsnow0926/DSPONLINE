@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopBridge } from "../desktop";
-import { beginWindowsNativeSave } from "./nativeSave";
+import { appendWindowsNativeWal, beginWindowsNativeSave } from "./nativeSave";
 
 function bridge(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
   return {
@@ -49,7 +49,14 @@ function bridge(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
   } as DesktopBridge;
 }
 
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
 afterEach(() => {
+  vi.runOnlyPendingTimers();
+  vi.clearAllTimers();
+  vi.useRealTimers();
   Reflect.deleteProperty(window, "dspDesktop");
 });
 
@@ -58,7 +65,7 @@ describe("Windows native save transaction", () => {
     expect(await beginWindowsNativeSave({
       slot: "normal-main",
       mode: "normal",
-      stateVersion: 47,
+      stateVersion: 47 as const,
       baseChecksum: "01234567",
       registryFingerprint: "01234567",
       revision: 7,
@@ -115,6 +122,58 @@ describe("Windows native save transaction", () => {
     expect(committed.walMaintenancePending).toBe(true);
     expect(warning).toHaveBeenCalledWith(expect.stringContaining("4096 bytes"));
     warning.mockRestore();
+  });
+
+  it("coalesces compaction until the slot has stayed idle after its latest commit", async () => {
+    let transaction = 0;
+    const desktop = bridge({
+      beginNativeSave: vi.fn(async () => ({ transactionId: `tx-${++transaction}` })),
+    });
+    Object.defineProperty(window, "dspDesktop", { configurable: true, value: desktop });
+    const request = {
+      slot: "normal-main" as const,
+      mode: "normal" as const,
+      stateVersion: 47 as const,
+      baseChecksum: "01234567",
+      registryFingerprint: "01234567",
+      revision: 7,
+      savedAtMs: 1,
+    };
+    const first = await beginWindowsNativeSave(request);
+    await first!.commit();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(desktop.compactNativeSave).not.toHaveBeenCalled();
+
+    // Beginning a newer checkpoint cancels the old idle deadline. Only the
+    // newer durable commit may schedule maintenance for this slot.
+    const second = await beginWindowsNativeSave({ ...request, savedAtMs: 2 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(desktop.compactNativeSave).not.toHaveBeenCalled();
+    await second!.commit();
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(desktop.compactNativeSave).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(desktop.compactNativeSave).toHaveBeenCalledTimes(1);
+    expect(desktop.compactNativeSave).toHaveBeenCalledWith({ slot: "normal-main", retainGenerations: 2 });
+  });
+
+  it("cancels pending compaction when a newer WAL operation becomes authoritative", async () => {
+    const desktop = bridge();
+    Object.defineProperty(window, "dspDesktop", { configurable: true, value: desktop });
+    const transaction = await beginWindowsNativeSave({
+      slot: "normal-main",
+      mode: "normal",
+      stateVersion: 47,
+      baseChecksum: "01234567",
+      registryFingerprint: "01234567",
+      revision: 7,
+      savedAtMs: 1,
+    });
+    await transaction!.commit();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await appendWindowsNativeWal("normal", 7, 8, "command-8", {})).toBe("appended");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(desktop.compactNativeSave).not.toHaveBeenCalled();
   });
 
   it("fails closed when the native service is unavailable", async () => {

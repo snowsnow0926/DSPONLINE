@@ -15,6 +15,13 @@ import type {
 } from "./types";
 
 export const BLUEPRINT_EXCHANGE_FORMAT_VERSION = 2;
+export const BLUEPRINT_EXCHANGE_MAX_BYTES = 1_048_576;
+export const BLUEPRINT_EXCHANGE_MAX_ENTITIES = 512;
+export const BLUEPRINT_EXCHANGE_MAX_BELTS = 1_024;
+export const BLUEPRINT_LIBRARY_MAX_ROWS = 64;
+
+const UTF8_ENCODER = new TextEncoder();
+const BLUEPRINT_EXCHANGE_MAX_GRAPH_NODES = 20_000;
 
 export interface BlueprintExchangeEnvelope {
   type: "dsp-idle-blueprint";
@@ -29,8 +36,173 @@ export interface BlueprintExchangeResult {
   issues: string[];
 }
 
+export type BlueprintImportFailureReason =
+  | "library-full"
+  | "invalid-next-id"
+  | "allocator-exhausted"
+  | "id-collision"
+  | "name-exhausted";
+
+export type BlueprintImportResult =
+  | Readonly<{ ok: true; state: GameState; blueprintId: string }>
+  | Readonly<{ ok: false; reason: BlueprintImportFailureReason }>;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function truncateWellFormedUtf16(value: string, maximumUnits: number): string {
+  let units = 0;
+  let result = "";
+  for (const character of value) {
+    const nextUnits = character.length;
+    if (units + nextUnits > maximumUnits) break;
+    result += character;
+    units += nextUnits;
+  }
+  return result;
+}
+
+function isExactIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function findDuplicateJsonKey(raw: string): boolean {
+  const stack: Array<Set<string> | null> = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index];
+    if (character === "{") {
+      stack.push(new Set());
+      continue;
+    }
+    if (character === "[") {
+      stack.push(null);
+      continue;
+    }
+    if (character === "}" || character === "]") {
+      stack.pop();
+      continue;
+    }
+    if (character !== "\"") continue;
+    const start = index;
+    for (index += 1; index < raw.length; index += 1) {
+      if (raw[index] === "\\") {
+        index += 1;
+        continue;
+      }
+      if (raw[index] === "\"") break;
+    }
+    if (index >= raw.length) return false;
+    let cursor = index + 1;
+    while (/\s/.test(raw[cursor] ?? "")) cursor += 1;
+    if (raw[cursor] !== ":" || !(stack.at(-1) instanceof Set)) continue;
+    let key: string;
+    try {
+      key = JSON.parse(raw.slice(start, index + 1)) as string;
+    } catch {
+      return false;
+    }
+    const keys = stack.at(-1) as Set<string>;
+    if (keys.has(key)) return true;
+    keys.add(key);
+  }
+  return false;
+}
+
+function jsonStringByteLength(value: string): number {
+  let bytes = UTF8_ENCODER.encode(value).byteLength + 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit === 0x22 || unit === 0x5c || unit === 0x08 || unit === 0x09 || unit === 0x0a || unit === 0x0c || unit === 0x0d) {
+      bytes += 1;
+    } else if (unit < 0x20) {
+      bytes += 5;
+    }
+  }
+  return bytes;
+}
+
+function measureJsonUtf8Bytes(value: unknown): number | null {
+  let graphNodes = 0;
+  const measure = (candidate: unknown, depth: number): number | null => {
+    graphNodes += 1;
+    if (graphNodes > BLUEPRINT_EXCHANGE_MAX_GRAPH_NODES || depth > 12) return null;
+    if (candidate === null) return 4;
+    if (typeof candidate === "string") return hasWellFormedUnicode(candidate) ? jsonStringByteLength(candidate) : null;
+    if (typeof candidate === "number") return Number.isFinite(candidate) ? String(Object.is(candidate, -0) ? 0 : candidate).length : null;
+    if (typeof candidate === "boolean") return candidate ? 4 : 5;
+    if (Array.isArray(candidate)) {
+      let bytes = 2;
+      for (let index = 0; index < candidate.length; index += 1) {
+        const child = measure(candidate[index], depth + 1);
+        if (child === null) return null;
+        bytes += child + (index > 0 ? 1 : 0);
+        if (bytes > BLUEPRINT_EXCHANGE_MAX_BYTES) return bytes;
+      }
+      return bytes;
+    }
+    if (isRecord(candidate)) {
+      let bytes = 2;
+      let emitted = 0;
+      for (const [key, childValue] of Object.entries(candidate)) {
+        if (childValue === undefined) continue;
+        const child = measure(childValue, depth + 1);
+        if (child === null) return null;
+        bytes += jsonStringByteLength(key) + 1 + child + (emitted > 0 ? 1 : 0);
+        emitted += 1;
+        if (bytes > BLUEPRINT_EXCHANGE_MAX_BYTES) return bytes;
+      }
+      return bytes;
+    }
+    return null;
+  };
+  return measure(value, 0);
+}
+
+function preflightBlueprintSerialization(blueprint: BlueprintDefinition): void {
+  if (!isRecord(blueprint) || typeof blueprint.name !== "string" || !hasWellFormedUnicode(blueprint.name) ||
+      !blueprint.name.trim() || blueprint.name.length > 48) {
+    throw new RangeError("蓝图名称必须是最多 48 个 UTF-16 单元的有效 Unicode 文本");
+  }
+  if (!Array.isArray(blueprint.entities) || blueprint.entities.length > BLUEPRINT_EXCHANGE_MAX_ENTITIES ||
+      !Array.isArray(blueprint.belts) || blueprint.belts.length > BLUEPRINT_EXCHANGE_MAX_BELTS) {
+    throw new RangeError("蓝图设备或线路数量超过交换上限");
+  }
+  if (blueprint.resourceAnchors !== undefined &&
+      (!Array.isArray(blueprint.resourceAnchors) || blueprint.resourceAnchors.length > 256)) {
+    throw new RangeError("蓝图资源锚点数量超过交换上限");
+  }
+  if (blueprint.externalPorts !== undefined &&
+      (!Array.isArray(blueprint.externalPorts) || blueprint.externalPorts.length > 128)) {
+    throw new RangeError("蓝图外部接口数量超过交换上限");
+  }
+  if (blueprint.recipeOverrides !== undefined && !isRecord(blueprint.recipeOverrides)) {
+    throw new RangeError("蓝图配方覆盖必须是对象");
+  }
+  if (blueprint.recipeOverrides) {
+    let overrideCount = 0;
+    for (const key in blueprint.recipeOverrides) {
+      if (!Object.prototype.hasOwnProperty.call(blueprint.recipeOverrides, key)) continue;
+      overrideCount += 1;
+      if (overrideCount > 512) throw new RangeError("蓝图配方覆盖数量超过交换上限");
+    }
+  }
 }
 
 function validId(value: unknown): value is string {
@@ -284,10 +456,19 @@ export function validateBlueprintExchange(value: unknown): BlueprintExchangeResu
   if (value.formatVersion !== 1 && value.formatVersion !== BLUEPRINT_EXCHANGE_FORMAT_VERSION) {
     return { valid: false, blueprint: null, issues: [`蓝图格式版本 formatVersion=${String(value.formatVersion)} 不受支持，当前支持 v1～v${BLUEPRINT_EXCHANGE_FORMAT_VERSION}`] };
   }
+  if (value.exportedAt !== undefined && !isExactIsoTimestamp(value.exportedAt)) {
+    return { valid: false, blueprint: null, issues: ["蓝图文件 exportedAt 必须是精确的 UTC ISO 时间"] };
+  }
   if (!isRecord(value.blueprint)) return { valid: false, blueprint: null, issues: ["蓝图文件缺少有效的 blueprint 对象"] };
   const source = value.blueprint;
-  if (typeof source.name !== "string" || !source.name.trim() || source.name.trim().length > 48 || !Array.isArray(source.entities) || source.entities.length > 256 || !Array.isArray(source.belts) || source.belts.length > 512) {
+  if (typeof source.name !== "string" || !hasWellFormedUnicode(source.name) || !source.name.trim() ||
+      source.name.trim().length > 48 || !Array.isArray(source.entities) ||
+      source.entities.length > BLUEPRINT_EXCHANGE_MAX_ENTITIES || !Array.isArray(source.belts) ||
+      source.belts.length > BLUEPRINT_EXCHANGE_MAX_BELTS) {
     return { valid: false, blueprint: null, issues: ["蓝图名称、设备数量或线路数量不合法"] };
+  }
+  if (value.formatVersion === 1 && Array.isArray(source.resourceAnchors) && source.resourceAnchors.length > 0) {
+    return { valid: false, blueprint: null, issues: ["v1 蓝图不能包含资源锚点"] };
   }
   const declaredEntityKeys = new Set(source.entities.flatMap((entry) => isRecord(entry) && validId(entry.key) ? [entry.key] : []));
   const entities = source.entities.flatMap((entry, index) => {
@@ -344,6 +525,18 @@ export function validateBlueprintExchange(value: unknown): BlueprintExchangeResu
 }
 
 export function parseBlueprintExchange(raw: string): BlueprintExchangeResult {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return { valid: false, blueprint: null, issues: ["蓝图文件为空"] };
+  }
+  if (!hasWellFormedUnicode(raw)) {
+    return { valid: false, blueprint: null, issues: ["蓝图文件包含无效 Unicode 字符"] };
+  }
+  if (UTF8_ENCODER.encode(raw).byteLength > BLUEPRINT_EXCHANGE_MAX_BYTES) {
+    return { valid: false, blueprint: null, issues: ["蓝图文件超过 1 MiB 安全上限"] };
+  }
+  if (findDuplicateJsonKey(raw)) {
+    return { valid: false, blueprint: null, issues: ["蓝图文件包含重复的 JSON 字段"] };
+  }
   try {
     return validateBlueprintExchange(JSON.parse(raw));
   } catch {
@@ -352,27 +545,74 @@ export function parseBlueprintExchange(raw: string): BlueprintExchangeResult {
 }
 
 export function serializeBlueprintExchange(blueprint: BlueprintDefinition): string {
+  preflightBlueprintSerialization(blueprint);
+  const exportedAt = new Date().toISOString();
+  const validation = validateBlueprintExchange({
+    type: "dsp-idle-blueprint",
+    formatVersion: BLUEPRINT_EXCHANGE_FORMAT_VERSION,
+    exportedAt,
+    blueprint,
+  });
+  if (!validation.valid || !validation.blueprint) {
+    throw new RangeError(validation.issues[0] ?? "蓝图无法通过交换格式校验");
+  }
+  const canonicalBlueprint: BlueprintDefinition = {
+    ...validation.blueprint,
+    id: validId(validation.blueprint.id) ? validation.blueprint.id : "exported_blueprint",
+  };
   const envelope: BlueprintExchangeEnvelope = {
     type: "dsp-idle-blueprint",
     formatVersion: BLUEPRINT_EXCHANGE_FORMAT_VERSION,
-    exportedAt: new Date().toISOString(),
-    blueprint: cloneBlueprint(blueprint),
+    exportedAt,
+    blueprint: canonicalBlueprint,
   };
-  return JSON.stringify(envelope, null, 2);
+  const measuredBytes = measureJsonUtf8Bytes(envelope);
+  if (measuredBytes === null || measuredBytes > BLUEPRINT_EXCHANGE_MAX_BYTES) {
+    throw new RangeError("蓝图交换文件超过 1 MiB 安全上限或包含无效 Unicode 字符");
+  }
+  const raw = JSON.stringify(envelope);
+  if (UTF8_ENCODER.encode(raw).byteLength !== measuredBytes || !parseBlueprintExchange(raw).valid) {
+    throw new RangeError("蓝图交换文件未通过规范往返校验");
+  }
+  return raw;
 }
 
-export function importBlueprintExchange(state: GameState, blueprint: BlueprintDefinition): GameState {
+export function importBlueprintExchange(state: GameState, blueprint: BlueprintDefinition): BlueprintImportResult {
+  if (state.blueprints.length >= BLUEPRINT_LIBRARY_MAX_ROWS) return { ok: false, reason: "library-full" };
+  if (!Number.isSafeInteger(state.nextId) || state.nextId < 0) return { ok: false, reason: "invalid-next-id" };
+  if (state.nextId >= Number.MAX_SAFE_INTEGER) return { ok: false, reason: "allocator-exhausted" };
   const imported = cloneBlueprint(blueprint);
   const existingNames = new Set(state.blueprints.map((candidate) => candidate.name));
-  const baseName = imported.name || "导入蓝图";
+  const baseName = hasWellFormedUnicode(imported.name) && imported.name.trim()
+    ? truncateWellFormedUtf16(imported.name.trim(), 48)
+    : "导入蓝图";
   let name = baseName;
-  let suffix = 2;
-  while (existingNames.has(name)) {
-    name = `${baseName} ${suffix}`.slice(0, 48);
-    suffix += 1;
+  for (let suffix = 2; existingNames.has(name) && suffix <= BLUEPRINT_LIBRARY_MAX_ROWS + 2; suffix += 1) {
+    const suffixText = ` ${suffix}`;
+    name = `${truncateWellFormedUtf16(baseName, 48 - suffixText.length)}${suffixText}`;
   }
-  imported.id = `blueprint_${state.nextId}`;
+  const importedId = `blueprint_${state.nextId}`;
+  if (existingNames.has(name)) return { ok: false, reason: "name-exhausted" };
+  const allocatedIds = new Set<string>();
+  for (const entity of state.entities) allocatedIds.add(entity.id);
+  for (const belt of state.belts) allocatedIds.add(belt.id);
+  for (const candidate of state.blueprints) allocatedIds.add(candidate.id);
+  for (const version of state.blueprintVersions) {
+    allocatedIds.add(version.id);
+    allocatedIds.add(version.blueprintId);
+  }
+  for (const entry of state.constructionQueue) {
+    allocatedIds.add(entry.id);
+    allocatedIds.add(entry.blueprintId);
+    if (entry.blueprintVersionId) allocatedIds.add(entry.blueprintVersionId);
+  }
+  if (allocatedIds.has(importedId)) return { ok: false, reason: "id-collision" };
+  imported.id = importedId;
   imported.name = name;
   imported.revision = 1;
-  return { ...state, nextId: state.nextId + 1, blueprints: [...state.blueprints, imported].slice(-64) };
+  return {
+    ok: true,
+    blueprintId: importedId,
+    state: { ...state, nextId: state.nextId + 1, blueprints: [...state.blueprints, imported] },
+  };
 }

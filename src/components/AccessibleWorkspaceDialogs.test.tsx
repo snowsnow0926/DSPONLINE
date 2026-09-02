@@ -20,6 +20,14 @@ function click(element: Element): void {
   act(() => element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })));
 }
 
+function inputValue(element: HTMLInputElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  act(() => {
+    setter?.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+  });
+}
+
 function keydown(key: string): void {
   act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })));
 }
@@ -44,7 +52,10 @@ describe("accessible workspace dialogs", () => {
     const onClose = vi.fn();
     render(<CommandPalette
       open
-      game={game}
+      webEntities={game.entities}
+      paused={game.paused}
+      performanceMode={game.settings.performanceMode}
+      reducedMotion={game.settings.reducedMotion}
       onClose={onClose}
       onOpenWorkspace={vi.fn()}
       onFocusRecipe={vi.fn()}
@@ -62,6 +73,79 @@ describe("accessible workspace dialogs", () => {
     expect(document.querySelector(".command-palette-backdrop > section.command-palette")).toBe(dialog);
     keydown("Escape");
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("uses only native scalar rows while native authority is bound and pages without reading GameState entities", () => {
+    const onEntitySearchRequest = vi.fn();
+    const onFocusEntity = vi.fn();
+    const common = {
+      open: true,
+      webEntities: null,
+      paused: false,
+      performanceMode: false,
+      reducedMotion: false,
+      onClose: vi.fn(),
+      onOpenWorkspace: vi.fn(),
+      onFocusRecipe: vi.fn(),
+      onFocusEntity,
+      onAutoLayout: vi.fn(),
+      onPauseToggle: vi.fn(),
+      onTogglePerformance: vi.fn(),
+      onToggleReducedMotion: vi.fn(),
+      entitySearchMode: "native" as const,
+      onEntitySearchRequest,
+    };
+    const nativeEntitySearch = {
+      schema: "command-palette-entity-search-read-model-v1" as const,
+      source: "native-core" as const,
+      sessionId: "authority-1",
+      runId: "run-1",
+      revision: 12,
+      registryFingerprint: "builtin:test",
+      query: "熔炉",
+      cursor: 0,
+      limit: 1,
+      totalCount: 2,
+      rows: [{
+        entityId: "native-entity-1",
+        buildingId: "arc_smelter" as const,
+        resourceId: null,
+        planetId: "home" as const,
+        recipeId: "iron_ingot" as const,
+        positionX: 240,
+        positionY: -80,
+      }],
+      nextCursor: 1,
+    };
+    render(<CommandPalette {...common} nativeEntitySearch={nativeEntitySearch} nativeEntitySearchStatus="ready" />);
+    const input = document.querySelector<HTMLInputElement>(".command-palette-search input")!;
+    inputValue(input, "熔炉");
+    expect(document.querySelector(".command-palette")?.textContent).toContain("native-entity-1");
+    click([...document.querySelectorAll(".command-palette-pagination button")]
+      .find((button) => button.textContent === "下一页")!);
+    expect(onEntitySearchRequest).toHaveBeenLastCalledWith("熔炉", 1);
+
+    render(<CommandPalette {...common} nativeEntitySearch={nativeEntitySearch} nativeEntitySearchStatus="loading" />);
+    expect(document.querySelector(".command-palette")?.textContent).not.toContain("native-entity-1");
+    expect(document.querySelector(".command-palette-search-status")?.textContent).toContain("正在从原生权威目录搜索设备");
+
+    render(<CommandPalette {...common} nativeEntitySearch={nativeEntitySearch} nativeEntitySearchStatus="unavailable" />);
+    expect(document.querySelector(".command-palette")?.textContent).not.toContain("native-entity-1");
+    expect(document.querySelector(".command-palette-search-status")?.textContent).toContain("暂不可用");
+
+    render(<CommandPalette {...common} nativeEntitySearch={nativeEntitySearch} nativeEntitySearchStatus="ready" />);
+    click([...document.querySelectorAll(".command-palette-list > button")]
+      .find((button) => button.textContent?.includes("native-entity-1"))!);
+    expect(onFocusEntity).toHaveBeenCalledWith("native-entity-1", {
+      sessionId: "authority-1",
+      runId: "run-1",
+      revision: 12,
+      registryFingerprint: "builtin:test",
+      planetId: "home",
+      label: expect.any(String),
+      positionX: 240,
+      positionY: -80,
+    });
   });
 
   it("keeps tray deletion behind an explicit alertdialog and returns exact confirmed amounts", () => {

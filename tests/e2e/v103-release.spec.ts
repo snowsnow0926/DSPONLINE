@@ -167,11 +167,32 @@ async function dismissReleaseNotes(page: Page) {
   if (await backdrop.isVisible().catch(() => false)) await backdrop.locator(".release-notes-footer button").click();
 }
 
+async function dismissIncidentalOfflineReport(page: Page) {
+  const report = page.getByRole("dialog", { name: "离线结算报告" });
+  await report.waitFor({ state: "visible", timeout: 1_500 }).catch(() => undefined);
+  if (!await report.isVisible().catch(() => false)) return;
+  await expect(report.locator(".offline-runtime > strong")).toHaveText("1 秒");
+  await expect(report.locator(".offline-runtime > small")).toHaveText("实际提交 1 秒");
+  const method = report.locator(".offline-report-method");
+  await expect(method).toHaveClass(/offline-report-method--exact/);
+  await expect(method.locator("header strong")).toHaveText("精确结算");
+  await expect(method.locator("dl > div").filter({ hasText: "精确校准" }).locator("dd")).toHaveText("全程精确");
+  await expect(method.locator("dl > div").filter({ hasText: "宏观覆盖" }).locator("dd")).toHaveText("未使用");
+  await expect(method.locator("dl > div").filter({ hasText: "估计最大误差" }).locator("dd")).toHaveText("0.00%");
+  await expect(method.locator("dl > div").filter({ hasText: "算法版本" }).locator("dd")).toHaveText("deterministic-exact");
+  await expect(method.locator("dl > div").filter({ hasText: "收益提交" }).locator("dd")).toHaveText("已验证提交");
+  await expect(method.locator("dl > div").filter({ hasText: "结算状态" }).locator("dd")).toHaveText("精确");
+  await expect(method.locator(".offline-report-warning")).toHaveCount(0);
+  await report.getByRole("button", { name: "确认结算" }).click();
+  await expect(report).toBeHidden();
+}
+
 async function openGame(page: Page, path = "/") {
   await page.goto(path);
   await dismissReleaseNotes(page);
   await dismissOnboarding(page);
   await expect(page.locator(".factory-canvas")).toBeVisible();
+  await dismissIncidentalOfflineReport(page);
 }
 
 async function setFontScale(page: Page, scale: 80 | 100 | 125 | 150 | 200) {
@@ -446,4 +467,3 @@ test("next-version selection, line finder, planet statistics and local settings 
   await page.getByRole("button", { name: "关闭运营中心" }).click();
   await expect(page.locator(".factory-canvas")).toBeVisible();
 });
-

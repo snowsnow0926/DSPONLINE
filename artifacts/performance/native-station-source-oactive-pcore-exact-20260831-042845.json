@@ -1,0 +1,3590 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-30T20:32:19.530Z",
+  "benchmark": "native-core-real-save-interleaved-ab",
+  "status": "completed",
+  "command": {
+    "runsPerBinary": 4,
+    "threads": "8",
+    "scenario": "exact",
+    "timeoutMsPerRun": 600000,
+    "baselineSyncRecordDrop": false,
+    "candidateSyncRecordDrop": false,
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ]
+  },
+  "host": {
+    "platform": "win32",
+    "arch": "x64",
+    "node": "v24.14.0",
+    "cpuCount": 28,
+    "cpuModel": "Intel(R) Core(TM) i7-14700KF",
+    "totalMemoryBytes": 34163752960
+  },
+  "binaries": {
+    "baseline": {
+      "path": "<baseline-host>",
+      "sizeBytes": 13302272,
+      "mtimeMs": 1788114916631.8723,
+      "sha256": "399c8f3e578f5050f57aa2331ad5cc72e3c2f5d04f12ffed595b4aa19ff1fa03"
+    },
+    "candidate": {
+      "path": "<candidate-host>",
+      "sizeBytes": 13353472,
+      "mtimeMs": 1788120404566.571,
+      "sha256": "6cd7d700d1992e46686525ad6e5b0516061bbccaae1ca816ae6d2d87fc21409b"
+    }
+  },
+  "fixture": {
+    "before": {
+      "path": "<read-only-player-fixture>",
+      "sizeBytes": 44167989,
+      "mtimeMs": 1787727301946.1252,
+      "sha256": "f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8"
+    },
+    "after": {
+      "path": "<read-only-player-fixture>",
+      "sizeBytes": 44167989,
+      "mtimeMs": 1787727301946.1252,
+      "sha256": "f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8"
+    },
+    "unchanged": true
+  },
+  "validation": {
+    "allProcessesExitedZero": true,
+    "allOpenRoundTripsExact": true,
+    "allNativeAdvancesMatchJavascript": true,
+    "allIntegratedProofsExact": "not-run",
+    "allDurableAuthorityCommitsExactAndIdempotent": "not-run",
+    "allIncrementalCheckpointsExact": "not-run",
+    "allBackToBackNativeBurstsExact": "not-run",
+    "allWindowsPrivatePeakSamplesValid": true
+  },
+  "summary": {
+    "baseline": {
+      "openDurationMs": {
+        "samples": [
+          3927.44,
+          4033.47,
+          4182.48,
+          3978.02
+        ],
+        "median": 4005.745,
+        "p95NearestRank": 4182.48,
+        "minimum": 3927.44,
+        "maximum": 4182.48
+      },
+      "openPrivateBytesDelta": {
+        "samples": [
+          641880064,
+          644108288,
+          641798144,
+          641912832
+        ],
+        "median": 641896448,
+        "p95NearestRank": 644108288,
+        "minimum": 641798144,
+        "maximum": 644108288
+      },
+      "openPeakPrivateBytes": {
+        "samples": [
+          1079246848,
+          1080745984,
+          1078906880,
+          1078112256
+        ],
+        "median": 1079076864,
+        "p95NearestRank": 1080745984,
+        "minimum": 1078112256,
+        "maximum": 1080745984
+      },
+      "openPeakPrivateBytesDelta": {
+        "samples": [
+          1076170752,
+          1079226368,
+          1075838976,
+          1075879936
+        ],
+        "median": 1076025344,
+        "p95NearestRank": 1079226368,
+        "minimum": 1075838976,
+        "maximum": 1079226368
+      },
+      "commandDurationMs": {
+        "samples": [
+          4.34,
+          4.67,
+          4.4,
+          4.99
+        ],
+        "median": 4.535,
+        "p95NearestRank": 4.99,
+        "minimum": 4.34,
+        "maximum": 4.99
+      },
+      "commandPrivateBytesDelta": {
+        "samples": [
+          2314240,
+          3096576,
+          3358720,
+          3538944
+        ],
+        "median": 3227648,
+        "p95NearestRank": 3538944,
+        "minimum": 2314240,
+        "maximum": 3538944
+      },
+      "nativeAdvanceDurationMs": {
+        "samples": [
+          568.72,
+          553.7,
+          463.75,
+          608.83
+        ],
+        "median": 561.21,
+        "p95NearestRank": 608.83,
+        "minimum": 463.75,
+        "maximum": 608.83
+      },
+      "nativeAdvancePeakPrivateBytes": {
+        "samples": [
+          713347072,
+          716677120,
+          767782912,
+          714059776
+        ],
+        "median": 715368448,
+        "p95NearestRank": 767782912,
+        "minimum": 713347072,
+        "maximum": 767782912
+      },
+      "nativeAdvancePeakPrivateBytesDelta": {
+        "samples": [
+          66076672,
+          67952640,
+          119558144,
+          66375680
+        ],
+        "median": 67164160,
+        "p95NearestRank": 119558144,
+        "minimum": 66076672,
+        "maximum": 119558144
+      },
+      "nativeBurst3DurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "nativeBurst3PeakPrivateBytes": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "nativeBurst3PeakPrivateBytesDelta": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "nativeMeasuredWorkflowPeakPrivateBytes": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "javascriptAdvanceDurationMs": {
+        "samples": [
+          1514.57,
+          1544.72,
+          1793.85,
+          1489.77
+        ],
+        "median": 1529.645,
+        "p95NearestRank": 1793.85,
+        "minimum": 1489.77,
+        "maximum": 1793.85
+      },
+      "deferredDiagnosticsDurationMs": {
+        "samples": [
+          1297.4,
+          1300.39,
+          1300.87,
+          1306.37
+        ],
+        "median": 1300.63,
+        "p95NearestRank": 1306.37,
+        "minimum": 1297.4,
+        "maximum": 1306.37
+      },
+      "cachedDiagnosticsDurationMs": {
+        "samples": [
+          0.28,
+          0.12,
+          0.13,
+          0.2
+        ],
+        "median": 0.165,
+        "p95NearestRank": 0.28,
+        "minimum": 0.12,
+        "maximum": 0.28
+      },
+      "integratedAdvanceAndProofDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "cachedIntegratedStatusDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "durableAuthorityDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "durableAuthorityPrivateBytesDelta": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "durableDuplicateRetryDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "incrementalCheckpointDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "incrementalCheckpointChangedBytes": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      }
+    },
+    "candidate": {
+      "openDurationMs": {
+        "samples": [
+          4030.6,
+          3989.62,
+          3986.29,
+          4171.98
+        ],
+        "median": 4010.1099999999997,
+        "p95NearestRank": 4171.98,
+        "minimum": 3986.29,
+        "maximum": 4171.98
+      },
+      "openPrivateBytesDelta": {
+        "samples": [
+          644075520,
+          641241088,
+          643293184,
+          647217152
+        ],
+        "median": 643684352,
+        "p95NearestRank": 647217152,
+        "minimum": 641241088,
+        "maximum": 647217152
+      },
+      "openPeakPrivateBytes": {
+        "samples": [
+          1079140352,
+          1077739520,
+          1078198272,
+          1078267904
+        ],
+        "median": 1078233088,
+        "p95NearestRank": 1079140352,
+        "minimum": 1077739520,
+        "maximum": 1079140352
+      },
+      "openPeakPrivateBytesDelta": {
+        "samples": [
+          1078181888,
+          1076531200,
+          1077039104,
+          1077313536
+        ],
+        "median": 1077176320,
+        "p95NearestRank": 1078181888,
+        "minimum": 1076531200,
+        "maximum": 1078181888
+      },
+      "commandDurationMs": {
+        "samples": [
+          4.59,
+          4.64,
+          4.75,
+          4.74
+        ],
+        "median": 4.6899999999999995,
+        "p95NearestRank": 4.75,
+        "minimum": 4.59,
+        "maximum": 4.75
+      },
+      "commandPrivateBytesDelta": {
+        "samples": [
+          3575808,
+          3956736,
+          4657152,
+          3837952
+        ],
+        "median": 3897344,
+        "p95NearestRank": 4657152,
+        "minimum": 3575808,
+        "maximum": 4657152
+      },
+      "nativeAdvanceDurationMs": {
+        "samples": [
+          573.05,
+          524.69,
+          504.28,
+          556.46
+        ],
+        "median": 540.575,
+        "p95NearestRank": 573.05,
+        "minimum": 504.28,
+        "maximum": 573.05
+      },
+      "nativeAdvancePeakPrivateBytes": {
+        "samples": [
+          716419072,
+          761339904,
+          709021696,
+          713199616
+        ],
+        "median": 714809344,
+        "p95NearestRank": 761339904,
+        "minimum": 709021696,
+        "maximum": 761339904
+      },
+      "nativeAdvancePeakPrivateBytesDelta": {
+        "samples": [
+          67809280,
+          114933760,
+          59912192,
+          61190144
+        ],
+        "median": 64499712,
+        "p95NearestRank": 114933760,
+        "minimum": 59912192,
+        "maximum": 114933760
+      },
+      "nativeBurst3DurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "nativeBurst3PeakPrivateBytes": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "nativeBurst3PeakPrivateBytesDelta": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "nativeMeasuredWorkflowPeakPrivateBytes": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "javascriptAdvanceDurationMs": {
+        "samples": [
+          1529.69,
+          1526.43,
+          1560.76,
+          1486.42
+        ],
+        "median": 1528.06,
+        "p95NearestRank": 1560.76,
+        "minimum": 1486.42,
+        "maximum": 1560.76
+      },
+      "deferredDiagnosticsDurationMs": {
+        "samples": [
+          1325.14,
+          1319.76,
+          1303.05,
+          1303.94
+        ],
+        "median": 1311.85,
+        "p95NearestRank": 1325.14,
+        "minimum": 1303.05,
+        "maximum": 1325.14
+      },
+      "cachedDiagnosticsDurationMs": {
+        "samples": [
+          0.18,
+          0.18,
+          0.14,
+          0.13
+        ],
+        "median": 0.16,
+        "p95NearestRank": 0.18,
+        "minimum": 0.13,
+        "maximum": 0.18
+      },
+      "integratedAdvanceAndProofDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "cachedIntegratedStatusDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "durableAuthorityDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "durableAuthorityPrivateBytesDelta": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "durableDuplicateRetryDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "incrementalCheckpointDurationMs": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      },
+      "incrementalCheckpointChangedBytes": {
+        "samples": [],
+        "median": null,
+        "p95NearestRank": null,
+        "minimum": null,
+        "maximum": null
+      }
+    }
+  },
+  "comparison": {
+    "openDurationMs": {
+      "baselineMedian": 4005.745,
+      "candidateMedian": 4010.1099999999997,
+      "baselineOverCandidate": 0.9989115011807657,
+      "candidateReductionPercent": -0.10896849400048635
+    },
+    "openPrivateBytesDelta": {
+      "baselineMedian": 641896448,
+      "candidateMedian": 643684352,
+      "baselineOverCandidate": 0.9972223901444166,
+      "candidateReductionPercent": -0.2785346461365681
+    },
+    "openPeakPrivateBytes": {
+      "baselineMedian": 1079076864,
+      "candidateMedian": 1078233088,
+      "baselineOverCandidate": 1.0007825543561877,
+      "candidateReductionPercent": 0.078194244372197
+    },
+    "openPeakPrivateBytesDelta": {
+      "baselineMedian": 1076025344,
+      "candidateMedian": 1077176320,
+      "baselineOverCandidate": 0.9989314878366431,
+      "candidateReductionPercent": -0.10696551028448638
+    },
+    "commandDurationMs": {
+      "baselineMedian": 4.535,
+      "candidateMedian": 4.6899999999999995,
+      "baselineOverCandidate": 0.966950959488273,
+      "candidateReductionPercent": -3.4178610804851015
+    },
+    "commandPrivateBytesDelta": {
+      "baselineMedian": 3227648,
+      "candidateMedian": 3897344,
+      "baselineOverCandidate": 0.8281660535995796,
+      "candidateReductionPercent": -20.748730964467004
+    },
+    "nativeAdvanceDurationMs": {
+      "baselineMedian": 561.21,
+      "candidateMedian": 540.575,
+      "baselineOverCandidate": 1.0381723165148222,
+      "candidateReductionPercent": 3.676876748454231
+    },
+    "nativeAdvancePeakPrivateBytes": {
+      "baselineMedian": 715368448,
+      "candidateMedian": 714809344,
+      "baselineOverCandidate": 1.0007821722039492,
+      "candidateReductionPercent": 0.07815608887463821
+    },
+    "nativeAdvancePeakPrivateBytesDelta": {
+      "baselineMedian": 67164160,
+      "candidateMedian": 64499712,
+      "baselineOverCandidate": 1.041309455769353,
+      "candidateReductionPercent": 3.967068150632718
+    },
+    "nativeBurst3DurationMs": null,
+    "nativeBurst3PeakPrivateBytes": null,
+    "nativeBurst3PeakPrivateBytesDelta": null,
+    "nativeMeasuredWorkflowPeakPrivateBytes": null,
+    "javascriptAdvanceDurationMs": {
+      "baselineMedian": 1529.645,
+      "candidateMedian": 1528.06,
+      "baselineOverCandidate": 1.0010372629347015,
+      "candidateReductionPercent": 0.10361881351555664
+    },
+    "deferredDiagnosticsDurationMs": {
+      "baselineMedian": 1300.63,
+      "candidateMedian": 1311.85,
+      "baselineOverCandidate": 0.9914471928955294,
+      "candidateReductionPercent": -0.8626588653190992
+    },
+    "cachedDiagnosticsDurationMs": {
+      "baselineMedian": 0.165,
+      "candidateMedian": 0.16,
+      "baselineOverCandidate": 1.03125,
+      "candidateReductionPercent": 3.030303030303033
+    },
+    "integratedAdvanceAndProofDurationMs": null,
+    "cachedIntegratedStatusDurationMs": null,
+    "durableAuthorityDurationMs": null,
+    "durableAuthorityPrivateBytesDelta": null,
+    "durableDuplicateRetryDurationMs": null,
+    "incrementalCheckpointDurationMs": null,
+    "incrementalCheckpointChangedBytes": null
+  },
+  "samples": [
+    {
+      "sequence": 1,
+      "label": "baseline",
+      "syncRecordDrop": false,
+      "startedAt": "2026-08-30T20:28:46.158Z",
+      "durationMs": 25916,
+      "systemBefore": {
+        "capturedAt": "2026-08-30T20:28:45.810Z",
+        "freeMemoryBytes": 11624996864,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2568.6875,
+            "WorkingSet64": 1215889408,
+            "PrivateMemorySize64": 1510010880
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9686.359375,
+            "WorkingSet64": 306507776,
+            "PrivateMemorySize64": 1408081920
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.09375,
+            "WorkingSet64": 355864576,
+            "PrivateMemorySize64": 1160921088
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.734375,
+            "WorkingSet64": 848007168,
+            "PrivateMemorySize64": 1076457472
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19699.828125,
+            "WorkingSet64": 345423872,
+            "PrivateMemorySize64": 1023463424
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7228.8125,
+            "WorkingSet64": 447045632,
+            "PrivateMemorySize64": 705302528
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357281792,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.734375,
+            "WorkingSet64": 125657088,
+            "PrivateMemorySize64": 577323008
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413736960,
+            "PrivateMemorySize64": 528855040
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 80932864,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7111.28125,
+            "WorkingSet64": 340746240,
+            "PrivateMemorySize64": 403939328
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "systemAfter": {
+        "capturedAt": "2026-08-30T20:29:12.075Z",
+        "freeMemoryBytes": 11558686720,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2568.6875,
+            "WorkingSet64": 1215827968,
+            "PrivateMemorySize64": 1509863424
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9686.65625,
+            "WorkingSet64": 305491968,
+            "PrivateMemorySize64": 1406943232
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.390625,
+            "WorkingSet64": 341991424,
+            "PrivateMemorySize64": 1148919808
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.734375,
+            "WorkingSet64": 848007168,
+            "PrivateMemorySize64": 1076457472
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700,
+            "WorkingSet64": 347041792,
+            "PrivateMemorySize64": 1024200704
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7228.9375,
+            "WorkingSet64": 445845504,
+            "PrivateMemorySize64": 703856640
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357281792,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.75,
+            "WorkingSet64": 125624320,
+            "PrivateMemorySize64": 575172608
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413749248,
+            "PrivateMemorySize64": 528855040
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 30704,
+            "ProcessName": "msedgewebview2",
+            "CPU": 5481.59375,
+            "WorkingSet64": 72470528,
+            "PrivateMemorySize64": 405979136
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7111.828125,
+            "WorkingSet64": 340852736,
+            "PrivateMemorySize64": 403951616
+          }
+        ]
+      },
+      "metrics": {
+        "openDurationMs": 3927.44,
+        "openPrivateBytesDelta": 641880064,
+        "openPeakPrivateBytes": 1079246848,
+        "openPeakPrivateBytesDelta": 1076170752,
+        "commandDurationMs": 4.34,
+        "commandPrivateBytesDelta": 2314240,
+        "nativeAdvanceDurationMs": 568.72,
+        "nativeAdvancePeakPrivateBytes": 713347072,
+        "nativeAdvancePeakPrivateBytesDelta": 66076672,
+        "nativeBurst3DurationMs": null,
+        "nativeBurst3PeakPrivateBytes": null,
+        "nativeBurst3PeakPrivateBytesDelta": null,
+        "nativeMeasuredWorkflowPeakPrivateBytes": null,
+        "javascriptAdvanceDurationMs": 1514.57,
+        "deferredDiagnosticsDurationMs": 1297.4,
+        "cachedDiagnosticsDurationMs": 0.28,
+        "integratedAdvanceAndProofDurationMs": null,
+        "cachedIntegratedStatusDurationMs": null,
+        "durableAuthorityDurationMs": null,
+        "durableAuthorityPrivateBytesDelta": null,
+        "durableDuplicateRetryDurationMs": null,
+        "incrementalCheckpointDurationMs": null,
+        "incrementalCheckpointChangedBytes": null
+      },
+      "records": {
+        "open": {
+          "fixture": {
+            "sourceBytes": 44167989,
+            "entities": 45904,
+            "belts": 91955
+          },
+          "nativeCore": {
+            "hostBinarySha256": "399c8f3e578f5050f57aa2331ad5cc72e3c2f5d04f12ffed595b4aa19ff1fa03",
+            "openDurationMs": 3927.44,
+            "canonicalSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "sourceSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "canonicalComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5"
+            },
+            "sourceComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99"
+            },
+            "exactRoundTrip": true,
+            "estimatedRuntimeBytes": 131207234,
+            "rawRecordBytes": 88177239,
+            "indexedStringBytes": 5625503,
+            "inventoryEntryCount": 160848,
+            "topologyIndexBytes": 22580364,
+            "processPrivateBytesBeforeOpen": 3076096,
+            "processPrivateBytesAfterOpen": 644956160,
+            "processPrivateBytesDelta": 641880064,
+            "processPrivateBytesPeakDuringOpen": 1079246848,
+            "processPrivateBytesPeakDeltaDuringOpen": 1076170752,
+            "privatePeakSampler": {
+              "phase": "open",
+              "pid": 121524,
+              "samplerPid": 115220,
+              "intervalMs": 50,
+              "baselineBytes": 3076096,
+              "finalBytes": 644956160,
+              "peakBytes": 1079246848,
+              "sampleCount": 66,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 64,
+              "intervalMinMs": 61,
+              "intervalMeanMs": 62,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 63,
+              "intervalMaxMs": 77,
+              "samplingCadenceValid": true,
+              "error": null
+            }
+          }
+        },
+        "admission": {
+          "nativeCoreAdmission": {
+            "supported": true,
+            "exactScope": "simple-factory-v1",
+            "reason": null,
+            "commandDurationMs": 4.34,
+            "commandPrivateBytesDelta": 2314240
+          }
+        },
+        "exact": {
+          "nativeCoreExactRealSaveAdvance": {
+            "exactState": true,
+            "revision": 3,
+            "expectedRevision": 3,
+            "canonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "expectedCanonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "domainSha256": "c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b",
+            "canonicalComponents": {
+              "base": "86a7cd5e2ab533ec46dcb427230ff8b1e0b5eaf59897bbd5c8c48f0e08039d86",
+              "belts": "32fa908cd9c3b4eb13548955c8964db4234733b913b1517b0cb71980d78ceec5",
+              "entities": "a327a66426129bd6245efc0240fac29b56d059caae1b403e4f63dee20a2b73cd"
+            },
+            "conservationSummarySha256": "3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7",
+            "conservationCaptureFailure": null,
+            "conservationValidationFailure": null,
+            "conservationItemCounts": {
+              "totals": 122,
+              "totalProduced": 78,
+              "knownConsumed": 34,
+              "knownGranted": 40,
+              "constructionOutputs": 47
+            },
+            "requestedThreadSetting": "8",
+            "effectiveWorkerLimit": 8,
+            "observedWorkerCount": 8,
+            "fieldMismatches": [],
+            "mismatchDetails": [],
+            "blockedMachineGroups": [],
+            "nativeAdvanceDurationMs": 568.72,
+            "jsAdvanceDurationMs": 1514.57,
+            "jsAdvanceAndConservationDurationMs": 1726.23,
+            "nativeToJsRatio": 0.376,
+            "processPrivateBytesPeakDuringAdvance": 713347072,
+            "processPrivateBytesPeakDeltaDuringAdvance": 66076672,
+            "privatePeakSampler": {
+              "phase": "exact-advance",
+              "pid": 121524,
+              "samplerPid": 121744,
+              "intervalMs": 50,
+              "baselineBytes": 647270400,
+              "finalBytes": 711872512,
+              "peakBytes": 713347072,
+              "sampleCount": 12,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 10,
+              "intervalMinMs": 61,
+              "intervalMeanMs": 63,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 78,
+              "intervalMaxMs": 78,
+              "samplingCadenceValid": true,
+              "error": null
+            },
+            "deferredDiagnosticsDurationMs": 1297.4,
+            "cachedDiagnosticsDurationMs": 0.28,
+            "nativeBeltScheduler": {
+              "activeQueueEnabled": false,
+              "carriedActiveGroups": 0,
+              "changedBeltRecords": 75559,
+              "fullScanPasses": 3,
+              "groupCount": 41804,
+              "initializationGroupChecks": 41804,
+              "reservationAllowanceEntries": 26270,
+              "reservationCreditEntries": 9683,
+              "reservationPasses": 1,
+              "reservationRouteChecks": 91955,
+              "routeCount": 91955,
+              "selectionGroupChecks": 0,
+              "sleepCount": 0,
+              "stableRoutesSkipped": 0,
+              "transferPasses": 2,
+              "transferRouteChecks": 183910,
+              "wakeCount": 0,
+              "writeBackPatchRecords": 91955,
+              "writeBackWorkers": 8
+            },
+            "javascriptBeltScheduler": {
+              "routeChecks": 183910,
+              "stableRoutesSkipped": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "sequence": 2,
+      "label": "candidate",
+      "syncRecordDrop": false,
+      "startedAt": "2026-08-30T20:29:12.722Z",
+      "durationMs": 26025,
+      "systemBefore": {
+        "capturedAt": "2026-08-30T20:29:12.437Z",
+        "freeMemoryBytes": 11571449856,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2568.6875,
+            "WorkingSet64": 1215827968,
+            "PrivateMemorySize64": 1509863424
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9686.65625,
+            "WorkingSet64": 305491968,
+            "PrivateMemorySize64": 1406943232
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.390625,
+            "WorkingSet64": 341913600,
+            "PrivateMemorySize64": 1148837888
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.734375,
+            "WorkingSet64": 848007168,
+            "PrivateMemorySize64": 1076457472
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700,
+            "WorkingSet64": 347049984,
+            "PrivateMemorySize64": 1024200704
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7228.9375,
+            "WorkingSet64": 445845504,
+            "PrivateMemorySize64": 703856640
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357281792,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.75,
+            "WorkingSet64": 125624320,
+            "PrivateMemorySize64": 575172608
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413749248,
+            "PrivateMemorySize64": 528855040
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 30704,
+            "ProcessName": "msedgewebview2",
+            "CPU": 5481.59375,
+            "WorkingSet64": 72470528,
+            "PrivateMemorySize64": 405979136
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7111.828125,
+            "WorkingSet64": 340852736,
+            "PrivateMemorySize64": 403951616
+          }
+        ]
+      },
+      "systemAfter": {
+        "capturedAt": "2026-08-30T20:29:38.747Z",
+        "freeMemoryBytes": 11594862592,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2568.75,
+            "WorkingSet64": 1216233472,
+            "PrivateMemorySize64": 1510547456
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9686.953125,
+            "WorkingSet64": 305709056,
+            "PrivateMemorySize64": 1407242240
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.53125,
+            "WorkingSet64": 342814720,
+            "PrivateMemorySize64": 1147817984
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.734375,
+            "WorkingSet64": 848044032,
+            "PrivateMemorySize64": 1076588544
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.078125,
+            "WorkingSet64": 353042432,
+            "PrivateMemorySize64": 1036476416
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.109375,
+            "WorkingSet64": 445652992,
+            "PrivateMemorySize64": 703586304
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357281792,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.75,
+            "WorkingSet64": 125607936,
+            "PrivateMemorySize64": 575143936
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413749248,
+            "PrivateMemorySize64": 528855040
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.0625,
+            "WorkingSet64": 340865024,
+            "PrivateMemorySize64": 403976192
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "metrics": {
+        "openDurationMs": 4030.6,
+        "openPrivateBytesDelta": 644075520,
+        "openPeakPrivateBytes": 1079140352,
+        "openPeakPrivateBytesDelta": 1078181888,
+        "commandDurationMs": 4.59,
+        "commandPrivateBytesDelta": 3575808,
+        "nativeAdvanceDurationMs": 573.05,
+        "nativeAdvancePeakPrivateBytes": 716419072,
+        "nativeAdvancePeakPrivateBytesDelta": 67809280,
+        "nativeBurst3DurationMs": null,
+        "nativeBurst3PeakPrivateBytes": null,
+        "nativeBurst3PeakPrivateBytesDelta": null,
+        "nativeMeasuredWorkflowPeakPrivateBytes": null,
+        "javascriptAdvanceDurationMs": 1529.69,
+        "deferredDiagnosticsDurationMs": 1325.14,
+        "cachedDiagnosticsDurationMs": 0.18,
+        "integratedAdvanceAndProofDurationMs": null,
+        "cachedIntegratedStatusDurationMs": null,
+        "durableAuthorityDurationMs": null,
+        "durableAuthorityPrivateBytesDelta": null,
+        "durableDuplicateRetryDurationMs": null,
+        "incrementalCheckpointDurationMs": null,
+        "incrementalCheckpointChangedBytes": null
+      },
+      "records": {
+        "open": {
+          "fixture": {
+            "sourceBytes": 44167989,
+            "entities": 45904,
+            "belts": 91955
+          },
+          "nativeCore": {
+            "hostBinarySha256": "6cd7d700d1992e46686525ad6e5b0516061bbccaae1ca816ae6d2d87fc21409b",
+            "openDurationMs": 4030.6,
+            "canonicalSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "sourceSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "canonicalComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5"
+            },
+            "sourceComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99"
+            },
+            "exactRoundTrip": true,
+            "estimatedRuntimeBytes": 131207234,
+            "rawRecordBytes": 88177239,
+            "indexedStringBytes": 5625503,
+            "inventoryEntryCount": 160848,
+            "topologyIndexBytes": 22580364,
+            "processPrivateBytesBeforeOpen": 958464,
+            "processPrivateBytesAfterOpen": 645033984,
+            "processPrivateBytesDelta": 644075520,
+            "processPrivateBytesPeakDuringOpen": 1079140352,
+            "processPrivateBytesPeakDeltaDuringOpen": 1078181888,
+            "privatePeakSampler": {
+              "phase": "open",
+              "pid": 121168,
+              "samplerPid": 99444,
+              "intervalMs": 50,
+              "baselineBytes": 958464,
+              "finalBytes": 645033984,
+              "peakBytes": 1079140352,
+              "sampleCount": 67,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 65,
+              "intervalMinMs": 60,
+              "intervalMeanMs": 63,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 69,
+              "intervalMaxMs": 77,
+              "samplingCadenceValid": true,
+              "error": null
+            }
+          }
+        },
+        "admission": {
+          "nativeCoreAdmission": {
+            "supported": true,
+            "exactScope": "simple-factory-v1",
+            "reason": null,
+            "commandDurationMs": 4.59,
+            "commandPrivateBytesDelta": 3575808
+          }
+        },
+        "exact": {
+          "nativeCoreExactRealSaveAdvance": {
+            "exactState": true,
+            "revision": 3,
+            "expectedRevision": 3,
+            "canonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "expectedCanonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "domainSha256": "c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b",
+            "canonicalComponents": {
+              "base": "86a7cd5e2ab533ec46dcb427230ff8b1e0b5eaf59897bbd5c8c48f0e08039d86",
+              "belts": "32fa908cd9c3b4eb13548955c8964db4234733b913b1517b0cb71980d78ceec5",
+              "entities": "a327a66426129bd6245efc0240fac29b56d059caae1b403e4f63dee20a2b73cd"
+            },
+            "conservationSummarySha256": "3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7",
+            "conservationCaptureFailure": null,
+            "conservationValidationFailure": null,
+            "conservationItemCounts": {
+              "totals": 122,
+              "totalProduced": 78,
+              "knownConsumed": 34,
+              "knownGranted": 40,
+              "constructionOutputs": 47
+            },
+            "requestedThreadSetting": "8",
+            "effectiveWorkerLimit": 8,
+            "observedWorkerCount": 8,
+            "fieldMismatches": [],
+            "mismatchDetails": [],
+            "blockedMachineGroups": [],
+            "nativeAdvanceDurationMs": 573.05,
+            "jsAdvanceDurationMs": 1529.69,
+            "jsAdvanceAndConservationDurationMs": 1758.28,
+            "nativeToJsRatio": 0.375,
+            "processPrivateBytesPeakDuringAdvance": 716419072,
+            "processPrivateBytesPeakDeltaDuringAdvance": 67809280,
+            "privatePeakSampler": {
+              "phase": "exact-advance",
+              "pid": 121168,
+              "samplerPid": 115960,
+              "intervalMs": 50,
+              "baselineBytes": 648609792,
+              "finalBytes": 715702272,
+              "peakBytes": 716419072,
+              "sampleCount": 12,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 10,
+              "intervalMinMs": 60,
+              "intervalMeanMs": 64,
+              "intervalP50Ms": 61,
+              "intervalP95Ms": 78,
+              "intervalMaxMs": 78,
+              "samplingCadenceValid": true,
+              "error": null
+            },
+            "deferredDiagnosticsDurationMs": 1325.14,
+            "cachedDiagnosticsDurationMs": 0.18,
+            "nativeBeltScheduler": {
+              "activeQueueEnabled": false,
+              "carriedActiveGroups": 0,
+              "changedBeltRecords": 75559,
+              "fullScanPasses": 3,
+              "groupCount": 41804,
+              "initializationGroupChecks": 41804,
+              "reservationAllowanceEntries": 26270,
+              "reservationCreditEntries": 9683,
+              "reservationPasses": 1,
+              "reservationRouteChecks": 91955,
+              "routeCount": 91955,
+              "selectionGroupChecks": 0,
+              "sleepCount": 0,
+              "stableRoutesSkipped": 0,
+              "transferPasses": 2,
+              "transferRouteChecks": 183910,
+              "wakeCount": 0,
+              "writeBackPatchRecords": 91955,
+              "writeBackWorkers": 8
+            },
+            "javascriptBeltScheduler": {
+              "routeChecks": 183910,
+              "stableRoutesSkipped": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "sequence": 3,
+      "label": "candidate",
+      "syncRecordDrop": false,
+      "startedAt": "2026-08-30T20:29:39.493Z",
+      "durationMs": 26092,
+      "systemBefore": {
+        "capturedAt": "2026-08-30T20:29:39.176Z",
+        "freeMemoryBytes": 11599355904,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2568.75,
+            "WorkingSet64": 1216233472,
+            "PrivateMemorySize64": 1510547456
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9686.953125,
+            "WorkingSet64": 305709056,
+            "PrivateMemorySize64": 1407242240
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.53125,
+            "WorkingSet64": 342818816,
+            "PrivateMemorySize64": 1147817984
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.734375,
+            "WorkingSet64": 848044032,
+            "PrivateMemorySize64": 1076588544
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.078125,
+            "WorkingSet64": 353042432,
+            "PrivateMemorySize64": 1036476416
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.109375,
+            "WorkingSet64": 445652992,
+            "PrivateMemorySize64": 703586304
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357281792,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.75,
+            "WorkingSet64": 125607936,
+            "PrivateMemorySize64": 575143936
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413749248,
+            "PrivateMemorySize64": 528855040
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.0625,
+            "WorkingSet64": 341045248,
+            "PrivateMemorySize64": 404156416
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "systemAfter": {
+        "capturedAt": "2026-08-30T20:30:05.586Z",
+        "freeMemoryBytes": 11525042176,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2568.890625,
+            "WorkingSet64": 1217421312,
+            "PrivateMemorySize64": 1511981056
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9687.25,
+            "WorkingSet64": 305967104,
+            "PrivateMemorySize64": 1407586304
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.640625,
+            "WorkingSet64": 343138304,
+            "PrivateMemorySize64": 1147969536
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.78125,
+            "WorkingSet64": 848490496,
+            "PrivateMemorySize64": 1077121024
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.078125,
+            "WorkingSet64": 347193344,
+            "PrivateMemorySize64": 1024372736
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.265625,
+            "WorkingSet64": 446246912,
+            "PrivateMemorySize64": 704442368
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357289984,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.78125,
+            "WorkingSet64": 125607936,
+            "PrivateMemorySize64": 575143936
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 419524608,
+            "PrivateMemorySize64": 534831104
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.203125,
+            "WorkingSet64": 340848640,
+            "PrivateMemorySize64": 403943424
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "metrics": {
+        "openDurationMs": 3989.62,
+        "openPrivateBytesDelta": 641241088,
+        "openPeakPrivateBytes": 1077739520,
+        "openPeakPrivateBytesDelta": 1076531200,
+        "commandDurationMs": 4.64,
+        "commandPrivateBytesDelta": 3956736,
+        "nativeAdvanceDurationMs": 524.69,
+        "nativeAdvancePeakPrivateBytes": 761339904,
+        "nativeAdvancePeakPrivateBytesDelta": 114933760,
+        "nativeBurst3DurationMs": null,
+        "nativeBurst3PeakPrivateBytes": null,
+        "nativeBurst3PeakPrivateBytesDelta": null,
+        "nativeMeasuredWorkflowPeakPrivateBytes": null,
+        "javascriptAdvanceDurationMs": 1526.43,
+        "deferredDiagnosticsDurationMs": 1319.76,
+        "cachedDiagnosticsDurationMs": 0.18,
+        "integratedAdvanceAndProofDurationMs": null,
+        "cachedIntegratedStatusDurationMs": null,
+        "durableAuthorityDurationMs": null,
+        "durableAuthorityPrivateBytesDelta": null,
+        "durableDuplicateRetryDurationMs": null,
+        "incrementalCheckpointDurationMs": null,
+        "incrementalCheckpointChangedBytes": null
+      },
+      "records": {
+        "open": {
+          "fixture": {
+            "sourceBytes": 44167989,
+            "entities": 45904,
+            "belts": 91955
+          },
+          "nativeCore": {
+            "hostBinarySha256": "6cd7d700d1992e46686525ad6e5b0516061bbccaae1ca816ae6d2d87fc21409b",
+            "openDurationMs": 3989.62,
+            "canonicalSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "sourceSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "canonicalComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5"
+            },
+            "sourceComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99"
+            },
+            "exactRoundTrip": true,
+            "estimatedRuntimeBytes": 131207234,
+            "rawRecordBytes": 88177239,
+            "indexedStringBytes": 5625503,
+            "inventoryEntryCount": 160848,
+            "topologyIndexBytes": 22580364,
+            "processPrivateBytesBeforeOpen": 1208320,
+            "processPrivateBytesAfterOpen": 642449408,
+            "processPrivateBytesDelta": 641241088,
+            "processPrivateBytesPeakDuringOpen": 1077739520,
+            "processPrivateBytesPeakDeltaDuringOpen": 1076531200,
+            "privatePeakSampler": {
+              "phase": "open",
+              "pid": 105372,
+              "samplerPid": 115248,
+              "intervalMs": 50,
+              "baselineBytes": 1208320,
+              "finalBytes": 642449408,
+              "peakBytes": 1077739520,
+              "sampleCount": 67,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 65,
+              "intervalMinMs": 57,
+              "intervalMeanMs": 62,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 63,
+              "intervalMaxMs": 77,
+              "samplingCadenceValid": true,
+              "error": null
+            }
+          }
+        },
+        "admission": {
+          "nativeCoreAdmission": {
+            "supported": true,
+            "exactScope": "simple-factory-v1",
+            "reason": null,
+            "commandDurationMs": 4.64,
+            "commandPrivateBytesDelta": 3956736
+          }
+        },
+        "exact": {
+          "nativeCoreExactRealSaveAdvance": {
+            "exactState": true,
+            "revision": 3,
+            "expectedRevision": 3,
+            "canonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "expectedCanonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "domainSha256": "c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b",
+            "canonicalComponents": {
+              "base": "86a7cd5e2ab533ec46dcb427230ff8b1e0b5eaf59897bbd5c8c48f0e08039d86",
+              "belts": "32fa908cd9c3b4eb13548955c8964db4234733b913b1517b0cb71980d78ceec5",
+              "entities": "a327a66426129bd6245efc0240fac29b56d059caae1b403e4f63dee20a2b73cd"
+            },
+            "conservationSummarySha256": "3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7",
+            "conservationCaptureFailure": null,
+            "conservationValidationFailure": null,
+            "conservationItemCounts": {
+              "totals": 122,
+              "totalProduced": 78,
+              "knownConsumed": 34,
+              "knownGranted": 40,
+              "constructionOutputs": 47
+            },
+            "requestedThreadSetting": "8",
+            "effectiveWorkerLimit": 8,
+            "observedWorkerCount": 8,
+            "fieldMismatches": [],
+            "mismatchDetails": [],
+            "blockedMachineGroups": [],
+            "nativeAdvanceDurationMs": 524.69,
+            "jsAdvanceDurationMs": 1526.43,
+            "jsAdvanceAndConservationDurationMs": 1725.93,
+            "nativeToJsRatio": 0.344,
+            "processPrivateBytesPeakDuringAdvance": 761339904,
+            "processPrivateBytesPeakDeltaDuringAdvance": 114933760,
+            "privatePeakSampler": {
+              "phase": "exact-advance",
+              "pid": 105372,
+              "samplerPid": 106660,
+              "intervalMs": 50,
+              "baselineBytes": 646406144,
+              "finalBytes": 761339904,
+              "peakBytes": 761339904,
+              "sampleCount": 11,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 9,
+              "intervalMinMs": 61,
+              "intervalMeanMs": 64,
+              "intervalP50Ms": 63,
+              "intervalP95Ms": 72,
+              "intervalMaxMs": 72,
+              "samplingCadenceValid": true,
+              "error": null
+            },
+            "deferredDiagnosticsDurationMs": 1319.76,
+            "cachedDiagnosticsDurationMs": 0.18,
+            "nativeBeltScheduler": {
+              "activeQueueEnabled": false,
+              "carriedActiveGroups": 0,
+              "changedBeltRecords": 75559,
+              "fullScanPasses": 3,
+              "groupCount": 41804,
+              "initializationGroupChecks": 41804,
+              "reservationAllowanceEntries": 26270,
+              "reservationCreditEntries": 9683,
+              "reservationPasses": 1,
+              "reservationRouteChecks": 91955,
+              "routeCount": 91955,
+              "selectionGroupChecks": 0,
+              "sleepCount": 0,
+              "stableRoutesSkipped": 0,
+              "transferPasses": 2,
+              "transferRouteChecks": 183910,
+              "wakeCount": 0,
+              "writeBackPatchRecords": 91955,
+              "writeBackWorkers": 8
+            },
+            "javascriptBeltScheduler": {
+              "routeChecks": 183910,
+              "stableRoutesSkipped": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "sequence": 4,
+      "label": "baseline",
+      "syncRecordDrop": false,
+      "startedAt": "2026-08-30T20:30:06.321Z",
+      "durationMs": 25824,
+      "systemBefore": {
+        "capturedAt": "2026-08-30T20:30:06.015Z",
+        "freeMemoryBytes": 11528007680,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2568.890625,
+            "WorkingSet64": 1217421312,
+            "PrivateMemorySize64": 1511981056
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9687.25,
+            "WorkingSet64": 305967104,
+            "PrivateMemorySize64": 1407586304
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.640625,
+            "WorkingSet64": 343138304,
+            "PrivateMemorySize64": 1147969536
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.78125,
+            "WorkingSet64": 848490496,
+            "PrivateMemorySize64": 1077121024
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.078125,
+            "WorkingSet64": 347193344,
+            "PrivateMemorySize64": 1024372736
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.265625,
+            "WorkingSet64": 446251008,
+            "PrivateMemorySize64": 704442368
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357289984,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.78125,
+            "WorkingSet64": 125607936,
+            "PrivateMemorySize64": 575143936
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 419524608,
+            "PrivateMemorySize64": 534831104
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.21875,
+            "WorkingSet64": 340848640,
+            "PrivateMemorySize64": 403943424
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "systemAfter": {
+        "capturedAt": "2026-08-30T20:30:32.145Z",
+        "freeMemoryBytes": 11556343808,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2568.921875,
+            "WorkingSet64": 1217409024,
+            "PrivateMemorySize64": 1511870464
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9687.484375,
+            "WorkingSet64": 305991680,
+            "PrivateMemorySize64": 1407586304
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.796875,
+            "WorkingSet64": 343252992,
+            "PrivateMemorySize64": 1147887616
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.796875,
+            "WorkingSet64": 848748544,
+            "PrivateMemorySize64": 1077383168
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.078125,
+            "WorkingSet64": 347172864,
+            "PrivateMemorySize64": 1024372736
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.5,
+            "WorkingSet64": 445722624,
+            "PrivateMemorySize64": 703860736
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357298176,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.8125,
+            "WorkingSet64": 125624320,
+            "PrivateMemorySize64": 575172608
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413822976,
+            "PrivateMemorySize64": 529117184
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.34375,
+            "WorkingSet64": 340705280,
+            "PrivateMemorySize64": 403955712
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "metrics": {
+        "openDurationMs": 4033.47,
+        "openPrivateBytesDelta": 644108288,
+        "openPeakPrivateBytes": 1080745984,
+        "openPeakPrivateBytesDelta": 1079226368,
+        "commandDurationMs": 4.67,
+        "commandPrivateBytesDelta": 3096576,
+        "nativeAdvanceDurationMs": 553.7,
+        "nativeAdvancePeakPrivateBytes": 716677120,
+        "nativeAdvancePeakPrivateBytesDelta": 67952640,
+        "nativeBurst3DurationMs": null,
+        "nativeBurst3PeakPrivateBytes": null,
+        "nativeBurst3PeakPrivateBytesDelta": null,
+        "nativeMeasuredWorkflowPeakPrivateBytes": null,
+        "javascriptAdvanceDurationMs": 1544.72,
+        "deferredDiagnosticsDurationMs": 1300.39,
+        "cachedDiagnosticsDurationMs": 0.12,
+        "integratedAdvanceAndProofDurationMs": null,
+        "cachedIntegratedStatusDurationMs": null,
+        "durableAuthorityDurationMs": null,
+        "durableAuthorityPrivateBytesDelta": null,
+        "durableDuplicateRetryDurationMs": null,
+        "incrementalCheckpointDurationMs": null,
+        "incrementalCheckpointChangedBytes": null
+      },
+      "records": {
+        "open": {
+          "fixture": {
+            "sourceBytes": 44167989,
+            "entities": 45904,
+            "belts": 91955
+          },
+          "nativeCore": {
+            "hostBinarySha256": "399c8f3e578f5050f57aa2331ad5cc72e3c2f5d04f12ffed595b4aa19ff1fa03",
+            "openDurationMs": 4033.47,
+            "canonicalSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "sourceSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "canonicalComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5"
+            },
+            "sourceComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99"
+            },
+            "exactRoundTrip": true,
+            "estimatedRuntimeBytes": 131207234,
+            "rawRecordBytes": 88177239,
+            "indexedStringBytes": 5625503,
+            "inventoryEntryCount": 160848,
+            "topologyIndexBytes": 22580364,
+            "processPrivateBytesBeforeOpen": 1519616,
+            "processPrivateBytesAfterOpen": 645627904,
+            "processPrivateBytesDelta": 644108288,
+            "processPrivateBytesPeakDuringOpen": 1080745984,
+            "processPrivateBytesPeakDeltaDuringOpen": 1079226368,
+            "privatePeakSampler": {
+              "phase": "open",
+              "pid": 114256,
+              "samplerPid": 111724,
+              "intervalMs": 50,
+              "baselineBytes": 1519616,
+              "finalBytes": 645627904,
+              "peakBytes": 1080745984,
+              "sampleCount": 68,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 66,
+              "intervalMinMs": 59,
+              "intervalMeanMs": 62,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 63,
+              "intervalMaxMs": 68,
+              "samplingCadenceValid": true,
+              "error": null
+            }
+          }
+        },
+        "admission": {
+          "nativeCoreAdmission": {
+            "supported": true,
+            "exactScope": "simple-factory-v1",
+            "reason": null,
+            "commandDurationMs": 4.67,
+            "commandPrivateBytesDelta": 3096576
+          }
+        },
+        "exact": {
+          "nativeCoreExactRealSaveAdvance": {
+            "exactState": true,
+            "revision": 3,
+            "expectedRevision": 3,
+            "canonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "expectedCanonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "domainSha256": "c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b",
+            "canonicalComponents": {
+              "base": "86a7cd5e2ab533ec46dcb427230ff8b1e0b5eaf59897bbd5c8c48f0e08039d86",
+              "belts": "32fa908cd9c3b4eb13548955c8964db4234733b913b1517b0cb71980d78ceec5",
+              "entities": "a327a66426129bd6245efc0240fac29b56d059caae1b403e4f63dee20a2b73cd"
+            },
+            "conservationSummarySha256": "3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7",
+            "conservationCaptureFailure": null,
+            "conservationValidationFailure": null,
+            "conservationItemCounts": {
+              "totals": 122,
+              "totalProduced": 78,
+              "knownConsumed": 34,
+              "knownGranted": 40,
+              "constructionOutputs": 47
+            },
+            "requestedThreadSetting": "8",
+            "effectiveWorkerLimit": 8,
+            "observedWorkerCount": 8,
+            "fieldMismatches": [],
+            "mismatchDetails": [],
+            "blockedMachineGroups": [],
+            "nativeAdvanceDurationMs": 553.7,
+            "jsAdvanceDurationMs": 1544.72,
+            "jsAdvanceAndConservationDurationMs": 1756.6,
+            "nativeToJsRatio": 0.358,
+            "processPrivateBytesPeakDuringAdvance": 716677120,
+            "processPrivateBytesPeakDeltaDuringAdvance": 67952640,
+            "privatePeakSampler": {
+              "phase": "exact-advance",
+              "pid": 114256,
+              "samplerPid": 4152,
+              "intervalMs": 50,
+              "baselineBytes": 648724480,
+              "finalBytes": 716677120,
+              "peakBytes": 716677120,
+              "sampleCount": 11,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 9,
+              "intervalMinMs": 62,
+              "intervalMeanMs": 64,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 78,
+              "intervalMaxMs": 78,
+              "samplingCadenceValid": true,
+              "error": null
+            },
+            "deferredDiagnosticsDurationMs": 1300.39,
+            "cachedDiagnosticsDurationMs": 0.12,
+            "nativeBeltScheduler": {
+              "activeQueueEnabled": false,
+              "carriedActiveGroups": 0,
+              "changedBeltRecords": 75559,
+              "fullScanPasses": 3,
+              "groupCount": 41804,
+              "initializationGroupChecks": 41804,
+              "reservationAllowanceEntries": 26270,
+              "reservationCreditEntries": 9683,
+              "reservationPasses": 1,
+              "reservationRouteChecks": 91955,
+              "routeCount": 91955,
+              "selectionGroupChecks": 0,
+              "sleepCount": 0,
+              "stableRoutesSkipped": 0,
+              "transferPasses": 2,
+              "transferRouteChecks": 183910,
+              "wakeCount": 0,
+              "writeBackPatchRecords": 91955,
+              "writeBackWorkers": 8
+            },
+            "javascriptBeltScheduler": {
+              "routeChecks": 183910,
+              "stableRoutesSkipped": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "sequence": 5,
+      "label": "baseline",
+      "syncRecordDrop": false,
+      "startedAt": "2026-08-30T20:30:32.842Z",
+      "durationMs": 26418,
+      "systemBefore": {
+        "capturedAt": "2026-08-30T20:30:32.535Z",
+        "freeMemoryBytes": 11560710144,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2568.921875,
+            "WorkingSet64": 1217409024,
+            "PrivateMemorySize64": 1511870464
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9687.484375,
+            "WorkingSet64": 305991680,
+            "PrivateMemorySize64": 1407586304
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.796875,
+            "WorkingSet64": 343220224,
+            "PrivateMemorySize64": 1147863040
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.796875,
+            "WorkingSet64": 848748544,
+            "PrivateMemorySize64": 1077383168
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.078125,
+            "WorkingSet64": 347172864,
+            "PrivateMemorySize64": 1024372736
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.5,
+            "WorkingSet64": 445722624,
+            "PrivateMemorySize64": 703860736
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357298176,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.8125,
+            "WorkingSet64": 125624320,
+            "PrivateMemorySize64": 575172608
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413822976,
+            "PrivateMemorySize64": 529117184
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.34375,
+            "WorkingSet64": 340705280,
+            "PrivateMemorySize64": 403955712
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "systemAfter": {
+        "capturedAt": "2026-08-30T20:30:59.260Z",
+        "freeMemoryBytes": 11569782784,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2569.03125,
+            "WorkingSet64": 1217900544,
+            "PrivateMemorySize64": 1512419328
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9687.71875,
+            "WorkingSet64": 306028544,
+            "PrivateMemorySize64": 1407647744
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.921875,
+            "WorkingSet64": 343957504,
+            "PrivateMemorySize64": 1148592128
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.828125,
+            "WorkingSet64": 847347712,
+            "PrivateMemorySize64": 1076072448
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.140625,
+            "WorkingSet64": 347475968,
+            "PrivateMemorySize64": 1026322432
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.609375,
+            "WorkingSet64": 445288448,
+            "PrivateMemorySize64": 703332352
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357298176,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.84375,
+            "WorkingSet64": 125624320,
+            "PrivateMemorySize64": 575172608
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413822976,
+            "PrivateMemorySize64": 529117184
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.6875,
+            "WorkingSet64": 340819968,
+            "PrivateMemorySize64": 403890176
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "metrics": {
+        "openDurationMs": 4182.48,
+        "openPrivateBytesDelta": 641798144,
+        "openPeakPrivateBytes": 1078906880,
+        "openPeakPrivateBytesDelta": 1075838976,
+        "commandDurationMs": 4.4,
+        "commandPrivateBytesDelta": 3358720,
+        "nativeAdvanceDurationMs": 463.75,
+        "nativeAdvancePeakPrivateBytes": 767782912,
+        "nativeAdvancePeakPrivateBytesDelta": 119558144,
+        "nativeBurst3DurationMs": null,
+        "nativeBurst3PeakPrivateBytes": null,
+        "nativeBurst3PeakPrivateBytesDelta": null,
+        "nativeMeasuredWorkflowPeakPrivateBytes": null,
+        "javascriptAdvanceDurationMs": 1793.85,
+        "deferredDiagnosticsDurationMs": 1300.87,
+        "cachedDiagnosticsDurationMs": 0.13,
+        "integratedAdvanceAndProofDurationMs": null,
+        "cachedIntegratedStatusDurationMs": null,
+        "durableAuthorityDurationMs": null,
+        "durableAuthorityPrivateBytesDelta": null,
+        "durableDuplicateRetryDurationMs": null,
+        "incrementalCheckpointDurationMs": null,
+        "incrementalCheckpointChangedBytes": null
+      },
+      "records": {
+        "open": {
+          "fixture": {
+            "sourceBytes": 44167989,
+            "entities": 45904,
+            "belts": 91955
+          },
+          "nativeCore": {
+            "hostBinarySha256": "399c8f3e578f5050f57aa2331ad5cc72e3c2f5d04f12ffed595b4aa19ff1fa03",
+            "openDurationMs": 4182.48,
+            "canonicalSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "sourceSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "canonicalComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5"
+            },
+            "sourceComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99"
+            },
+            "exactRoundTrip": true,
+            "estimatedRuntimeBytes": 131207234,
+            "rawRecordBytes": 88177239,
+            "indexedStringBytes": 5625503,
+            "inventoryEntryCount": 160848,
+            "topologyIndexBytes": 22580364,
+            "processPrivateBytesBeforeOpen": 3067904,
+            "processPrivateBytesAfterOpen": 644866048,
+            "processPrivateBytesDelta": 641798144,
+            "processPrivateBytesPeakDuringOpen": 1078906880,
+            "processPrivateBytesPeakDeltaDuringOpen": 1075838976,
+            "privatePeakSampler": {
+              "phase": "open",
+              "pid": 116724,
+              "samplerPid": 125128,
+              "intervalMs": 50,
+              "baselineBytes": 3067904,
+              "finalBytes": 644866048,
+              "peakBytes": 1078906880,
+              "sampleCount": 70,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 68,
+              "intervalMinMs": 60,
+              "intervalMeanMs": 62,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 63,
+              "intervalMaxMs": 64,
+              "samplingCadenceValid": true,
+              "error": null
+            }
+          }
+        },
+        "admission": {
+          "nativeCoreAdmission": {
+            "supported": true,
+            "exactScope": "simple-factory-v1",
+            "reason": null,
+            "commandDurationMs": 4.4,
+            "commandPrivateBytesDelta": 3358720
+          }
+        },
+        "exact": {
+          "nativeCoreExactRealSaveAdvance": {
+            "exactState": true,
+            "revision": 3,
+            "expectedRevision": 3,
+            "canonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "expectedCanonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "domainSha256": "c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b",
+            "canonicalComponents": {
+              "base": "86a7cd5e2ab533ec46dcb427230ff8b1e0b5eaf59897bbd5c8c48f0e08039d86",
+              "belts": "32fa908cd9c3b4eb13548955c8964db4234733b913b1517b0cb71980d78ceec5",
+              "entities": "a327a66426129bd6245efc0240fac29b56d059caae1b403e4f63dee20a2b73cd"
+            },
+            "conservationSummarySha256": "3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7",
+            "conservationCaptureFailure": null,
+            "conservationValidationFailure": null,
+            "conservationItemCounts": {
+              "totals": 122,
+              "totalProduced": 78,
+              "knownConsumed": 34,
+              "knownGranted": 40,
+              "constructionOutputs": 47
+            },
+            "requestedThreadSetting": "8",
+            "effectiveWorkerLimit": 8,
+            "observedWorkerCount": 8,
+            "fieldMismatches": [],
+            "mismatchDetails": [],
+            "blockedMachineGroups": [],
+            "nativeAdvanceDurationMs": 463.75,
+            "jsAdvanceDurationMs": 1793.85,
+            "jsAdvanceAndConservationDurationMs": 1917.5,
+            "nativeToJsRatio": 0.259,
+            "processPrivateBytesPeakDuringAdvance": 767782912,
+            "processPrivateBytesPeakDeltaDuringAdvance": 119558144,
+            "privatePeakSampler": {
+              "phase": "exact-advance",
+              "pid": 116724,
+              "samplerPid": 40560,
+              "intervalMs": 50,
+              "baselineBytes": 648224768,
+              "finalBytes": 717426688,
+              "peakBytes": 767782912,
+              "sampleCount": 10,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 8,
+              "intervalMinMs": 61,
+              "intervalMeanMs": 66,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 77,
+              "intervalMaxMs": 77,
+              "samplingCadenceValid": true,
+              "error": null
+            },
+            "deferredDiagnosticsDurationMs": 1300.87,
+            "cachedDiagnosticsDurationMs": 0.13,
+            "nativeBeltScheduler": {
+              "activeQueueEnabled": false,
+              "carriedActiveGroups": 0,
+              "changedBeltRecords": 75559,
+              "fullScanPasses": 3,
+              "groupCount": 41804,
+              "initializationGroupChecks": 41804,
+              "reservationAllowanceEntries": 26270,
+              "reservationCreditEntries": 9683,
+              "reservationPasses": 1,
+              "reservationRouteChecks": 91955,
+              "routeCount": 91955,
+              "selectionGroupChecks": 0,
+              "sleepCount": 0,
+              "stableRoutesSkipped": 0,
+              "transferPasses": 2,
+              "transferRouteChecks": 183910,
+              "wakeCount": 0,
+              "writeBackPatchRecords": 91955,
+              "writeBackWorkers": 8
+            },
+            "javascriptBeltScheduler": {
+              "routeChecks": 183910,
+              "stableRoutesSkipped": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "sequence": 6,
+      "label": "candidate",
+      "syncRecordDrop": false,
+      "startedAt": "2026-08-30T20:30:59.963Z",
+      "durationMs": 25880,
+      "systemBefore": {
+        "capturedAt": "2026-08-30T20:30:59.644Z",
+        "freeMemoryBytes": 11562057728,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2569.03125,
+            "WorkingSet64": 1217900544,
+            "PrivateMemorySize64": 1512419328
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9687.71875,
+            "WorkingSet64": 306028544,
+            "PrivateMemorySize64": 1407647744
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 980.921875,
+            "WorkingSet64": 343957504,
+            "PrivateMemorySize64": 1148592128
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.828125,
+            "WorkingSet64": 847347712,
+            "PrivateMemorySize64": 1076072448
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.140625,
+            "WorkingSet64": 347475968,
+            "PrivateMemorySize64": 1026322432
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.609375,
+            "WorkingSet64": 445288448,
+            "PrivateMemorySize64": 703332352
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357298176,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.84375,
+            "WorkingSet64": 125624320,
+            "PrivateMemorySize64": 575172608
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413822976,
+            "PrivateMemorySize64": 529117184
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.6875,
+            "WorkingSet64": 340819968,
+            "PrivateMemorySize64": 403890176
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "systemAfter": {
+        "capturedAt": "2026-08-30T20:31:25.843Z",
+        "freeMemoryBytes": 11629457408,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2569.046875,
+            "WorkingSet64": 1217863680,
+            "PrivateMemorySize64": 1512325120
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9687.96875,
+            "WorkingSet64": 306028544,
+            "PrivateMemorySize64": 1407647744
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 981,
+            "WorkingSet64": 343523328,
+            "PrivateMemorySize64": 1148198912
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.828125,
+            "WorkingSet64": 847933440,
+            "PrivateMemorySize64": 1076596736
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.140625,
+            "WorkingSet64": 347459584,
+            "PrivateMemorySize64": 1026322432
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.671875,
+            "WorkingSet64": 445730816,
+            "PrivateMemorySize64": 703856640
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357298176,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.859375,
+            "WorkingSet64": 125624320,
+            "PrivateMemorySize64": 575172608
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413827072,
+            "PrivateMemorySize64": 529117184
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.8125,
+            "WorkingSet64": 340676608,
+            "PrivateMemorySize64": 403918848
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "metrics": {
+        "openDurationMs": 3986.29,
+        "openPrivateBytesDelta": 643293184,
+        "openPeakPrivateBytes": 1078198272,
+        "openPeakPrivateBytesDelta": 1077039104,
+        "commandDurationMs": 4.75,
+        "commandPrivateBytesDelta": 4657152,
+        "nativeAdvanceDurationMs": 504.28,
+        "nativeAdvancePeakPrivateBytes": 709021696,
+        "nativeAdvancePeakPrivateBytesDelta": 59912192,
+        "nativeBurst3DurationMs": null,
+        "nativeBurst3PeakPrivateBytes": null,
+        "nativeBurst3PeakPrivateBytesDelta": null,
+        "nativeMeasuredWorkflowPeakPrivateBytes": null,
+        "javascriptAdvanceDurationMs": 1560.76,
+        "deferredDiagnosticsDurationMs": 1303.05,
+        "cachedDiagnosticsDurationMs": 0.14,
+        "integratedAdvanceAndProofDurationMs": null,
+        "cachedIntegratedStatusDurationMs": null,
+        "durableAuthorityDurationMs": null,
+        "durableAuthorityPrivateBytesDelta": null,
+        "durableDuplicateRetryDurationMs": null,
+        "incrementalCheckpointDurationMs": null,
+        "incrementalCheckpointChangedBytes": null
+      },
+      "records": {
+        "open": {
+          "fixture": {
+            "sourceBytes": 44167989,
+            "entities": 45904,
+            "belts": 91955
+          },
+          "nativeCore": {
+            "hostBinarySha256": "6cd7d700d1992e46686525ad6e5b0516061bbccaae1ca816ae6d2d87fc21409b",
+            "openDurationMs": 3986.29,
+            "canonicalSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "sourceSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "canonicalComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5"
+            },
+            "sourceComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99"
+            },
+            "exactRoundTrip": true,
+            "estimatedRuntimeBytes": 131207234,
+            "rawRecordBytes": 88177239,
+            "indexedStringBytes": 5625503,
+            "inventoryEntryCount": 160848,
+            "topologyIndexBytes": 22580364,
+            "processPrivateBytesBeforeOpen": 1159168,
+            "processPrivateBytesAfterOpen": 644452352,
+            "processPrivateBytesDelta": 643293184,
+            "processPrivateBytesPeakDuringOpen": 1078198272,
+            "processPrivateBytesPeakDeltaDuringOpen": 1077039104,
+            "privatePeakSampler": {
+              "phase": "open",
+              "pid": 120400,
+              "samplerPid": 125080,
+              "intervalMs": 50,
+              "baselineBytes": 1159168,
+              "finalBytes": 644452352,
+              "peakBytes": 1078198272,
+              "sampleCount": 67,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 65,
+              "intervalMinMs": 61,
+              "intervalMeanMs": 62,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 63,
+              "intervalMaxMs": 78,
+              "samplingCadenceValid": true,
+              "error": null
+            }
+          }
+        },
+        "admission": {
+          "nativeCoreAdmission": {
+            "supported": true,
+            "exactScope": "simple-factory-v1",
+            "reason": null,
+            "commandDurationMs": 4.75,
+            "commandPrivateBytesDelta": 4657152
+          }
+        },
+        "exact": {
+          "nativeCoreExactRealSaveAdvance": {
+            "exactState": true,
+            "revision": 3,
+            "expectedRevision": 3,
+            "canonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "expectedCanonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "domainSha256": "c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b",
+            "canonicalComponents": {
+              "base": "86a7cd5e2ab533ec46dcb427230ff8b1e0b5eaf59897bbd5c8c48f0e08039d86",
+              "belts": "32fa908cd9c3b4eb13548955c8964db4234733b913b1517b0cb71980d78ceec5",
+              "entities": "a327a66426129bd6245efc0240fac29b56d059caae1b403e4f63dee20a2b73cd"
+            },
+            "conservationSummarySha256": "3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7",
+            "conservationCaptureFailure": null,
+            "conservationValidationFailure": null,
+            "conservationItemCounts": {
+              "totals": 122,
+              "totalProduced": 78,
+              "knownConsumed": 34,
+              "knownGranted": 40,
+              "constructionOutputs": 47
+            },
+            "requestedThreadSetting": "8",
+            "effectiveWorkerLimit": 8,
+            "observedWorkerCount": 8,
+            "fieldMismatches": [],
+            "mismatchDetails": [],
+            "blockedMachineGroups": [],
+            "nativeAdvanceDurationMs": 504.28,
+            "jsAdvanceDurationMs": 1560.76,
+            "jsAdvanceAndConservationDurationMs": 1777.93,
+            "nativeToJsRatio": 0.323,
+            "processPrivateBytesPeakDuringAdvance": 709021696,
+            "processPrivateBytesPeakDeltaDuringAdvance": 59912192,
+            "privatePeakSampler": {
+              "phase": "exact-advance",
+              "pid": 120400,
+              "samplerPid": 121320,
+              "intervalMs": 50,
+              "baselineBytes": 649109504,
+              "finalBytes": 709021696,
+              "peakBytes": 709021696,
+              "sampleCount": 10,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 8,
+              "intervalMinMs": 62,
+              "intervalMeanMs": 66,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 77,
+              "intervalMaxMs": 77,
+              "samplingCadenceValid": true,
+              "error": null
+            },
+            "deferredDiagnosticsDurationMs": 1303.05,
+            "cachedDiagnosticsDurationMs": 0.14,
+            "nativeBeltScheduler": {
+              "activeQueueEnabled": false,
+              "carriedActiveGroups": 0,
+              "changedBeltRecords": 75559,
+              "fullScanPasses": 3,
+              "groupCount": 41804,
+              "initializationGroupChecks": 41804,
+              "reservationAllowanceEntries": 26270,
+              "reservationCreditEntries": 9683,
+              "reservationPasses": 1,
+              "reservationRouteChecks": 91955,
+              "routeCount": 91955,
+              "selectionGroupChecks": 0,
+              "sleepCount": 0,
+              "stableRoutesSkipped": 0,
+              "transferPasses": 2,
+              "transferRouteChecks": 183910,
+              "wakeCount": 0,
+              "writeBackPatchRecords": 91955,
+              "writeBackWorkers": 8
+            },
+            "javascriptBeltScheduler": {
+              "routeChecks": 183910,
+              "stableRoutesSkipped": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "sequence": 7,
+      "label": "candidate",
+      "syncRecordDrop": false,
+      "startedAt": "2026-08-30T20:31:26.541Z",
+      "durationMs": 25986,
+      "systemBefore": {
+        "capturedAt": "2026-08-30T20:31:26.236Z",
+        "freeMemoryBytes": 11628556288,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2569.046875,
+            "WorkingSet64": 1217863680,
+            "PrivateMemorySize64": 1512325120
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9687.96875,
+            "WorkingSet64": 306028544,
+            "PrivateMemorySize64": 1407647744
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 981,
+            "WorkingSet64": 343523328,
+            "PrivateMemorySize64": 1148198912
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.828125,
+            "WorkingSet64": 847933440,
+            "PrivateMemorySize64": 1076596736
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.140625,
+            "WorkingSet64": 347459584,
+            "PrivateMemorySize64": 1026322432
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.671875,
+            "WorkingSet64": 445730816,
+            "PrivateMemorySize64": 703856640
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357298176,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.859375,
+            "WorkingSet64": 125624320,
+            "PrivateMemorySize64": 575172608
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413827072,
+            "PrivateMemorySize64": 529117184
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.8125,
+            "WorkingSet64": 340676608,
+            "PrivateMemorySize64": 403918848
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "systemAfter": {
+        "capturedAt": "2026-08-30T20:31:52.527Z",
+        "freeMemoryBytes": 11623202816,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2569.109375,
+            "WorkingSet64": 1218605056,
+            "PrivateMemorySize64": 1513119744
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9688.140625,
+            "WorkingSet64": 306044928,
+            "PrivateMemorySize64": 1407647744
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 981.09375,
+            "WorkingSet64": 343957504,
+            "PrivateMemorySize64": 1148751872
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.828125,
+            "WorkingSet64": 847572992,
+            "PrivateMemorySize64": 1076334592
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.15625,
+            "WorkingSet64": 347435008,
+            "PrivateMemorySize64": 1026322432
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.703125,
+            "WorkingSet64": 445349888,
+            "PrivateMemorySize64": 703324160
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357298176,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.859375,
+            "WorkingSet64": 125607936,
+            "PrivateMemorySize64": 575143936
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413827072,
+            "PrivateMemorySize64": 529117184
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.984375,
+            "WorkingSet64": 340672512,
+            "PrivateMemorySize64": 403910656
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "metrics": {
+        "openDurationMs": 4171.98,
+        "openPrivateBytesDelta": 647217152,
+        "openPeakPrivateBytes": 1078267904,
+        "openPeakPrivateBytesDelta": 1077313536,
+        "commandDurationMs": 4.74,
+        "commandPrivateBytesDelta": 3837952,
+        "nativeAdvanceDurationMs": 556.46,
+        "nativeAdvancePeakPrivateBytes": 713199616,
+        "nativeAdvancePeakPrivateBytesDelta": 61190144,
+        "nativeBurst3DurationMs": null,
+        "nativeBurst3PeakPrivateBytes": null,
+        "nativeBurst3PeakPrivateBytesDelta": null,
+        "nativeMeasuredWorkflowPeakPrivateBytes": null,
+        "javascriptAdvanceDurationMs": 1486.42,
+        "deferredDiagnosticsDurationMs": 1303.94,
+        "cachedDiagnosticsDurationMs": 0.13,
+        "integratedAdvanceAndProofDurationMs": null,
+        "cachedIntegratedStatusDurationMs": null,
+        "durableAuthorityDurationMs": null,
+        "durableAuthorityPrivateBytesDelta": null,
+        "durableDuplicateRetryDurationMs": null,
+        "incrementalCheckpointDurationMs": null,
+        "incrementalCheckpointChangedBytes": null
+      },
+      "records": {
+        "open": {
+          "fixture": {
+            "sourceBytes": 44167989,
+            "entities": 45904,
+            "belts": 91955
+          },
+          "nativeCore": {
+            "hostBinarySha256": "6cd7d700d1992e46686525ad6e5b0516061bbccaae1ca816ae6d2d87fc21409b",
+            "openDurationMs": 4171.98,
+            "canonicalSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "sourceSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "canonicalComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5"
+            },
+            "sourceComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99"
+            },
+            "exactRoundTrip": true,
+            "estimatedRuntimeBytes": 131207234,
+            "rawRecordBytes": 88177239,
+            "indexedStringBytes": 5625503,
+            "inventoryEntryCount": 160848,
+            "topologyIndexBytes": 22580364,
+            "processPrivateBytesBeforeOpen": 954368,
+            "processPrivateBytesAfterOpen": 648171520,
+            "processPrivateBytesDelta": 647217152,
+            "processPrivateBytesPeakDuringOpen": 1078267904,
+            "processPrivateBytesPeakDeltaDuringOpen": 1077313536,
+            "privatePeakSampler": {
+              "phase": "open",
+              "pid": 124952,
+              "samplerPid": 117260,
+              "intervalMs": 50,
+              "baselineBytes": 954368,
+              "finalBytes": 648171520,
+              "peakBytes": 1078267904,
+              "sampleCount": 70,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 68,
+              "intervalMinMs": 60,
+              "intervalMeanMs": 62,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 63,
+              "intervalMaxMs": 64,
+              "samplingCadenceValid": true,
+              "error": null
+            }
+          }
+        },
+        "admission": {
+          "nativeCoreAdmission": {
+            "supported": true,
+            "exactScope": "simple-factory-v1",
+            "reason": null,
+            "commandDurationMs": 4.74,
+            "commandPrivateBytesDelta": 3837952
+          }
+        },
+        "exact": {
+          "nativeCoreExactRealSaveAdvance": {
+            "exactState": true,
+            "revision": 3,
+            "expectedRevision": 3,
+            "canonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "expectedCanonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "domainSha256": "c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b",
+            "canonicalComponents": {
+              "base": "86a7cd5e2ab533ec46dcb427230ff8b1e0b5eaf59897bbd5c8c48f0e08039d86",
+              "belts": "32fa908cd9c3b4eb13548955c8964db4234733b913b1517b0cb71980d78ceec5",
+              "entities": "a327a66426129bd6245efc0240fac29b56d059caae1b403e4f63dee20a2b73cd"
+            },
+            "conservationSummarySha256": "3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7",
+            "conservationCaptureFailure": null,
+            "conservationValidationFailure": null,
+            "conservationItemCounts": {
+              "totals": 122,
+              "totalProduced": 78,
+              "knownConsumed": 34,
+              "knownGranted": 40,
+              "constructionOutputs": 47
+            },
+            "requestedThreadSetting": "8",
+            "effectiveWorkerLimit": 8,
+            "observedWorkerCount": 8,
+            "fieldMismatches": [],
+            "mismatchDetails": [],
+            "blockedMachineGroups": [],
+            "nativeAdvanceDurationMs": 556.46,
+            "jsAdvanceDurationMs": 1486.42,
+            "jsAdvanceAndConservationDurationMs": 1662.25,
+            "nativeToJsRatio": 0.374,
+            "processPrivateBytesPeakDuringAdvance": 713199616,
+            "processPrivateBytesPeakDeltaDuringAdvance": 61190144,
+            "privatePeakSampler": {
+              "phase": "exact-advance",
+              "pid": 124952,
+              "samplerPid": 111480,
+              "intervalMs": 50,
+              "baselineBytes": 652009472,
+              "finalBytes": 713199616,
+              "peakBytes": 713199616,
+              "sampleCount": 11,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 9,
+              "intervalMinMs": 61,
+              "intervalMeanMs": 64,
+              "intervalP50Ms": 62,
+              "intervalP95Ms": 77,
+              "intervalMaxMs": 77,
+              "samplingCadenceValid": true,
+              "error": null
+            },
+            "deferredDiagnosticsDurationMs": 1303.94,
+            "cachedDiagnosticsDurationMs": 0.13,
+            "nativeBeltScheduler": {
+              "activeQueueEnabled": false,
+              "carriedActiveGroups": 0,
+              "changedBeltRecords": 75559,
+              "fullScanPasses": 3,
+              "groupCount": 41804,
+              "initializationGroupChecks": 41804,
+              "reservationAllowanceEntries": 26270,
+              "reservationCreditEntries": 9683,
+              "reservationPasses": 1,
+              "reservationRouteChecks": 91955,
+              "routeCount": 91955,
+              "selectionGroupChecks": 0,
+              "sleepCount": 0,
+              "stableRoutesSkipped": 0,
+              "transferPasses": 2,
+              "transferRouteChecks": 183910,
+              "wakeCount": 0,
+              "writeBackPatchRecords": 91955,
+              "writeBackWorkers": 8
+            },
+            "javascriptBeltScheduler": {
+              "routeChecks": 183910,
+              "stableRoutesSkipped": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "sequence": 8,
+      "label": "baseline",
+      "syncRecordDrop": false,
+      "startedAt": "2026-08-30T20:31:53.237Z",
+      "durationMs": 25880,
+      "systemBefore": {
+        "capturedAt": "2026-08-30T20:31:52.905Z",
+        "freeMemoryBytes": 11619393536,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2569.109375,
+            "WorkingSet64": 1218605056,
+            "PrivateMemorySize64": 1513119744
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9688.140625,
+            "WorkingSet64": 306098176,
+            "PrivateMemorySize64": 1407705088
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 981.09375,
+            "WorkingSet64": 343957504,
+            "PrivateMemorySize64": 1148751872
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.828125,
+            "WorkingSet64": 847572992,
+            "PrivateMemorySize64": 1076334592
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.15625,
+            "WorkingSet64": 347435008,
+            "PrivateMemorySize64": 1026322432
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.703125,
+            "WorkingSet64": 445349888,
+            "PrivateMemorySize64": 703324160
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357298176,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.859375,
+            "WorkingSet64": 126283776,
+            "PrivateMemorySize64": 575717376
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413827072,
+            "PrivateMemorySize64": 529117184
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7112.984375,
+            "WorkingSet64": 340672512,
+            "PrivateMemorySize64": 403910656
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "systemAfter": {
+        "capturedAt": "2026-08-30T20:32:19.117Z",
+        "freeMemoryBytes": 11705368576,
+        "totalMemoryBytes": 34163752960,
+        "loadAverage": [
+          0,
+          0,
+          0
+        ],
+        "topProcessesByPrivateBytes": [
+          {
+            "Id": 102608,
+            "ProcessName": "codex",
+            "CPU": 2569.203125,
+            "WorkingSet64": 1218650112,
+            "PrivateMemorySize64": 1513758720
+          },
+          {
+            "Id": 5132,
+            "ProcessName": "explorer",
+            "CPU": 9688.53125,
+            "WorkingSet64": 306184192,
+            "PrivateMemorySize64": 1407795200
+          },
+          {
+            "Id": 122852,
+            "ProcessName": "ChatGPT",
+            "CPU": 981.21875,
+            "WorkingSet64": 343805952,
+            "PrivateMemorySize64": 1148243968
+          },
+          {
+            "Id": 119948,
+            "ProcessName": "ChatGPT",
+            "CPU": 4156.84375,
+            "WorkingSet64": 848072704,
+            "PrivateMemorySize64": 1076596736
+          },
+          {
+            "Id": 25864,
+            "ProcessName": "quark",
+            "CPU": 19700.15625,
+            "WorkingSet64": 347439104,
+            "PrivateMemorySize64": 1026322432
+          },
+          {
+            "Id": 20116,
+            "ProcessName": "QQ",
+            "CPU": 7229.875,
+            "WorkingSet64": 445779968,
+            "PrivateMemorySize64": 703852544
+          },
+          {
+            "Id": 36644,
+            "ProcessName": "QQ",
+            "CPU": 3412.453125,
+            "WorkingSet64": 357298176,
+            "PrivateMemorySize64": 656490496
+          },
+          {
+            "Id": 12020,
+            "ProcessName": "NVIDIA Overlay",
+            "CPU": 3596.859375,
+            "WorkingSet64": 125689856,
+            "PrivateMemorySize64": 575225856
+          },
+          {
+            "Id": 75652,
+            "ProcessName": "quark",
+            "CPU": 1937.6875,
+            "WorkingSet64": 413835264,
+            "PrivateMemorySize64": 529117184
+          },
+          {
+            "Id": 19668,
+            "ProcessName": "QQ",
+            "CPU": 1800.484375,
+            "WorkingSet64": 81035264,
+            "PrivateMemorySize64": 453185536
+          },
+          {
+            "Id": 25876,
+            "ProcessName": "quark",
+            "CPU": 7113.109375,
+            "WorkingSet64": 340652032,
+            "PrivateMemorySize64": 403890176
+          },
+          {
+            "Id": 1916,
+            "ProcessName": "dwm",
+            "CPU": null,
+            "WorkingSet64": 135827456,
+            "PrivateMemorySize64": 396165120
+          }
+        ]
+      },
+      "metrics": {
+        "openDurationMs": 3978.02,
+        "openPrivateBytesDelta": 641912832,
+        "openPeakPrivateBytes": 1078112256,
+        "openPeakPrivateBytesDelta": 1075879936,
+        "commandDurationMs": 4.99,
+        "commandPrivateBytesDelta": 3538944,
+        "nativeAdvanceDurationMs": 608.83,
+        "nativeAdvancePeakPrivateBytes": 714059776,
+        "nativeAdvancePeakPrivateBytesDelta": 66375680,
+        "nativeBurst3DurationMs": null,
+        "nativeBurst3PeakPrivateBytes": null,
+        "nativeBurst3PeakPrivateBytesDelta": null,
+        "nativeMeasuredWorkflowPeakPrivateBytes": null,
+        "javascriptAdvanceDurationMs": 1489.77,
+        "deferredDiagnosticsDurationMs": 1306.37,
+        "cachedDiagnosticsDurationMs": 0.2,
+        "integratedAdvanceAndProofDurationMs": null,
+        "cachedIntegratedStatusDurationMs": null,
+        "durableAuthorityDurationMs": null,
+        "durableAuthorityPrivateBytesDelta": null,
+        "durableDuplicateRetryDurationMs": null,
+        "incrementalCheckpointDurationMs": null,
+        "incrementalCheckpointChangedBytes": null
+      },
+      "records": {
+        "open": {
+          "fixture": {
+            "sourceBytes": 44167989,
+            "entities": 45904,
+            "belts": 91955
+          },
+          "nativeCore": {
+            "hostBinarySha256": "399c8f3e578f5050f57aa2331ad5cc72e3c2f5d04f12ffed595b4aa19ff1fa03",
+            "openDurationMs": 3978.02,
+            "canonicalSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "sourceSha256": "705b61174bfe97eb2c70cd10e118496745be422188aa32f2ce330229a718a023",
+            "canonicalComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5"
+            },
+            "sourceComponents": {
+              "base": "fa1a45977f53d10f92edf819f977d2ac1fce8bacef97203851357788c30c4e8a",
+              "entities": "fa16da1a5cfbf75bccfed048b29eee4c7521d24397232944783779ab70e729b5",
+              "belts": "e296b037fb4673511d249eaa2e9ef3c034be5b84592158e6ae06d042fff1ef99"
+            },
+            "exactRoundTrip": true,
+            "estimatedRuntimeBytes": 131207234,
+            "rawRecordBytes": 88177239,
+            "indexedStringBytes": 5625503,
+            "inventoryEntryCount": 160848,
+            "topologyIndexBytes": 22580364,
+            "processPrivateBytesBeforeOpen": 2232320,
+            "processPrivateBytesAfterOpen": 644145152,
+            "processPrivateBytesDelta": 641912832,
+            "processPrivateBytesPeakDuringOpen": 1078112256,
+            "processPrivateBytesPeakDeltaDuringOpen": 1075879936,
+            "privatePeakSampler": {
+              "phase": "open",
+              "pid": 100016,
+              "samplerPid": 124028,
+              "intervalMs": 50,
+              "baselineBytes": 2232320,
+              "finalBytes": 644145152,
+              "peakBytes": 1078112256,
+              "sampleCount": 67,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 65,
+              "intervalMinMs": 60,
+              "intervalMeanMs": 62,
+              "intervalP50Ms": 61,
+              "intervalP95Ms": 63,
+              "intervalMaxMs": 77,
+              "samplingCadenceValid": true,
+              "error": null
+            }
+          }
+        },
+        "admission": {
+          "nativeCoreAdmission": {
+            "supported": true,
+            "exactScope": "simple-factory-v1",
+            "reason": null,
+            "commandDurationMs": 4.99,
+            "commandPrivateBytesDelta": 3538944
+          }
+        },
+        "exact": {
+          "nativeCoreExactRealSaveAdvance": {
+            "exactState": true,
+            "revision": 3,
+            "expectedRevision": 3,
+            "canonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "expectedCanonicalSha256": "02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c",
+            "domainSha256": "c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b",
+            "canonicalComponents": {
+              "base": "86a7cd5e2ab533ec46dcb427230ff8b1e0b5eaf59897bbd5c8c48f0e08039d86",
+              "belts": "32fa908cd9c3b4eb13548955c8964db4234733b913b1517b0cb71980d78ceec5",
+              "entities": "a327a66426129bd6245efc0240fac29b56d059caae1b403e4f63dee20a2b73cd"
+            },
+            "conservationSummarySha256": "3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7",
+            "conservationCaptureFailure": null,
+            "conservationValidationFailure": null,
+            "conservationItemCounts": {
+              "totals": 122,
+              "totalProduced": 78,
+              "knownConsumed": 34,
+              "knownGranted": 40,
+              "constructionOutputs": 47
+            },
+            "requestedThreadSetting": "8",
+            "effectiveWorkerLimit": 8,
+            "observedWorkerCount": 8,
+            "fieldMismatches": [],
+            "mismatchDetails": [],
+            "blockedMachineGroups": [],
+            "nativeAdvanceDurationMs": 608.83,
+            "jsAdvanceDurationMs": 1489.77,
+            "jsAdvanceAndConservationDurationMs": 1657.6,
+            "nativeToJsRatio": 0.409,
+            "processPrivateBytesPeakDuringAdvance": 714059776,
+            "processPrivateBytesPeakDeltaDuringAdvance": 66375680,
+            "privatePeakSampler": {
+              "phase": "exact-advance",
+              "pid": 100016,
+              "samplerPid": 96700,
+              "intervalMs": 50,
+              "baselineBytes": 647684096,
+              "finalBytes": 714059776,
+              "peakBytes": 714059776,
+              "sampleCount": 12,
+              "readErrors": 0,
+              "lastReadSucceeded": true,
+              "intervalSampleCount": 10,
+              "intervalMinMs": 60,
+              "intervalMeanMs": 63,
+              "intervalP50Ms": 61,
+              "intervalP95Ms": 76,
+              "intervalMaxMs": 76,
+              "samplingCadenceValid": true,
+              "error": null
+            },
+            "deferredDiagnosticsDurationMs": 1306.37,
+            "cachedDiagnosticsDurationMs": 0.2,
+            "nativeBeltScheduler": {
+              "activeQueueEnabled": false,
+              "carriedActiveGroups": 0,
+              "changedBeltRecords": 75559,
+              "fullScanPasses": 3,
+              "groupCount": 41804,
+              "initializationGroupChecks": 41804,
+              "reservationAllowanceEntries": 26270,
+              "reservationCreditEntries": 9683,
+              "reservationPasses": 1,
+              "reservationRouteChecks": 91955,
+              "routeCount": 91955,
+              "selectionGroupChecks": 0,
+              "sleepCount": 0,
+              "stableRoutesSkipped": 0,
+              "transferPasses": 2,
+              "transferRouteChecks": 183910,
+              "wakeCount": 0,
+              "writeBackPatchRecords": 91955,
+              "writeBackWorkers": 8
+            },
+            "javascriptBeltScheduler": {
+              "routeChecks": 183910,
+              "stableRoutesSkipped": 0
+            }
+          }
+        }
+      }
+    }
+  ]
+}

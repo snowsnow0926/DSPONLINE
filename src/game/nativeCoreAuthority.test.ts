@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   beginNativeCoreShadow,
+  bindMainOwnedNativeCoreAuthority,
   createNativeCoreAuthorityState,
   fallbackNativeCoreToJavaScript,
   handleNativeCoreExit,
@@ -68,6 +69,57 @@ describe("native core authority state machine", () => {
     expect(() => promoteNativeCoreAuthority(state, proof(1))).toThrow(/同 revision/);
     state = promoteNativeCoreAuthority(state, proof(2));
     expect(state).toMatchObject({ phase: "native-authoritative", authority: "native" });
+  });
+
+  it("binds a main-owned handoff only to the exact verified shadow identity", () => {
+    let state = beginNativeCoreShadow(createNativeCoreAuthorityState(), {
+      sessionId: "core-1", javascriptProof: proof(1), nativeProof: proof(1), startedAtMs: 1_000,
+    });
+    state = recordNativeCoreShadowComparison(state, {
+      javascriptProof: proof(2), nativeProof: proof(2), compatibleFallback: proof(2),
+    });
+    const bound = bindMainOwnedNativeCoreAuthority(state, {
+      sessionId: "core-1",
+      proof: proof(2, "d"),
+      authorityEligibleCoverage: true,
+      source: "handoff",
+    });
+    expect(bound).toMatchObject({
+      phase: "native-authoritative",
+      authority: "native",
+      sessionId: "core-1",
+      shadowRevision: 2,
+      latestVerifiedProof: proof(2, "d"),
+    });
+    expect(() => bindMainOwnedNativeCoreAuthority(state, {
+      sessionId: "core-other",
+      proof: proof(2, "d"),
+      authorityEligibleCoverage: true,
+      source: "handoff",
+    })).toThrow(/影子不一致/);
+  });
+
+  it("binds startup recovery only from a fresh JavaScript state and never invents Gate evidence", () => {
+    const state = bindMainOwnedNativeCoreAuthority(createNativeCoreAuthorityState(), {
+      sessionId: "core-recovered-1",
+      proof: proof(41, "e"),
+      authorityEligibleCoverage: true,
+      source: "startup-recovery",
+    });
+    expect(state).toMatchObject({
+      phase: "native-authoritative",
+      authority: "native",
+      sessionId: "core-recovered-1",
+      shadowRevision: 41,
+      comparisonCount: 0,
+      gateEvidence: null,
+    });
+    expect(() => bindMainOwnedNativeCoreAuthority(state, {
+      sessionId: "core-recovered-1",
+      proof: proof(41, "e"),
+      authorityEligibleCoverage: true,
+      source: "startup-recovery",
+    })).toThrow(/启动恢复/);
   });
 
   it("continues comparing a ready shadow and keeps the latest exact fallback", () => {

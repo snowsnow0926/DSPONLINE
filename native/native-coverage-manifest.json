@@ -1,0 +1,473 @@
+{
+  "schemaVersion": 1,
+  "generatedFrom": [
+    "native/dsp-native-core/src/state.rs",
+    "native/dsp-native-host/src/main.rs",
+    "native/dsp-native-host/src/core_runtime.rs",
+    "native/dsp-native-host/src/exact_realtime_lease.rs",
+    "src/App.tsx",
+    "native/native-surface-registry.json"
+  ],
+  "domainCoverage": {
+    "state_container": true,
+    "command_patches": true,
+    "quiescent_clock": true,
+    "infinite_solid_mining": true,
+    "finite_solid_mining": true,
+    "fluid_mining": true,
+    "wind_power": true,
+    "renewable_power": true,
+    "fuel_power": true,
+    "energy_storage": true,
+    "power_priorities": true,
+    "ordinary_production": true,
+    "proliferated_production": true,
+    "finite_research": true,
+    "infinite_research": true,
+    "ordinary_belts": true,
+    "storage_and_splitters": true,
+    "planetary_logistics": true,
+    "same_system_interstellar_logistics": true,
+    "direct_warp_logistics": true,
+    "relay_logistics": true,
+    "orbital_collectors": true,
+    "station_warper_auto_refill": true,
+    "quantum_logistics_network": true,
+    "quantum_local_drone_bridge": true,
+    "quantum_belt_bridge": true,
+    "persisted_construction_jobs": true,
+    "construction_quantum_prefetch": true,
+    "recursive_construction_planning": true,
+    "portable_fleet_construction": true,
+    "construction_byproduct_settlement": true,
+    "construction_arithmetic_batching": true,
+    "quantum_attachment_transitions": true,
+    "inactive_time_warp_controller": true,
+    "active_time_warp_power": true,
+    "unified_advance_budgets": true,
+    "dyson_swarm_and_sphere": true,
+    "dyson_launchers": true,
+    "dyson_ray_receivers": true,
+    "orbital_cargo_terminals": true,
+    "station_contract_refresh": true,
+    "system_space_station_construction": true,
+    "system_hub_logistics": true,
+    "elevator_belts": true,
+    "station_mode_transitions": true,
+    "campaign_progress": true,
+    "handcraft_queue": true,
+    "exploration_missions": true,
+    "galactic_exports": true,
+    "speedrun_clock_and_milestones": true,
+    "exact_segmented_offline": true,
+    "pure_idle_macro": true,
+    "mining": true,
+    "production": true,
+    "research": true,
+    "belts": true,
+    "logistics": true,
+    "power": true,
+    "dyson": true,
+    "construction": true,
+    "space_station": true,
+    "offline_and_time_warp": true,
+    "content_packs": true,
+    "authority_eligible": false
+  },
+  "hostCapabilities": [
+    "native-core-authority-wal-v1",
+    "native-core-blueprint-capture-context-v1",
+    "native-core-blueprint-direct-deploy-context-v1",
+    "native-core-blueprint-enqueue-context-v1",
+    "native-core-blueprint-export-context-v1",
+    "native-core-blueprint-import-context-v1",
+    "native-core-blueprint-workspace-v1",
+    "native-core-campaign-workspace-projection-v1",
+    "native-core-checkpoint-v1",
+    "native-core-command-palette-entity-search-v1",
+    "native-core-command-v1",
+    "native-core-construction-belt-lane-context-v1",
+    "native-core-construction-belt-placement-context-v1",
+    "native-core-construction-belt-removal-context-v1",
+    "native-core-construction-inventory-v1",
+    "native-core-construction-placement-context-v1",
+    "native-core-construction-removal-context-v1",
+    "native-core-construction-stack-context-v1",
+    "native-core-dyson-workspace-projection-v1",
+    "native-core-exact-realtime-lease-v2",
+    "native-core-exact-realtime-writer-fence-v1",
+    "native-core-factory-inventory-v1",
+    "native-core-factory-read-model-v1",
+    "native-core-galaxy-account-workspace-projection-v1",
+    "native-core-offline-candidate-export-v1",
+    "native-core-offline-macro-v1",
+    "native-core-operations-workspace-projection-v1",
+    "native-core-orbital-contract-workspace-projection-v1",
+    "native-core-player-authority-command-v1",
+    "native-core-player-authority-gate-v1",
+    "native-core-player-authority-operations-setting-command-v1",
+    "native-core-player-authority-orbital-contract-command-v1",
+    "native-core-player-authority-pause-lifecycle-v1",
+    "native-core-player-authority-pure-idle-macro-v1",
+    "native-core-player-authority-startup-recovery-v1",
+    "native-core-player-authority-system-space-station-command-v1",
+    "native-core-player-authority-tick-v1",
+    "native-core-projection-v1",
+    "native-core-recipe-workspace-projection-v1",
+    "native-core-shadow-v1",
+    "native-core-star-map-catalog-projection-v1",
+    "native-core-star-map-overview-projection-v1",
+    "native-core-state-v1",
+    "native-core-statistics-projection-v1",
+    "native-core-stellar-industry-projection-v1",
+    "native-core-stellar-industry-projection-v2",
+    "native-core-stellar-quantum-projection-v1",
+    "native-core-system-space-station-workspace-projection-v1",
+    "native-core-technology-projection-v1",
+    "native-core-v46-to-v47-stream-adapter-v1",
+    "native-core-v47-stream-export-v1",
+    "native-core-v47-stream-import-v1",
+    "native-core-viewport-entity-presentation-v1",
+    "native-core-viewport-projection-v1",
+    "native-core-viewport-projection-v2",
+    "native-save-put-batch-v1",
+    "native-save-v1"
+  ],
+  "playerWriteSurfaces": [
+    {
+      "label": "轨道货运接口清空",
+      "occurrences": 1,
+      "lines": [
+        14519
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust special-input-port command owns clearing and refunds."
+    },
+    {
+      "label": "轨道空间站操作",
+      "occurrences": 1,
+      "lines": [
+        23716
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust orbital-contract command owns the native workspace mutations."
+    },
+    {
+      "label": "基础制造",
+      "occurrences": 2,
+      "lines": [
+        20857,
+        20927
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust workspace actions own bounded handcraft enqueue/cancel and derive materials from the current revision."
+    },
+    {
+      "label": "建筑放置与扩建",
+      "occurrences": 4,
+      "lines": [
+        13112,
+        18125,
+        21829,
+        23029
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Ordinary placement, blueprint deployment and construction queue use Rust commands."
+    },
+    {
+      "label": "建筑回收",
+      "occurrences": 1,
+      "lines": [
+        13173
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust removal contexts and authoritative refunds are wired."
+    },
+    {
+      "label": "建筑升级",
+      "occurrences": 1,
+      "lines": [
+        23976
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust factory batch commands derive single and selected building upgrades, costs and stable targets."
+    },
+    {
+      "label": "建筑拖放",
+      "occurrences": 1,
+      "lines": [
+        18621
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Bounded native position commands own ordinary dragging."
+    },
+    {
+      "label": "建筑位置编辑",
+      "occurrences": 1,
+      "lines": [
+        21789
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust validates and commits exact position leaves."
+    },
+    {
+      "label": "建筑物资交互",
+      "occurrences": 4,
+      "lines": [
+        13013,
+        13029,
+        13045,
+        13067
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Factory inventory projection and typed transfer commands are authoritative."
+    },
+    {
+      "label": "建筑与线路回收",
+      "occurrences": 1,
+      "lines": [
+        12916
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "One Rust factory batch transaction re-derives selected entities, incident belts and refunds atomically."
+    },
+    {
+      "label": "建筑制造中心",
+      "occurrences": 3,
+      "lines": [
+        21026,
+        21563,
+        22795
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Construction automation and queue commands own native mutations."
+    },
+    {
+      "label": "旧版游戏规则设置",
+      "occurrences": 1,
+      "lines": [
+        13853
+      ],
+      "kind": "deliberately-unsupported",
+      "owner": "web",
+      "status": "intentional",
+      "reason": "Legacy rules are not part of the Windows player-authority contract."
+    },
+    {
+      "label": "蓝图部署",
+      "occurrences": 1,
+      "lines": [
+        20844
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust direct-deploy and enqueue commands own blueprint deployment."
+    },
+    {
+      "label": "蓝图复制",
+      "occurrences": 1,
+      "lines": [
+        20628
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust capture/import/export contexts own native blueprints."
+    },
+    {
+      "label": "蓝图施工订单取消",
+      "occurrences": 1,
+      "lines": [
+        23154
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust queue cancellation owns refunds and version pruning."
+    },
+    {
+      "label": "批量回收",
+      "occurrences": 1,
+      "lines": [
+        20426
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust selection removal is one bounded atomic command with current-revision refund derivation."
+    },
+    {
+      "label": "批量接入量子物流",
+      "occurrences": 1,
+      "lines": [
+        14120
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust derives eligible entities by explicit IDs or system scope and applies one quantum transition."
+    },
+    {
+      "label": "批量切换轨道采集器量子模式",
+      "occurrences": 1,
+      "lines": [
+        14149
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust derives collector scope and settles the complete mode transition atomically."
+    },
+    {
+      "label": "批量升级星际物流站",
+      "occurrences": 1,
+      "lines": [
+        14090
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust derives the complete system scope and reuses authoritative station cost and fleet validation."
+    },
+    {
+      "label": "批量增加建筑与线路",
+      "occurrences": 1,
+      "lines": [
+        20507
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust factory batch commands derive stack/lane bounds and construction debits for the selection."
+    },
+    {
+      "label": "生产区域编辑",
+      "occurrences": 1,
+      "lines": [
+        21776
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Persisted regions use typed Rust add/update/resize/remove leaves; device-only viewport state stays local."
+    },
+    {
+      "label": "手动采矿",
+      "occurrences": 1,
+      "lines": [
+        12982
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust manual-mining intent derives yield and depletion."
+    },
+    {
+      "label": "托盘与手持物",
+      "occurrences": 8,
+      "lines": [
+        12905,
+        13076,
+        13101,
+        13968,
+        21601,
+        21852,
+        21857,
+        21861
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Paged native inventory projections and typed Rust pickup/drop/transfer/discard commands own persisted material movement."
+    },
+    {
+      "label": "微型黑洞启停",
+      "occurrences": 1,
+      "lines": [
+        22857
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust black-hole pause intent owns activation and pause state."
+    },
+    {
+      "label": "物料配送接口设置",
+      "occurrences": 1,
+      "lines": [
+        14501
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust special-input-port command owns configuration and refunds."
+    },
+    {
+      "label": "系统空间站输出口设置",
+      "occurrences": 1,
+      "lines": [
+        23693
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust station command owns output-port configuration."
+    },
+    {
+      "label": "远程轨道采集物设置",
+      "occurrences": 1,
+      "lines": [
+        20572
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust workspace action validates the collector, catalog item and safe return of old buffers/routes."
+    },
+    {
+      "label": "远程物流槽位设置",
+      "occurrences": 1,
+      "lines": [
+        20547
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust station-slot intents own item and mode configuration."
+    },
+    {
+      "label": "运输线创建",
+      "occurrences": 1,
+      "lines": [
+        17876
+      ],
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Ordinary belt placement context and command are authoritative."
+    }
+  ]
+}

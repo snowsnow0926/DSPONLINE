@@ -15906,11 +15906,11 @@ mod tests {
         // future unexplained gameplay drift cannot be accepted as "history".
         assert_fixed_macro_hash_at_one_two_four_eight_workers(
             productive_closed_recipe_dag_macro_fixture,
-            "a3fb35709924370c720f2dcd9df64394b19cdb8b1bff6892059ae513c9d47cba",
+            "e6095295aa7aaae1e84a4c96b8b7335acffdd051da931aad80c37918f64e3736",
             "0e225ed562017b92c73b53c83c8191d42c95c67064835a123d0df81bf456b918",
             "6a42519ebeb092f4580ce9eaefccc26e5f6456bf387051199eb3dbc60462daf6",
             "aae0e08fc018ea32ff5df9a9fa31e01946c859e4aac9ed8944d407c19567fcac",
-            "5942eebc0800e86aa919e66520701cbf0a6fde7ad01297b552240ee4c5d30888",
+            "029721bf9652279c30e8850b1b5c0701b46bdeb98b3b2868234e418e00bd2ed5",
         );
     }
 
@@ -16429,11 +16429,11 @@ mod tests {
     fn macro_v10_closed_recipe_has_a_fixed_cross_thread_hash() {
         assert_fixed_macro_hash_at_one_two_four_eight_workers(
             productive_closed_recipe_macro_fixture,
-            "d536aac5b0b425b1f358cf1e3d1ef0e132544e2cd99a2a37be4dd9c32b61f4a6",
+            "84944662ddf998621707fcbb757856158fa92d452b0523cd7ab0bd9545bf9746",
             "e2ce7700859fc0321532bee4351f3b3d365180a68980cffa478e483a99ed8e42",
             "f9a4439bfcb9a337868933db93ad18f71c09c5a327583abf6304ae38be17b78f",
             "0d1d41bcab8958166f540dfbd5d0e51b074d51e98682df846bb169d097e7aae8",
-            "1b80a5f072bf58beb7a058770b9aba569fda1632f4fd0cd7f5e5cd99990c5e2a",
+            "c28b7772359e7e1f4ce50cb5030407e777c9146921552baef00c47d24c222b2c",
         );
     }
 

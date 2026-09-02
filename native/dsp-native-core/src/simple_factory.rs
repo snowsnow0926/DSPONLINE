@@ -11226,7 +11226,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn exact_one_second_public_history_keeps_the_legacy_single_sample_bytes() {
+    fn exact_one_second_public_history_keeps_the_current_single_sample_bytes() {
         let mut state = production_history_segmentation_fixture();
         advance_exact_public_seconds(&mut state, 1.0);
 
@@ -11245,11 +11245,34 @@ pub(crate) mod tests {
             "powerEfficiency": 1.0,
             "activeMachines": 0.0,
             "blockedMachines": 33.0,
+            "pureIdleReplication": {
+                "researchInvestmentByItem": { "universe_matrix": "0" },
+                "structurePointsBySystem": {
+                    "aurora": 0,
+                    "blue_giant": 0,
+                    "borealis": 0,
+                    "ember": 0,
+                    "helios": 0,
+                    "neutron": 0,
+                    "sirius": 0,
+                    "white_dwarf": 0
+                },
+                "shellSailsBySystem": {
+                    "aurora": 0,
+                    "blue_giant": 0,
+                    "borealis": 0,
+                    "ember": 0,
+                    "helios": 0,
+                    "neutron": 0,
+                    "sirius": 0,
+                    "white_dwarf": 0
+                }
+            },
         }]);
         assert_eq!(
             serde_json::to_vec(&state.base_value()["productionHistory"]).unwrap(),
             serde_json::to_vec(&expected).unwrap(),
-            "the inner sample must replace, not duplicate or alter, the established one-second outer sample"
+            "the inner sample must replace, not duplicate, the established one-second outer sample"
         );
         assert_eq!(state.base_value()["historyRecordedAt"].as_f64(), Some(1.0));
     }

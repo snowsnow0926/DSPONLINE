@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -132,7 +133,16 @@ export async function verifyNativeCoverageManifest() {
   if (actual !== expected) throw new Error("native coverage manifest is stale; run npm run native:coverage:generate");
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(path.resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectInvocation()) {
   const mode = process.argv[2] ?? "--verify";
   if (mode === "--write") {
     const manifest = await writeNativeCoverageManifest();

@@ -9611,7 +9611,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const returnToMenuSafely = useCallback(async () => {
     if (returnToMenuSaveInFlightRef.current) return;
     returnToMenuSaveInFlightRef.current = true;
-    const source = currentPrimarySaveSource();
+    // React Flow publishes its final camera position through a trailing
+    // debounce. Returning during that window used to let the timer mutate the
+    // save source after the verified checkpoint, which both lost the camera
+    // and triggered an un-awaited cleanup write from the unmount path. Freeze
+    // the latest imperative viewport into the checkpoint overlay instead.
+    if (factoryConfirmedActivePlanetId) {
+      const previous = pendingPlanetViewportRef.current.get(factoryConfirmedActivePlanetId);
+      if (previous?.timer) window.clearTimeout(previous.timer);
+      pendingPlanetViewportRef.current.set(factoryConfirmedActivePlanetId, {
+        viewport: {
+          x: alignToDevicePixel(viewportRef.current.x),
+          y: alignToDevicePixel(viewportRef.current.y),
+          zoom: Math.max(0.25, Math.min(1.8, Math.round(viewportRef.current.zoom * 1000) / 1000)),
+        },
+        timer: 0,
+      });
+    }
     const result = await persistPrimarySave(undefined, "return");
     if (lifecycleExitStartedRef.current) {
       returnToMenuSaveInFlightRef.current = false;
@@ -9623,13 +9639,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return;
     }
-    // Skip cleanup only while the exact authoritative state/debt/viewport
-    // source remains current. A Worker result or player command arriving while
-    // the durable write was in flight must still receive the final cleanup
-    // save, preserving the former no-progress-loss behavior.
-    controlledReturnCommitRef.current = source;
+    // `return` always crosses a Worker checkpoint barrier. Capture the source
+    // after its durable ACK: this is the exact state/debt/viewport boundary
+    // that may suppress the otherwise redundant unmount cleanup write.
+    controlledReturnCommitRef.current = currentPrimarySaveSource();
     onReturnToMenu();
-  }, [currentPrimarySaveSource, onReturnToMenu, persistPrimarySave, playTone]);
+  }, [currentPrimarySaveSource, factoryConfirmedActivePlanetId, onReturnToMenu, persistPrimarySave, playTone]);
 
   const spawnInteractionBurst = useCallback((x: number, y: number, label: string, tone: InteractionBurst["tone"] = "positive") => {
     const id = burstSequenceRef.current + 1;
@@ -10549,6 +10564,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     };
     const pending = pendingPlanetViewportRef.current.get(planetId);
     if (pending) window.clearTimeout(pending.timer);
+    if (returnToMenuSaveInFlightRef.current) {
+      // The return checkpoint reads this map as an overlay. Do not start a
+      // late timer that can race the durable ACK and manufacture a second
+      // local-save revision while the factory is unmounting.
+      pendingPlanetViewportRef.current.set(planetId, { viewport: normalized, timer: 0 });
+      return;
+    }
     const schedule = () => {
       const timer = window.setTimeout(() => {
         const latest = pendingPlanetViewportRef.current.get(planetId);

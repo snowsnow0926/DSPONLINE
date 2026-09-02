@@ -2528,7 +2528,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 /* P5 keeps React Flow's invisible edge hit paths; only ordinary visuals move
    into this single Canvas surface. Selected and hovered lines stay in SVG. */
 
-.canvas-belt-layer {
+.canvas-belt-layer-shell {
   position: absolute;
   inset: 0;
   z-index: 1;

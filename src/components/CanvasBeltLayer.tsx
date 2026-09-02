@@ -416,19 +416,23 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
   }, [failRenderer]);
 
   return <div
-    className="canvas-belt-layer"
+    className="canvas-belt-layer-shell"
     aria-hidden="true"
-    data-segments={batch.segments}
-    data-topology-revision={topologyRevision}
     data-static-dynamic-split="true"
-    data-first-source-x={batch.segments > 0 ? batch.positions[0] : undefined}
-    data-first-source-y={batch.segments > 0 ? batch.positions[1] : undefined}
-    data-first-target-x={batch.segments > 0 ? batch.positions[2] : undefined}
-    data-first-target-y={batch.segments > 0 ? batch.positions[3] : undefined}
-    data-first-route-mode={batch.segments > 0 ? batch.routeModes[0] : undefined}
-    data-first-route-center={batch.segments > 0 && Number.isFinite(batch.routeCenters[0]) ? batch.routeCenters[0] : undefined}
   >
-    <canvas ref={baseCanvasRef} className="canvas-belt-layer__topology" />
+    <canvas
+      ref={baseCanvasRef}
+      className="canvas-belt-layer canvas-belt-layer__topology"
+      data-segments={batch.segments}
+      data-topology-revision={topologyRevision}
+      data-static-dynamic-split="true"
+      data-first-source-x={batch.segments > 0 ? batch.positions[0] : undefined}
+      data-first-source-y={batch.segments > 0 ? batch.positions[1] : undefined}
+      data-first-target-x={batch.segments > 0 ? batch.positions[2] : undefined}
+      data-first-target-y={batch.segments > 0 ? batch.positions[3] : undefined}
+      data-first-route-mode={batch.segments > 0 ? batch.routeModes[0] : undefined}
+      data-first-route-center={batch.segments > 0 && Number.isFinite(batch.routeCenters[0]) ? batch.routeCenters[0] : undefined}
+    />
     <canvas ref={overlayCanvasRef} className="canvas-belt-layer__telemetry" />
   </div>;
 });

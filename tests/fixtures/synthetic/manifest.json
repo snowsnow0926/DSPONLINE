@@ -1,6 +1,6 @@
 {
   "contractVersion": 1,
-  "generatorVersion": "p2-07-v1",
+  "generatorVersion": "p2-08-v1",
   "gameStateVersion": 47,
   "envelopeVersion": 2,
   "seed": 1040406,
@@ -10,72 +10,72 @@
       "targetBytes": 1048576,
       "normalResourceMode": "finite",
       "normal": {
-        "sha256": "09ce1ccdbccfb3f82ce21b100d760f57b766e4a845a30494e13e1684de9f5788",
-        "stateChecksum": "65c7def8",
+        "sha256": "92fb7083deff9ac8dd120acfa9bdb0012b7840b3a100e1c3893d0fdc6aeb895b",
+        "stateChecksum": "65bfd9b5",
         "entityCount": 962,
         "beltCount": 1696,
-        "paddingBytes": 43
+        "paddingBytes": 24
       },
       "speedrun": {
-        "sha256": "05e1dcee90b5a59542e65f1d2a6271f315e9a9a752b44edd12aab4383ec6058d",
-        "stateChecksum": "37155905",
+        "sha256": "7a47abe621caaece79f629fe4a89853ff4d34c69c591e63b12ae38824b2ee171",
+        "stateChecksum": "770a7f32",
         "entityCount": 961,
         "beltCount": 1696,
-        "paddingBytes": 36
+        "paddingBytes": 17
       }
     },
     "8m": {
       "targetBytes": 8388608,
       "normalResourceMode": "infinite",
       "normal": {
-        "sha256": "12f7f40607ec25538bbeab7cc86ba8eb216e76d1209e3a191bf336191e6c1eb3",
-        "stateChecksum": "c29a2c39",
+        "sha256": "12501ef089837fbf4040bdbd25342102bbecec5cbd9bce300953b0d722bcfba5",
+        "stateChecksum": "09ce9d0e",
         "entityCount": 7726,
         "beltCount": 13906,
-        "paddingBytes": 78
+        "paddingBytes": 59
       },
       "speedrun": {
-        "sha256": "a857c1431dd6e21207175a82d7bb5dd6c81b4dba2c1eb5836ac0de8dbef72a12",
-        "stateChecksum": "edd92a91",
+        "sha256": "d6624b63a23f7db9699ae1142288232442fa20ca95a2d109442bef5fd4a7b72d",
+        "stateChecksum": "3abd8700",
         "entityCount": 7725,
         "beltCount": 13905,
-        "paddingBytes": 293
+        "paddingBytes": 274
       }
     },
     "20m": {
       "targetBytes": 20971520,
       "normalResourceMode": "finite",
       "normal": {
-        "sha256": "fe7b9da487a31aaed605e521cb80d5b54054a9edb77dcb57b0d8fe183a8e7517",
-        "stateChecksum": "1700ec77",
+        "sha256": "cf46519e3450721796c1556cb80c63525d5caa27db3bf25d4394bfb472c3c012",
+        "stateChecksum": "3a70c4ec",
         "entityCount": 19297,
-        "beltCount": 34837,
-        "paddingBytes": 17
+        "beltCount": 34836,
+        "paddingBytes": 316
       },
       "speedrun": {
-        "sha256": "2283fae26ab3284eed87d7a53f5639f404b4fb830253a8dbb4e046bdfc3ebd7d",
-        "stateChecksum": "d46e7a33",
+        "sha256": "6f8f40309526e437e279f3edfe3dced42bd3176c9daac6147e8e6721ba8ad330",
+        "stateChecksum": "635c1e74",
         "entityCount": 19297,
         "beltCount": 34835,
-        "paddingBytes": 231
+        "paddingBytes": 212
       }
     },
     "29m": {
       "targetBytes": 30408704,
       "normalResourceMode": "infinite",
       "normal": {
-        "sha256": "f93c6728ea139120c7b0ae2924ed203ff7a664e120eaef68a3f77b03663b6588",
-        "stateChecksum": "1022a48e",
+        "sha256": "85b7387778099b02b2818c08b5fd422c5391da582f581c8f9e7ca0881ebf1feb",
+        "stateChecksum": "71c1ce59",
         "entityCount": 27975,
         "beltCount": 50537,
-        "paddingBytes": 203
+        "paddingBytes": 184
       },
       "speedrun": {
-        "sha256": "95712fdcea7aae6b7bda6f8807e8663e32229853b1c02c0b35de29e1afcf8cbe",
-        "stateChecksum": "3db0d799",
+        "sha256": "cad39a9e400b44675b785ec6883a80194dc0c9a00845ce5daec50904b301b7d1",
+        "stateChecksum": "dbc65b42",
         "entityCount": 27975,
         "beltCount": 50535,
-        "paddingBytes": 293
+        "paddingBytes": 274
       }
     }
   },
@@ -91,6 +91,7 @@
     "fluids",
     "byproducts",
     "recursive-manufacturing",
+    "galactic-exports",
     "finite-veins",
     "infinite-veins",
     "cache-boundaries"

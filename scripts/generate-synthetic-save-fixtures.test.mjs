@@ -99,6 +99,7 @@ test("fixture description pins the current GameState/envelope-v2, exact sizes, a
     "fluids",
     "byproducts",
     "recursive-manufacturing",
+    "galactic-exports",
     "finite-veins",
     "infinite-veins",
     "cache-boundaries",
@@ -254,6 +255,10 @@ test("representative normal and speedrun payloads pass current client and server
     assert.ok(parsed.state.dysonPlans.helios.layers[0].shells.length > 0);
     assert.equal(parsed.state.research.selectedTechId, "universe_matrix");
     assert.equal(parsed.state.quantumLogisticsNetwork.inventory.hydrogen, "10000000000");
+    assert.deepEqual(
+      Object.values(parsed.state.endgame.exportProjects).map((project) => project.priority),
+      [1, 2, 3, 1],
+    );
   }
 });
 

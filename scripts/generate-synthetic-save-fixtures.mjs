@@ -7,7 +7,7 @@ import { once } from "node:events";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const SYNTHETIC_FIXTURE_GENERATOR_VERSION = "p2-07-v1";
+export const SYNTHETIC_FIXTURE_GENERATOR_VERSION = "p2-08-v1";
 export const SYNTHETIC_FIXTURE_SEED = 1_040_406;
 export const SYNTHETIC_FIXTURE_SAVED_AT = 1_767_225_600_000;
 export const SYNTHETIC_FIXTURE_FORMAT_VERSION = 2;
@@ -30,6 +30,7 @@ const COVERAGE = [
   "fluids",
   "byproducts",
   "recursive-manufacturing",
+  "galactic-exports",
   "finite-veins",
   "infinite-veins",
   "cache-boundaries",
@@ -668,7 +669,10 @@ function exportProjects() {
   ].map(([id], index) => [id, {
     id,
     enabled: index % 2 === 0,
-    priority: index % 3,
+    // Galactic export priorities are a distinct 1..3 domain (belt priority
+    // remains 0..2 above). Keep the fixture admissible to the authoritative
+    // export stage so thread/performance gates exercise the complete state.
+    priority: (index % 3) + 1,
     level: index + 1,
     delivered: index * 1_000,
     totalDelivered: index * 10_000,

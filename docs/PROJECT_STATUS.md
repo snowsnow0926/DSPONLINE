@@ -2,9 +2,9 @@
 
 > **Windows 三层性能计划集中验收（2026-09-02，1.2.3 开发候选，未发布）**：在独立工作树 `D:/GameDev/DSPidle2-windows-native-complete` 的 `codex/windows-native-plan-completion` 分支中，14/14 工作包、6/6 连续波次已形成冻结候选。当前 Rust 原生权威、薄 UI、活动物流、确定性并行、增量保存、流式 v47、内容包边界、内存预算和单所有者路径均保持 GameState v47/envelope v2/cloud v8/SQLite v3 兼容；`authority_eligible=false`，没有连接生产、部署、签名或修改真实玩家存档。
 >
-> 本次集中门禁实际结果：完整 Vitest 3,024 passed / 28 skipped / 0 failed（381 文件通过、13 条件跳过）；Rust Core 1,056 passed / 3 ignored / 0 failed，Host library 239/0/0，Host binary 3/0/0；native/desktop 587 passed / 1 Windows symlink 权限 skip / 0 failed；server 389 passed / 2 skipped、station 4/4；ops 56 passed / 6 Linux-only skipped；backup 2/2；typecheck、fmt、strict Clippy、许可证 125 项、coverage、thin-UI boundary、production build 均通过。线程矩阵 15/15、确定性矩阵 4/4、真实只读大存档 full stress 3/3 均保持输入哈希和守恒/完整状态校验不变。
+> 本次集中门禁实际结果：完整 Vitest 3,024 passed / 28 skipped / 0 failed（381 文件通过、13 条件跳过）；Rust Core 1,056 passed / 3 ignored / 0 failed，Host library 239/0/0，Host binary 3/0/0；native/desktop 587 passed / 1 Windows symlink 权限 skip / 0 failed；server 389 passed / 2 skipped、station 4/4；ops 56 passed / 6 Linux-only skipped；backup 2/2；typecheck、fmt、strict Clippy、许可证 125 项、coverage、thin-UI boundary、production build 均通过。线程矩阵 15/15、确定性矩阵 4/4、真实只读大存档 full stress 3/3 均保持输入哈希和守恒/完整状态校验不变。完整 Chromium 433/27/0、durable WAL 7/7、nightly Firefox/WebKit 2/2 也已通过；Windows 目录包隔离冒烟通过，正式签名仍为 No-Go。
 >
-> 真实 44,167,989 B 存档冷启动估算从 204,737,068 B 降至 132,356,522 B（低于 132,503,967 B 门槛），采用大实体图惰性缓存，首次精确推进时才建立行星指标和解析缓存；不是降低门槛或修改存档。短暂解析峰值约 1.08 GiB，打开后常驻约 170–172 MiB，仍需 24 小时和多硬件验证。完整 E2E、nightly 浏览器、安装/升级、签名、真实测试账号云往返及灰度完成前，候选仍是本地测试版本，发布成熟度按 60% 记录。
+> 真实 44,167,989 B 存档冷启动估算从 204,737,068 B 降至 132,356,522 B（低于 132,503,967 B 门槛），采用大实体图惰性缓存，首次精确推进时才建立行星指标和解析缓存；不是降低门槛或修改存档。短暂解析峰值约 1.08 GiB，打开后常驻约 170–172 MiB，仍需 24 小时和多硬件验证。安装/升级、签名、真实测试账号云往返及灰度完成前，候选仍是本地测试版本，发布成熟度按 60% 记录。
 
 > **Windows 剩余工作统一重基线（2026-09-02，开发暂停复盘）**：功能提交冻结在 `ac13404c57ee14ba1eff34b76c8c02c7b24116ee`。总体能力口径继续保持 `Rust 90% / 薄 UI 98% / O(active) 97% / 并行 75% / 综合开发 93% / 发布成熟度 60%`，不会因为把剩余事项拆细而降低。剩余代码已在 [三层计划书第 25 节](./WINDOWS_NATIVE_PERFORMANCE_DEVELOPMENT_PLAN_2026-08.md#25-剩余全部工作一次性收口计划2026-09-02-重基线) 固定为 100 个“剩余工作单位”；它是剩余子计划的独立分母，不替换总体 93%。后续连续完成整张表，开发中只跑与改动直接相关的红绿测试和静态检查，全部代码冻结后再统一执行完整 Rust、Vitest、native/server、build、E2E、性能、打包与长跑矩阵。
 

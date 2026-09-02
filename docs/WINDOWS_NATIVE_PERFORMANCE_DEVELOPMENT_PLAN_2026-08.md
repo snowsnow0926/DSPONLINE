@@ -2725,6 +2725,7 @@ Rust workspace 串行全量随后给出新的首轮证据：Core 为 1,056 项�
 | backup 工具 | 2/2 通过、0 跳过、0 失败 |
 | typecheck / fmt / strict Clippy / licenses / coverage / thin-UI / diff | 全部通过；运行依赖许可证 125 项，thin-UI 为 13 个 App binding、12 个组件 |
 | production build | 2,107 modules；startup gzip 180,830 B（JS 87,091 B、CSS 93,739 B）；forbidden startup modules 0；仅保留既有大 FactoryRuntime 警告 |
+| Chromium / durable / nightly | Chromium 460：433 通过、27 跳过、0 失败（约 6.9 min）；durable WAL 7/7（48.2 s）；Firefox 1/1、WebKit 1/1（nightly 2/2，8.2 s） |
 
 ### 27.3 线程、确定性和真实大存档
 
@@ -2732,10 +2733,16 @@ Rust workspace 串行全量随后给出新的首轮证据：Core 为 1,056 项�
 - 确定性矩阵 `artifacts/windows-native-completion/final-20260902/thread-determinism.json`：1/2/4/8 共 4/4；revision `3`，canonical `53a0779e…8768c0`、domain `9f8ef282…20dc9d`、守恒摘要 `7e4bf852…05af1a` 全部相同。
 - 真实只读存档 `D:/360安全浏览器下载/dsp-idle-save-2026-08-26.json`（44,167,989 B、45,904 entities、91,955 belts）full stress `artifacts/windows-native-completion/final-20260902/real-save-full-stress.json`：3/3 完成、exact/采样/durable/checkpoint/burst 全部通过，源文件和 Release Host SHA 全程不变。冷启动估算 `132,356,522 B`，低于 `132,503,967 B` 门槛；打开后 Private Bytes 约 170–172 MiB，打开瞬时峰值约 1.08 GiB（解析输入的短暂峰值，不能用“打开后常驻”数字替代）；exact native 600–696 ms，对应 JavaScript 1,701–1,861 ms，约 2.4–2.9×。这证明本机候选的内存预算和正确性，不等于所有 Windows 机器的 24 小时稳定性。
 
-### 27.4 尚未关闭的门禁（因此仍 No-Go）
+### 27.4 本机候选制品与外部 No-Go
 
-完整 Chromium、durable WAL、nightly Firefox/WebKit、桌面打包、安装/覆盖升级、三档硬件、Defender/磁盘满/休眠唤醒、24 小时长跑、Authenticode 签名、真实测试账号云往返和灰度尚未在本节记录前全部完成。Linux-only 的 6 个运维用例和 1 个 Windows symlink 权限用例是环境条件跳过，不应计作绿色。完成这些外部证据前，发布成熟度仍按 60% 记录，`authority_eligible=false` 保持关闭；候选只能作为本地开发测试版本。
+完整 Chromium、durable WAL 和 nightly Firefox/WebKit 已在本次冻结候选通过；桌面 `desktop:dist` 也已用隔离的 dummy HTTPS 地址生成 unsigned 安装器、blockmap、`latest.yml`，并对 `win-unpacked` 完成 12 秒隔离 profile 冒烟（主进程响应、Rust Host 可见、临时 profile 隔离、残留进程 0）。制品目录为 `release-performance-edition/`，独立可测试 bundle 与逐文件 manifest 位于 `artifacts/windows-native-completion/final-20260902/`；Authenticode 状态为 `NotSigned`。
+
+仍未关闭且不能由本机自动化替代的门禁包括：Windows 10/11 三档硬件、Defender/真实磁盘满/只读目录/休眠唤醒/RDP/GPU context loss、24 小时组合长跑、正式 Authenticode 签名、安装覆盖升级/卸载保留、真实测试账号云往返和 Beta→灰度。Linux-only 的 6 个运维用例和 1 个 Windows symlink 权限用例是环境条件跳过，不应计作绿色。完成这些外部证据前，发布成熟度仍按 60% 记录，`authority_eligible=false` 保持关闭；候选只能作为本地开发测试版本。
 
 ### 27.5 证据和保护规则
 
 首轮 5 个 Vitest、5 个 Rust、1 个 Host 脏域失败及其修复原因继续保留在 26.4–26.6；本节不删除失败史。纯挂机终端账本、排行榜 review queue、增量保存和惰性缓存均不通过迁移静默修正历史数据；候选失败、取消、保存失败或 Host 重启都保留原检查点和源哈希。任何后续发布工作必须从本节冻结 SHA 重新生成 manifest、SHA256SUMS 和 unsigned Windows bundle。
+
+### 27.6 最终交付索引
+
+最终 SHA、Build ID、制品逐文件 SHA、测试报告和旧版对比摘要统一写入 `artifacts/windows-native-completion/final-20260902/final-report.json` 与 `SHA256SUMS.txt`；可读说明见 `docs/releases/1.2.3-windows-native-complete-development-report-2026-09-02.md`。这些文件只描述本地开发候选，不构成发布授权。

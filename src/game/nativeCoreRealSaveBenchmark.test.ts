@@ -890,6 +890,13 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         privatePeakSampler: openPeakSample,
       },
     });
+    // A memory-gate failure happens before the later exact-advance diagnostics.
+    // Preserve the bounded native profile tail here so the failed report still
+    // names the resident indexes responsible for the excess instead of forcing
+    // developers to weaken or bypass the memory assertion to diagnose it.
+    if (process.env.DSP_NATIVE_CORE_PROFILE === "1" && client.stderrTail?.trim()) {
+      console.log(client.stderrTail.trim());
+    }
     // Emit the complete immutable open evidence before enforcing the memory
     // budget so a regression report retains the component breakdown needed to
     // diagnose the excess without weakening the fail-closed gate.

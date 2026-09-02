@@ -31,6 +31,12 @@ const MAX_STELLAR_PROJECTION_PAGE_ROWS = 64;
 const MAX_STELLAR_ROUTE_QUERY_BYTES = 512;
 const MAX_DYSON_WORKSPACE_ID_BYTES = 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+// Keep enough native diagnostics for the deterministic benchmark harness to
+// retain the startup worker-count markers even when a parallel run emits a
+// long phase profile.  The tail is still bounded (and is never part of a
+// save/projection payload), while the old 8 KiB limit could evict the only
+// evidence needed to prove the requested 2/4/8-worker setting.
+const MAX_NATIVE_HOST_STDERR_TAIL_BYTES = 64 * 1024;
 const NATIVE_EXACT_REALTIME_LEASE_CAPABILITY = "native-core-exact-realtime-lease-v2";
 const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
   "native-core-exact-realtime-writer-fence-v1";
@@ -262,7 +268,7 @@ class NativeHostClient {
       this.exited = false;
       child.stdout.on("data", (chunk) => this.onStdout(chunk));
       child.stderr.on("data", (chunk) => {
-        this.stderrTail = `${this.stderrTail}${Buffer.from(chunk).toString("utf8")}`.slice(-8_192);
+        this.stderrTail = `${this.stderrTail}${Buffer.from(chunk).toString("utf8")}`.slice(-MAX_NATIVE_HOST_STDERR_TAIL_BYTES);
       });
       child.once("error", (error) => this.failAll(new NativeHostError(`native host failed to start: ${error.message}`, "NATIVE_HOST_START_FAILED")));
       child.once("exit", (code, signal) => {

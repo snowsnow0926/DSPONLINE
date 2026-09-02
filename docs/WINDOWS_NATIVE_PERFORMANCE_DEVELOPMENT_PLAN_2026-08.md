@@ -2700,3 +2700,42 @@ Rust workspace 串行全量随后给出新的首轮证据：Core 为 1,056 项�
 根因是施工队列的 WAL 只持有有界意图，实际 `ConstructionQueueExpansion` 会在 Rust 内派生修改多个公开字段。既有 dirty 标记只看原始 `constructionQueue.intent` 并额外强制 Core；取消和补料还会修改属于 Logistics 域的 `portableFleet`，保存时却尝试复用旧 `base:logistics`。修正为每种派生计划显式声明实际触及的 v47 顶层字段，并统一交给已有 domain classifier：Cancel、Enqueue、Fund、Deploy、DirectDeploy 分别只标记各自的 construction、portableFleet、queue、version 和 allocator 字段。审计仍保持开启，并把错误信息补充为具体 domain ID。
 
 原失败测试修复后 1/1 通过；同一筛选下蓝图捕获、导入、入队、直接部署、施工部署和取消的全部 Host fault-boundary 场景为 6/6。该 focused 结果只允许形成新的冻结提交；25.6 集中矩阵仍需在新 SHA 上再次从头执行。
+
+## 27. 14 个工作包、6 个波次集中验收记录（2026-09-02）
+
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`；分支：`codex/windows-native-plan-completion`。本节是开发候选的集中验收记录，不是生产发布证明。版本仍为 package `1.2.3`，GameState v47、envelope v2、cloud schema v8、SQLite layout v3 均未升级；没有连接生产、部署、签名、修改真实玩家存档或云数据。
+
+### 27.1 代码结算
+
+14/14 工作包、6/6 波次的代码与定向回归已经形成一个冻结候选；剩余问题不再拆成新的开发波次，而只进入集中门禁或外部发布门禁。普通构建的 `authority_eligible` 仍为 `false`，不能由 UI 开关或环境变量绕过。
+
+集中前最后一个真实产品回归是大存档冷启动缓存过量：原先会在打开时同时常驻解析实体图、行星指标和 campaign 缓存，内存估算为 `204,737,068 B`，超过 `132,503,967 B` 门槛。修复采用惰性缓存而非降低门槛：原始实体记录超过 16 MiB 时冷启动只保留 typed 列、索引和 topology；第一次确实需要精确推进时才建立对应缓存。`memory-estimate-breakdown` 诊断标记同时记录各项字节，便于失败时定位，不进入公开存档字节。
+
+### 27.2 本次实际集中结果
+
+以下数字全部来自本次冻结候选重新运行，未复用旧报告：
+
+| 门禁 | 实际结果 |
+| --- | --- |
+| 完整 Vitest（`DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1`） | 381 文件通过、13 文件条件跳过；3,024 通过、28 跳过、0 失败；497.91 s |
+| Rust workspace 串行全量 | Core 1,056 通过、3 ignored、0 失败（452.85 s）；Host library 239 通过、0 失败；Host binary 3 通过、0 失败；doc 0/0 |
+| native/desktop Node 套件 | 588 项：587 通过、1 个 Windows symlink 权限条件跳过、0 失败（10.96 s） |
+| server/API | 主套件 391：389 通过、2 跳过、0 失败；station 4/4 |
+| ops/发布工具 | 62：56 通过、6 个 Linux-only 条件跳过、0 失败 |
+| backup 工具 | 2/2 通过、0 跳过、0 失败 |
+| typecheck / fmt / strict Clippy / licenses / coverage / thin-UI / diff | 全部通过；运行依赖许可证 125 项，thin-UI 为 13 个 App binding、12 个组件 |
+| production build | 2,107 modules；startup gzip 180,830 B（JS 87,091 B、CSS 93,739 B）；forbidden startup modules 0；仅保留既有大 FactoryRuntime 警告 |
+
+### 27.3 线程、确定性和真实大存档
+
+- 合成线程矩阵 `artifacts/windows-native-completion/final-20260902/thread-matrix.json`：15/15 单元完成（1/2/4/8/auto × 3），输入、二进制均未变化，跨线程 canonical SHA 全部一致。中位 exact 时间为 1 线程 67.70 ms、2 线程 46.36 ms、4 线程 40.76 ms、8 线程 33.06 ms、auto 34.13 ms；相对 1 线程最高约 2.05×，峰值推进 Private Bytes 约 80.9–85.1 MiB。
+- 确定性矩阵 `artifacts/windows-native-completion/final-20260902/thread-determinism.json`：1/2/4/8 共 4/4；revision `3`，canonical `53a0779e…8768c0`、domain `9f8ef282…20dc9d`、守恒摘要 `7e4bf852…05af1a` 全部相同。
+- 真实只读存档 `D:/360安全浏览器下载/dsp-idle-save-2026-08-26.json`（44,167,989 B、45,904 entities、91,955 belts）full stress `artifacts/windows-native-completion/final-20260902/real-save-full-stress.json`：3/3 完成、exact/采样/durable/checkpoint/burst 全部通过，源文件和 Release Host SHA 全程不变。冷启动估算 `132,356,522 B`，低于 `132,503,967 B` 门槛；打开后 Private Bytes 约 170–172 MiB，打开瞬时峰值约 1.08 GiB（解析输入的短暂峰值，不能用“打开后常驻”数字替代）；exact native 600–696 ms，对应 JavaScript 1,701–1,861 ms，约 2.4–2.9×。这证明本机候选的内存预算和正确性，不等于所有 Windows 机器的 24 小时稳定性。
+
+### 27.4 尚未关闭的门禁（因此仍 No-Go）
+
+完整 Chromium、durable WAL、nightly Firefox/WebKit、桌面打包、安装/覆盖升级、三档硬件、Defender/磁盘满/休眠唤醒、24 小时长跑、Authenticode 签名、真实测试账号云往返和灰度尚未在本节记录前全部完成。Linux-only 的 6 个运维用例和 1 个 Windows symlink 权限用例是环境条件跳过，不应计作绿色。完成这些外部证据前，发布成熟度仍按 60% 记录，`authority_eligible=false` 保持关闭；候选只能作为本地开发测试版本。
+
+### 27.5 证据和保护规则
+
+首轮 5 个 Vitest、5 个 Rust、1 个 Host 脏域失败及其修复原因继续保留在 26.4–26.6；本节不删除失败史。纯挂机终端账本、排行榜 review queue、增量保存和惰性缓存均不通过迁移静默修正历史数据；候选失败、取消、保存失败或 Host 重启都保留原检查点和源哈希。任何后续发布工作必须从本节冻结 SHA 重新生成 manifest、SHA256SUMS 和 unsigned Windows bundle。

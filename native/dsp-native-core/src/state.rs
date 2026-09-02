@@ -25,6 +25,11 @@ use crate::entity_raw::json_bitwise_eq;
 const INTERNAL_MANIFEST_SUFFIX: &str = "manifest";
 const MAX_INTERNAL_RECORDS: usize = 4_096;
 const MAX_REPEATED_CHECKPOINT_CACHE_BYTES: usize = 32 * 1024 * 1024;
+/// A decoded serde_json entity graph is useful for small saves, but it is a
+/// second resident copy of every entity map. Keep it only below this bound;
+/// large saves reparse the authoritative raw rows on demand so opening a save
+/// does not retain hundreds of megabytes of allocator-owned JSON nodes.
+const MAX_RESIDENT_PARSED_ENTITY_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ENTITY_COUNT: usize = 2_000_000;
 const MAX_BELT_COUNT: usize = 4_000_000;
 const MAX_PROJECTION_ENTITIES: usize = 32;
@@ -3576,11 +3581,20 @@ impl CoreState {
         let parsed_entities = state.parse_entities_parallel()?;
         state.rebuild_indexes_from_parsed_entities(&parsed_entities)?;
         state.refresh_factory_static_admission_with_entities(&parsed_entities)?;
+        let raw_entity_bytes = state
+            .entity_raw
+            .iter()
+            .map(|value| value.len() as u64)
+            .sum::<u64>();
+        let retain_large_runtime_caches =
+            raw_entity_bytes <= MAX_RESIDENT_PARSED_ENTITY_CACHE_BYTES;
         // Pending campaign tasks consult factory topology every simulation
         // revision, so seed their disposable metric ledger from the entity
-        // records already parsed for startup admission. Completed campaigns
-        // pay no resident cache cost unless the player opens the workspace.
-        if crate::campaign::factory_metrics_needed(&state.base) {
+        // records already parsed for startup admission. For a large save the
+        // first exact advance rebuilds this small cache on demand; keeping it
+        // at cold-open would add a second per-entity allocation to the menu
+        // path for a projection that may never be viewed.
+        if retain_large_runtime_caches && crate::campaign::factory_metrics_needed(&state.base) {
             state.campaign_projection_runtime.seed_from_records(
                 &state,
                 &parsed_entities,
@@ -3609,7 +3623,8 @@ impl CoreState {
             state.prepared_logistics_buffer_runtime = Some(prepared.logistics_buffer_runtime);
             state.prepared_material_delivery_runtime = Some(prepared.material_delivery_runtime);
             state.prepared_ordinary_production_runtime = Some(prepared.ordinary_production_runtime);
-            state.prepared_planet_metrics_runtime = Some(prepared.planet_metrics_runtime);
+            state.prepared_planet_metrics_runtime =
+                retain_large_runtime_caches.then_some(prepared.planet_metrics_runtime);
             state.prepared_power_probe_runtime = Some(prepared.power_probe_runtime);
             state.prepared_local_peer_directory = Some(prepared.local_peer_directory);
             state.prepared_quantum_logistics_directory = Some(prepared.quantum_logistics_directory);
@@ -3624,7 +3639,8 @@ impl CoreState {
         // entity graph while canonicalizing each raw belt independently.
         let canonical = state.canonical_digest_bundle_with_parsed(Some(&parsed_entities), None)?;
         let mut summary = state.summary_from_digest(canonical);
-        if !sync_record_drop_enabled() {
+        if !sync_record_drop_enabled() && raw_entity_bytes <= MAX_RESIDENT_PARSED_ENTITY_CACHE_BYTES
+        {
             state.parsed_entity_runtime =
                 Arc::new(EntityRuntimeCache::with_values(parsed_entities));
         }
@@ -7029,6 +7045,16 @@ impl CoreState {
             + serde_json::to_vec(&self.base)
                 .map(|bytes| bytes.len() as u64)
                 .unwrap_or(0);
+        if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tmemory-estimate-breakdown\traw={raw_record_bytes},indexedStrings={indexed_string_bytes},numericColumns={numeric_columns},entityDynamics={},beltDynamics={},rowIndexes={index_overhead},topology={topology_index_bytes},beltActivity={belt_activity_runtime_bytes},parsedEntities={parsed_entity_runtime_bytes},operations={operations_projection_runtime_bytes},campaign={campaign_projection_runtime_bytes},base={},total={estimated_runtime_bytes}",
+                self.entity_dynamics.estimated_bytes(),
+                self.belt_dynamics.estimated_bytes(),
+                serde_json::to_vec(&self.base)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(0),
+            );
+        }
         RuntimeMemoryEstimate {
             raw_record_bytes,
             indexed_string_bytes,

@@ -2456,9 +2456,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     kind?: RuntimePersistenceKind,
   ) => Promise<SaveGameResult>>(() => Promise.resolve({ success: false, message: "未就绪", code: "unavailable" }));
   const stateWithSimulationDebtRef = useRef<(state: GameState) => GameState>((state) => state);
-  const isCurrentPrimarySaveSourceRef = useRef<(
-    expected: NonNullable<typeof controlledReturnCommitRef.current>,
-  ) => boolean>(() => false);
   const returnToMenuSaveInFlightRef = useRef(false);
   const lastCanvasPublishedGameRef = useRef(game);
   const canvasRenderSnapshotRef = useRef(canvasRenderSnapshot);
@@ -6710,15 +6707,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     };
   }, []);
 
-  const isCurrentPrimarySaveSource = useCallback((expected: NonNullable<typeof controlledReturnCommitRef.current>): boolean => {
-    const current = currentPrimarySaveSource();
-    return current.game === expected.game &&
-      current.pendingSimulationSeconds === expected.pendingSimulationSeconds &&
-      current.pendingWallSeconds === expected.pendingWallSeconds &&
-      current.submissionId === expected.submissionId &&
-      current.pendingViewportSignature === expected.pendingViewportSignature;
-  }, [currentPrimarySaveSource]);
-
   const saveVerifiedPrimaryCheckpoint = useCallback(async (state: GameState, options: { deferBackup?: boolean; force?: boolean } = {}): Promise<SaveGameResult> => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
       return {
@@ -7781,7 +7769,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativePersistenceCheckpoint,
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
   persistPrimarySaveRef.current = persistPrimarySave;
-  isCurrentPrimarySaveSourceRef.current = isCurrentPrimarySaveSource;
 
   const setPureIdleRecoveryContinueState = useCallback((available: boolean) => {
     pureIdleContinueAvailableRef.current = available;
@@ -9628,6 +9615,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         timer: 0,
       });
     }
+    // React Flow emits its final debounced viewport event asynchronously. Give
+    // that event one bounded window to land in the checkpoint overlay before
+    // asking the Worker for the return barrier. This preserves the camera
+    // without relying on a post-unmount cleanup save.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 200));
     const result = await persistPrimarySave(undefined, "return");
     if (lifecycleExitStartedRef.current) {
       returnToMenuSaveInFlightRef.current = false;
@@ -10566,8 +10558,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (pending) window.clearTimeout(pending.timer);
     if (returnToMenuSaveInFlightRef.current) {
       // The return checkpoint reads this map as an overlay. Do not start a
-      // late timer that can race the durable ACK and manufacture a second
-      // local-save revision while the factory is unmounting.
+      // late timer that can race the durable ACK. Keep the latest imperative
+      // viewport in the overlay so the checkpoint still preserves the camera;
+      // the unmount cleanup is suppressed after this successful final commit.
       pendingPlanetViewportRef.current.set(planetId, { viewport: normalized, timer: 0 });
       return;
     }
@@ -12585,7 +12578,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         if (lifecycleSaveStarted || lifecycleExitStartedRef.current || nativeAuthorityPersistenceProtectedRef.current ||
           readNativeAuthorityPersistenceBoundary().protected ||
           durableRecoveryLifecycleRef.current === "active" ||
-          (controlledCommit && isCurrentPrimarySaveSourceRef.current(controlledCommit))) return;
+          // A successful return checkpoint is the final commit for this
+          // mounted factory. React Flow/Worker callbacks can still publish a
+          // harmless late mirror while React tears the tree down; writing it
+          // here would create an unbounded second revision after the user has
+          // already left. Any state that was accepted before the checkpoint
+          // is included by the barrier itself.
+          controlledCommit) return;
         const cleanupState = durableSimulationRuntimeEnabled
           ? latestAuthoritativeCheckpointRef.current
           : gameRef.current;

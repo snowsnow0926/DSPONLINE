@@ -131,7 +131,16 @@ test("each planet restores its last canvas viewport", async ({ page }) => {
 
   await page.getByTitle("保存并返回主菜单").click();
   await expect(page.locator(".start-menu")).toBeVisible();
-  const savedViewport = await page.evaluate(async () => (await import("/src/game/storage.ts")).loadGame().state.planetViewports.home);
+  // Catalog-backed IndexedDB intentionally keeps the large primary payload
+  // out of the synchronous cache. Resolve the same selected payload path the
+  // real Continue button uses instead of relying on the legacy loadGame()
+  // compatibility fallback.
+  const savedViewport = await page.evaluate(async () => {
+    const { resolveMenuContinueSave } = await import("/src/game/savePreviewPayload.ts");
+    const resolved = await resolveMenuContinueSave("normal");
+    if (!resolved) throw new Error("主存档无法通过菜单候选解析");
+    return resolved.inspection.state.planetViewports.home;
+  });
   expect(savedViewport.x).toBeCloseTo(homeViewport.x, 0);
   expect(savedViewport.y).toBeCloseTo(homeViewport.y, 0);
   expect(savedViewport.zoom).toBeCloseTo(homeViewport.zoom, 3);

@@ -2746,3 +2746,42 @@ Rust workspace 串行全量随后给出新的首轮证据：Core 为 1,056 项�
 ### 27.6 最终交付索引
 
 最终 SHA、Build ID、制品逐文件 SHA、测试报告和旧版对比摘要统一写入 `artifacts/windows-native-completion/final-20260902/final-report.json` 与 `SHA256SUMS.txt`；可读说明见 `docs/releases/1.2.3-windows-native-complete-development-report-2026-09-02.md`。这些文件只描述本地开发候选，不构成发布授权。
+
+## 28. 1.2.6 合入既有 Windows/Rust 原生工作树（1.2.7，2026-09-02）
+
+### 28.1 合并边界与来源
+
+本节是对前述三层计划在 1.2.7 候选中的实际收口记录。工作树为 `D:\GameDev\DSPidle2-v127-windows-performance`，分支为 `codex/1.2.7-windows-performance-fixes`。提交 `22a3e41a913b99cdf839b95bb0a67c67741d23a6` 是一次真正的双父合并：
+
+- `f0cd0c26d82a82b9cdca7de40691e69692cdef04`：线上 1.2.6 发布线；
+- `6b3c88f0cf474ba4add47a69f78c5e7e0b5b48b3`：此前持续开发的 Windows/Rust 原生性能线。
+
+因此本候选是“把 1.2.6 合入已有原生实现后修复兼容问题”，不是从网页版本重新开发一套功能。GameState v47、envelope v2、cloud schema v8 和 SQLite layout v3 均保持不变；没有迁移、回写、修复或上传任何真实玩家存档，也没有连接生产环境。
+
+### 28.2 合入后的修复
+
+1. **1.2.6 功能保留**：纯挂机终端遥测、白矩阵/戴森逐恒星系终端结算、星图原生面板和既有 Rust 权威/薄 UI/增量保存/活动线路代码均来自合并父线并保留。Rust `production_history` 补齐 `pureIdleReplication` 诊断投影，并在历史压缩时携带最新投影，使 1.2.6 的生产历史和 canonical v47 哈希在原生路径中一致；该投影只读，不参与物料或玩法写入。
+2. **合并路由回归**：桌面 StarMap 最终渲染不再硬编码旧版 `IndustryConsole`/`QuantumInventoryConsole`，而是使用已计算的原生面板；因此 1.2.6 的原生面板不会在最后一层被旧 UI 覆盖。
+3. **Windows 稳定性**：原生 Rayon、回收线程和并发回归线程显式使用 4 MiB 栈，避免 Windows 默认小栈在合法大 v47 批次中触发 `STATUS_ACCESS_VIOLATION`/栈压力。新增入口脚本语法门禁，并修复合并产生的重复 `isDevelopment` 声明。
+4. **大存档传输峰值**：本地导入/检查改用有界 `ArrayBuffer` 转移和一次性字节校验（256 MiB 上限、gzip 魔数与严格 UTF-8），只在救援回退需要时再读取文本，避免 renderer/Worker 同时保留完整字符串副本；有效导入不把整份 raw 正文长期留在 UI 状态中。
+5. **兼容基线**：更新原生生产历史 canonical 预期和 1.2.6 遥测回归；没有通过降低显示值、删除历史或静默修正存档来“解决”差异。
+
+### 28.3 当前新鲜验证（本候选实际运行）
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run typecheck`、Web `npm run build`、startup budget、thin-UI、native coverage、`git diff --check` | 全部通过；startup gzip 总计 181,674 B（JS 87,098 B、CSS 94,576 B），forbidden 0 |
+| 完整 Vitest（含 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1`） | 385 文件通过、13 条件跳过；3,053 通过、28 跳过、0 失败；500.91 s |
+| Rust workspace（locked，8 线程） | Core 1,057 通过、3 ignored；Host library 239 通过；Host binary 3 通过；0 失败；141.30 s（doc 0/0） |
+| native/desktop Node | 586 项：585 通过、1 个 Windows symlink 权限条件跳过、0 失败 |
+| Rust `production_history` 专项 | 29/29 |
+| 原生长差分 | 51/51；8×/12×/15×/16× 以及长窗口差分结果一致 |
+| server/API | 主套件 392 项：390 通过、2 跳过、0 失败；station 4/4 |
+| 运维/备份 | Ops 62：56 通过、6 个 Linux-only 条件跳过；backup 2/2 |
+| licenses | 125 个运行时依赖通过 |
+
+完整 Chromium、durable WAL、nightly Firefox/WebKit 和最终桌面冒烟均已在本候选实际运行；精确日志与包清单位于 `artifacts/1.2.7-*.log`、`artifacts/1.2.7-windows-smoke-final.json` 和 `artifacts/1.2.7-windows-native/`，没有沿用旧版本计数。
+
+### 28.4 发布边界
+
+本候选的 Windows 包仍为未签名本地测试包（`Authenticode=NotSigned`），不得当作 1.2.7 stable。三档 Windows 硬件、Defender/磁盘故障、安装覆盖升级、24 小时长跑、正式签名、真实云往返和灰度发布仍是 Release Agent 门禁；当前开发角色不执行部署。候选失败、取消、Worker 重启或保存失败必须保留最近有效检查点，不能部分提交或回滚玩家历史。

@@ -4,6 +4,13 @@ All notable player-facing changes are recorded here. Game-state migration versio
 
 ## [Unreleased]
 
+### 1.2.7（Windows/Rust 原生整合候选，未发布，2026-09-02）
+
+- 将线上 1.2.6 以真实双父合并方式整合进既有 Windows/Rust 原生性能工作树；保留 1.2.6 的纯挂机终端结算、遥测、星图原生面板和玩家功能，不重新实现网页版本。
+- 原生生产历史补齐 `pureIdleReplication` 遥测并在压缩后保留最新投影，使 1.2.6 与原生 v47 canonical 历史一致；遥测为只读投影，不修改物料或玩家存档。
+- 修复合并后的 StarMap 桌面面板路由、Windows 原生大档线程栈压力、字节级存档检查/导入峰值，并加入桌面入口语法回归门禁。
+- GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 不变；候选包为 `NotSigned` 本地测试版，未部署、未连接生产。
+
 ### 1.2.6（已发布，2026-08-31）
 
 - 产率复制挂机不再复制物品或向量子仓库、行星托盘、机器缓存和施工缓存写入虚构库存；统计窗口只直接推进真实白矩阵科研与逐恒星系戴森结构/壳面进度。

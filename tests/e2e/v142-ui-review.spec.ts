@@ -520,14 +520,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "终局直结与星球工厂重置");
+  await expect(dialog).toHaveAttribute("aria-label", "Windows 原生性能整合与大存档内存优化");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.7");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("产率复制只直结终局成果");
-  await expect(dialog).toContainText("没有终局目标就不生成延期库存");
-  await expect(dialog).toContainText("在星图重置一颗已殖民星球");
-  await expect(dialog).toContainText("天然资源与全局进度保持不变");
-  await expect(dialog).toContainText("存档与服务器格式保持兼容");
+  await expect(dialog).toContainText("1.2.6 功能原样进入原生候选");
+  await expect(dialog).toContainText("Rust 原生候选继续使用确定性边界");
+  await expect(dialog).toContainText("并发测试与 Worker 线程使用有界栈");
+  await expect(dialog).toContainText("大存档检查改用可转移字节");
+  await expect(dialog).toContainText("协议与存档边界保持兼容");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

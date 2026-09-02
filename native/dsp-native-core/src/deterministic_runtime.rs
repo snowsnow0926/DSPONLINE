@@ -7,6 +7,13 @@ use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 pub(crate) const PARALLEL_MIN_ITEMS: usize = 4_096;
+/// JSON records and deterministic writeback helpers can build a moderately
+/// deep temporary value tree. The Windows default thread stack (roughly
+/// 2 MiB) is not sufficient for the largest valid v47 batches and can turn a
+/// recoverable candidate into STATUS_STACK_OVERFLOW/STATUS_ACCESS_VIOLATION.
+/// Keep the reserve bounded and explicit for every native worker instead of
+/// relying on the host process' platform default.
+pub(crate) const NATIVE_THREAD_STACK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WORKERS: usize = 8;
 const JOINED_DROP_CHUNKS_PER_WORKER: usize = 4;
 
@@ -74,6 +81,7 @@ impl DeterministicRuntime {
             Some(
                 ThreadPoolBuilder::new()
                     .num_threads(worker_limit)
+                    .stack_size(NATIVE_THREAD_STACK_BYTES)
                     .thread_name(|index| format!("dsp-native-core-{index}"))
                     .build()?,
             )

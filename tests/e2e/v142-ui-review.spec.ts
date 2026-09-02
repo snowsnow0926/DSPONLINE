@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-31-v1.2.6";
+const RELEASE_NOTE_ID = "2026-09-02-v1.2.7";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -521,7 +521,7 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveAttribute("aria-label", "终局直结与星球工厂重置");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.6");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.7");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
   await expect(dialog).toContainText("产率复制只直结终局成果");
   await expect(dialog).toContainText("没有终局目标就不生成延期库存");

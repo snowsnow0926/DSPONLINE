@@ -89,6 +89,7 @@ pub(crate) fn cost(id: &str, current_level: u32) -> anyhow::Result<u128> {
 /// Returns the exact lifetime matrix investment represented by one infinite
 /// research track. This mirrors the JavaScript telemetry helper without
 /// repeatedly walking the whole curve once per completed level.
+#[allow(dead_code)]
 pub(crate) fn cumulative_investment(
     id: &str,
     current_level: u32,

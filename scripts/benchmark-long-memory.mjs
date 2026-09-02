@@ -36,6 +36,11 @@ const heapSnapshotEnabled = args.get("heap-snapshot") === "true";
 const scenario = args.get("scenario") ?? "pure";
 const autoPauseArgument = args.get("auto-pause");
 const requestedAutoPause = autoPauseArgument === undefined ? null : autoPauseArgument !== "false";
+// Keep the harness usable on a development candidate without silently
+// hard-coding an older release note ID.  CI/release jobs can override this
+// when they exercise a different build, while the current 1.2.7 candidate is
+// the safe default for local runs.
+const releaseNoteId = args.get("release-note-id") ?? "2026-09-02-v1.2.7";
 const label = (args.get("label") ?? `${scenario}-${durationSeconds}s`).replace(/[^a-zA-Z0-9_-]/g, "-");
 const outputPath = resolve(args.get("output") ?? `artifacts/performance/${label}.json`);
 const executablePath = resolve(args.get("browser") ?? "C:/Program Files/Google/Chrome/Application/chrome.exe");
@@ -335,8 +340,8 @@ try {
   browser = context.browser();
   const page = context.pages()[0] ?? await context.newPage();
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  await page.addInitScript(({ autoPause }) => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-27-v1.2.2");
+  await page.addInitScript(({ autoPause, releaseNoteId: currentReleaseNoteId }) => {
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", currentReleaseNoteId);
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.ui.large-save-autosave-throttle.v1", "false");
     if (autoPause !== null) localStorage.setItem("dsp-idle-network.ui.memory-auto-pause.v1", String(autoPause));
@@ -362,7 +367,7 @@ try {
       });
     };
     globalThis.__DSP_MEMORY_SAMPLE_TIMER__ = window.setInterval(sampleMemory, 250);
-  }, { autoPause: requestedAutoPause });
+  }, { autoPause: requestedAutoPause, releaseNoteId });
   await page.goto(`${url.replace(/\/$/, "")}/?menu=1&dspPerformanceHarness=1`, { waitUntil: "domcontentloaded", timeout: 120_000 });
   await page.getByLabel("选择存档文件").setInputFiles(savePath);
   const enter = page.getByRole("button", { name: "确认导入并进入" });

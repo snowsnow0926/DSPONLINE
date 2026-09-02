@@ -56,6 +56,17 @@ export interface StarMapIndustryReadRequest {
   query: string;
 }
 
+// Keep the workspace component backwards compatible with the pre-1.2.6
+// callers (including saved/custom shells) while the native industry view is
+// opt-in.  The real app supplies a controlled selector; legacy callers get a
+// harmless read-only all-routes selector and a no-op updater.
+const DEFAULT_INDUSTRY_READ_REQUEST: StarMapIndustryReadRequest = Object.freeze({
+  systemId: null,
+  planetId: null,
+  routeFilter: "all",
+  query: "",
+});
+
 export type StarMapNativeReadStatus = "ready" | "loading" | "unavailable";
 
 type StarMapBatchAction = (systemId?: StarSystemId) => Promise<StarMapBatchActionResult | null>;
@@ -878,8 +889,8 @@ export function NativeStarMapWorkspace({
   readStatus = "ready",
   quantumReadModel,
   quantumReadStatus = "ready",
-  industryReadRequest,
-  onIndustryReadRequest,
+  industryReadRequest = DEFAULT_INDUSTRY_READ_REQUEST,
+  onIndustryReadRequest = () => undefined,
   onClose,
   onNativeRoleChange,
   onNativeStationPriorityChange,
@@ -907,8 +918,8 @@ export function NativeStarMapWorkspace({
   readStatus?: StarMapNativeReadStatus;
   quantumReadModel: NativeStellarQuantumReadModel | null;
   quantumReadStatus?: StarMapNativeReadStatus;
-  industryReadRequest: StarMapIndustryReadRequest;
-  onIndustryReadRequest: (request: StarMapIndustryReadRequest) => void;
+  industryReadRequest?: StarMapIndustryReadRequest;
+  onIndustryReadRequest?: (request: StarMapIndustryReadRequest) => void;
   onClose: () => void;
   onNativeRoleChange?: NativePlanetRoleAction;
   onNativeStationPriorityChange?: NativeStationPriorityAction;
@@ -985,8 +996,8 @@ export function StarMapWorkspace({
   nativeQuantumReadModel,
   nativeQuantumReadStatus = "ready",
   nativeAuthorityRequired = false,
-  industryReadRequest,
-  onIndustryReadRequest,
+  industryReadRequest = DEFAULT_INDUSTRY_READ_REQUEST,
+  onIndustryReadRequest = () => undefined,
   onClose,
   onExplore,
   onColonize,
@@ -1008,7 +1019,7 @@ export function StarMapWorkspace({
   onAttachAllQuantumStations,
   onCollectorQuantumModeChange,
   onQuantumItemCapacityChange,
-  onResetPlanetFactory,
+  onResetPlanetFactory = () => false,
   onNativeQuantumItemCapacityChange,
   onOpenSystemSpaceStation,
   mobile = false,
@@ -1024,8 +1035,8 @@ export function StarMapWorkspace({
   nativeQuantumReadModel?: NativeStellarQuantumReadModel | null;
   nativeQuantumReadStatus?: StarMapNativeReadStatus;
   nativeAuthorityRequired?: boolean;
-  industryReadRequest: StarMapIndustryReadRequest;
-  onIndustryReadRequest: (request: StarMapIndustryReadRequest) => void;
+  industryReadRequest?: StarMapIndustryReadRequest;
+  onIndustryReadRequest?: (request: StarMapIndustryReadRequest) => void;
   onClose: () => void;
   onExplore: (systemId: StarSystemId) => void;
   onColonize: (planetId: PlanetId) => void;
@@ -1047,7 +1058,7 @@ export function StarMapWorkspace({
   onAttachAllQuantumStations: StarMapBatchAction;
   onCollectorQuantumModeChange: StarMapCollectorBatchAction;
   onQuantumItemCapacityChange: (itemId: ItemId, value: string) => void;
-  onResetPlanetFactory: (planetId: PlanetId) => boolean;
+  onResetPlanetFactory?: (planetId: PlanetId) => boolean;
   onNativeQuantumItemCapacityChange?: NativeQuantumItemCapacityAction;
   onOpenSystemSpaceStation?: (systemId: StarSystemId) => void;
   mobile?: boolean;
@@ -1364,7 +1375,7 @@ export function StarMapWorkspace({
             </div>
           );
         })}
-      </div> : view === "industry" ? <IndustryConsole game={game} onTravel={onTravel} onRoleChange={onRoleChange} onStationPriorityChange={onStationPriorityChange} onStationMinimumLoadChange={onStationMinimumLoadChange} onStationLimitsChange={onStationLimitsChange} onFocusStation={onFocusStation} /> : <QuantumInventoryConsole game={game} onCollectorModeChange={onCollectorQuantumModeChange} onItemCapacityChange={onQuantumItemCapacityChange} />}
+      </div> : view === "industry" ? industryConsole : nativeAuthorityRequired ? nativeQuantumConsole : <QuantumInventoryConsole game={game} onCollectorModeChange={onCollectorQuantumModeChange} onItemCapacityChange={onQuantumItemCapacityChange} />}
     </WorkspaceFrame>{resetDialog}</>
   );
 }

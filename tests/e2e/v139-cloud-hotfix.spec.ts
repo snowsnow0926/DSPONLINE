@@ -90,7 +90,7 @@ test.afterAll(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-test("reports the 1.2.6 candidate version and a unique build id", async ({ page }) => {
+test("reports the 1.2.7 native candidate version and a unique build id", async ({ page }) => {
   await page.goto("/?menu=1");
   const application = process.env.DSP_E2E_USE_PREVIEW === "1"
     ? await page.evaluate(async () => {
@@ -103,7 +103,7 @@ test("reports the 1.2.6 candidate version and a unique build id", async ({ page 
         const { collectClientDiagnostics } = await import("/src/game/diagnostics.ts");
         return collectClientDiagnostics().application as { version: string; build: string };
       });
-  expect(application.version).toBe("1.2.6");
+  expect(application.version).toBe("1.2.7");
   expect(application.build).toMatch(/^1\.2\.6\+[0-9a-f]{12}(?:\.dirty)?$/);
 });
 

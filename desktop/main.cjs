@@ -138,7 +138,6 @@ const desktopRuntimeIdentity = initializeDesktopEditionIdentity({
 // not mutate Electron; only the exact experimental fallback can disable GPU use.
 const shellRuntimePolicy = initializeShellRuntimePolicy({ app, environment: process.env });
 
-const isDevelopment = Boolean(process.env.DSP_DESKTOP_DEV_URL);
 const sampleNativeOfflineStartupWallClock = createMonotonicOrbitalContractClock();
 const channels = createReleaseChannels({
   updateBaseUrl: process.env.DSP_UPDATE_BASE_URL || packageMetadata.updateBaseUrl,

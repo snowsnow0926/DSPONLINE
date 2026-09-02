@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-31-v1.2.6");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-02-v1.2.7");
     }
   });
 }
@@ -1603,7 +1603,7 @@ test("dated release notes appear once and remain available from both settings sc
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "终局直结与星球工厂重置");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.6");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.7");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await expect(releaseNotes).toContainText("产率复制只直结终局成果");
   await expect(releaseNotes).toContainText("没有终局目标就不生成延期库存");
@@ -1637,7 +1637,7 @@ test("dated release notes appear once and remain available from both settings sc
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
   await expect(releaseNotes).toHaveAttribute("aria-label", "终局直结与星球工厂重置");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.6");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.7");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-31-v126-1440.png", fullPage: true });
 
@@ -1676,7 +1676,7 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-31-v1.2.6");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-09-02-v1.2.7");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
@@ -1684,7 +1684,7 @@ test("dated release notes appear once and remain available from both settings sc
   await page.getByRole("button", { name: "查看2026年8月31日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "终局直结与星球工厂重置");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.6");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.7");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
@@ -1696,7 +1696,7 @@ test("dated release notes appear once and remain available from both settings sc
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "终局直结与星球工厂重置");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.6");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.7");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);

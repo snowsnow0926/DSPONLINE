@@ -1,4 +1,4 @@
-const MAXIMUM_LOCAL_SAVE_FILE_BYTES = 256 * 1024 * 1024;
+export const MAXIMUM_LOCAL_SAVE_FILE_BYTES = 256 * 1024 * 1024;
 
 export async function compressSaveTextToGzipBlob(contents: string): Promise<Blob | null> {
   if (typeof CompressionStream === "undefined" || typeof Blob === "undefined" || typeof Response === "undefined") return null;
@@ -44,16 +44,20 @@ async function readBoundedStream(stream: ReadableStream<Uint8Array>, maximumByte
   return merged.buffer;
 }
 
-/** Read legacy .json and compressed .json.gz saves through one bounded API. */
-export async function readSaveFileText(file: File): Promise<string> {
+/**
+ * Read a local save as its original UTF-8 bytes.  Keeping this boundary
+ * binary is important for large imports: the caller can transfer ownership
+ * to the inspection Worker instead of first creating a giant JavaScript
+ * string and structured-cloning that string to another thread.
+ */
+export async function readSaveFileBytes(file: File): Promise<ArrayBuffer> {
   if (file.size <= 0) throw new Error("存档文件为空");
   if (file.size > MAXIMUM_LOCAL_SAVE_FILE_BYTES) throw new Error("存档文件超过 256 MiB 安全上限");
   const gzip = await fileHasGzipMagic(file);
-  if (!gzip) return file.text();
+  if (!gzip) return file.arrayBuffer();
   if (typeof DecompressionStream === "undefined") throw new Error("当前浏览器不支持 gzip 存档，请先解压为 JSON");
-  let bytes: ArrayBuffer;
   try {
-    bytes = await readBoundedStream(
+    return await readBoundedStream(
       file.stream().pipeThrough(new DecompressionStream("gzip")),
       MAXIMUM_LOCAL_SAVE_FILE_BYTES,
     );
@@ -61,9 +65,22 @@ export async function readSaveFileText(file: File): Promise<string> {
     if (error instanceof Error && /256 MiB/.test(error.message)) throw error;
     throw new Error("gzip 存档损坏或无法解压");
   }
+}
+
+/** Decode bytes only when a caller actually needs the textual payload. */
+export function decodeSaveFileBytes(bytes: ArrayBuffer, fatal = true): string {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal }).decode(bytes);
   } catch {
-    throw new Error("gzip 存档不是合法 UTF-8 JSON");
+    throw new Error("存档不是合法 UTF-8 JSON");
   }
+}
+
+/** Read legacy .json and compressed .json.gz saves through one bounded API. */
+export async function readSaveFileText(file: File): Promise<string> {
+  if (file.size <= 0) throw new Error("存档文件为空");
+  if (file.size > MAXIMUM_LOCAL_SAVE_FILE_BYTES) throw new Error("存档文件超过 256 MiB 安全上限");
+  const gzip = await fileHasGzipMagic(file);
+  if (!gzip) return file.text();
+  return decodeSaveFileBytes(await readSaveFileBytes(file), true);
 }

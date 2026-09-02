@@ -27,6 +27,40 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release127Copy = {
+  date: { "zh-CN": "2026年9月2日", en: "September 2, 2026" },
+  title: { "zh-CN": "Windows 原生性能整合与大存档内存优化", en: "Windows Native Performance Integration and Large-save Memory Improvements" },
+  summary: {
+    "zh-CN": "1.2.7 以已经完成一周开发的 Windows/Rust 原生工作树为基线，完整保留 1.2.6 的终局直结和星球工厂重置；同时把 1.2.6 的代码、测试和兼容性修复合入原生候选，不重新开发网页版本。Windows 仍是未签名本地候选，GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.2.7 uses the week-long Windows/Rust native worktree as its baseline and keeps all 1.2.6 endgame settlement and planet-factory reset behavior. The 1.2.6 code, tests, and compatibility fixes are integrated into the native candidate rather than rebuilding the Web edition. Windows remains an unsigned local candidate; GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+  },
+  integrationTitle: { "zh-CN": "1.2.6 功能原样进入原生候选", en: "1.2.6 behavior is retained in the native candidate" },
+  integrationDescription: {
+    "zh-CN": "产率复制仍只直结白矩阵科研和逐恒星系戴森成果；星图重置仍要求三次确认并保留天然资源与全局进度。没有静默修改玩家存档或降低历史数值。",
+    en: "Rate replication still settles only white-matrix research and per-system Dyson outcomes, while the star-map reset keeps its three confirmations and preserves natural resources and global progress. No player save is silently rewritten or numerically reduced.",
+  },
+  nativeTitle: { "zh-CN": "Rust 原生候选继续使用确定性边界", en: "The Rust native candidate keeps deterministic boundaries" },
+  nativeDescription: {
+    "zh-CN": "Windows 的权威状态、增量保存、事件物流、薄 UI 投影和 v47 流式导出继续由原生工作树提供；未经多硬件和长时门禁前不会宣称为稳定权威版本。",
+    en: "The native worktree continues to provide authoritative state, incremental persistence, event-driven logistics, thin-UI projections, and streaming v47 export on Windows. It is not presented as a stable authoritative build before multi-hardware and long-run gates pass.",
+  },
+  stackTitle: { "zh-CN": "并发测试与 Worker 线程使用有界栈", en: "Concurrent tests and Workers use bounded stacks" },
+  stackDescription: {
+    "zh-CN": "Windows 默认线程栈较小时，深层存档解析可能导致访问冲突；原生 Rayon 与回收线程统一使用 4 MiB 有界栈，并保留确定性提交顺序，不改变游戏规则。",
+    en: "Deep save parsing could hit access violations on Windows with small default thread stacks. Native Rayon and reclaimer threads now use a bounded 4 MiB stack while retaining deterministic commit order and gameplay rules.",
+  },
+  importTitle: { "zh-CN": "大存档检查改用可转移字节", en: "Large-save inspection uses transferable bytes" },
+  importDescription: {
+    "zh-CN": "本地 JSON 或 gzip 存档先以有界 UTF-8 字节交给检查 Worker，成功路径不再在界面线程保留一份完整 UTF-16 正文；长度和哈希不匹配会回退到原始文件，不覆盖玩家文件。",
+    en: "Local JSON or gzip saves now reach the inspection Worker as bounded UTF-8 bytes. The successful path no longer keeps a full UTF-16 payload on the UI thread; length or hash mismatches fall back to the original file without overwriting it.",
+  },
+  boundaryTitle: { "zh-CN": "协议与存档边界保持兼容", en: "Protocol and save boundaries remain compatible" },
+  boundaryDescription: {
+    "zh-CN": "本候选不升级 GameState、envelope、云 schema 或 SQLite layout；1.2.6 的线上稳定版和生产服务不受这棵开发树影响。",
+    en: "This candidate does not upgrade GameState, the envelope, cloud schema, or SQLite layout. The 1.2.6 online stable release and production services are unaffected by this development tree.",
+  },
+} as const;
+
 const release126Copy = {
   date: { "zh-CN": "2026年8月31日", en: "August 31, 2026" },
   title: { "zh-CN": "终局直结与星球工厂重置", en: "Direct Endgame Settlement and Planet Factory Reset" },
@@ -861,6 +895,10 @@ function release126Message(locale: AppLocale, key: keyof typeof release126Copy):
   return release126Copy[key][locale];
 }
 
+function release127Message(locale: AppLocale, key: keyof typeof release127Copy): string {
+  return release127Copy[key][locale];
+}
+
 function release125Message(locale: AppLocale, key: keyof typeof release125Copy): string {
   return release125Copy[key][locale];
 }
@@ -903,6 +941,23 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-09-02-v1.2.7",
+    date: release127Message(locale, "date"),
+    version: "1.2.7",
+    title: release127Message(locale, "title"),
+    summary: release127Message(locale, "summary"),
+    items: [
+      { id: "v127-126-native-integration", title: release127Message(locale, "integrationTitle"), description: release127Message(locale, "integrationDescription") },
+      { id: "v127-native-boundaries", title: release127Message(locale, "nativeTitle"), description: release127Message(locale, "nativeDescription") },
+      { id: "v127-bounded-thread-stack", title: release127Message(locale, "stackTitle"), description: release127Message(locale, "stackDescription") },
+      { id: "v127-transferable-save-inspection", title: release127Message(locale, "importTitle"), description: release127Message(locale, "importDescription") },
+      { id: "v127-compatibility-boundary", title: release127Message(locale, "boundaryTitle"), description: release127Message(locale, "boundaryDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes126(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
     id: "2026-08-31-v1.2.6",
     date: release126Message(locale, "date"),

@@ -303,7 +303,7 @@ import { createNativeFactoryPositionCommand } from "./game/nativeFactoryPosition
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
 import { getCampaignTask, getCampaignTaskRequirements, selectCampaignTask, syncCampaignProgress, type CampaignNavigation } from "./game/campaign";
-import { inspectSaveInWorker } from "./game/saveInspection";
+import { inspectSaveInWorker, inspectSavePayloadBytesInWorker } from "./game/saveInspection";
 import { clearGameSlotVerified, clearSaveSnapshotVerified, clearSaveSnapshotsVerified, exportGame, getSaveSummariesInWorker, getSaveSlotSummaries, getSaveSnapshotSummaries, loadGameSlotFromPersistence, loadSaveSnapshotFromPersistence, repairSave, SAVE_KEY, saveGame, saveGameSnapshotVerified, saveGameSlotVerified, saveGameVerified, saveGameVerifiedFromEnvelopeTransfer, serializeEnvelopeInWorker, type LoadedGame, type OfflineReport, type SaveGameResult, type SaveInspection, type SaveSlotId, type SaveSnapshotSummary } from "./game/storage";
 import { runAutomaticPerformanceReport, type AutomaticPerformanceReport } from "./game/benchmark";
 import {
@@ -313,7 +313,7 @@ import {
   serializeBlueprintExchange,
 } from "./game/blueprintExchange";
 import { exportBinaryFile, exportTextFile } from "./game/fileExport";
-import { compressSaveTextToGzipBlob } from "./game/saveFileCodec";
+import { compressSaveTextToGzipBlob, decodeSaveFileBytes } from "./game/saveFileCodec";
 import { alignToDevicePixel } from "./game/displayPixels";
 import {
   getDesktopBridge,
@@ -8663,8 +8663,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             ? `纯挂机启动失败：${error.message}；主存档未改变，可立即重试`
             : "纯挂机启动失败；主存档未改变，可立即重试");
         });
-          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
-        })();
         return;
       }
       if (!simulationWorkerRef.current || simulationWorkerDisabledRef.current) {
@@ -15291,7 +15289,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     });
   }, [nativePlayerAuthorityClock, persistNativeAuthorityCheckpoint, persistPrimarySave, playTone, readNativeAuthorityRuntimeObservation, refreshNativeAuthorityPersistenceBoundary]);
 
-  const importSave = useCallback(async (raw: string) => {
+  const importSave = useCallback(async (payload: string | ArrayBuffer) => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
       setNotice(nativeAuthorityReplacementBlockedMessage("import"));
       playTone("alert");
@@ -15302,13 +15300,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     const generation = ++saveImportInspectionGenerationRef.current;
+    const bytePayload = payload instanceof ArrayBuffer;
+    // A local-file ArrayBuffer is transferred to the inspection Worker. Keep a
+    // single bounded copy only for the explicit rescue/error path; successful
+    // imports never retain the original giant string on the renderer thread.
+    const fallbackBytes = bytePayload ? payload.slice(0) : null;
     setImportPreview(null);
     setPendingImportState(null);
     setPendingImportRaw(null);
     setImportRescueArmed(false);
     setNotice("正在后台检查存档完整性与兼容性…");
     try {
-      const inspection = await inspectSaveInWorker(raw);
+      const inspectionResult = bytePayload
+        ? await inspectSavePayloadBytesInWorker(payload, undefined, fallbackBytes
+          ? () => decodeSaveFileBytes(fallbackBytes, true)
+          : undefined)
+        : null;
+      const inspection = inspectionResult?.inspection ?? await inspectSaveInWorker(payload as string);
       if (generation !== saveImportInspectionGenerationRef.current) return;
       if ((!inspection.valid && !inspection.repairable) || !inspection.state) {
         setNotice(`存档导入失败：${inspection.issues[0] ?? "文件格式或版本无效"}`);
@@ -15317,7 +15325,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       }
       setImportPreview(inspection);
       setPendingImportState(inspection.valid ? inspection.state : null);
-      setPendingImportRaw(inspection.valid ? null : raw);
+      setPendingImportRaw(inspection.valid ? null : bytePayload
+        ? decodeSaveFileBytes(fallbackBytes!, true)
+        : payload as string);
       setImportRescueArmed(false);
       setNotice(inspection.valid
         ? inspection.integrity === "valid" ? "已读取存档，请确认导入" : "存档可迁移，请确认导入"

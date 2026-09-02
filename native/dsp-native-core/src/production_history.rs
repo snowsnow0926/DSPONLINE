@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use anyhow::{anyhow, bail};
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -23,6 +24,8 @@ const TIERED_HISTORY_SIDECAR_FORMAT_VERSION: u16 = 1;
 const MAX_TIERED_HISTORY_SIDECAR_SAMPLES: usize = 32;
 const HISTORY_PROBE_CHUNK_ROWS: usize = 2_048;
 const HISTORY_REPLAY_SHARDS: usize = 32;
+const TELEMETRY_MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+const TELEMETRY_MAX_SAFE_INTEGER_U64: u64 = 9_007_199_254_740_991;
 
 /// Runtime-only exact directory for rows that currently carry material in
 /// `inputs` or `outputs`. The immutable factory topology provides the startup
@@ -134,6 +137,175 @@ fn finite_number(value: Option<&Value>) -> Option<f64> {
     value
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
+}
+
+/// Reproduce the 1.2.6 `pureIdleReplication` history telemetry in the native
+/// authority.  This is deliberately a diagnostic projection only: it reads
+/// the candidate base map after settlement and never participates in gameplay
+/// mutation or material accounting.  Keeping the projection here (rather
+/// than making the renderer merge it back in) is important because production
+/// history is part of the canonical v47 state hash.
+fn pure_idle_replication_telemetry(
+    catalog: &crate::catalog::RuntimeCatalog,
+    base: &Map<String, Value>,
+) -> Option<Value> {
+    fn safe_progress_number(value: &Value) -> Option<BigUint> {
+        if let Some(value) = value.as_u64() {
+            return (value <= TELEMETRY_MAX_SAFE_INTEGER_U64).then(|| BigUint::from(value));
+        }
+        if let Some(value) = value.as_i64() {
+            return (value >= 0 && (value as u64) <= TELEMETRY_MAX_SAFE_INTEGER_U64)
+                .then(|| BigUint::from(value as u64));
+        }
+        let value = value.as_f64()?;
+        if !value.is_finite()
+            || !(0.0..=TELEMETRY_MAX_SAFE_INTEGER).contains(&value)
+            || value.fract().abs() > f64::EPSILON
+        {
+            return None;
+        }
+        Some(BigUint::from(value as u64))
+    }
+
+    fn catalog_cost(amount: f64) -> Option<BigUint> {
+        // The active JS catalog uses integer item costs.  Fail closed if a
+        // malformed content-pack definition reaches the native projection;
+        // omitting telemetry is safer than inventing a counter.
+        if !amount.is_finite()
+            || !(0.0..=TELEMETRY_MAX_SAFE_INTEGER).contains(&amount)
+            || amount.fract().abs() > f64::EPSILON
+        {
+            return None;
+        }
+        Some(BigUint::from(amount as u64))
+    }
+
+    fn infinite_level(value: Option<&Value>, maximum: u32) -> Option<u32> {
+        let number = value.and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.parse::<f64>().ok())
+        })?;
+        if !number.is_finite() {
+            return None;
+        }
+        Some(number.floor().clamp(0.0, f64::from(maximum)) as u32)
+    }
+
+    fn infinite_progress(value: Option<&Value>) -> BigUint {
+        // The JS helper intentionally treats malformed progress as zero.  A
+        // valid save stores this field as a decimal string, while accepting a
+        // JSON integer here keeps old v47 fixtures byte-compatible.
+        let Some(value) = value else {
+            return BigUint::default();
+        };
+        if let Some(text) = value.as_str()
+            && !text.is_empty()
+            && text.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return BigUint::parse_bytes(text.as_bytes(), 10).unwrap_or_default();
+        }
+        safe_progress_number(value).unwrap_or_default()
+    }
+
+    let research = base.get("research")?.as_object()?;
+    let endgame = base.get("endgame")?.as_object()?;
+    let plans = base.get("dysonPlans")?.as_object()?;
+    let completed_values = research.get("completedTechIds")?.as_array()?;
+    let mut completed = HashSet::<String>::new();
+    for value in completed_values {
+        completed.insert(value.as_str()?.to_owned());
+    }
+
+    let mut universe_matrix_investment: Option<BigUint> = None;
+    let mut add_research = |item_id: &str, amount: BigUint| {
+        if item_id != "universe_matrix" {
+            return;
+        }
+        let total = universe_matrix_investment.take().unwrap_or_default() + amount;
+        universe_matrix_investment = Some(total);
+    };
+
+    for technology_id in &completed {
+        let Some(technology) = catalog.technologies.get(technology_id) else {
+            continue;
+        };
+        for cost in &technology.costs {
+            add_research(&cost.item_id, catalog_cost(cost.amount)?);
+        }
+    }
+
+    if let Some(progress) = research.get("progressByTech")
+        && !progress.is_null()
+    {
+        let progress = progress.as_object()?;
+        for (technology_id, by_item) in progress {
+            if completed.contains(technology_id) {
+                continue;
+            }
+            let by_item = by_item.as_object()?;
+            for (item_id, amount) in by_item {
+                // Unlike infinite-research progress, the 1.2.6 JS helper
+                // returns undefined for any non-safe finite progress value.
+                add_research(item_id, safe_progress_number(amount)?);
+            }
+        }
+    }
+
+    if let Some(infinite) = endgame.get("infiniteResearch")
+        && !infinite.is_null()
+    {
+        let infinite = infinite.as_object()?;
+        for (research_id, progress) in infinite {
+            let definition = crate::infinite_research::maximum_level(research_id)?;
+            let progress = progress.as_object()?;
+            let level = infinite_level(progress.get("level"), definition)?;
+            let invested = crate::infinite_research::cumulative_investment(
+                research_id,
+                level,
+                &infinite_progress(progress.get("progress")),
+            )
+            .ok()?;
+            add_research("universe_matrix", invested);
+        }
+    }
+
+    let mut structure_by_system = Map::new();
+    let mut shell_by_system = Map::new();
+    for (system_id, plan) in plans {
+        let plan = plan.as_object()?;
+        let structure = plan
+            .get("structurePoints")
+            .and_then(Value::as_f64)
+            .filter(|value| {
+                value.is_finite()
+                    && (0.0..=TELEMETRY_MAX_SAFE_INTEGER).contains(value)
+                    && value.fract().abs() <= f64::EPSILON
+            })?;
+        let shell = plan
+            .get("shellSails")
+            .and_then(Value::as_f64)
+            .filter(|value| {
+                value.is_finite()
+                    && (0.0..=TELEMETRY_MAX_SAFE_INTEGER).contains(value)
+                    && value.fract().abs() <= f64::EPSILON
+            })?;
+        structure_by_system.insert(system_id.clone(), Value::from(structure as u64));
+        shell_by_system.insert(system_id.clone(), Value::from(shell as u64));
+    }
+
+    let mut research_investment = Map::new();
+    if let Some(amount) = universe_matrix_investment {
+        research_investment.insert(
+            "universe_matrix".to_owned(),
+            Value::from(amount.to_string()),
+        );
+    }
+    Some(serde_json::json!({
+        "researchInvestmentByItem": Value::Object(research_investment),
+        "structurePointsBySystem": Value::Object(structure_by_system),
+        "shellSailsBySystem": Value::Object(shell_by_system),
+    }))
 }
 
 fn production_history_boundary(
@@ -650,7 +822,7 @@ fn merge_samples(samples: &[Value]) -> anyhow::Result<Value> {
         .unwrap_or_else(|| latest_number("blockedMachines"))
         .round()
         .max(0.0);
-    Ok(serde_json::json!({
+    let mut merged = serde_json::json!({
         "elapsedSeconds": latest_number("elapsedSeconds"),
         "sampleDurationSeconds": duration,
         "productionPerMinute": merge_rate_records(samples, "productionPerMinute", duration),
@@ -665,7 +837,18 @@ fn merge_samples(samples: &[Value]) -> anyhow::Result<Value> {
         "powerEfficiency": weighted_optional(samples, "powerEfficiency", duration),
         "activeMachines": active,
         "blockedMachines": blocked,
-    }))
+    });
+    // 1.2.6 added this monotonic terminal projection to every history row.
+    // Compaction must carry the newest snapshot forward exactly like the JS
+    // `mergeProductionHistorySamples` helper, otherwise long windows silently
+    // lose the field and change the canonical v47 hash.
+    if let Some(telemetry) = latest.get("pureIdleReplication") {
+        merged
+            .as_object_mut()
+            .expect("merged production history sample is an object")
+            .insert("pureIdleReplication".to_owned(), telemetry.clone());
+    }
+    Ok(merged)
 }
 
 fn split_sample_at_duration(
@@ -2007,7 +2190,7 @@ impl CoreState {
             0.0
         };
         profile_mark!("efficiency");
-        let sample = serde_json::json!({
+        let mut sample = serde_json::json!({
             "elapsedSeconds": elapsed,
             "sampleDurationSeconds": duration,
             "productionPerMinute": rates_to_value(production),
@@ -2023,6 +2206,12 @@ impl CoreState {
             "activeMachines": if refresh { active.floor().max(0.0) } else { previous_number("activeMachines").unwrap_or(0.0).floor().max(0.0) },
             "blockedMachines": if refresh { blocked.floor().max(0.0) } else { previous_number("blockedMachines").unwrap_or(0.0).floor().max(0.0) },
         });
+        if let Some(telemetry) = pure_idle_replication_telemetry(&self.catalog, base) {
+            sample
+                .as_object_mut()
+                .expect("production history sample is an object")
+                .insert("pureIdleReplication".to_owned(), telemetry);
+        }
         // The history was only borrowed while this sample was calculated. Move
         // the existing array out now instead of cloning every retained bucket
         // (and all of its nested item maps) once per simulation second.

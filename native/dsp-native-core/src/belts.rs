@@ -7725,21 +7725,25 @@ mod tests {
             let pool = Arc::clone(&pool);
             let start = Arc::clone(&start);
             let borrowed = Arc::clone(&borrowed);
-            std::thread::spawn(move || {
-                start.wait();
-                let reusable = pool.take();
-                let reused = reusable.is_some();
-                let mut runtime = BeltRuntime::empty_with_reusable(belt_count, &prepared, reusable);
-                runtime.reusable_pool = Some(Arc::clone(&pool));
-                runtime.active_groups[group_index] = true;
-                runtime.active_group_indices = vec![group_index as u32];
-                runtime.active_route_indices = vec![group_index as u32];
-                // Both candidates must complete checkout before either can
-                // publish, proving that only one owns the resident workspace.
-                borrowed.wait();
-                let snapshot = runtime.activity_snapshot(&prepared);
-                (reused, snapshot)
-            })
+            std::thread::Builder::new()
+                .stack_size(crate::deterministic_runtime::NATIVE_THREAD_STACK_BYTES)
+                .spawn(move || {
+                    start.wait();
+                    let reusable = pool.take();
+                    let reused = reusable.is_some();
+                    let mut runtime =
+                        BeltRuntime::empty_with_reusable(belt_count, &prepared, reusable);
+                    runtime.reusable_pool = Some(Arc::clone(&pool));
+                    runtime.active_groups[group_index] = true;
+                    runtime.active_group_indices = vec![group_index as u32];
+                    runtime.active_route_indices = vec![group_index as u32];
+                    // Both candidates must complete checkout before either can
+                    // publish, proving that only one owns the resident workspace.
+                    borrowed.wait();
+                    let snapshot = runtime.activity_snapshot(&prepared);
+                    (reused, snapshot)
+                })
+                .expect("native belt candidate test thread should spawn")
         };
 
         let first = spawn_candidate(0);

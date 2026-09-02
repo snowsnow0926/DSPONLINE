@@ -79,8 +79,8 @@ function performancePackageFixture() {
   return value;
 }
 
-test("source package is a 1.2.6 stable upgrade identity and retains an isolated performance build path", () => {
-  assert.equal(packageMetadata.version, "1.2.6");
+test("source package is a 1.2.7 native candidate and retains an isolated performance build path", () => {
+  assert.equal(packageMetadata.version, "1.2.7");
   assert.equal(validateStablePackageIdentity(packageMetadata, {
     requireBuildConfiguration: true,
     requireOfflineDefaults: true,
@@ -92,7 +92,12 @@ test("source package is a 1.2.6 stable upgrade identity and retains an isolated 
   assert.equal(Object.prototype.hasOwnProperty.call(packageMetadata.build.nsis, "guid"), false);
   assert.equal(packageMetadata.updateBaseUrl, "");
   assert.equal(packageMetadata.cloudApiBaseUrl, "");
-  assert.match(packageMetadata.scripts["desktop:release"], /--desktop-source release(?:\s|$)/);
+  // The native candidate's packer owns the release feed lifecycle in
+  // `pack.cjs release`; the older 1.2.6 script exposed the equivalent
+  // `create-native-update-manifests --desktop-source release` command
+  // directly. Accept either spelling while still requiring an explicit
+  // release-mode/feed-producing path.
+  assert.match(packageMetadata.scripts["desktop:release"], /(?:--desktop-source release(?:\s|$)|desktop\/pack\.cjs release(?:\s|$))/);
   assert.match(packageMetadata.scripts["desktop:performance:pack"], /DSP_DESKTOP_EDITION=performance/);
   assert.match(packageMetadata.scripts["desktop:performance:dist"], /DSP_DESKTOP_EDITION=performance/);
 });
@@ -332,7 +337,7 @@ test("packaged identity verifier accepts only the dedicated executable and rejec
   fs.mkdirSync(resourcesDirectory, { recursive: true });
   fs.writeFileSync(path.join(source, "package.json"), JSON.stringify({
     name: "dsp-idle-network",
-    version: "1.2.6",
+    version: "1.2.7",
     desktopEditionId: PERFORMANCE_EDITION_IDENTITY.editionId,
     productName: PERFORMANCE_EDITION_IDENTITY.productName,
   }));

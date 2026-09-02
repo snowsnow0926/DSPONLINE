@@ -619,6 +619,7 @@ fn deferred_record_drop_sender() -> &'static SyncSender<DeferredRecordDrop> {
         let (sender, receiver) = sync_channel::<DeferredRecordDrop>(0);
         if std::thread::Builder::new()
             .name("dsp-native-record-reclaimer".to_owned())
+            .stack_size(crate::deterministic_runtime::NATIVE_THREAD_STACK_BYTES)
             .spawn(move || {
                 while let Ok(batch) = receiver.recv() {
                     let DeferredRecordDrop { entities, belts } = batch;
@@ -8822,7 +8823,10 @@ mod tests {
         let workers = (0..8)
             .map(|_| {
                 let state = state.clone();
-                std::thread::spawn(move || state.summary().unwrap().canonical_sha256)
+                std::thread::Builder::new()
+                    .stack_size(crate::deterministic_runtime::NATIVE_THREAD_STACK_BYTES)
+                    .spawn(move || state.summary().unwrap().canonical_sha256)
+                    .expect("native state summary test thread should spawn")
             })
             .collect::<Vec<_>>();
         for worker in workers {

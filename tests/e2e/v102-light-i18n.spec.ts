@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-31-v1.2.6";
+const RELEASE_NOTE_ID = "2026-09-02-v1.2.7";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -112,7 +112,7 @@ test("English light release notes are localized and persist dismissal", async ({
   await page.goto("/?menu=1&lang=en");
   const dialog = page.getByRole("dialog", { name: "Direct Endgame Settlement and Planet Factory Reset" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.2.6");
+  await expect(dialog).toContainText("1.2.7");
   await expect(dialog).toContainText("Rate replication settles only terminal outcomes");
   await expect(dialog).toContainText("Missing terminal targets create no deferred inventory");
   await expect(dialog).toContainText("Reset one colonized planet from the star map");

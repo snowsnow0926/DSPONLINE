@@ -1140,10 +1140,22 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         loadSaveInspectionModule(),
         import("../game/saveFileCodec"),
       ]);
-      const raw = await saveFileCodec.readSaveFileText(file);
-      const inspection = await saveInspection.inspectSaveInWorker(raw);
+      const bytes = await saveFileCodec.readSaveFileBytes(file);
+      const inspected = await saveInspection.inspectSavePayloadBytesInWorker(
+        bytes,
+        undefined,
+        // A fallback string is needed only if the short-lived Worker fails or
+        // the user enters the rescue flow; successful large imports never
+        // retain a second UTF-16 payload in the menu.
+        () => saveFileCodec.readSaveFileText(file),
+      );
+      const inspection = inspected.inspection;
       if (generation !== importInspectionGenerationRef.current) return;
-      setImportRaw(!inspection.valid && inspection.repairable ? raw : null);
+      const rescueRaw = !inspection.valid && inspection.repairable
+        ? await saveFileCodec.readSaveFileText(file)
+        : null;
+      if (generation !== importInspectionGenerationRef.current) return;
+      setImportRaw(rescueRaw);
       setImportInspection(inspection);
       setMessage(inspection.valid
         ? { tone: inspection.integrity === "valid" ? "ready" : "warning", text: inspection.integrity === "valid" ? "存档校验通过" : "存档将在导入时自动迁移" }

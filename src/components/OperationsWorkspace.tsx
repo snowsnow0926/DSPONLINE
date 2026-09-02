@@ -58,7 +58,7 @@ import type { AutomaticPerformanceReport } from "../game/benchmark";
 import { NativeUpdateCard } from "./NativeUpdateCard";
 import type { AutosaveIntervalSeconds, CargoStackSize, DefaultBeltRouteMode, DifficultyMode, FontScale, GameSettings, GameState, SimulationSpeed } from "../game/types";
 import { canSetBeltStackSize } from "../game/engine";
-import { readSaveFileText } from "../game/saveFileCodec";
+import { readSaveFileBytes } from "../game/saveFileCodec";
 import { validateBuildingBufferLimitInput, validateDefaultBeltLanesInput, validateProliferatorBufferLimitInput, type BuildingBufferLimitValidation } from "../game/settings";
 import { PRODUCTION_REFRESH_PROFILES, type ProductionRefreshPreference } from "../game/productionRefresh";
 import { getPerformancePeaks, getPerformancePhaseShares, type PerformanceMonitorSnapshot } from "../game/performanceMonitor";
@@ -164,7 +164,8 @@ interface OperationsWorkspaceProps {
   onSettingsChange: (settings: Partial<GameSettings>) => void;
   onManualSave: () => void;
   onExport: () => void;
-  onImport: (raw: string) => void;
+  /** Accept text for cloud/legacy callers or transferred local-file bytes. */
+  onImport: (payload: string | ArrayBuffer) => void;
   onConfirmImport: () => void;
   onConfirmImportRescue: () => void;
   importRescueArmed: boolean;
@@ -1016,7 +1017,7 @@ function SavesPanel({
           aria-label="选择要导入的存档文件"
           onChange={async (event) => {
             const file = event.target.files?.[0];
-            if (file) onImport(await readSaveFileText(file));
+            if (file) onImport(await readSaveFileBytes(file));
             event.target.value = "";
           }}
         />

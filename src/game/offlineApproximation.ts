@@ -1174,6 +1174,26 @@ const PURE_IDLE_TRANSIENT_KEYS = new Set([
   "effectiveMultiplier", "requiredPowerKw", "allocatedPowerKw",
 ]);
 
+// These fields are terminal material sinks or their public mirrors.  A pure
+// idle affine contract may only extrapolate a closed flow ledger; it must not
+// turn a one-second launch/export/absorption observation into repeated free
+// outcomes.  The exact prefix and the dedicated rocket ledger still update
+// these fields, while the unproven macro tail keeps the last certified values.
+// Keep this separate from AFFINE_IGNORED_KEYS so ordinary offline simulation
+// retains its existing affine behaviour; the guard is enabled only by the
+// pure-idle calibration call site.
+const PURE_IDLE_TERMINAL_PATH_KEYS = new Set([
+  // Dyson rocket/sail terminal counters and per-system/per-orbit mirrors.
+  "totalRocketsLaunched", "totalLaunched", "totalExpired", "totalSailsAbsorbed",
+  "structurePoints", "shellSails", "sailsInOrbit", "absorbedSails",
+  // Galactic exports, contracts, orbital delivery and destruction sinks.
+  "totalDelivered", "delivered", "personalDelivered", "globalDelivered", "pendingBatches",
+  "exportedByItem", "totalExported", "orbitalCargoTotalUploaded", "totalDestroyed",
+  // Construction completion is committed through its receipt/queue ledger,
+  // never by copying a sampled cumulative counter.
+  "totalCrafted", "destroyedByproducts",
+]);
+
 function isFastFiniteFloatPath(path: AffinePath): boolean {
   return path.some((part) => typeof part === "string" &&
     (FAST_FINITE_FLOAT_KEYS.has(part) || part.endsWith("Kw")));
@@ -1185,6 +1205,10 @@ function isFastSensitivePath(path: AffinePath): boolean {
 
 function isPureIdleTransientPath(path: AffinePath): boolean {
   return pathHasString(path, PURE_IDLE_TRANSIENT_KEYS);
+}
+
+function isPureIdleTerminalPath(path: AffinePath): boolean {
+  return pathHasString(path, PURE_IDLE_TERMINAL_PATH_KEYS);
 }
 
 function isDynamicMapEntryPath(path: AffinePath): boolean {
@@ -1603,7 +1627,8 @@ function createFastAffineContractFromSnapshots(
     const first = entries[0]!;
     const path = pathFor(key);
     if (!path) continue;
-    if (excludePureIdleTransientPaths && isPureIdleTransientPath(path)) continue;
+    if (excludePureIdleTransientPaths &&
+      (isPureIdleTransientPath(path) || isPureIdleTerminalPath(path))) continue;
     if (first.kind === "number" && entries.every((entry) => entry?.kind === "number")) {
       const numericEntries = entries as Array<Extract<AffineEntry, { kind: "number" }>>;
       const intervalRates = numericEntries.slice(1).map((entry, index) => (entry.value - numericEntries[index].value) / intervalSeconds);

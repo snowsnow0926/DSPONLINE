@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **香港 iframe 白名单现状（2026-08-26）**：活动 Nginx 仅允许 `https://nutwg.com` 作为正式 SPA HTML 的 iframe 祖先来源；HTML 不发送 `X-Frame-Options`，CSP 为精确的 `frame-ancestors https://nutwg.com`。`www`、子域名、HTTP 和通配来源均未允许，非 HTML 响应继续 `DENY`/`frame-ancestors 'none'`。任何后续 snippet/template 安装必须先对照 [运维记录](./releases/ops-hong-kong-nutwg-iframe-allowlist-2026-08-26.md) 和活动配置哈希，避免把白名单退回默认拒绝策略；调整白名单仍须备份/哈希活动 snippet、独立语法检查、原子安装、正式 `nginx -t`、reload 及公网 HTML/API smoke。
+
 > 公开仓库脱敏说明：本文及 `deploy/` 模板中的节点地址、证书主机名和对象存储标识均使用示例占位符。实际值只应从受保护的运维环境注入，不能提交到 Git。
 
 ## 1. 环境边界
@@ -148,6 +150,34 @@ pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-relea
 Android 正式构建只允许通过 `invoke-protected-android-release.ps1` 将 vault 字段临时注入子进程，并验证 clean SHA、APK v2/v3、zipalign、包名/版本及 APK/AAB 历史证书连续性。香港/上海只接受完整 `DSP_HK_*` / `DSP_SH_*` transport、固定 host key、严格 TLS/SSH 和单命令物理出口。不得把真实值复制到仓库 `.env`、命令模板、发布记录或聊天。能力检查通过也不等于授权连接或发布。
 
 ## 5. 推荐的安全发布流程
+
+### 5.0 快速预检与并行化（不连接生产）
+
+发布耗时最长的失败通常发生在上传或维护窗口之后才发现清单、出口、磁盘或回滚指针不满足。今后先在本机完成一次可重复的预检，再决定是否进入远端维护窗口：
+
+```powershell
+# 只验证本地不可变清单；不会读取凭据或连接服务器
+node deploy/probe-release.mjs --base-url https://example.invalid `
+  --expected-version <version> --expected-build-id <build-id> `
+  --artifact <path>,<size>,<sha256> --concurrency 4
+
+# 只读节点健康探针可预留备份峰值空间；不会删除文件或启动服务
+$env:DSP_MONITOR_ESTIMATED_BACKUP_BYTES = '<snapshot-bytes>'
+$env:DSP_MONITOR_BACKUP_COUNT = '2'
+$env:DSP_MONITOR_BACKUP_OVERHEAD_BYTES = '<cosfs-and-startup-overhead-bytes>'
+node deploy/probe-node-health.mjs
+```
+
+`probe-release.mjs` 对多个下载制品使用有界并发（默认 4），但按输入顺序汇总结果，避免逐个等待或无界并发耗尽本机/代理连接。`probe-node-health.mjs` 的 `reservedBytes` 会同时检查当前可用空间和“完成快照及立即启动快照后”的剩余比例；任何一项低于门槛都在上传前失败。生产环境建议通过 `DSP_MONITOR_RESERVED_BYTES` 直接传入已经审计的峰值，或使用 `estimated-backup × count + overhead` 计算；数值配置格式错误会 fail-closed，不得用清理数据库/WAL/SHM 来制造空间。
+
+建议把以下只读阶段并行执行，全部通过后才进入串行维护窗口：
+
+1. 本地：clean SHA、不可变 manifest/SHA256SUMS、包签名和下载站构建产物。
+2. 本地：受保护 Android/SSH 能力检查与物理出口检查。
+3. 远端：服务/指针/磁盘/备份能力与公网 health/ready 探针。
+4. 串行：备份证据 → 新目录上传 → 依赖安装 → 原子切换 → smoke/回滚核对。
+
+这不会放宽任何门禁；它只把可并行的只读工作提前，避免在备份或停写后才发现候选制品或节点接入问题。
 
 ### 5.1 备份和预检
 

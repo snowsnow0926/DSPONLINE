@@ -78,3 +78,43 @@ test("reports stale version, cache and hash failures without exposing response b
   assert.match(report.errors.join("\n"), /size|sha256/);
   assert.equal(report.errors.join("\n").includes(artifact.toString()), false);
 });
+
+test("bounds concurrent artifact probes while preserving manifest order", async () => {
+  let active = 0;
+  let maximumActive = 0;
+  const fetchImpl = async (url, options) => {
+    const isArtifact = String(url).includes("/downloads/app.bin");
+    if (isArtifact) {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    try {
+      return await fetch(url, options);
+    } finally {
+      if (isArtifact) active -= 1;
+    }
+  };
+  const report = await probeRelease({
+    baseUrl,
+    expectedVersion: "1.0.40",
+    expectedBuildId: "1.0.40+synthetic",
+    concurrency: 2,
+    artifacts: Array.from({ length: 5 }, (_, index) => ({
+      name: `artifact-${index}`,
+      path: "/downloads/app.bin",
+      size: artifact.length,
+      sha256,
+    })),
+    fetchImpl,
+  });
+  assert.equal(report.ok, true);
+  assert.equal(maximumActive <= 2, true);
+  assert.deepEqual(report.checks.slice(2).map((entry) => entry.name), [
+    "artifact-0",
+    "artifact-1",
+    "artifact-2",
+    "artifact-3",
+    "artifact-4",
+  ]);
+});

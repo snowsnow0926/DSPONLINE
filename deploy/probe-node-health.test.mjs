@@ -56,3 +56,25 @@ test("marks failed endpoints and attempts a privacy-safe alert", async () => {
   assert.deepEqual(alerts[0].failedChecks, [`endpoint:${baseUrl}/failed`]);
   assert.equal(JSON.stringify(alerts[0]).includes("password"), false);
 });
+
+test("fails the disk gate before a release when reserved snapshot headroom would cross the threshold", async () => {
+  const result = await probeNodeHealth({
+    endpoints: [`${baseUrl}/ok`],
+    dataDirectory: directory,
+    statusFile: path.join(directory, "reserved-headroom.json"),
+    minimumDiskFreeRatio: 0,
+    reservedBytes: Number.MAX_SAFE_INTEGER,
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.failedChecks, ["disk"]);
+  assert.equal(result.disk.reservedBytes, Number.MAX_SAFE_INTEGER);
+  assert.ok(result.disk.postReserveFreeBytes < 0);
+  assert.ok(result.disk.postReserveFreeRatio < 0);
+});
+
+test("rejects malformed headroom configuration instead of silently disabling the gate", async () => {
+  await assert.rejects(
+    probeNodeHealth({ dataDirectory: directory, statusFile: path.join(directory, "invalid-headroom.json"), reservedBytes: "not-a-number" }),
+    /reservedBytes must be a non-negative number/,
+  );
+});

@@ -1,5 +1,9 @@
 # DSP极简网络项目现状
 
+> **香港 `nutwg.com` iframe 白名单已上线（2026-08-26）**：香港正式主站活动 Nginx 在不切换 Web/API、下载或数据库指针的前提下，仅对 SPA HTML 移除 `X-Frame-Options: DENY`，并把 CSP 精确设为 `frame-ancestors https://nutwg.com`；不包含 `www`、子域名、HTTP 或通配符。候选独立语法检查、活动配置备份/哈希、原子安装、正式 `nginx -t`/reload、公网根页/index/SPA fallback、health/ready 和 `NRestarts=0 → 0` 均通过；非 HTML 响应继续拒绝 framing。回滚副本、哈希与边界见 [本次运维记录](./releases/ops-hong-kong-nutwg-iframe-allowlist-2026-08-26.md)。仓库模板的持久化仍需单独 Development 交接，未来重装模板前不得覆盖活动白名单。
+
+> **发布/运维流程加固（2026-08-25，工作区已完成，未修改服务器）**：`deploy/probe-release.mjs` 对多个下载制品采用默认 4 路有界并发并保持输入顺序汇总；`deploy/probe-node-health.mjs` 支持按已审计的备份峰值预留磁盘空间，在当前空间或快照后剩余比例低于门槛时提前失败。新增 `npm run release:probe`、`npm run ops:health` 入口和对应 ops 回归；新上海节点重新绑定必须先通过受保护加载器登记固定 host key，不能从桌面明文连接文件或未知指纹接管。详见 [部署与运维手册](./DEPLOYMENT_OPERATIONS.md) 与 [受保护发布接入](./PROTECTED_RELEASE_ACCESS.md)。
+
 > **1.1.5 已完成稳定发布（2026-08-24）**：运行时 `a92c0d3157f3658523d8d4abbbb0ae654dc4fc35`，Release ID `1.1.5-a92c0d3157f3`，Build ID `1.1.5+a92c0d3157f3`。香港与上海 Web/API、上海下载页、Windows stable 和 Android stable 均已完成不可变目录部署与原子切换；香港 `/canary/previous/` 现在指向 1.1.4 的不可变 Web 目录。两地 health/ready、公网 smoke、Range/完整下载哈希和 PWA 路由隔离均通过；正式 SQLite Backup API evidence、quick_check、schema/layout 和磁盘保护门禁均通过。Android 实体设备门禁为用户明确豁免，Windows 按历史策略保持 `NotSigned`。完整制品、哈希、当前/previous 指针、观察结果和回滚边界见 [1.1.5 正式发布记录](./releases/1.1.5.md)，交接、开发报告和候选记录也已归档。
 
 > **匿名玩家统计冻结修复（2026-08-24，开发完成、未部署）**：只读生产核对确认香港活动 Nginx 仍保留 1.0.41 P0 时的 `/api/presence`、`/api/analytics`、`/api/errors` synthetic 202 熔断，请求未进入当前健康 API，因此 8 月 14 日后人数与匿名访问统计冻结。源码模板现在对三条路由显式反代到本机 API，并增加禁止 `return 202` 的 Nginx 回归测试。服务端新增可预览、计划指纹锁定、备份门禁和幂等冲突保护的历史人数估算：只在 daily metrics 中增加 `playersEstimate`/元数据，保留 8 月 14 日部分实测和 8 月 15–24 日缺失事实，不改写 `players`、累计唯一玩家、账号、云存档或排行榜。正式修复仍需 Release Agent 对活动 Nginx 做备份/语法检查/原子 reload，并在已验证 SQLite Backup API evidence 后单独应用估算计划；当前不能把开发态描述成线上已恢复。候选交接见 [统计冻结修复候选](./releases/player-statistics-freeze-fix-candidate-2026-08-24.md)。

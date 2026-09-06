@@ -41,6 +41,21 @@ function addFailure(report, check, error) {
   report.errors.push(`${check}: ${error instanceof Error ? error.message : String(error)}`);
 }
 
+async function mapLimit(values, limit, worker) {
+  const results = new Array(values.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, values.length) }, async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= values.length) return;
+      results[index] = await worker(values[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function checkFreshResource(report, fetchImpl, url, name, expectedVersion, expectedBuildId) {
   try {
     const response = await request(fetchImpl, url);
@@ -73,7 +88,7 @@ function parseContentRange(value) {
   return { start: Number(match[1]), end: Number(match[2]), total: match[3] === "*" ? null : Number(match[3]) };
 }
 
-async function checkArtifact(report, fetchImpl, baseUrl, artifact, rangeBytes) {
+async function checkArtifact(fetchImpl, baseUrl, artifact, rangeBytes) {
   const name = artifact.name || artifact.path || artifact.url;
   try {
     if (!artifact.url && !artifact.path) throw new Error("artifact needs url or path");
@@ -99,9 +114,9 @@ async function checkArtifact(report, fetchImpl, baseUrl, artifact, rangeBytes) {
     const actualHash = createHash("sha256").update(body).digest("hex");
     if (body.byteLength !== Number(artifact.size)) throw new Error(`size is ${body.byteLength}, expected ${artifact.size}`);
     if (actualHash !== String(artifact.sha256).toLowerCase()) throw new Error(`sha256 is ${actualHash}, expected ${artifact.sha256}`);
-    report.checks.push({ name, ok: true, status: fullResponse.status, rangeStatus: rangeResponse.status, size: body.byteLength, sha256: actualHash, cacheControl: cacheControl(fullResponse) });
+    return { ok: true, check: { name, ok: true, status: fullResponse.status, rangeStatus: rangeResponse.status, size: body.byteLength, sha256: actualHash, cacheControl: cacheControl(fullResponse) } };
   } catch (error) {
-    addFailure(report, `artifact:${name}`, error);
+    return { ok: false, error: `artifact:${name}: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
 
@@ -113,15 +128,21 @@ export async function probeRelease({
   expectedBuildId = "",
   artifacts = [],
   rangeBytes = DEFAULT_RANGE_BYTES,
+  concurrency = 4,
   fetchImpl = fetch,
 } = {}) {
   if (!baseUrl) throw new Error("baseUrl is required");
   if (!Number.isSafeInteger(Number(rangeBytes)) || Number(rangeBytes) <= 0) throw new Error("rangeBytes must be a positive integer");
+  if (!Number.isSafeInteger(Number(concurrency)) || Number(concurrency) <= 0) throw new Error("concurrency must be a positive integer");
   const normalizedBaseUrl = new URL(baseUrl).toString();
   const report = { ok: false, baseUrl: new URL(normalizedBaseUrl).origin, checks: [], errors: [] };
   await checkFreshResource(report, fetchImpl, absoluteUrl(normalizedBaseUrl, pagePath), "download-page", expectedVersion, "");
   await checkFreshResource(report, fetchImpl, absoluteUrl(normalizedBaseUrl, versionPath), "version.json", expectedVersion, expectedBuildId);
-  for (const artifact of artifacts) await checkArtifact(report, fetchImpl, normalizedBaseUrl, artifact, Number(rangeBytes));
+  const artifactResults = await mapLimit(artifacts, Number(concurrency), (artifact) => checkArtifact(fetchImpl, normalizedBaseUrl, artifact, Number(rangeBytes)));
+  for (const result of artifactResults) {
+    if (result.ok) report.checks.push(result.check);
+    else report.errors.push(result.error);
+  }
   report.ok = report.errors.length === 0;
   return report;
 }
@@ -184,6 +205,7 @@ if (isMainModule()) {
       expectedVersion: args.get("expected-version") || "",
       expectedBuildId: args.get("expected-build-id") || "",
       rangeBytes: Number(args.get("range-bytes") || DEFAULT_RANGE_BYTES),
+      concurrency: Number(args.get("concurrency") || 4),
       artifacts: await parseArtifacts(artifacts, args.get("base-url")),
     });
     console.log(JSON.stringify(report, null, 2));

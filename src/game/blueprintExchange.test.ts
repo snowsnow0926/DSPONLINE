@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_BELT_LANES, MAX_BUILDING_STACK_COUNT, createBlueprint, createInitialState, installMiner, placeBlueprint, placeBuilding, setLogisticsItem, setStationHubConfiguration, setStationSlotRoutePolicy, setStationSlotWarperBudget, setStationWarperAutoRefill, setStationWarperTarget } from "./engine";
-import { importBlueprintExchange, parseBlueprintExchange, serializeBlueprintExchange } from "./blueprintExchange";
+import { MAX_BLUEPRINT_EXCHANGE_BELTS, importBlueprintExchange, parseBlueprintExchange, serializeBlueprintExchange, validateBlueprintExchange } from "./blueprintExchange";
 
 describe("blueprint exchange", () => {
   it("round-trips a valid blueprint and assigns a safe local id on import", () => {
@@ -38,6 +38,47 @@ describe("blueprint exchange", () => {
     const reparsed = parseBlueprintExchange(serializeBlueprintExchange(parsed.blueprint!));
     expect(reparsed.valid).toBe(true);
     expect(reparsed.blueprint?.entities.map((entity) => entity.machineCount)).toEqual([400_000, 10_240]);
+  });
+
+  it("accepts exporter-sized blueprints beyond the legacy 512-line guard", () => {
+    const belts = Array.from({ length: 513 }, (_, index) => ({
+      key: `line_${index + 1}`,
+      sourceKey: "node_1",
+      targetKey: "node_2",
+      itemId: "iron_ingot",
+      lanes: 1,
+      tier: 1,
+      priority: 0,
+    }));
+    const parsed = parseBlueprintExchange(JSON.stringify({
+      type: "dsp-idle-blueprint",
+      formatVersion: 2,
+      blueprint: {
+        name: "高线路数交换",
+        entities: [
+          { key: "node_1", buildingId: "arc_smelter", offset: { x: 0, y: 0 }, machineCount: 1 },
+          { key: "node_2", buildingId: "storage_mk1", offset: { x: 240, y: 0 }, machineCount: 1 },
+        ],
+        belts,
+      },
+    }));
+    expect(MAX_BLUEPRINT_EXCHANGE_BELTS).toBeGreaterThan(513);
+    expect(parsed.valid).toBe(true);
+    expect(parsed.blueprint?.belts).toHaveLength(513);
+  });
+
+  it("reports the exchange belt budget when it is exceeded", () => {
+    const result = validateBlueprintExchange({
+      type: "dsp-idle-blueprint",
+      formatVersion: 2,
+      blueprint: {
+        name: "超限线路",
+        entities: [{ key: "node_1", buildingId: "storage_mk1", offset: { x: 0, y: 0 }, machineCount: 1 }],
+        belts: new Array(MAX_BLUEPRINT_EXCHANGE_BELTS + 1),
+      },
+    });
+    expect(result.valid).toBe(false);
+    expect(result.issues).toEqual([expect.stringContaining(`超出允许上限 ${MAX_BLUEPRINT_EXCHANGE_BELTS}`)]);
   });
 
   it("reports an exact invalid machineCount once and suppresses dependent belt endpoint noise", () => {

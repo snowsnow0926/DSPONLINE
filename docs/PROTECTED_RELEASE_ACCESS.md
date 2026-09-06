@@ -112,6 +112,23 @@ pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-protected-ssh
 
 wrapper 强制固定 host key、单次物理出口、BatchMode 和有界连接；不接受 inline remote command。远端脚本只能输出经过隐私审查的版本、指针、健康、哈希和计数，不能输出环境、账号、数据库正文或目录中的秘密。上传制品仍走发布清单约束的独立 SCP 流程；该 wrapper 不自动授予上传权限。
 
+### 4.1 新节点接入/重新绑定
+
+新 VPS 不能通过桌面文本、聊天记录、DNS 结果或一次性 `ssh-keyscan` 自动替换现有节点。受保护加载器目前只接受已经登记并固定主机指纹的 transport；没有登记入口时，Release Agent 必须报告 blocker，而不是自行创建普通 `.env` 或接受未知指纹。
+
+安全登记顺序如下：
+
+1. 在提供商控制台或受信任的串口渠道核验新机 SSH 主机指纹；该指纹不能只来自待连接主机本身。
+2. 在受保护运维存储中登记新节点的 `DSP_SH_HOST`、`DSP_SH_SSH_USER`、`DSP_SH_SSH_KEY_PATH`、`DSP_SH_KNOWN_HOSTS`（端口和物理出口按需登记），并保留旧节点记录作为回退。
+3. 确认私钥文件和 `known_hosts` 的 ACL 仍为受限状态，且新主机指纹与登记值一致；不要把任何真实值写入仓库、普通用户环境、交接文档或聊天。
+4. 重新加载 Agent 会话后只运行能力检查：
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability Shanghai
+```
+
+只有同时得到 `status: ready`、完整 transport、可读私钥、可读 `known_hosts` 和 `strictHostKeyEntryPresent: true`，才允许进行第一个远端只读预检。能力检查失败时不得用旧节点值、新节点明文密码、`StrictHostKeyChecking=no`、`accept-new` 或未经验证的临时文件替代。登记/轮换本身不授权上传、备份、切换或数据库操作。
+
 专用入口：
 
 ```powershell

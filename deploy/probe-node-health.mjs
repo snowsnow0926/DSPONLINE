@@ -33,12 +33,31 @@ async function probeEndpoint(url, timeoutMs, fetchImpl) {
   }
 }
 
-async function diskStatus(directory, minimumFreeRatio) {
+function nonNegativeNumber(value, fallback = 0, label = "value") {
+  if (value === undefined || value === null || value === "") return fallback;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) throw new Error(`${label} must be a non-negative number`);
+  return number;
+}
+
+async function diskStatus(directory, minimumFreeRatio, reservedBytes = 0) {
   const stats = await statfs(directory);
   const totalBytes = Number(stats.blocks) * Number(stats.bsize);
   const freeBytes = Number(stats.bavail) * Number(stats.bsize);
   const freeRatio = totalBytes > 0 ? freeBytes / totalBytes : 0;
-  return { ok: freeRatio >= minimumFreeRatio, path: path.resolve(directory), totalBytes, freeBytes, freeRatio };
+  const reserved = nonNegativeNumber(reservedBytes, 0, "reservedBytes");
+  const postReserveFreeBytes = freeBytes - reserved;
+  const postReserveFreeRatio = totalBytes > 0 ? postReserveFreeBytes / totalBytes : 0;
+  return {
+    ok: freeRatio >= minimumFreeRatio && postReserveFreeRatio >= minimumFreeRatio,
+    path: path.resolve(directory),
+    totalBytes,
+    freeBytes,
+    freeRatio,
+    reservedBytes: reserved,
+    postReserveFreeBytes,
+    postReserveFreeRatio,
+  };
 }
 
 async function tlsStatus(host, port, minimumDays) {
@@ -96,6 +115,7 @@ export async function probeNodeHealth({
   endpointTimeoutMs = 8_000,
   maximumLatencyMs = 3_000,
   minimumDiskFreeRatio = 0.15,
+  reservedBytes = 0,
   minimumTlsDays = 14,
   alertWebhookUrl = "",
   alertWebhookToken = "",
@@ -106,7 +126,7 @@ export async function probeNodeHealth({
   const normalizedEndpoints = endpoints.map((value) => value.trim()).filter(Boolean);
   const [endpointResults, disk, tls] = await Promise.all([
     Promise.all(normalizedEndpoints.map((url) => probeEndpoint(url, endpointTimeoutMs, fetchImpl))),
-    diskStatus(path.resolve(dataDirectory), minimumDiskFreeRatio),
+    diskStatus(path.resolve(dataDirectory), minimumDiskFreeRatio, reservedBytes),
     tlsStatus(tlsHost, Number(tlsPort), minimumTlsDays),
   ]);
   const failedChecks = [
@@ -122,7 +142,7 @@ export async function probeNodeHealth({
     endpoints: endpointResults,
     disk,
     tls,
-    thresholds: { maximumLatencyMs, minimumDiskFreeRatio, minimumTlsDays },
+    thresholds: { maximumLatencyMs, minimumDiskFreeRatio, reservedBytes: nonNegativeNumber(reservedBytes), minimumTlsDays },
   };
   let previous = null;
   try { previous = JSON.parse(await readFile(path.resolve(statusFile), "utf8")); } catch { /* first probe */ }
@@ -136,6 +156,13 @@ export async function probeNodeHealth({
 
 async function startFromCli() {
   const endpoints = (process.env.DSP_MONITOR_ENDPOINTS || "").split(",");
+  const explicitReservedBytes = nonNegativeNumber(process.env.DSP_MONITOR_RESERVED_BYTES, 0, "DSP_MONITOR_RESERVED_BYTES");
+  const estimatedBackupBytes = nonNegativeNumber(process.env.DSP_MONITOR_ESTIMATED_BACKUP_BYTES, 0, "DSP_MONITOR_ESTIMATED_BACKUP_BYTES");
+  const backupCount = Math.floor(nonNegativeNumber(process.env.DSP_MONITOR_BACKUP_COUNT, 0, "DSP_MONITOR_BACKUP_COUNT"));
+  const backupOverheadBytes = nonNegativeNumber(process.env.DSP_MONITOR_BACKUP_OVERHEAD_BYTES, 0, "DSP_MONITOR_BACKUP_OVERHEAD_BYTES");
+  const reservedBytes = explicitReservedBytes > 0
+    ? explicitReservedBytes
+    : estimatedBackupBytes * backupCount + backupOverheadBytes;
   const result = await probeNodeHealth({
     endpoints,
     dataDirectory: process.env.DSP_MONITOR_DATA_DIRECTORY || "/var/lib/dsp-idle-cloud",
@@ -146,6 +173,7 @@ async function startFromCli() {
     endpointTimeoutMs: Number(process.env.DSP_MONITOR_TIMEOUT_MS || 8_000),
     maximumLatencyMs: Number(process.env.DSP_MONITOR_MAX_LATENCY_MS || 3_000),
     minimumDiskFreeRatio: Number(process.env.DSP_MONITOR_MIN_DISK_FREE_RATIO || 0.15),
+    reservedBytes,
     minimumTlsDays: Number(process.env.DSP_MONITOR_MIN_TLS_DAYS || 14),
     alertWebhookUrl: process.env.DSP_ALERT_WEBHOOK_URL || "",
     alertWebhookToken: process.env.DSP_ALERT_WEBHOOK_TOKEN || "",

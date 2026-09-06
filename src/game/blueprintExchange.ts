@@ -1,5 +1,5 @@
 import { BUILDINGS, ITEMS, RECIPES, getExtractorBuildingId } from "./content";
-import { MAX_BELT_LANES, MAX_BUILDING_STACK_COUNT } from "./engine";
+import { MAX_BELT_LANES, MAX_BLUEPRINT_CONSTRUCTION_BELTS, MAX_BUILDING_STACK_COUNT } from "./engine";
 import type {
   BlueprintDefinition,
   BlueprintExternalPort,
@@ -15,6 +15,8 @@ import type {
 } from "./types";
 
 export const BLUEPRINT_EXCHANGE_FORMAT_VERSION = 2;
+/** Keep exchange validation aligned with the construction queue/exporter budget. */
+export const MAX_BLUEPRINT_EXCHANGE_BELTS = MAX_BLUEPRINT_CONSTRUCTION_BELTS;
 
 export interface BlueprintExchangeEnvelope {
   type: "dsp-idle-blueprint";
@@ -286,8 +288,21 @@ export function validateBlueprintExchange(value: unknown): BlueprintExchangeResu
   }
   if (!isRecord(value.blueprint)) return { valid: false, blueprint: null, issues: ["蓝图文件缺少有效的 blueprint 对象"] };
   const source = value.blueprint;
-  if (typeof source.name !== "string" || !source.name.trim() || source.name.trim().length > 48 || !Array.isArray(source.entities) || source.entities.length > 256 || !Array.isArray(source.belts) || source.belts.length > 512) {
-    return { valid: false, blueprint: null, issues: ["蓝图名称、设备数量或线路数量不合法"] };
+  if (typeof source.name !== "string" || !source.name.trim() || source.name.trim().length > 48) {
+    return { valid: false, blueprint: null, issues: ["蓝图名称不合法"] };
+  }
+  if (!Array.isArray(source.entities) || source.entities.length > 256) {
+    return { valid: false, blueprint: null, issues: ["蓝图设备数量不合法，最多 256 项"] };
+  }
+  if (!Array.isArray(source.belts)) {
+    return { valid: false, blueprint: null, issues: ["蓝图线路必须是数组"] };
+  }
+  if (source.belts.length > MAX_BLUEPRINT_EXCHANGE_BELTS) {
+    return {
+      valid: false,
+      blueprint: null,
+      issues: [`蓝图线路数量 ${source.belts.length} 超出允许上限 ${MAX_BLUEPRINT_EXCHANGE_BELTS}`],
+    };
   }
   const declaredEntityKeys = new Set(source.entities.flatMap((entry) => isRecord(entry) && validId(entry.key) ? [entry.key] : []));
   const entities = source.entities.flatMap((entry, index) => {

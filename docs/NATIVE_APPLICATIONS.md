@@ -58,15 +58,23 @@ npm ci
 npm run typecheck
 ```
 
-Windows 目录包：
+Windows 普通版目录包：
 
 ```powershell
 npm run desktop:pack
 ```
 
-该命令只写入固定的 `release-performance-edition/win-unpacked/`，或在 Windows 文件锁命中时写入固定的 `release-performance-edition-fallback/win-unpacked/`。不存在 renderer 可控或环境变量控制的输出路径；包后门禁会核对 editionId、产品名和 `dsp-idle-performance-edition.exe`，并拒绝混入稳定版 EXE。默认 `cloudApiBaseUrl` 与 `updateBaseUrl` 均为空，因此本地性能测试不会自动连接官方云或更新源。当前没有签名、部署或下载页授权，不得把这个目录包描述为稳定发布。
+该命令使用稳定版身份（`com.dspidle.network` / `DSP极简网络.exe` / 历史 `dsp-idle-network` userData），写入固定的 `release/win-unpacked/`，或在 Windows 文件锁命中时写入 `release-fallback/win-unpacked/`。它不生成更新 feed，不要求签名或 HTTPS API/更新地址，允许本地无签名测试。`DSP_RELEASE_CHANNEL` 只改变通道元数据，不会把普通版改成性能开发版。
 
-测试目录版时直接运行其中的 `dsp-idle-performance-edition.exe`。首次运行只会创建 AppData 下的 `DSPidle2-Performance-Edition`；不要复制稳定版的 `dsp-idle-network` profile。需要测试真实旧档时，通过稳定版的“导出”取得 JSON/JSON.gz，再在性能版中手动导入。测试完成后也不要用脚本删除 profile；其中可能已包含玩家刚完成的性能版测试进度。
+独立性能开发版目录包：
+
+```powershell
+npm run desktop:performance:pack
+```
+
+该命令写入 `release-performance-edition/win-unpacked/`，或在文件锁命中时写入 `release-performance-edition-fallback/win-unpacked/`。包后门禁会核对 editionId、产品名和 `dsp-idle-performance-edition.exe`，并拒绝混入稳定版 EXE。默认 `cloudApiBaseUrl` 与 `updateBaseUrl` 均为空。edition（普通版/性能开发版）与 releaseChannel（stable/beta/nightly）是不同概念；性能开发版也可以带 beta 通道，但不会改用稳定版 appId 或数据目录。当前没有签名、部署或下载页授权，不得把这个目录包描述为稳定发布。
+
+测试性能开发版时直接运行其中的 `dsp-idle-performance-edition.exe`。首次运行只会创建 AppData 下的 `DSPidle2-Performance-Edition`；不要复制稳定版的 `dsp-idle-network` profile。需要测试真实旧档时，通过稳定版的“导出”取得 JSON/JSON.gz，再在性能版中手动导入。测试完成后也不要用脚本删除 profile；其中可能已包含玩家刚完成的性能版测试进度。
 
 仅在诊断显卡驱动、远程桌面或 GPU 进程异常时，开发者可以显式启动软件回退：
 
@@ -182,7 +190,7 @@ node scripts/create-native-update-manifests.mjs `
   --android-certificate-sha256 <公开证书指纹>
 ```
 
-生成器没有默认发布域名，必须传入 `--base-url` 或设置 `DSP_NATIVE_UPDATE_BASE_URL`。Windows 的 `latest.yml`、安装程序和 blockmap 由 `npm run desktop:release` 写入本次唯一成功的 `release-performance-edition/` 或 `release-performance-edition-fallback/`，对应更新清单位于该目录的 `update-feed/desktop/<channel>/`。Android JSON 与 APK 整理到 `release/update-feed/android/`。这些命令只生成待发布目录，不上传服务器。
+生成器没有默认发布域名，必须传入 `--base-url` 或设置 `DSP_NATIVE_UPDATE_BASE_URL`。Windows 的 `latest.yml`、安装程序和 blockmap 由 `npm run desktop:release` 写入本次唯一成功的普通版 `release/` 或 `release-fallback/`，对应更新清单位于该目录的 `update-feed/desktop/<channel>/`。正式工作流通过同一套身份模块收集该目录，不会把性能开发版制品混入普通稳定更新源。Android JSON 与 APK 整理到 `release/update-feed/android/`。这些命令只生成待发布目录，不上传服务器。`npm run desktop:dist` 与 `npm run desktop:performance:dist` 只做本机未签名安装器验收，仍要求 HTTPS API/更新地址，但不签名、不写 feed。
 
 ## 6. CI 与发布门禁
 

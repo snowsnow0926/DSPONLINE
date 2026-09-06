@@ -15,9 +15,11 @@ const {
   initializePerformanceEditionIdentity,
   resolveDesktopEditionOutputDirectory,
   resolvePerformanceEditionOutputDirectory,
+  listDesktopEditionOutputDirectories,
+  resolveAllowedDesktopEditionOutputDirectory,
+  selectCompleteDesktopReleaseOutput,
   validatePerformanceEditionPackageIdentity,
   validateStablePackageIdentity,
-  verifyPackagedDesktopEditionIdentity,
   verifyPackagedPerformanceEditionIdentity,
 } = require("./performance-edition-identity.cjs");
 
@@ -307,8 +309,117 @@ test("packaging outputs are fixed per stable or isolated performance identity", 
 
   const packSource = fs.readFileSync(path.join(__dirname, "pack.cjs"), "utf8");
   assert.equal(packSource.includes("DSP_DESKTOP_OUTPUT_DIR"), false);
-  assert.match(packSource, /resolveDesktopEditionOutputDirectory\(repositoryRoot, desktopIdentity\)/);
+  assert.match(packSource, /listDesktopEditionOutputDirectories\(repositoryRoot, desktopIdentity\)/);
+  assert.match(packSource, /resolveAllowedDesktopEditionOutputDirectory/);
+  assert.equal(packSource.includes("resolvePerformanceEditionOutputDirectory("), false);
   assert.match(packSource, /verifyPackagedDesktopEditionIdentity/);
+});
+
+function writeCompleteReleaseOutput(root, relativeDirectory, channel) {
+  const directory = path.join(root, relativeDirectory);
+  fs.mkdirSync(path.join(directory, "update-feed", "desktop", channel), { recursive: true });
+  fs.writeFileSync(path.join(directory, "latest.yml"), "version: 1.2.7\npath: dsp-idle-1.2.7-x64-setup.exe\n");
+  fs.writeFileSync(path.join(directory, "update-feed", "desktop", channel, "release.json"), "{}\n");
+  return directory;
+}
+
+test("standard and fallback output directories stay edition-scoped and reject the other edition", () => {
+  const repositoryRoot = path.resolve(__dirname, "..");
+  for (const identity of [STABLE_IDENTITY, PERFORMANCE_EDITION_IDENTITY]) {
+    const allowed = listDesktopEditionOutputDirectories(repositoryRoot, identity);
+    assert.equal(allowed.standard, path.join(repositoryRoot, identity.outputDirectoryName));
+    assert.equal(allowed.fallback, path.resolve(`${allowed.standard}-fallback`));
+    assert.equal(
+      resolveAllowedDesktopEditionOutputDirectory(repositoryRoot, identity, allowed.standard),
+      allowed.standard,
+    );
+    assert.equal(
+      resolveAllowedDesktopEditionOutputDirectory(repositoryRoot, identity, allowed.fallback),
+      allowed.fallback,
+    );
+  }
+  const other = listDesktopEditionOutputDirectories(repositoryRoot, PERFORMANCE_EDITION_IDENTITY);
+  assert.throws(
+    () => resolveAllowedDesktopEditionOutputDirectory(repositoryRoot, STABLE_IDENTITY, other.standard),
+    /输出目录无效/,
+  );
+  assert.throws(
+    () => resolveAllowedDesktopEditionOutputDirectory(repositoryRoot, PERFORMANCE_EDITION_IDENTITY, path.join(repositoryRoot, "release")),
+    /输出目录无效/,
+  );
+  assert.throws(
+    () => listDesktopEditionOutputDirectories(repositoryRoot, { ...STABLE_IDENTITY, editionId: "forged-v1" }),
+    /输出身份无效/,
+  );
+});
+
+test("release output selection requires exactly one complete candidate for the selected edition", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-desktop-release-select-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeCompleteReleaseOutput(root, "release-performance-edition", "stable");
+  writeCompleteReleaseOutput(root, "release-performance-edition-fallback", "beta");
+  writeCompleteReleaseOutput(root, "release-fallback", "beta");
+
+  assert.throws(
+    () => selectCompleteDesktopReleaseOutput({
+      repositoryRoot: root,
+      identity: STABLE_IDENTITY,
+      channel: "stable",
+    }),
+    /found 0/,
+  );
+
+  writeCompleteReleaseOutput(root, "release", "stable");
+  const selected = selectCompleteDesktopReleaseOutput({
+    repositoryRoot: root,
+    identity: STABLE_IDENTITY,
+    channel: "stable",
+  });
+  assert.equal(selected.relativeOutputDirectory, "release");
+  assert.equal(selected.identity.editionId, STABLE_IDENTITY.editionId);
+
+  writeCompleteReleaseOutput(root, "release-fallback", "stable");
+  assert.throws(
+    () => selectCompleteDesktopReleaseOutput({
+      repositoryRoot: root,
+      identity: STABLE_IDENTITY,
+      channel: "stable",
+    }),
+    /found 2/,
+  );
+
+  const performance = selectCompleteDesktopReleaseOutput({
+    repositoryRoot: root,
+    identity: PERFORMANCE_EDITION_IDENTITY,
+    channel: "stable",
+  });
+  assert.equal(performance.relativeOutputDirectory, "release-performance-edition");
+});
+
+test("release output selection rejects redirected edition directories", {
+  skip: process.platform === "win32" ? false : "Windows junction semantics",
+}, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-desktop-release-junction-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const outside = writeCompleteReleaseOutput(root, "outside-complete", "stable");
+  const redirected = path.join(root, "release");
+  try {
+    fs.symlinkSync(outside, redirected, "junction");
+  } catch (error) {
+    if (error && ["EACCES", "EPERM", "ENOTSUP"].includes(error.code)) {
+      t.skip(`Windows junction creation unavailable: ${error.code}`);
+      return;
+    }
+    throw error;
+  }
+  assert.throws(
+    () => selectCompleteDesktopReleaseOutput({
+      repositoryRoot: root,
+      identity: STABLE_IDENTITY,
+      channel: "stable",
+    }),
+    /符号链接|reparse point/,
+  );
 });
 
 test("main resolves stable or isolated data identity before locks and binds the selected taskbar identity", () => {

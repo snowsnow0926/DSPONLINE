@@ -6,7 +6,8 @@ const { validatePackagedTransferContract } = require("./package-contract.cjs");
 const { verifyDesktopPackageHygiene } = require("./package-hygiene.cjs");
 const {
   resolveDesktopEditionIdentity,
-  resolveDesktopEditionOutputDirectory,
+  listDesktopEditionOutputDirectories,
+  resolveAllowedDesktopEditionOutputDirectory,
   validateStablePackageIdentity,
   verifyPackagedDesktopEditionIdentity,
 } = require("./performance-edition-identity.cjs");
@@ -26,7 +27,8 @@ const desktopIdentity = resolveDesktopEditionIdentity(
   packageMetadata,
   process.env.DSP_DESKTOP_EDITION || "stable",
 );
-const outputDirectory = resolveDesktopEditionOutputDirectory(repositoryRoot, desktopIdentity);
+const desktopOutputDirectories = listDesktopEditionOutputDirectories(repositoryRoot, desktopIdentity);
+const outputDirectory = desktopOutputDirectories.standard;
 const buildMode = mode === "release" ? "dist" : mode;
 const releaseChannel = resolveReleaseChannel(
   process.env.DSP_RELEASE_CHANNEL || packageMetadata.releaseChannel,
@@ -71,16 +73,12 @@ function runCommand(command, args) {
 
 function createDesktopUpdateFeedArguments(sourceDirectory, {
   repositoryRoot: root = repositoryRoot,
+  identity = desktopIdentity,
   releaseChannel: channel = releaseChannel,
   updateBaseUrl: baseUrl = updateBaseUrl,
 } = {}) {
-  const standardOutput = resolvePerformanceEditionOutputDirectory(root);
-  const fallbackOutput = path.resolve(`${standardOutput}-fallback`);
-  const resolvedSource = path.resolve(sourceDirectory);
-  if (![standardOutput, fallbackOutput].includes(resolvedSource)) {
-    throw new Error("Windows 性能开发版更新 feed 输出目录无效");
-  }
-  if (!baseUrl) throw new Error("Windows 性能开发版更新 feed 缺少 HTTPS 基址");
+  const resolvedSource = resolveAllowedDesktopEditionOutputDirectory(root, identity, sourceDirectory);
+  if (!baseUrl) throw new Error(`${identity.productName} 更新 feed 缺少 HTTPS 基址`);
   return [
     path.join(root, "scripts", "create-native-update-manifests.mjs"),
     "--channel", channel,
@@ -163,7 +161,7 @@ async function main() {
   const temporaryDist = path.join(outputDirectory, "win-unpacked.tmp");
   if (!fs.existsSync(temporaryDist)) process.exit(standardResult);
 
-  const fallbackOutput = path.resolve(`${outputDirectory}-fallback`);
+  const fallbackOutput = desktopOutputDirectories.fallback;
   console.warn("标准目录包被 Windows 文件锁阻塞，使用已解压 Electron 分发重试。", fallbackOutput);
   const fallbackResult = await runBuilder([
     ...(mode === "pack" ? ["--dir"] : []),
@@ -183,4 +181,4 @@ async function main() {
 
 if (require.main === module) void main();
 
-module.exports = { createDesktopUpdateFeedArguments, finalizePackagedOutput };
+module.exports = { createDesktopUpdateFeedArguments, finalizePackagedOutput, identityBuilderArgs };

@@ -140,7 +140,7 @@ function resolvePerformanceEditionOutputDirectory(repositoryRoot, pathModule = p
   return outputDirectory;
 }
 
-function readDirectDirectory(fileSystem, directoryPath, label) {
+function readDirectDirectory(fileSystem, directoryPath, label, productLabel = "Windows 性能开发版") {
   let metadata;
   try {
     metadata = fileSystem.lstatSync(directoryPath);
@@ -152,12 +152,42 @@ function readDirectDirectory(fileSystem, directoryPath, label) {
   // reparse entries as links from lstat. Never stat/realpath first: either would
   // follow the redirect before the performance-edition boundary is established.
   if (metadata.isSymbolicLink()) {
-    throw new Error(`Windows 性能开发版 ${label} 不能是符号链接或 Windows reparse point`);
+    throw new Error(`${productLabel} ${label} 不能是符号链接或 Windows reparse point`);
   }
   if (!metadata.isDirectory()) {
-    throw new Error(`Windows 性能开发版 ${label} 必须是直接目录`);
+    throw new Error(`${productLabel} ${label} 必须是直接目录`);
   }
   return metadata;
+}
+
+function readDirectLeaf(fileSystem, filePath, label, productLabel = "Windows 桌面版") {
+  let metadata;
+  try {
+    metadata = fileSystem.lstatSync(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  if (metadata.isSymbolicLink()) {
+    throw new Error(`${productLabel} ${label} 不能是符号链接或 Windows reparse point`);
+  }
+  if (!metadata.isFile()) {
+    throw new Error(`${productLabel} ${label} 必须是普通文件`);
+  }
+  return metadata;
+}
+
+function readDirectRelativeFile(fileSystem, pathModule, rootDirectory, segments, label, productLabel) {
+  let current = rootDirectory;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = pathModule.join(current, segments[index]);
+    if (index === segments.length - 1) {
+      return readDirectLeaf(fileSystem, current, label, productLabel);
+    }
+    const directory = readDirectDirectory(fileSystem, current, label, productLabel);
+    if (!directory) return null;
+  }
+  return null;
 }
 
 function sameDirectoryIdentity(left, right) {
@@ -336,6 +366,107 @@ function resolveDesktopEditionOutputDirectory(repositoryRoot, identity, pathModu
   return pathModule.resolve(repositoryRoot, identity.outputDirectoryName);
 }
 
+function listDesktopEditionOutputDirectories(repositoryRoot, identity, pathModule = path) {
+  const standard = resolveDesktopEditionOutputDirectory(repositoryRoot, identity, pathModule);
+  const fallback = pathModule.resolve(`${standard}-fallback`);
+  const root = pathModule.resolve(repositoryRoot);
+  if (pathModule.dirname(standard) !== root || pathModule.dirname(fallback) !== root) {
+    throw new Error("Windows 桌面版输出目录越界");
+  }
+  const otherIdentity = identity.editionId === PERFORMANCE_EDITION_IDENTITY.editionId
+    ? STABLE_IDENTITY
+    : PERFORMANCE_EDITION_IDENTITY;
+  const otherStandard = pathModule.resolve(root, otherIdentity.outputDirectoryName);
+  const otherFallback = pathModule.resolve(`${otherStandard}-fallback`);
+  if (
+    standard === otherStandard
+    || standard === otherFallback
+    || fallback === otherStandard
+    || fallback === otherFallback
+  ) {
+    throw new Error("Windows 桌面版输出目录与另一 edition 冲突");
+  }
+  return Object.freeze({
+    identity,
+    standard,
+    fallback,
+    relativeStandard: identity.outputDirectoryName,
+    relativeFallback: `${identity.outputDirectoryName}-fallback`,
+  });
+}
+
+function resolveAllowedDesktopEditionOutputDirectory(
+  repositoryRoot,
+  identity,
+  sourceDirectory,
+  pathModule = path,
+) {
+  const allowed = listDesktopEditionOutputDirectories(repositoryRoot, identity, pathModule);
+  const resolved = pathModule.resolve(sourceDirectory);
+  if (resolved === allowed.standard || resolved === allowed.fallback) return resolved;
+  throw new Error(`${identity.productName} 输出目录无效`);
+}
+
+function isCompleteDesktopReleaseOutput(directoryPath, channel, {
+  fileSystem = fs,
+  pathModule = path,
+  productLabel = "Windows 桌面版",
+} = {}) {
+  if (!["stable", "beta", "nightly"].includes(channel)) {
+    throw new Error("Windows 桌面版更新通道无效");
+  }
+  const latest = readDirectRelativeFile(
+    fileSystem,
+    pathModule,
+    directoryPath,
+    ["latest.yml"],
+    "latest.yml",
+    productLabel,
+  );
+  if (!latest) return false;
+  return Boolean(readDirectRelativeFile(
+    fileSystem,
+    pathModule,
+    directoryPath,
+    ["update-feed", "desktop", channel, "release.json"],
+    "update feed",
+    productLabel,
+  ));
+}
+
+function selectCompleteDesktopReleaseOutput({
+  repositoryRoot,
+  identity,
+  channel,
+  fileSystem = fs,
+  pathModule = path,
+} = {}) {
+  if (!["stable", "beta", "nightly"].includes(channel)) {
+    throw new Error("Windows 桌面版更新通道无效");
+  }
+  const allowed = listDesktopEditionOutputDirectories(repositoryRoot, identity, pathModule);
+  const productLabel = identity.productName;
+  const complete = [];
+  for (const candidate of [
+    { absolute: allowed.standard, relative: allowed.relativeStandard },
+    { absolute: allowed.fallback, relative: allowed.relativeFallback },
+  ]) {
+    if (!readDirectDirectory(fileSystem, candidate.absolute, "release output", productLabel)) continue;
+    if (isCompleteDesktopReleaseOutput(candidate.absolute, channel, { fileSystem, pathModule, productLabel })) {
+      complete.push(candidate);
+    }
+  }
+  if (complete.length !== 1) {
+    throw new Error(`Expected exactly one complete desktop release output, found ${complete.length}`);
+  }
+  return Object.freeze({
+    outputDirectory: complete[0].absolute,
+    relativeOutputDirectory: complete[0].relative,
+    identity,
+    channel,
+  });
+}
+
 function verifyPackagedPerformanceEditionIdentity({
   asarPath,
   unpackedDirectory,
@@ -410,7 +541,10 @@ module.exports = {
   initializeStableEditionIdentity,
   resolveDesktopEditionIdentity,
   resolveDesktopEditionOutputDirectory,
+  listDesktopEditionOutputDirectories,
+  resolveAllowedDesktopEditionOutputDirectory,
   resolvePerformanceEditionOutputDirectory,
+  selectCompleteDesktopReleaseOutput,
   validateDesktopPackageIdentity,
   validatePerformanceEditionPackageIdentity,
   validateStablePackageIdentity,

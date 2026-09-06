@@ -41,13 +41,9 @@ jobs:
       - name: Resolve the complete desktop release output
         shell: pwsh
         run: |
-          $candidates = @("release-performance-edition", "release-performance-edition-fallback")
-          $complete = @($candidates | Where-Object {
-            (Test-Path (Join-Path $_ "latest.yml") -PathType Leaf) -and
-            (Test-Path (Join-Path $_ "update-feed\desktop\$env:DSP_RELEASE_CHANNEL\release.json") -PathType Leaf)
-          })
-          if ($complete.Count -ne 1) { throw "Expected exactly one complete desktop release output, found $($complete.Count)" }
-          "DSP_DESKTOP_RELEASE_OUTPUT=$($complete[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $relative = node desktop/select-desktop-release-output.cjs
+          if ($LASTEXITCODE -ne 0) { throw "Expected exactly one complete desktop release output" }
+          "DSP_DESKTOP_RELEASE_OUTPUT=$relative" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dsp-idle-${{ env.DSP_RELEASE_CHANNEL }}

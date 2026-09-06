@@ -80,7 +80,7 @@ function createDesktopUpdateFeedArguments(sourceDirectory, {
   const resolvedSource = resolveAllowedDesktopEditionOutputDirectory(root, identity, sourceDirectory);
   if (!baseUrl) throw new Error(`${identity.productName} 更新 feed 缺少 HTTPS 基址`);
   return [
-    path.join(root, "scripts", "create-native-update-manifests.mjs"),
+    path.join(path.resolve(__dirname, ".."), "scripts", "create-native-update-manifests.mjs"),
     "--channel", channel,
     "--base-url", baseUrl,
     "--desktop-source", resolvedSource,

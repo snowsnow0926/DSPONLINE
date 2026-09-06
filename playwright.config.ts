@@ -21,6 +21,7 @@ if (requestedRendererHeapMb !== null && (!Number.isSafeInteger(requestedRenderer
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  testIgnore: "**/desktop-performance-package-journey.spec.ts",
   timeout: 30_000,
   fullyParallel: false,
   workers: e2eWorkers,

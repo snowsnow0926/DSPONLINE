@@ -1,13 +1,17 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { execFile } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { promisify } = require("node:util");
+const execFileAsync = promisify(execFile);
 const {
   PERFORMANCE_EDITION_IDENTITY,
   STABLE_IDENTITY,
+  selectCompleteDesktopReleaseOutput,
 } = require("./performance-edition-identity.cjs");
 const {
   createDesktopUpdateFeedArguments,
@@ -244,4 +248,43 @@ test("workflow selector defaults to the official stable edition and ignores a co
   });
   assert.equal(selected.relativeOutputDirectory, "release");
   assert.equal(selected.identity.editionId, STABLE_IDENTITY.editionId);
+});
+
+test("real feed generator and identity selector agree on a synthetic stable release directory", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-desktop-feed-integration-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "release");
+  fs.mkdirSync(source, { recursive: true });
+  fs.writeFileSync(path.join(source, "dsp-idle-1.2.7-x64-setup.exe"), Buffer.from("desktop fixture"));
+  fs.writeFileSync(
+    path.join(source, "latest.yml"),
+    "version: 1.2.7\npath: dsp-idle-1.2.7-x64-setup.exe\nsha512: fixture\n",
+  );
+  const args = createDesktopUpdateFeedArguments(source, {
+    repositoryRoot: root,
+    identity: STABLE_IDENTITY,
+    releaseChannel: "beta",
+    updateBaseUrl: "https://updates.example.invalid/desktop/",
+  });
+  assert.equal(args[2], "beta");
+  assert.equal(args[4], "https://updates.example.invalid/desktop/");
+  assert.equal(args[6], source);
+  await execFileAsync(process.execPath, args, { cwd: repositoryRoot });
+  const selected = selectCompleteDesktopReleaseOutput({
+    repositoryRoot: root,
+    identity: STABLE_IDENTITY,
+    channel: "beta",
+  });
+  assert.equal(selected.relativeOutputDirectory, "release");
+  const feed = JSON.parse(fs.readFileSync(path.join(source, "update-feed", "desktop", "beta", "release.json"), "utf8"));
+  assert.equal(feed.channel, "beta");
+  assert.equal(feed.files[1].name, "dsp-idle-1.2.7-x64-setup.exe");
+  assert.throws(
+    () => selectCompleteDesktopReleaseOutput({
+      repositoryRoot: root,
+      identity: PERFORMANCE_EDITION_IDENTITY,
+      channel: "beta",
+    }),
+    /found 0/,
+  );
 });

@@ -131,7 +131,7 @@ async function installProbe(page: Page): Promise<void> {
 
 async function seedRecoverableRun(page: Page, startedPaused: boolean, expiredBackground = false, withOrdinaryReport = false): Promise<{ primary: string; inventory: unknown }> {
   await page.route("**/__v127_stop_seed.html", (route) => route.fulfill({
-    contentType: "text/html; charset=utf-8", body: "<!doctype html><html><body>public synthetic stop recovery seed</body></html>",
+    contentType: "text/html; charset=utf-8", body: '<!doctype html><html><head><script type="module" src="/@vite/client"></script></head><body>public synthetic stop recovery seed</body></html>',
   }));
   await page.goto("/__v127_stop_seed.html");
   return page.evaluate(async ({ pausedBeforeStart, background, ordinaryReport }) => {
@@ -432,6 +432,11 @@ test("explicitly abandoning a failed terminal candidate starts a new run with a 
   expect(checkpoint.totalIdleTime).toBe(0);
   expect(checkpoint.inventory).toEqual(seeded.inventory);
   const oldProbe = await readProbe(page);
+  // Ordinary startup progress may finish loading behind the idle overlay.
+  // Its preserved report becomes actionable after abandon, before factory input.
+  await page.addLocatorHandler(page.getByRole("dialog", { name: "离线结算报告", exact: true }), async (report) => {
+    await report.getByRole("button", { name: "关闭离线结算报告", exact: true }).click();
+  });
   const node = page.locator(".react-flow__node").filter({ hasText: "时间扭曲装置" });
   await expect(node).toBeVisible();
   await node.locator(".factory-node__header").click();

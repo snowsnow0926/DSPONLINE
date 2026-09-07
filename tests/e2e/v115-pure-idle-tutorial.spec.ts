@@ -176,7 +176,9 @@ test("an interrupted frozen settlement exposes retry and explicit abandon action
   await page.route("**/__pure_idle_recovery_harness.html", (route) => route.fulfill({
     status: 200,
     contentType: "text/html; charset=utf-8",
-    body: "<!doctype html><html><body>Pure-idle recovery harness</body></html>",
+    // Vite's dev client installs compile-time globals through /@vite/env.
+    // Keep the seed page free of main.tsx/App while using that real environment.
+    body: '<!doctype html><html><head><script type="module" src="/@vite/client"></script></head><body>Pure-idle recovery harness</body></html>',
   }));
   await page.goto("/__pure_idle_recovery_harness.html");
   await page.evaluate(async () => {

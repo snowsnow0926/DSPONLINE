@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { injectOneConservativeDecision } from "./offline-decision-test-helpers";
 
 const RELEASE_NOTE_ID = "2026-09-08-v1.2.7";
 
@@ -72,6 +73,7 @@ for (const scenario of [
     await seedBatchSave(page, { offlineSeconds: scenario.seconds, bypassMenu: false });
     await page.setViewportSize(scenario.viewport);
     await page.goto("/?menu=1");
+    if (scenario.name === "fallback") await injectOneConservativeDecision(page);
     await page.getByRole("button", { name: /继续游戏/ }).click();
 
     if (scenario.name === "approximate") {
@@ -142,6 +144,7 @@ test("offline settlement choice traps keyboard focus and keeps its explicit zero
   await seedBatchSave(page, { offlineSeconds: 33, bypassMenu: false });
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/?menu=1");
+  await injectOneConservativeDecision(page);
   await page.getByRole("button", { name: /继续游戏/ }).click();
 
   const initialDecision = page.getByRole("dialog", { name: "快速结算需要玩家选择" });
@@ -156,6 +159,7 @@ test("offline settlement choice traps keyboard focus and keeps its explicit zero
   await expect(initialDecision).toHaveCount(0);
   await expect(page.locator(".start-menu-layout")).not.toHaveAttribute("inert", "");
 
+  await injectOneConservativeDecision(page);
   await page.getByRole("button", { name: /继续游戏/ }).click();
   const decision = page.getByRole("dialog", { name: "快速结算需要玩家选择" });
   await expect(decision).toBeVisible({ timeout: 20_000 });

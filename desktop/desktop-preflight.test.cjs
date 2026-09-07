@@ -18,6 +18,7 @@ test("missing package is BLOCKED and real package identity checks gate the drive
   const fixture = await writeFixture(root, "release-performance-edition");
   writeDesktopBuildEvidence(fixture.directory, { expected, identity: PERFORMANCE_EDITION_IDENTITY });
   assert.equal(preflight(root, { expected }).expected.buildId, expected.buildId);
+  assert.throws(() => preflight(root, { expected, channel: "beta" }), /wrong channel/);
   assert.throws(() => preflight(root, { expected: { ...expected, sourceSha: "b".repeat(40), buildId: `1.2.7+${"b".repeat(12)}` } }));
   fs.appendFileSync(path.join(fixture.directory, "win-unpacked/resources/app.asar"), "wrong application bytes");
   assert.throws(() => preflight(root, { expected }), /digest|size/);

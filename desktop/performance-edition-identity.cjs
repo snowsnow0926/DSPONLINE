@@ -435,6 +435,7 @@ function isCompleteDesktopReleaseOutput(directoryPath, channel, {
     productLabel,
   );
   if (!feed) return false;
+  if (expected?.channel !== channel) throw new Error("Trusted build context has the wrong release channel");
   require("./desktop-artifact-evidence.cjs").verifyDesktopBuildEvidence(directoryPath, { expected, identity, release: true });
   return true;
 }

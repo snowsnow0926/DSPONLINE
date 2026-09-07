@@ -6,7 +6,7 @@ const { spawn } = require("node:child_process");
 const { preflight } = require("./desktop-package-preflight.cjs");
 const root = path.resolve(__dirname, "..");
 try {
-  const verified = preflight(root, { channel: process.env.DSP_RELEASE_CHANNEL || "stable" });
+  const verified = preflight(root, { channel: process.env.DSP_RELEASE_CHANNEL });
   const runDirectory = path.join(root, "artifacts", `desktop-journey-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`);
   fs.mkdirSync(runDirectory, { recursive: false });
   fs.writeFileSync(path.join(runDirectory, "run-context.json"), JSON.stringify({ ...verified, runDirectory }, null, 2));

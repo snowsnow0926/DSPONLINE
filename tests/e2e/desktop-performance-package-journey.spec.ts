@@ -97,10 +97,12 @@ test("main and renderer reject external probes in the isolated package", async (
   try {
     const result = await app.evaluate(() => {
       let blocked = false;
-      try { require("node:https").get("https://example.invalid/dsp-isolation-probe"); } catch (error) { blocked = (error as Error).message === "DSP_ISOLATED_NETWORK_BLOCKED"; }
+      try { (process as any).mainModule.require("node:https").get("https://example.invalid/dsp-isolation-probe"); } catch (error) { blocked = (error as Error).message === "DSP_ISOLATED_NETWORK_BLOCKED"; }
       return { blocked, audit: (globalThis as any).__dspIsolatedNetworkAudit };
     });
     expect(result.blocked).toBe(true);
+    expect(await app.evaluate(async ({ net }) => { try { await net.fetch("https://example.invalid/dsp-isolation-probe"); return false; } catch { return true; } })).toBe(true);
+    expect(await app.evaluate(() => (globalThis as any).__dspIsolatedNetworkAudit.chromiumBlocked)).toBeGreaterThan(0);
     expect(await page.evaluate(async () => { try { await fetch("https://example.invalid/dsp-isolation-probe"); return false; } catch { return true; } })).toBe(true);
     records.push({ event: "network-probes", result });
     await normalClose(app);

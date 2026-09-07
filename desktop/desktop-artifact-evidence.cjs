@@ -154,7 +154,10 @@ function writeDesktopBuildEvidence(root, { expected, identity, release = false, 
   const paths = [...listFiles(root, "win-unpacked"), ...(release ? releaseFiles(root, expected, identity) : [])].sort();
   const manifest = { schemaVersion: 1, ...expected, kind: release ? "release" : "directory", files: paths.map((relative) => fileRecord(root, relative)) };
   // Only the verified packer writes this internal file, after all build steps.
-  if (fs.existsSync(path.join(root, EVIDENCE_FILE))) requireDirect(root, EVIDENCE_FILE);
+  try {
+    fs.lstatSync(path.join(root, EVIDENCE_FILE));
+    requireDirect(root, EVIDENCE_FILE);
+  } catch (error) { if (error.code !== "ENOENT") throw error; }
   fs.writeFileSync(path.join(root, EVIDENCE_FILE), `${JSON.stringify(manifest, null, 2)}\n`, { flag: "w" });
   return manifest;
 }

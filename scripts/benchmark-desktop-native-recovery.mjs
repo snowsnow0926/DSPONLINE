@@ -84,7 +84,7 @@ try {
   console.log("launch");
   app = await electron.launch({ executablePath: path.join(packageDirectory, "dsp-idle-performance-edition.exe"), cwd: packageDirectory, env, timeout: 60000 });
   appChild = app.process();
-  const page = await app.firstWindow();
+  let page = await app.firstWindow();
   page.setDefaultTimeout(30000);
   console.log("window");
   const assets = listPackage(path.join(packageDirectory, "resources/app.asar")).filter(name => /[/\\]dist[/\\]assets[/\\]nativeSaveRecovery-[^/\\]*\.js$/.test(name));
@@ -106,6 +106,28 @@ try {
   for (let index = 0; index < records.length; index += 8) await page.evaluate(request => window.dspDesktop.writeNativeSave(request), { transactionId: tx.transactionId, records: records.slice(index, index + 8) });
   const checkpoint = await page.evaluate(transactionId => window.dspDesktop.commitNativeSave({ transactionId }), tx.transactionId);
   console.log("seeded", records.length);
+  // Measure after a real normal close and a fresh Electron/Host process. A
+  // just-committed Host has a warm manifest cache and would understate the
+  // verification work performed when reopening a saved factory.
+  report.seedProcessId = appChild.pid;
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  for (let i = 0; i < 250 && appChild.exitCode === null; i++) await delay(100);
+  if (appChild.exitCode !== 0) throw new Error("Seed process did not close normally");
+  app = null;
+  if (packageProcesses(packageDirectory).length) throw new Error("Seed package processes remain before reopen");
+  app = await electron.launch({ executablePath: path.join(packageDirectory, "dsp-idle-performance-edition.exe"), cwd: packageDirectory, env, timeout: 60000 });
+  appChild = app.process();
+  page = await app.firstWindow();
+  page.setDefaultTimeout(30000);
+  await app.evaluate(({ BrowserWindow }) => { const win = BrowserWindow.getAllWindows()[0]; win.show(); win.focus(); });
+  await page.bringToFront();
+  await page.waitForFunction(() => Boolean(window.dspDesktop));
+  const reopenedStatus = await page.evaluate(() => window.dspDesktop.getNativePerformanceStatus());
+  if (!reopenedStatus.available || reopenedStatus.nativeFormatVersion !== 1 || report.seedProcessId === appChild.pid) throw new Error("Fresh native process unavailable after normal reopen");
+  report.hostStatus = reopenedStatus;
+  report.reopenedBeforeMeasurement = true;
+  report.measuredProcessId = appChild.pid;
+  console.log("reopened");
   await page.evaluate(value => { window.__recoveryBenchmarkRaw = value; }, inputRaw);
   await app.evaluate(({ app }) => {
     const nativeRequire = process.getBuiltinModule("module").createRequire(app.getAppPath() + "/package.json");

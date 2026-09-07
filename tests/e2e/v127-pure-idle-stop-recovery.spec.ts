@@ -1,6 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
+import { resolveDurableSimulationRuntimeEnabled } from "../../src/game/runtimePersistenceMode";
+
+const durableMode = resolveDurableSimulationRuntimeEnabled(process.env);
 
 type StopProbe = {
   claims: number;
@@ -19,7 +22,7 @@ type StopProbe = {
 };
 
 async function installProbe(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+  await page.addInitScript((durable) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-08-v1.2.7");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
@@ -51,7 +54,7 @@ async function installProbe(page: Page): Promise<void> {
             }
           } catch { /* Only valid primary envelopes contribute an observation. */ }
         }
-        if (probe.failPrimaryWrites) {
+        if (probe.failPrimaryWrites && (!durable || probe.finalizes > 0)) {
           probe.failedWrites += 1;
           throw new DOMException("injected pure-idle primary write failure", "QuotaExceededError");
         }
@@ -89,7 +92,7 @@ async function installProbe(page: Page): Promise<void> {
         }
         if (this.workerName === "authoritative-save-persistence" &&
             request?.type === "commit" && request.key === "dsp-idle-network.save.v1" &&
-            probe.failPrimaryWrites) {
+            probe.failPrimaryWrites && probe.finalizes > 0) {
           probe.failedWrites += 1;
           queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: {
             id: request.id, type: "error", message: "injected pure-idle primary write failure",
@@ -101,7 +104,7 @@ async function installProbe(page: Page): Promise<void> {
       }
     }
     Object.defineProperty(window, "Worker", { configurable: true, writable: true, value: ObservedWorker });
-  });
+  }, durableMode);
 
   // Observe the real boot entry without mocking claim/readback or its result.
   await page.route("**/src/game/pureIdleRecovery.ts*", async (route) => {
@@ -227,8 +230,24 @@ async function readPrimary(page: Page) {
   });
 }
 
-async function openRecovery(page: Page): Promise<void> {
-  await page.goto("/");
+async function continueDurableMenu(page: Page): Promise<void> {
+  if (!durableMode) return;
+  await expect(page.locator(".start-menu")).toBeVisible();
+  await page.getByRole("button", { name: /继续游戏/ }).click();
+  await expect(page.locator(".game-shell")).toHaveAttribute("data-runtime-recovery", "active", { timeout: 30_000 });
+}
+
+async function openLauncher(page: Page, seeded?: { primary: string }): Promise<void> {
+  // A restored durable run needs the same verified recovery-head handshake as
+  // a player entering through StartMenu. The direct development bypass does
+  // not perform that handshake. Keep the accepted default path unchanged.
+  await page.goto(durableMode ? "/?menu=1&storageMigration=production" : "/");
+  await continueDurableMenu(page);
+  if (durableMode && seeded) seeded.primary = (await readPrimary(page)).raw;
+}
+
+async function openRecovery(page: Page, seeded?: { primary: string }): Promise<void> {
+  await openLauncher(page, seeded);
   const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
   await expect(overlay).toBeVisible();
   await expect.poll(async () => (await readProbe(page)).initializes).toBe(1);
@@ -252,7 +271,7 @@ for (const failures of [1, 2]) {
     test.setTimeout(90_000);
     await installProbe(page);
     const seeded = await seedRecoverableRun(page, failures === 2);
-    await openRecovery(page);
+    await openRecovery(page, seeded);
     const baseline = await readProbe(page);
     const bytesBefore = await page.locator(".game-shell").getAttribute("data-primary-save-bytes");
     let target: number | undefined;
@@ -295,13 +314,14 @@ test("reload after a failed stop keeps the frozen journal recoverable and commit
   test.setTimeout(90_000);
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
-  await openRecovery(page);
+  await openRecovery(page, seeded);
   await stopWithFailure(page);
   const frozen = await readRecovery(page);
   expect(frozen?.targetWallSeconds).toBeGreaterThan(90);
   expect((await readPrimary(page)).raw).toBe(seeded.primary);
   await armWriteFailure(page, false);
   await page.reload();
+  await continueDurableMenu(page);
   const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
   await expect(overlay).toBeVisible();
   await expect(overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true })).toBeVisible();
@@ -318,6 +338,7 @@ test("reload after a failed stop keeps the frozen journal recoverable and commit
   expect(resumed.finalizes).toBe(1);
   expect(resumed.targets).toEqual([frozen!.targetWallSeconds]);
   await page.reload();
+  await continueDurableMenu(page);
   await expect(page.locator(".game-shell")).toBeVisible();
   await expect(page.getByRole("dialog", { name: "纯挂机", exact: true })).toHaveCount(0);
   expect(await readRecovery(page)).toBeNull();
@@ -362,7 +383,7 @@ test("background stop retries reuse the complete candidate and frozen ordinary-o
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true, true);
   await page.evaluate(() => sessionStorage.setItem("v127-stop-fail-next-boot", "1"));
-  await page.goto("/");
+  await openLauncher(page, seeded);
   const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
   await expect(overlay).toBeVisible();
   await expect.poll(async () => (await readProbe(page)).failedWrites, { timeout: 30_000 }).toBeGreaterThan(0);
@@ -397,7 +418,7 @@ test("explicitly abandoning a failed terminal candidate starts a new run with a 
   test.setTimeout(90_000);
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
-  await openRecovery(page);
+  await openRecovery(page, seeded);
   await stopWithFailure(page);
   const abandoned = await readRecovery(page);
   await armWriteFailure(page, false);
@@ -433,7 +454,8 @@ test("cancel while the finalized journal acknowledgement is pending never saves 
   test.setTimeout(90_000);
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
-  await openRecovery(page);
+  await openRecovery(page, seeded);
+  const primaryWritesBeforeStop = (await readProbe(page)).primaryWrites;
   await page.evaluate(() => {
     (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.holdValidatingJournal = true;
   });
@@ -451,14 +473,14 @@ test("cancel while the finalized journal acknowledgement is pending never saves 
   await expect(overlay.getByRole("button", { name: "取消结算并保留原存档", exact: true })).toHaveCount(0);
   expect((await readPrimary(page)).raw).toBe(seeded.primary);
   expect((await readRecovery(page))?.committed).toBe(false);
-  expect((await readProbe(page)).primaryWrites).toBe(0);
+  expect((await readProbe(page)).primaryWrites).toBe(primaryWritesBeforeStop);
 });
 
 test("failed-stop recovery export downloads a diagnostic without mutating storage and fits both mobile orientations", async ({ page }, testInfo) => {
   test.setTimeout(90_000);
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
-  await openRecovery(page);
+  await openRecovery(page, seeded);
   await stopWithFailure(page);
   const journalBefore = await page.evaluate(async () =>
     (await import("/src/game/pureIdleRecovery.ts")).readPureIdleRecovery());

@@ -34,6 +34,7 @@ function fixtureEnvelope() {
   // deliveries and the achievement already earned by its existing belt.
   state = migrateGame(state)!;
   state.achievements.unlockedIds = ["first_logistics_line"];
+  state.orbitalStation.contractBoard.lastConfirmedWallClockMs = 1788739200000;
   return serializeEnvelope(state, 1788739200000);
 }
 export const fixture = fixtureEnvelope();
@@ -60,19 +61,38 @@ export function factoryContent(raw: string) {
 export async function deployThroughUi(page: Page, title: string) {
   await page.getByTitle(title, { exact: true }).click();
   const canvas = page.locator(".react-flow__pane");
-  const box = (await canvas.boundingBox())!;
-  let chosen: { x: number; y: number } | null = null;
-  for (const y of [0.32, 0.5, 0.65, 0.2]) {
-    for (const x of [0.64, 0.78, 0.48, 0.35]) {
-      const point = { x: box.x + box.width * x, y: box.y + box.height * y };
-      const empty = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.classList.contains("react-flow__pane"), point);
-      if (empty) { chosen = point; break; }
+  const beforeIds = await page.locator(".react-flow__node").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-id")));
+  const chosen = await canvas.evaluate((pane) => {
+    const bounds = pane.getBoundingClientRect();
+    const occupied = [...document.querySelectorAll(".react-flow__node")].map((node) => node.getBoundingClientRect());
+    let best: { x: number; y: number; clearance: number } | null = null;
+    // A bare hit point may still be within the snapped position of an existing
+    // card. Reserve visible room for the whole card and keep clear of every
+    // node (including collapsed stack proxies), using only read-only geometry.
+    for (const fy of [0.2, 0.35, 0.5, 0.65]) for (const fx of [0.2, 0.35, 0.5, 0.65, 0.8]) {
+      const x = bounds.x + bounds.width * fx;
+      const y = bounds.y + bounds.height * fy;
+      const clear = [0, 120, 240].every((dx) => [0, 125, 250].every((dy) =>
+        document.elementFromPoint(x + dx, y + dy)?.classList.contains("react-flow__pane")));
+      if (!clear) continue;
+      const clearance = Math.min(...occupied.map((rect) => Math.hypot(
+        Math.max(rect.left - (x + 240), x - rect.right, 0),
+        Math.max(rect.top - (y + 250), y - rect.bottom, 0),
+      )));
+      if (clearance > 64 && (!best || clearance > best.clearance)) best = { x, y, clearance };
     }
-    if (chosen) break;
-  }
-  expect(chosen, "a visible canvas position free of nodes, minimap and construction controls").not.toBeNull();
-  await canvas.click({ position: { x: chosen!.x - box.x, y: chosen!.y - box.y } });
+    return best;
+  });
+  expect(chosen, "visible room for a building clear of nodes and controls").not.toBeNull();
+  await page.mouse.click(chosen!.x, chosen!.y);
+  await expect.poll(() => page.locator(".react-flow__node").evaluateAll((nodes, previous) =>
+    nodes.filter((node) => !previous.includes(node.getAttribute("data-id"))).length, beforeIds)).toBe(1);
   await page.keyboard.press("Escape");
+  records.push({ event: "ui-deploy", title, position: chosen,
+    nodes: await page.locator(".react-flow__node").evaluateAll((nodes) => nodes.map((node) => ({
+      id: node.getAttribute("data-id"), transform: (node as HTMLElement).style.transform,
+    }))),
+  });
 }
 
 export function profile() { return fs.mkdtempSync(path.join(os.tmpdir(), "dspidle-performance-smoke-")); }

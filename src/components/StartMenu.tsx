@@ -84,6 +84,7 @@ import { useAppLocale } from "../i18n/locale";
 import { exportTextFile } from "../game/fileExport";
 import type { OfflineApproximationReport } from "../game/offlineApproximation";
 import { offlineProfileLabel, type OfflineComplexityReport } from "../game/offlineComplexityTypes";
+import { bindOfflineComplexity, matchingOfflineComplexity, type OfflineComplexityBinding } from "../game/offlineComplexityBinding";
 import {
   classifyOfflineSettlementFailure,
   readOfflineSettlementPreference,
@@ -134,6 +135,7 @@ type OfflineSettlementPrompt = {
   label: string;
   preserveReason?: string;
   complexity: OfflineComplexityReport;
+  complexityBinding: OfflineComplexityBinding;
   allowNativeStartup?: boolean;
 };
 type TimeWarpRecoveryPrompt = {
@@ -606,7 +608,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     label: string,
     preserveReason: string | undefined,
     storage: StorageModule,
-    options: { forceExact?: boolean; allowNativeStartup?: boolean } = {},
+    options: { forceExact?: boolean; allowNativeStartup?: boolean; complexityBinding?: OfflineComplexityBinding } = {},
   ) => {
     let completed = loaded.state;
     let settlementLoaded = loaded;
@@ -678,6 +680,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         const result = completedByNative ? null : await runOfflineSimulationInWorkerDetailed!(loaded.state, loaded.offlineSeconds, {
           signal: controller.signal,
           approximate: options.forceExact !== true && offlineSettlementPreference !== "exact",
+          complexity: matchingOfflineComplexity(loaded, options.complexityBinding),
           onComplexity: (complexity) => {
             complexityReport = complexity;
             setOfflineProgress((current) => current ? { ...current, complexity } : {
@@ -790,11 +793,13 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
   ) => {
     if (loaded.offlineSeconds >= 60 && loaded.state.mode !== "speedrun" && !loaded.state.speedrun?.enabled) {
       const { classifyOfflineWorkload } = await importWithRecovery(() => import("../game/offlineComplexity"), "离线工作量分析");
+      const complexity = classifyOfflineWorkload(loaded.state, loaded.offlineSeconds);
       setOfflinePrompt({
         loaded,
         label,
         ...(preserveReason ? { preserveReason } : {}),
-        complexity: classifyOfflineWorkload(loaded.state, loaded.offlineSeconds),
+        complexity,
+        complexityBinding: bindOfflineComplexity(loaded, complexity),
         ...(options.allowNativeStartup ? { allowNativeStartup: true } : {}),
       });
       setMessage({ tone: "warning", text: "请选择本次离线收益的处理方式；选择前原存档保持不变" });
@@ -853,6 +858,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
       await completeDeferredLoad(prompt.loaded, `${prompt.label} · ${choice === "exact" ? "精确结算" : "快速结算"}`, prompt.preserveReason, storage, {
         forceExact: choice === "exact",
         allowNativeStartup: choice !== "exact" && prompt.allowNativeStartup === true,
+        complexityBinding: prompt.complexityBinding,
       });
     } catch (error) {
       handleLoadError(error, choice === "exact" ? "精确离线结算失败，原存档保持不变" : "快速离线结算失败，原存档保持不变");

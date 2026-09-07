@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { verifyBuiltPlatform } from "./verify-built-platform.mjs";
 
 const platform = process.argv[2];
 if (platform !== "desktop" && platform !== "android") throw new Error("Usage: node scripts/build-platform.mjs <desktop|android>");
-const requestedChannel = process.env.DSP_RELEASE_CHANNEL?.trim().toLowerCase() || "stable";
+const packageMetadata = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const requestedChannel = process.env.DSP_RELEASE_CHANNEL?.trim().toLowerCase() || packageMetadata.releaseChannel || "stable";
 const channel = ["stable", "beta", "nightly"].includes(requestedChannel) ? requestedChannel : "stable";
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error("build-platform.mjs must be launched from an npm script");

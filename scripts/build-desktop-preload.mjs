@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { rolldown } from "rolldown";
@@ -14,4 +15,13 @@ export async function buildDesktopPreload(output = path.join(root, "desktop/prel
   try { await bundle.write({ file: output, format: "cjs", codeSplitting: false, sourcemap: false }); }
   finally { await bundle.close(); }
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await buildDesktopPreload();
+function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(path.resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectInvocation()) await buildDesktopPreload();

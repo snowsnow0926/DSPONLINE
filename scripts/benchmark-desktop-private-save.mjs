@@ -82,7 +82,10 @@ try {
   for (const name of ["我知道了", /^(?:关闭|跳过)启动引导$/]) { const button = page.getByRole("button", { name }); if (await button.isVisible()) await button.click(); }
   await page.evaluate(() => {
     window.__dspPrivateOriginalDate = Date;
-    window.__dspPrivateMetrics = { events: [], dropped: 0 };
+    window.__dspPrivateMetrics = { events: [], dropped: 0, longTasks: [] };
+    new PerformanceObserver(list => {
+      for (const entry of list.getEntries()) window.__dspPrivateMetrics.longTasks.push(entry.duration);
+    }).observe({ type: 'longtask' });
     window.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {}, counters: {} };
     const names = new Set(["save-inspection", "offline-simulation", "save-serialization", "authoritative-save-persistence", "runtime-recovery-persistence"]);
     const record = (name, direction, data, extra = {}) => {
@@ -188,6 +191,7 @@ try {
   if (args.has("--resume-profile")) { report.returnToInteractiveMs = report.importToInteractiveMs; delete report.importToInteractiveMs; }
   const metrics = await page.evaluate(() => window.__dspPrivateMetrics);
   report.workerEvents = metrics.events; report.droppedWorkerEvents = metrics.dropped;
+  report.mainThreadLongTasks = { count: metrics.longTasks.length, maxMs: Math.max(0, ...metrics.longTasks), totalMs: metrics.longTasks.reduce((total, duration) => total + duration, 0) };
   mark("read-only-persisted-identity");
   report.persisted = await page.evaluate(async () => {
     const db = await new Promise((resolve, reject) => { const request = indexedDB.open("dsp-idle-network.local-saves", 2); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error("read-failed")); request.onupgradeneeded = () => { request.transaction.abort(); reject(new Error("missing-database")); }; });
@@ -196,11 +200,24 @@ try {
       const read = key => new Promise((resolve, reject) => { const request = tx.objectStore("records").get(key); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error("read-failed")); });
       const [primary, receipt] = await Promise.all([read(key), read(`dsp-idle-network.local-save-coordination.v1.revision.${encodeURIComponent(key)}`)]);
       if (typeof primary?.value !== "string" || !receipt?.value) throw new Error("missing-primary");
-      const revision = JSON.parse(receipt.value), bytes = new TextEncoder().encode(primary.value);
-      const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(value => value.toString(16).padStart(2, "0")).join("");
-      return { byteLength: bytes.byteLength, sha256, revision: revision.revision, stateChecksum: revision.checksum };
+      const revision = JSON.parse(receipt.value);
+      const hash = async text => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map(value => value.toString(16).padStart(2, "0")).join("");
+      const sha256 = await hash(primary.value);
+      const keys = await new Promise((resolve, reject) => { const request = db.transaction('records', 'readonly').objectStore('records').getAllKeys(); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error('read-failed')); });
+      const snapshotKey = keys.filter(key => typeof key === 'string' && key.startsWith('dsp-idle-network.save.v1.snapshot.')).sort().at(-1);
+      const snapshot = snapshotKey ? await new Promise((resolve, reject) => { const request = db.transaction('records', 'readonly').objectStore('records').get(snapshotKey); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error('read-failed')); }) : null;
+      const stateText = raw => {
+        const prefix = /^\{"formatVersion":2,"kind":"(?:primary|snapshot)"(?:,"reason":"(?:[^"\\]|\\.)*")?,"savedAt":\d+,"mode":"normal","slot":"main","state":/.exec(raw)?.[0];
+        const suffix = /,"checksum":"[a-f0-9]{8}"\}$/.exec(raw)?.[0];
+        if (!prefix || !suffix) throw new Error('noncanonical-private-boundary');
+        return raw.slice(prefix.length, -suffix.length);
+      };
+      const stateSha256 = await hash(stateText(primary.value));
+      const snapshotStateSha256 = snapshot?.value ? await hash(stateText(snapshot.value)) : null;
+      return { byteLength: new TextEncoder().encode(primary.value).byteLength, sha256, revision: revision.revision, stateChecksum: revision.checksum, stateSha256, snapshotStateSha256, snapshotMatchesPrimary: stateSha256 === snapshotStateSha256 };
     } finally { db.close(); }
   });
+  if (report.scope === 'import' && !report.persisted.snapshotMatchesPrimary) throw new Error('automatic-snapshot-state-mismatch');
   mark("normal-close"); await normalClose();
   if (report.rendererErrors || report.droppedWorkerEvents) throw new Error("diagnostic-gate-failed");
   report.status = "PASS";

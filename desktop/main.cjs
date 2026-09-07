@@ -1618,7 +1618,7 @@ function createWindow() {
     title: desktopRuntimeIdentity.productName,
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: path.join(__dirname, "preload.bundle.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,

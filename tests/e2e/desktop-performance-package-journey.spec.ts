@@ -36,6 +36,7 @@ test("close during a controlled in-flight save waits for the durable commit", as
     expect(await boundary(opened.page)).toMatchObject({ raw: before.raw, revision: before.revision });
     await expect(opened.page.locator(".game-shell")).toHaveAttribute("data-primary-save-edit-lock", "true");
     const closing = normalClose(app);
+    void closing.catch(() => undefined); // Preserve the failure if a later assertion requires cleanup.
     await expect(opened.page.locator("html")).toHaveAttribute("data-desktop-closing", "true");
     expect(await boundary(opened.page)).toMatchObject({ raw: before.raw, revision: before.revision });
     records.push({ event: "close-with-save-held", revision: before.revision });

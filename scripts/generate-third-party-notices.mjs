@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const checkOnly = process.argv.includes("--check");
-const shippedDevelopmentPackages = new Set(["@capacitor/android", "electron"]);
+const shippedDevelopmentPackages = new Set(["@capacitor/android", "@noble/hashes", "electron"]);
 
 function packageNameFromLockPath(lockPath) {
   return lockPath.split("node_modules/").at(-1);

@@ -6,6 +6,7 @@ import { assertSaveReceipt, boundary, continueExisting, deployThroughUi, enterNe
 import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 import { inspectSaveEnvelopeChecksum } from "../../src/game/saveEnvelopeIntegrity";
+import { LOCAL_SAVE_LEASE_DURATION_MS } from "../../src/game/localSaveCoordination";
 
 test.afterEach(async ({}, info) => {
   records.push({ event: "test-result", title: info.title, status: info.status });
@@ -121,9 +122,15 @@ test("intentional crash retains the lease and restores the confirmed boundary", 
     await enterNew(opened.page);
     const saved = await importFixture(opened.page, "crash-input");
     await forceKill(app); app = undefined;
-    // The crash path retains the recorded lease. Normal close never waits.
-    const delay = Math.max(0, saved.lease.expiresAt - Date.now() + 100);
-    records.push({ event: "crash-lease-wait", milliseconds: delay, expiresAt: saved.lease.expiresAt });
+    // A heartbeat may renew the lease after boundary() captured it but before
+    // the process tree actually died. Wait a full production lease lifetime
+    // from confirmed exit, so the stale observed expiry cannot shorten the
+    // crash recovery test. Normal close still reopens immediately.
+    const crashCompletedAt = Date.now();
+    const expiryBoundary = Math.max(saved.lease.expiresAt, crashCompletedAt + LOCAL_SAVE_LEASE_DURATION_MS);
+    const delay = Math.max(0, expiryBoundary - Date.now() + 100);
+    records.push({ event: "crash-lease-wait", milliseconds: delay,
+      observedExpiresAt: saved.lease.expiresAt, crashCompletedAt, expiryBoundary });
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
     const reopened = await launch(isolated); app = reopened.app;
     await continueExisting(reopened.page);

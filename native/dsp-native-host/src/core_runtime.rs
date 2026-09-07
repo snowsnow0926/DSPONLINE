@@ -219,6 +219,8 @@ struct DurableWalIntent {
     wall_seconds: f64,
     #[serde(default)]
     advance_mode: CoreAdvanceMode,
+    #[serde(default)]
+    offline_algorithm_version: Option<String>,
     #[allow(dead_code)]
     #[serde(default)]
     approximate: bool,
@@ -229,7 +231,11 @@ struct DurableWalIntent {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind")]
 enum AcceptedWalPayload {
-    #[serde(rename = "stable-operation-v1", rename_all = "camelCase")]
+    #[serde(
+        rename = "stable-operation-v1",
+        alias = "stable-offline-operation-v2",
+        rename_all = "camelCase"
+    )]
     Stable {
         base_state_revision: u64,
         result_state_revision: u64,
@@ -238,9 +244,15 @@ enum AcceptedWalPayload {
         wall_seconds: f64,
         #[serde(default)]
         advance_mode: CoreAdvanceMode,
+        #[serde(default)]
+        offline_algorithm_version: Option<String>,
         registry: WalRegistryIdentity,
     },
-    #[serde(rename = "durable-operation-v1", rename_all = "camelCase")]
+    #[serde(
+        rename = "durable-operation-v1",
+        alias = "durable-offline-operation-v2",
+        rename_all = "camelCase"
+    )]
     Durable {
         intent: DurableWalIntent,
         result_state_revision: u64,
@@ -254,6 +266,7 @@ struct ReplayOperation {
     simulation_seconds: f64,
     wall_seconds: f64,
     advance_mode: CoreAdvanceMode,
+    offline_algorithm_version: Option<String>,
     registry_fingerprint: String,
 }
 
@@ -279,6 +292,16 @@ fn validate_operation_numbers(operation: &ReplayOperation) -> anyhow::Result<()>
         || operation.wall_seconds < 0.0
     {
         bail!("native core WAL operation bounds are invalid");
+    }
+    // The first 30 seconds retain the same exact calibration semantics. A
+    // longer operation can contain a changed macro tail, so legacy unbound
+    // operations must not be silently recomputed by this binary on reopen.
+    if operation.advance_mode == CoreAdvanceMode::OfflineMacroV1
+        && operation.simulation_seconds > 30.0
+        && operation.offline_algorithm_version.as_deref()
+            != Some(dsp_native_core::offline_macro_algorithm_version())
+    {
+        bail!("native core WAL offline algorithm version is missing or incompatible");
     }
     Ok(())
 }
@@ -329,6 +352,7 @@ fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
             simulation_seconds,
             wall_seconds,
             advance_mode,
+            offline_algorithm_version,
             registry,
         } => ReplayOperation {
             base_revision: base_state_revision,
@@ -337,6 +361,7 @@ fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
             simulation_seconds,
             wall_seconds,
             advance_mode,
+            offline_algorithm_version,
             registry_fingerprint: registry.fingerprint,
         },
         AcceptedWalPayload::Durable {
@@ -366,11 +391,21 @@ fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
                 simulation_seconds: intent.simulation_seconds,
                 wall_seconds: intent.wall_seconds,
                 advance_mode: intent.advance_mode,
+                offline_algorithm_version: intent.offline_algorithm_version,
                 registry_fingerprint: intent.registry.fingerprint,
             }
         }
     };
     validate_operation_numbers(&operation)?;
+    if operation.advance_mode == CoreAdvanceMode::OfflineMacroV1
+        && operation.simulation_seconds > 30.0
+        && !matches!(
+            entry.payload.get("kind").and_then(Value::as_str),
+            Some("stable-offline-operation-v2" | "durable-offline-operation-v2")
+        )
+    {
+        bail!("native core WAL offline algorithm version requires a versioned payload kind");
+    }
     if operation.base_revision != entry.base_revision || operation.result_revision != entry.revision
     {
         bail!("native core WAL payload revision range does not match its envelope");
@@ -5314,7 +5349,7 @@ impl CoreRegistry {
                 .map(CoreLeaseAuthorization::lease),
             result_revision,
         )?;
-        let payload = json!({
+        let mut payload = json!({
             "kind": "stable-operation-v1",
             "baseStateRevision": request.base_revision,
             "resultStateRevision": result_revision,
@@ -5325,6 +5360,16 @@ impl CoreRegistry {
             "approximate": request.advance_mode != CoreAdvanceMode::Exact,
             "registry": { "fingerprint": fingerprint },
         });
+        if request.advance_mode == CoreAdvanceMode::OfflineMacroV1 {
+            payload["offlineAlgorithmVersion"] =
+                Value::from(dsp_native_core::offline_macro_algorithm_version());
+            if request.simulation_seconds > 30.0 {
+                // Older hosts ignore extra JSON fields but reject unknown
+                // payload kinds. This also prevents a downgrade from silently
+                // replaying the newly accepted long-tail semantics as v1.
+                payload["kind"] = Value::from("stable-offline-operation-v2");
+            }
+        }
         let receipt = match lease_authorization.as_ref() {
             Some(CoreLeaseAuthorization::Experiment(lease)) => store
                 .append_wal_idempotent_exact_realtime(
@@ -8234,6 +8279,64 @@ mod tests {
         }
     }
 
+    fn offline_productive_settlement_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        CoreImportV47Result,
+        Value,
+    ) {
+        // Long-tail WAL acceptance needs a real certified flow. The old
+        // unpowered import fixture only exercised an unqualified frozen tail.
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        let state = &mut envelope["state"];
+        state["historyRecordedAt"] = state["elapsedSeconds"].clone();
+        state["quantumLogisticsNetwork"]["enabled"] = json!(true);
+        state["quantumLogisticsNetwork"]["itemCapacities"] = json!({"iron_ore": "10000000000"});
+        state["campaign"]["completedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        state["campaign"]["rewardedTaskIds"] = state["campaign"]["completedTaskIds"].clone();
+        let entities = state["entities"].as_array_mut().unwrap();
+        entities[0]["powerGridId"] = json!("grid-a");
+        entities[0]["outputs"]["iron_ore"] = json!(0);
+        entities[0]["resourceCapacity"] = json!(1000000);
+        entities[0]["resourceRemaining"] = json!(1000000);
+        entities[0]["resourceDepletionRemainder"] = json!(0);
+        entities.push(json!({
+            "id": "offline-wind", "kind": "power", "planetId": "home", "powerGridId": "grid-a",
+            "buildingId": "wind_turbine", "machineCount": 1, "minerCount": 0,
+            "position": {"x": 0, "y": 0}, "inputs": {}, "outputs": {}, "progress": 0,
+            "routingCursor": 0, "utilization": 0, "productionRate": 0,
+        }));
+        let body = serde_json::to_string(state).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{body}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let mut catalog = import_catalog();
+        catalog["buildings"].as_array_mut().unwrap().push(json!({
+            "id": "wind_turbine", "kind": "power", "speed": 1,
+            "inputCapacity": 0, "outputCapacity": 0, "powerDemandKw": 0, "powerGenerationKw": 1000,
+        }));
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                catalog.clone(),
+            )
+            .unwrap();
+        (root, store, registry, imported, catalog)
+    }
+
     fn offline_candidate_request(
         source: &crate::save_store::SaveRecoveryResult,
         summary: &CoreStateSummary,
@@ -8413,7 +8516,8 @@ mod tests {
 
     #[test]
     fn offline_settlement_derives_one_x_budget_and_publishes_one_checkpoint() {
-        let (_root, mut store, mut registry, imported, _catalog) = offline_settlement_fixture();
+        let (_root, mut store, mut registry, imported, _catalog) =
+            offline_productive_settlement_fixture();
         let source = store.recover("normal-main").unwrap().unwrap();
         assert_eq!(source.saved_at_ms, 42);
         let result = registry
@@ -8448,7 +8552,8 @@ mod tests {
 
     #[test]
     fn offline_settlement_reuses_a_wal_synced_budget_after_cold_reopen() {
-        let (_root, mut store, mut registry, imported, catalog) = offline_settlement_fixture();
+        let (_root, mut store, mut registry, imported, catalog) =
+            offline_productive_settlement_fixture();
         let source = store.recover("normal-main").unwrap().unwrap();
         let command_id = format!(
             "offline-main-g{}-r{}-s{}",
@@ -8470,6 +8575,15 @@ mod tests {
             )
             .unwrap();
         let committed_hash = committed.summary.as_ref().unwrap().canonical_sha256.clone();
+        let accepted_wal = store.read_wal("normal-main", source.revision).unwrap();
+        assert_eq!(
+            accepted_wal[0].payload["offlineAlgorithmVersion"],
+            dsp_native_core::offline_macro_algorithm_version()
+        );
+        assert_eq!(
+            accepted_wal[0].payload["kind"],
+            "stable-offline-operation-v2"
+        );
         registry.close_all();
 
         let mut reopened = CoreRegistry::default();
@@ -8501,6 +8615,160 @@ mod tests {
         let published = store.recover("normal-main").unwrap().unwrap();
         assert_eq!(published.saved_at_ms, source.saved_at_ms + 600_000);
         assert_eq!(published.revision, committed.revision);
+    }
+
+    #[test]
+    fn offline_wal_algorithm_binding_checks_stable_and_digested_durable_payloads() {
+        for durable in [false, true] {
+            for (seconds, version, accepted) in [
+                (30.0, None, true),
+                (31.0, None, false),
+                (
+                    600.0,
+                    Some("native-offline-macro-v1-closed-ledger-one-shot-v1"),
+                    false,
+                ),
+                (600.0, Some("unknown-future-algorithm"), false),
+                (
+                    600.0,
+                    Some(dsp_native_core::offline_macro_algorithm_version()),
+                    true,
+                ),
+            ] {
+                let mut operation = json!({
+                    "baseStateRevision": 7,
+                    "command": null,
+                    "simulationSeconds": seconds,
+                    "wallSeconds": seconds,
+                    "advanceMode": "offline-macro-v1",
+                    "registry": { "fingerprint": "builtin:test" },
+                });
+                if let Some(version) = version {
+                    operation["offlineAlgorithmVersion"] = Value::from(version);
+                }
+                let payload = if durable {
+                    operation["schemaVersion"] = json!(1);
+                    operation["sessionId"] = json!("offline-replay-test");
+                    operation["generation"] = json!(1);
+                    operation["sequence"] = json!(1);
+                    operation["committedAtMs"] = json!(123);
+                    operation["intentSha256"] = Value::from(canonical_sha256(&operation));
+                    json!({ "kind": if seconds > 30.0 { "durable-offline-operation-v2" } else { "durable-operation-v1" },
+                        "intent": operation, "resultStateRevision": 8 })
+                } else {
+                    operation["kind"] = json!(if seconds > 30.0 {
+                        "stable-offline-operation-v2"
+                    } else {
+                        "stable-operation-v1"
+                    });
+                    operation["resultStateRevision"] = json!(8);
+                    operation
+                };
+                let entry = WalEntry {
+                    base_revision: 7,
+                    revision: 8,
+                    command_id: "offline-replay-test".to_owned(),
+                    payload,
+                    previous_hash: String::new(),
+                    entry_hash: String::new(),
+                };
+                let decoded = decode_wal_operation(&entry);
+                assert_eq!(
+                    decoded.is_ok(),
+                    accepted,
+                    "durable={durable}, seconds={seconds}, version={version:?}"
+                );
+                if !accepted {
+                    assert!(
+                        decoded
+                            .err()
+                            .unwrap()
+                            .to_string()
+                            .contains("offline algorithm version")
+                    );
+                } else if seconds > 30.0 {
+                    let mut legacy_kind = entry.clone();
+                    legacy_kind.payload["kind"] = Value::from(if durable {
+                        "durable-operation-v1"
+                    } else {
+                        "stable-operation-v1"
+                    });
+                    assert!(
+                        decode_wal_operation(&legacy_kind)
+                            .err()
+                            .unwrap()
+                            .to_string()
+                            .contains("versioned payload kind")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn offline_wal_incompatible_tail_reopen_keeps_checkpoint_log_and_live_source_unchanged() {
+        for version in [
+            None,
+            Some("native-offline-macro-v1-closed-ledger-one-shot-v1"),
+        ] {
+            let (_root, store, mut registry, imported, catalog) = offline_settlement_fixture();
+            let source = store.recover("normal-main").unwrap().unwrap();
+            let before = registry.status(&imported.session_id).unwrap();
+            let mut payload = json!({
+                "kind": "stable-operation-v1",
+                "baseStateRevision": source.revision,
+                "resultStateRevision": source.revision + 1,
+                "command": null,
+                "simulationSeconds": 600,
+                "wallSeconds": 600,
+                "advanceMode": "offline-macro-v1",
+                "registry": { "fingerprint": source.registry_fingerprint },
+            });
+            if let Some(version) = version {
+                payload["offlineAlgorithmVersion"] = Value::from(version);
+            }
+            store
+                .append_wal_idempotent(
+                    "normal-main",
+                    source.revision,
+                    source.revision + 1,
+                    "legacy-offline-tail",
+                    payload,
+                )
+                .unwrap();
+            let wal_before =
+                serde_json::to_value(store.read_wal("normal-main", source.revision).unwrap())
+                    .unwrap();
+            let error = registry
+                .open(
+                    &store,
+                    "normal-main",
+                    source.generation,
+                    &source.root_hash,
+                    source.revision,
+                    &source.registry_fingerprint,
+                    catalog,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("offline algorithm version"));
+            assert_eq!(
+                registry
+                    .status(&imported.session_id)
+                    .unwrap()
+                    .canonical_sha256,
+                before.canonical_sha256
+            );
+            let after = store.recover("normal-main").unwrap().unwrap();
+            assert_eq!(
+                (after.generation, after.root_hash, after.revision),
+                (source.generation, source.root_hash, source.revision)
+            );
+            assert_eq!(
+                serde_json::to_value(store.read_wal("normal-main", source.revision).unwrap())
+                    .unwrap(),
+                wal_before
+            );
+        }
     }
 
     #[test]

@@ -72,6 +72,13 @@ pub mod v47_import;
 mod workspace_action_command;
 
 pub use belts::BeltSchedulerDiagnostics;
+
+/// Binds durable offline operations to the implementation that accepted them.
+/// A mode name alone cannot make a changed long-tail algorithm replay-safe.
+pub fn offline_macro_algorithm_version() -> &'static str {
+    pure_idle::OFFLINE_MACRO_V1_ALGORITHM_VERSION
+}
+
 pub use catalog::{
     BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,
     ItemDefinition, PlanetDefinition, ProliferatorDefinition, RecipeDefinition,

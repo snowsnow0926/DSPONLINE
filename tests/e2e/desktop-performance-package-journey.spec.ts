@@ -153,7 +153,7 @@ test("compressed export validates checksum and imports into a separate profile",
     expect(factoryContent(exported)).toEqual(factoryContent(saved.raw!));
     const independent = await launch(profile()); second = independent.app;
     await enterNew(independent.page);
-    await importFixture(independent.page, "roundtrip-reimport", exported);
+    await importFixture(independent.page, "roundtrip-reimport", exported, exportPath);
     records.push({ event: "roundtrip", exportSha256: sha256(fs.readFileSync(exportPath)), inputSha256: sha256(fixture) });
     await normalClose(second); second = undefined;
     await normalClose(first); first = undefined;

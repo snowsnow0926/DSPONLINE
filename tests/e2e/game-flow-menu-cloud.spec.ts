@@ -2095,6 +2095,8 @@ test("username registration and login preserve every local save without automati
   await page.goto("/?menu=1");
   await page.getByRole("button", { name: /开始游戏/ }).click();
   await page.getByTitle("保存并返回主菜单").click();
+  // The menu mounts only after the asynchronous return checkpoint is durable.
+  await expect(page.locator(".start-menu")).toBeVisible();
   const before = await page.evaluate(async () => {
     const store = await import("/src/game/localSaveStore.ts");
     await store.initializeLocalSaveStore();

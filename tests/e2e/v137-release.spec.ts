@@ -4,6 +4,11 @@ const SAVE_KEY = "dsp-idle-network.save.v1";
 const REQUIRED_TIERS = [6, 16, 17, 21] as const;
 
 async function seedTechnologyFactory(page: Page, fontScale: 1 | 1.5 | 2, layout: "standard" | "compact") {
+  // Fixture reloads may produce an offline report before the tree opens.
+  const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
+  await page.addLocatorHandler(offlineReport, async () => {
+    await offlineReport.getByRole("button", { name: "确认结算" }).click({ force: true });
+  });
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));

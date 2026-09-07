@@ -13,6 +13,7 @@ if (!runDirectory) throw new Error("BLOCKED: missing verified package run contex
 export const run = JSON.parse(fs.readFileSync(path.join(runDirectory, "run-context.json"), "utf8"));
 export const marker = "Round3 固定合成工厂 271828";
 export const records: unknown[] = [];
+const children = new WeakMap<ElectronApplication, ReturnType<ElectronApplication["process"]>>();
 export const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 
 function fixtureEnvelope() {
@@ -33,6 +34,15 @@ function fixtureEnvelope() {
 }
 export const fixture = fixtureEnvelope();
 
+export function productionFixture() {
+  const state = inspectSaveEnvelopeChecksum(fixture).state! as any;
+  state.entities = state.entities.filter((entity: any) => entity.id === "vein_iron");
+  state.entities[0].position = { x: 0, y: 0 };
+  state.entities[0].outputs = { iron_ore: 50 };
+  state.belts = [];
+  return serializeEnvelope(state, 1788739200000);
+}
+
 export function factoryContent(raw: string) {
   const inspected = inspectSaveEnvelopeChecksum(raw);
   expect(inspected.status).toBe("valid");
@@ -51,6 +61,8 @@ export async function launch(profileRoot: string) {
   env.DSP_PERFORMANCE_SMOKE_ISOLATION = "1";
   env.DSP_PERFORMANCE_SMOKE_APP_DATA_ROOT = profileRoot;
   const app = await electron.launch({ executablePath: path.join(run.packageDirectory, "dsp-idle-performance-edition.exe"), cwd: run.packageDirectory, env, timeout: 60000 });
+  children.set(app, app.process());
+  try {
   const page = await app.firstWindow();
   expect(page.url()).toMatch(/app\.asar\/dist\/index\.html/);
   records.push({ event: "launch", pid: app.process().pid, profileRoot, buildId: run.expected.buildId, url: page.url() });
@@ -58,6 +70,7 @@ export async function launch(profileRoot: string) {
   app.process().stderr?.on("data", (bytes) => fs.appendFileSync(path.join(runDirectory, "electron-stderr.log"), bytes));
   expect(await app.evaluate(() => (globalThis as any).__dspIsolatedNetworkAudit?.policy)).toBe("loopback-only-v1");
   return { app, page };
+  } catch (error) { await forceKill(app, "failure-cleanup"); throw error; }
 }
 
 async function dismissIntro(page: Page) {
@@ -118,12 +131,34 @@ export async function saveAndVerify(page: Page) {
   await expect.poll(async () => (await boundary(page)).revision?.revision ?? 0, { timeout: 30000 }).toBeGreaterThan(before.revision?.revision ?? 0);
   await expect(page.locator(".game-shell")).toHaveAttribute("data-persistence-phase", "complete", { timeout: 30000 });
   const saved = await boundary(page);
+  assertSaveReceipt(before, saved);
+  records.push({ event: "durable-save", revision: saved.revision, rawSha256: sha256(saved.raw!) });
+  return saved;
+}
+export function assertSaveReceipt(before: { revision: any }, saved: { raw?: string; revision: any }) {
+  expect(saved.revision.revision).toBeGreaterThan(before.revision?.revision ?? 0);
   expect(saved.raw).toBeTruthy();
   const inspected = inspectSaveEnvelopeChecksum(saved.raw!);
   expect(inspected.status).toBe("valid");
   expect(saved.revision.checksum).toBe(inspected.recordedChecksum);
-  records.push({ event: "durable-save", revision: saved.revision, rawSha256: sha256(saved.raw!) });
-  return saved;
+}
+
+// Delay the real persistence Worker before dispatch. Releasing calls the
+// original postMessage with its original payload/transfers; no fake save ACK.
+export async function holdNextPersistenceCommit(page: Page) {
+  await page.evaluate(() => {
+    const original = Worker.prototype.postMessage;
+    const control = { held: 0, release: null as (() => void) | null };
+    (window as any).__dspHeldCommit = control;
+    Worker.prototype.postMessage = function(message: any, options?: any) {
+      if (message?.type === "commit" && message.payload instanceof ArrayBuffer && control.held === 0) {
+        control.held++;
+        control.release = () => { Worker.prototype.postMessage = original; original.call(this, message, options); };
+        return;
+      }
+      return original.call(this, message, options);
+    };
+  });
 }
 export async function importFixture(page: Page, label: string, raw = fixture) {
   const input = path.join(runDirectory, `${label}.json`);
@@ -141,9 +176,9 @@ export async function importFixture(page: Page, label: string, raw = fixture) {
   return saved;
 }
 async function waitExit(app: ElectronApplication, mode: string) {
-  const child = app.process();
+  const child = children.get(app)!;
   if (child.exitCode === null && child.signalCode === null) await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${mode} did not exit in 10 seconds`)), 10000);
+    const timer = setTimeout(() => reject(new Error(`${mode} did not exit in 25 seconds`)), 25000);
     child.once("exit", () => { clearTimeout(timer); resolve(); });
   });
   records.push({ event: "exit", mode, pid: child.pid, code: child.exitCode, signal: child.signalCode });
@@ -153,7 +188,7 @@ export async function normalClose(app: ElectronApplication) {
   await waitExit(app, "normal-window-close");
 }
 export async function forceKill(app: ElectronApplication, mode = "intentional-crash") {
-  const child = app.process();
+  const child = children.get(app)!;
   if (child.exitCode !== null || child.signalCode !== null) {
     if (mode !== "failure-cleanup") throw new Error("Process exited before intentional crash");
     return;

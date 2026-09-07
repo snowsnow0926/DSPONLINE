@@ -261,6 +261,7 @@ let pendingWriteError: unknown = null;
 // legacy string writes; otherwise a queued legacy write can overtake the
 // proof/CAS revision head while the large payload is committing.
 let authoritativeSaveQueue: Promise<void> = Promise.resolve();
+let writerClosing = false;
 let startupConflictId: string | null = null;
 let startupConflictCreatedAt = -1;
 const LOCAL_SAVE_WRITER_CONTINUATION_MAX_AGE_MS = 120_000;
@@ -1317,7 +1318,7 @@ async function releaseWriterLeaseForReload(): Promise<void> {
 }
 
 async function renewWriterLease(): Promise<void> {
-  if (writerStatus.role !== "primary" || backend !== "indexeddb" || !database) return;
+  if (writerClosing || writerStatus.role !== "primary" || backend !== "indexeddb" || !database) return;
   const now = Date.now();
   const renewed = await withBrowserCoordinationLock(async () => {
     const transaction = database!.transaction(RECORD_STORE, "readwrite");
@@ -1950,7 +1951,7 @@ export async function takeOverLocalSaveWriter(): Promise<boolean> {
 }
 
 export function canWriteLocalSaves(): boolean {
-  return writerStatus.role === "primary";
+  return !writerClosing && writerStatus.role === "primary";
 }
 
 export async function getLocalSaveConflicts(): Promise<LocalSaveConflictSummary[]> {
@@ -2450,6 +2451,7 @@ export function clearLocalSaveRawPayloadCache(): void {
 }
 
 function enqueue(operation: () => Promise<void>, key?: string): void {
+  if (writerClosing) throw new LocalSaveReadOnlyError("正在安全退出，已停止新存档写入");
   // Capture the current proof queue at enqueue time. Reading a mutable queue
   // later inside the callback can deadlock when a proof commit is waiting for
   // the legacy queue that contains this operation.
@@ -2467,6 +2469,7 @@ function enqueueAuthoritativeSave<T>(
   priorLegacyWrites: Promise<void>,
   operation: () => Promise<T>,
 ): Promise<T> {
+  if (writerClosing) return Promise.reject(new LocalSaveReadOnlyError("正在安全退出，已停止新存档写入"));
   const priorProof = authoritativeSaveQueue;
   const queued = priorProof.catch(() => undefined).then(async () => {
     await priorLegacyWrites;
@@ -2479,6 +2482,7 @@ function enqueueAuthoritativeSave<T>(
 }
 
 export function setLocalSaveValue(key: string, value: string): void {
+  if (writerClosing) throw new LocalSaveReadOnlyError("正在安全退出，已停止新存档写入");
   if (!isSaveKey(key)) throw new Error(`Unsupported local save key: ${key}`);
   ensureSynchronousFallback();
   if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError(writerStatus.reason);
@@ -2682,6 +2686,56 @@ export async function flushLocalSaveWrites(): Promise<void> {
     }
     throw error;
   }
+}
+
+/** Quiesce both save queues, then release only our unchanged durable head. */
+export async function closeLocalSaveWriter(signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  if (writerClosing) throw new Error("Writer close is already pending");
+  const owner = { ...writerStatus };
+  writerClosing = true;
+  let committed = false;
+  try {
+    await authoritativeSaveQueue;
+    await flushLocalSaveWrites();
+    signal.throwIfAborted();
+    if (backend !== "indexeddb" || !database || owner.role !== "primary") {
+      committed = true; // Read-only windows never release another owner's lease.
+      return;
+    }
+    const heads = (["normal", "speedrun"] as const).map((mode) => ({
+      key: primaryKeyForMode(mode), revision: getPrimaryLocalSaveRevision(mode),
+      identity: getVerifiedPrimaryLocalSaveIdentity(mode),
+    }));
+    const transaction = database.transaction(RECORD_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    const abort = () => { try { transaction.abort(); } catch { /* already completed */ } };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      const store = transaction.objectStore(RECORD_STORE);
+      const read = (key: string) => requestResult(store.get(key) as IDBRequest<StoredSaveRecord | undefined>);
+      const [leaseRecord, ...revisions] = await Promise.all([read(LOCAL_SAVE_WRITER_LEASE_KEY), ...heads.map((head) => read(localSaveRevisionKey(head.key)))]);
+      const lease = parseLocalSaveWriterLease(leaseRecord?.value);
+      signal.throwIfAborted();
+      if (lease?.ownerId !== owner.writerId || lease.fencingToken !== owner.fencingToken || writerStatus.role !== "primary") throw new Error("Writer changed during close");
+      for (let index = 0; index < heads.length; index += 1) {
+        const head = heads[index];
+        const revision = parseLocalSaveRevision(revisions[index]?.value);
+        if ((revision?.revision ?? 0) !== head.revision ||
+          (head.revision > 0 && (!head.identity || revision?.deleted || revision?.checksum !== head.identity.stateChecksum))) throw new Error("Durable primary changed during close");
+      }
+      const now = Date.now();
+      putStoredValue(store, LOCAL_SAVE_WRITER_LEASE_KEY, JSON.stringify({ ...lease, heartbeatAt: now, expiresAt: now }), now);
+      await done;
+      committed = true;
+      if (writerHeartbeat !== null) { window.clearInterval(writerHeartbeat); writerHeartbeat = null; }
+      publishWriterStatus({ ...owner, role: "unavailable", leaseExpiresAt: now, reason: "存档已确认，正在退出" });
+    } catch (error) {
+      abort();
+      await done.catch(() => undefined);
+      throw error;
+    } finally { signal.removeEventListener("abort", abort); }
+  } finally { if (!committed) writerClosing = false; }
 }
 
 export async function readPersistedLocalSaveValue(key: string): Promise<string | null> {

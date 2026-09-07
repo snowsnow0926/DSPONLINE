@@ -443,6 +443,8 @@ import {
   takeOverLocalSaveWriter,
 } from "./game/localSaveStore";
 import { registerCurrentTabTakeoverHandler } from "./game/localSaveTakeover";
+import { desktopCloseCompleted, registerDesktopCloseHandler } from "./game/desktopGracefulClose";
+import { closeLocalSaveWriter } from "./game/localSaveStore";
 import type {
   LocalSaveNativeAuthorityCheckpoint,
   LocalSaveNativeAuthorityLeaseReceipt,
@@ -2617,6 +2619,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   // boolean because lifecycle/manual/autosave requests may briefly overlap;
   // the fail-safe lock must remain active until the last verified write ends.
   const verifiedPrimarySaveInFlightDepthRef = useRef(0);
+  const desktopClosePendingRef = useRef(false);
   // A Rust-owned checkpoint is an independent single-writer transaction. It
   // must reject renderer commands even when the legacy "edit while saving"
   // preference is enabled, because there is no JavaScript state to rebase.
@@ -2689,6 +2692,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     writeAllowEditsDuringSavePreference(enabled);
   }, []);
   const rejectPlayerStateEditDuringPrimarySave = useCallback((): boolean => {
+    if (desktopClosePendingRef.current) return true;
     if (nativePlayerAuthorityMacroReadOnlyRef.current) {
       setNotice("Windows 原生宏观结算正在推进权威状态；当前画面只读，本次操作未应用");
       return true;
@@ -6846,6 +6850,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (lifecycleExitStartedRef.current) {
       return { success: false, message: "页面正在退出，已保留 durable recovery 供下次精确恢复", code: "conflict" };
     }
+    if (desktopClosePendingRef.current && (kind === "autosave" || kind === "lifecycle")) {
+      return { success: false, message: "正在安全退出", code: "conflict" };
+    }
     if (durablePrimarySaveInFlightRef.current) {
       return { success: false, message: "已有 durable 主存档检查点正在进行，请稍候", code: "conflict" };
     }
@@ -7812,6 +7819,40 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativePersistenceCheckpoint,
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
   persistPrimarySaveRef.current = persistPrimarySave;
+
+  useEffect(() => registerDesktopCloseHandler(async (signal) => {
+    if (readNativeAuthorityPersistenceBoundary().protected || pureIdleMacroActiveRef.current) {
+      setNotice("请先安全结束原生权威或纯挂机会话，再退出应用");
+      throw new Error("Runtime requires its own verified stop boundary");
+    }
+    desktopClosePendingRef.current = true;
+    simulationSaveBarrierDepthRef.current += 1;
+    simulationCheckpointBarrierRef.current = true;
+    let released = false;
+    try {
+      // Wait for the actual checkpoint owner, not an autosave coalescing ACK.
+      while (durablePrimarySaveInFlightRef.current || verifiedPrimarySaveInFlightDepthRef.current > 0) {
+        signal.throwIfAborted();
+        await new Promise((resolve) => window.setTimeout(resolve, 20));
+      }
+      signal.throwIfAborted();
+      const result = await persistPrimarySaveRef.current(undefined, "manual");
+      if (!result.success || result.skippedUnchanged) throw new Error(result.message);
+      signal.throwIfAborted();
+      await closeLocalSaveWriter(signal);
+      released = true;
+      lifecycleExitStartedRef.current = true;
+    } catch (error) {
+      setNotice("退出前保存尚未确认；窗口和原存档保持不变，请等待保存完成或处理存档错误后重试");
+      throw error;
+    } finally {
+      if (!released) {
+        desktopClosePendingRef.current = false;
+        simulationSaveBarrierDepthRef.current = Math.max(0, simulationSaveBarrierDepthRef.current - 1);
+        if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current) simulationCheckpointBarrierRef.current = false;
+      }
+    }
+  }), [readNativeAuthorityPersistenceBoundary]);
 
   useEffect(() => registerCurrentTabTakeoverHandler(async () => {
     const before = getLocalSaveWriterStatus();
@@ -12729,6 +12770,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const saveBeforeUnload = (_event: Event) => {
       if (lifecycleSaveStarted) return;
       lifecycleSaveStarted = true;
+      if (desktopCloseCompleted()) return;
       // Mark the exit before checking recovery mode. A visibility/native
       // callback may already be queued behind this synchronous event; it must
       // not enqueue a new primary write after pagehide chose the recovery path.

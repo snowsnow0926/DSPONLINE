@@ -2808,6 +2808,80 @@ fn checked_material_delta(
         .ok_or_else(|| format!("{label}.{item_id} delta overflowed"))
 }
 
+/// A closed upload-only tower moves already-owned material; its output slots
+/// are buffers, not recipe production declarations. This classification grants
+/// no material rate: the three exact windows must still close all production,
+/// consumption, owned stock, recipe dependencies and finite reserve debits.
+/// Keep mixed demand/local routes and transitions outside this narrow case.
+fn is_ordinary_quantum_upload_endpoint(state: &CoreState, entity: &Value) -> bool {
+    if entity.get("kind").and_then(Value::as_str) != Some("station")
+        || entity.get("buildingId").and_then(Value::as_str)
+            != Some("interstellar_logistics_station")
+        || entity.get("quantumMode").and_then(Value::as_str) != Some("quantum")
+        || number_at(Some(entity), &["stationTier"]) < 2.0
+        || entity
+            .get("recipeId")
+            .is_some_and(|id| !id.is_null() && id.as_str() != Some(""))
+        || entity
+            .get("stationModeTransition")
+            .is_some_and(|transition| !transition.is_null())
+        || entity
+            .get("stationRoutes")
+            .is_some_and(|routes| routes.as_array().is_none_or(|routes| !routes.is_empty()))
+        || number_at(Some(entity), &["stationDrones"]) != 0.0
+        || number_at(Some(entity), &["stationVessels"]) != 0.0
+        || !state
+            .catalog
+            .buildings
+            .get("interstellar_logistics_station")
+            .is_some_and(|building| building.kind == "station")
+    {
+        return false;
+    }
+    let Some(slots) = entity.get("stationSlots").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut upload_items = BTreeSet::new();
+    for slot in slots {
+        if !slot.is_object()
+            || slot
+                .get("localMode")
+                .and_then(Value::as_str)
+                .unwrap_or("storage")
+                != "storage"
+        {
+            return false;
+        }
+        let Some(item_id) = slot.get("itemId").and_then(Value::as_str) else {
+            if slot.get("itemId").is_some_and(|item_id| !item_id.is_null())
+                || slot
+                    .get("remoteMode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("storage")
+                    != "storage"
+            {
+                return false;
+            }
+            continue;
+        };
+        if slot.get("remoteMode").and_then(Value::as_str) != Some("supply") {
+            return false;
+        }
+        upload_items.insert(item_id);
+    }
+    !upload_items.is_empty()
+        && ["inputs", "outputs"].into_iter().all(|field| {
+            entity
+                .get(field)
+                .and_then(Value::as_object)
+                .is_some_and(|buffers| {
+                    buffers
+                        .keys()
+                        .all(|item_id| upload_items.contains(item_id.as_str()))
+                })
+        })
+}
+
 fn exclusive_vein_sources(state: &CoreState) -> Result<BTreeSet<String>, String> {
     // Material-fuel generators and charge/discharge stores can make a short
     // window productive by spending a finite cache. Their energy budget is not
@@ -2868,6 +2942,9 @@ fn exclusive_vein_sources(state: &CoreState) -> Result<BTreeSet<String>, String>
         let entity = state
             .parse_entity(entity_index)
             .map_err(|error| format!("ordinary entity decode failed: {error:#}"))?;
+        if is_ordinary_quantum_upload_endpoint(state, &entity) {
+            continue;
+        }
         if let Some(outputs) = entity.get("outputs").and_then(Value::as_object) {
             for item_id in outputs.keys() {
                 sources.remove(item_id);
@@ -4463,6 +4540,9 @@ fn active_ordinary_recipe_ids(
             .parse_entity(entity_index)
             .map_err(|error| format!("ordinary recipe entity decode failed: {error:#}"))?;
         if number_at(Some(&entity), &["machineCount"]) <= EPSILON {
+            continue;
+        }
+        if is_ordinary_quantum_upload_endpoint(state, &entity) {
             continue;
         }
         let entity_output_ids = entity
@@ -10484,6 +10564,486 @@ mod tests {
 
     fn productive_closed_recipe_macro_fixture(multiplier: f64) -> CoreState {
         productive_single_recipe_macro_fixture(multiplier, "iron_ingot", "iron_ingot", false, false)
+    }
+
+    fn with_quantum_upload_station(source: CoreState, item_id: &str, source_id: &str) -> CoreState {
+        let mut entities = source.parse_entities_parallel().unwrap();
+        entities.push(json!({
+            "id": "quantum-upload", "kind": "station", "planetId": "home",
+            "powerGridId": "grid-a", "buildingId": "interstellar_logistics_station",
+            "stationTier": 2, "quantumMode": "quantum", "machineCount": 1,
+            "stationSlots": [{
+                "itemId": item_id, "localMode": "storage", "remoteMode": "supply",
+                "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000,
+                "priority": 1, "routePolicy": "direct", "warperBudget": 0
+            }],
+            "stationRoutes": [], "stationDrones": 0, "stationVessels": 0,
+            "stationWarpEnabled": false, "stationWarpers": 0,
+            "stationDispatchCursor": 0, "stationLastSupplyPeerBySlot": {},
+            "stationProgress": 0, "stationCongestion": 0, "stationTrips": 0,
+            "stationLastTransfer": 0, "inputs": { item_id: 0 }, "outputs": { item_id: 0 },
+            "progress": 0, "routingCursor": 0, "utilization": 0, "productionRate": 0
+        }));
+        entities.last_mut().unwrap()["stationSlots"]
+            .as_array_mut()
+            .unwrap()
+            .extend((0..4).map(|_| {
+                json!({
+                    "itemId": null, "localMode": "storage", "remoteMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000,
+                    "priority": 1, "routePolicy": "direct", "warperBudget": 0
+                })
+            }));
+        let mut belts = source.parse_belts_parallel().unwrap();
+        belts.push(json!({
+            "id": "quantum-upload-feed", "planetId": "home", "source": source_id,
+            "target": "quantum-upload", "itemId": item_id, "lanes": 1, "tier": 1,
+            "priority": 1, "progress": 0, "lastFlow": 0, "totalTransferred": 0
+        }));
+        let mut catalog = source.catalog.snapshot.clone();
+        catalog.buildings.push(BuildingDefinition {
+            id: "interstellar_logistics_station".to_owned(),
+            kind: "station".to_owned(),
+            speed: 1.0,
+            input_capacity: 1_000_000.0,
+            output_capacity: 1_000_000.0,
+            power_demand_kw: 0.0,
+            power_generation_kw: 0.0,
+            power_charge_kw: 0.0,
+            energy_capacity_mj: 0.0,
+            fuel_item_ids: Vec::new(),
+            fuel_efficiency: 1.0,
+            family: None,
+            accepts: None,
+        });
+        let catalog = RuntimeCatalog::validate(catalog, "pure-idle-test").unwrap();
+        fixture_state_from_parts_with_belts_and_catalog(
+            Value::Object(source.base_value().clone()),
+            entities,
+            belts,
+            catalog,
+        )
+    }
+
+    #[test]
+    fn quantum_upload_is_a_transfer_endpoint_for_source_and_recipe_certificates() {
+        for (item_id, source_id, source) in [
+            (
+                "iron_ore",
+                "vein",
+                productive_quantum_macro_fixture(1.0, "infinite"),
+            ),
+            (
+                "iron_ingot",
+                "smelter",
+                productive_closed_recipe_macro_fixture(1.0),
+            ),
+        ] {
+            let mut state = with_quantum_upload_station(source, item_id, source_id);
+            let revision = state.revision;
+            let warmup = state
+                .advance_exact(&exact_request(revision, 30.0, 30.0))
+                .unwrap();
+            assert!(warmup.supported, "{:?}", warmup.reason);
+            let request = offline_macro_request(state.revision, 600.0);
+            let snapshots = exact_three_window_probe(&state, &request).unwrap();
+            let certificate = build_ordinary_flow_certificate(&state, &snapshots)
+                .unwrap_or_else(|reason| panic!("{item_id}: {reason}"));
+            assert!(
+                certificate
+                    .produced_units_per_second
+                    .get(item_id)
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            );
+        }
+    }
+
+    #[test]
+    fn offline_macro_quantum_upload_matches_exact_materials_and_repeated_hash() {
+        for resource_mode in ["infinite", "finite"] {
+            for prefilled in [0, 250] {
+                let mut initial = with_quantum_upload_station(
+                    as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+                    "iron_ingot",
+                    "smelter",
+                );
+                initial.base_value_mut()["settings"]["resourceMode"] = json!(resource_mode);
+                let mut tower = initial.parse_entity(4).unwrap();
+                tower["outputs"]["iron_ingot"] = json!(prefilled);
+                initial.replace_entity_raw(4, serde_json::to_string(&tower).unwrap().into());
+                initial.rebuild_indexes().unwrap();
+                let revision = initial.revision;
+                let warmup = initial
+                    .advance_exact(&exact_request(revision, 30.0, 30.0))
+                    .unwrap();
+                assert!(warmup.supported, "{:?}", warmup.reason);
+
+                let mut exact = initial.clone();
+                for _ in 0..60 {
+                    let revision = exact.revision;
+                    let result = exact
+                        .advance_exact(&exact_request(revision, 10.0, 10.0))
+                        .unwrap();
+                    assert!(result.supported, "{:?}", result.reason);
+                }
+                let mut long = initial.clone();
+                let revision = long.revision;
+                let result =
+                    advance_macro_v10(&mut long, &offline_macro_request(revision, 600.0)).unwrap();
+                assert!(result.supported, "{:?}", result.reason);
+                assert!(
+                    !result
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("ordinary-flow tail froze")),
+                    "{:?}",
+                    result.reason
+                );
+                let exact_materials = capture_settlement_snapshot(&exact).unwrap();
+                let long_materials = capture_settlement_snapshot(&long).unwrap();
+                assert_eq!(
+                    long_materials.produced, exact_materials.produced,
+                    "{resource_mode} prefill={prefilled}"
+                );
+                assert_eq!(
+                    long_materials.owned, exact_materials.owned,
+                    "{resource_mode} prefill={prefilled}"
+                );
+                assert_eq!(long_materials.consumed, exact_materials.consumed);
+                assert_eq!(long_materials.granted, exact_materials.granted);
+                assert_eq!(long_materials.finite_veins, exact_materials.finite_veins);
+
+                // OfflineMacroV1 is deliberately one-shot: each call owns a
+                // fresh exact prefix. Repeat the same call for deterministic
+                // state identity; sessioned macro split identity is separate.
+                let mut repeated = initial;
+                let revision = repeated.revision;
+                assert!(
+                    advance_macro_v10(&mut repeated, &offline_macro_request(revision, 600.0))
+                        .unwrap()
+                        .supported
+                );
+                assert_eq!(
+                    repeated.summary().unwrap().canonical_sha256,
+                    long.summary().unwrap().canonical_sha256,
+                    "{resource_mode} prefill={prefilled}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quantum_upload_recognition_preserves_unknown_producer_and_mixed_route_rejections() {
+        let state = with_quantum_upload_station(
+            productive_closed_recipe_macro_fixture(1.0),
+            "iron_ingot",
+            "smelter",
+        );
+        let tower = state.parse_entity(4).unwrap();
+        assert!(is_ordinary_quantum_upload_endpoint(&state, &tower));
+        for (field, value) in [
+            ("kind", json!("machine")),
+            ("buildingId", json!("storage_mk1")),
+            ("quantumMode", json!("legacy")),
+            ("stationTier", json!(1)),
+            ("recipeId", json!("iron_ingot")),
+            (
+                "stationRoutes",
+                json!([{ "itemId": "iron_ingot", "amount": 100 }]),
+            ),
+            ("stationDrones", json!(1)),
+            ("stationVessels", json!(1)),
+            ("stationModeTransition", json!({ "target": "quantum" })),
+            ("outputs", json!({ "iron_ingot": 0, "magnet": 0 })),
+        ] {
+            let mut changed = state.clone();
+            let mut entity = tower.clone();
+            entity[field] = value;
+            assert!(
+                !is_ordinary_quantum_upload_endpoint(&changed, &entity),
+                "{field}"
+            );
+            changed.replace_entity_raw(4, serde_json::to_string(&entity).unwrap().into());
+            changed.rebuild_indexes().unwrap();
+            let hash = changed.summary().unwrap().canonical_sha256;
+            assert!(
+                active_ordinary_recipe_ids(&changed, false, false, false, false, false).is_err(),
+                "{field}"
+            );
+            assert_eq!(changed.summary().unwrap().canonical_sha256, hash);
+        }
+        for (field, mode) in [("remoteMode", "demand"), ("localMode", "supply")] {
+            let mut mixed = tower.clone();
+            mixed["stationSlots"][0][field] = json!(mode);
+            assert!(
+                !is_ordinary_quantum_upload_endpoint(&state, &mixed),
+                "{field}"
+            );
+        }
+        let ore_state = with_quantum_upload_station(
+            productive_quantum_macro_fixture(1.0, "infinite"),
+            "iron_ore",
+            "vein",
+        );
+        assert!(
+            exclusive_vein_sources(&ore_state)
+                .unwrap()
+                .contains("iron_ore")
+        );
+        let mut alternate = ore_state;
+        let mut entity = alternate.parse_entity(3).unwrap();
+        entity["kind"] = json!("machine");
+        alternate.replace_entity_raw(3, serde_json::to_string(&entity).unwrap().into());
+        alternate.rebuild_indexes().unwrap();
+        assert!(exclusive_vein_sources(&alternate).is_err());
+    }
+
+    #[test]
+    fn offline_macro_quantum_upload_does_not_replay_prefilled_material_without_live_sources() {
+        let mut initial = with_quantum_upload_station(
+            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+            "iron_ingot",
+            "smelter",
+        );
+        for index in [2, 3, 4] {
+            let mut entity = initial.parse_entity(index).unwrap();
+            if index == 2 {
+                entity["minerCount"] = json!(0);
+            }
+            if index == 3 {
+                entity["inputs"]["iron_ore"] = json!(10000);
+            }
+            if index == 4 {
+                entity["outputs"]["iron_ingot"] = json!(10000);
+            }
+            initial.replace_entity_raw(index, serde_json::to_string(&entity).unwrap().into());
+        }
+        initial.rebuild_indexes().unwrap();
+        let mut prefix = initial.clone();
+        let revision = prefix.revision;
+        assert!(
+            advance_macro_v10(&mut prefix, &offline_macro_request(revision, 30.0))
+                .unwrap()
+                .supported
+        );
+        let mut long = initial;
+        let revision = long.revision;
+        let result = advance_macro_v10(&mut long, &offline_macro_request(revision, 600.0)).unwrap();
+        assert!(result.supported);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("froze")),
+            "{:?}",
+            result.reason
+        );
+        let prefix_materials = capture_settlement_snapshot(&prefix).unwrap();
+        let long_materials = capture_settlement_snapshot(&long).unwrap();
+        assert_eq!(long_materials.owned, prefix_materials.owned);
+        assert_eq!(long_materials.produced, prefix_materials.produced);
+        assert_eq!(
+            long.materialize().unwrap()["entities"],
+            prefix.materialize().unwrap()["entities"]
+        );
+    }
+
+    #[test]
+    fn offline_macro_quantum_upload_preserves_capacity_and_finite_reserve_horizons() {
+        for bounded_inventory in [true, false] {
+            let mut initial = with_quantum_upload_station(
+                as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+                "iron_ingot",
+                "smelter",
+            );
+            let revision = initial.revision;
+            assert!(
+                initial
+                    .advance_exact(&exact_request(revision, 30.0, 30.0))
+                    .unwrap()
+                    .supported
+            );
+            if bounded_inventory {
+                initial.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"] =
+                    json!("9967");
+                initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"] =
+                    json!("10000");
+            } else {
+                initial.base_value_mut()["settings"]["resourceMode"] = json!("finite");
+                let mut vein = initial.parse_entity(2).unwrap();
+                vein["resourceRemaining"] = json!(120);
+                vein["resourceDepletionRemainder"] = json!(0);
+                initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+                initial.rebuild_indexes().unwrap();
+            }
+            let before = capture_settlement_snapshot(&initial).unwrap();
+            let mut prefix = initial.clone();
+            let revision = prefix.revision;
+            assert!(
+                advance_macro_v10(&mut prefix, &offline_macro_request(revision, 30.0))
+                    .unwrap()
+                    .supported
+            );
+            let prefix_snapshot = capture_settlement_snapshot(&prefix).unwrap();
+            let mut long = initial.clone();
+            let revision = long.revision;
+            let result =
+                advance_macro_v10(&mut long, &offline_macro_request(revision, 600.0)).unwrap();
+            assert!(result.supported, "{:?}", result.reason);
+            assert!(
+                result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("horizon")),
+                "{:?}",
+                result.reason
+            );
+            let long_snapshot = capture_settlement_snapshot(&long).unwrap();
+            if bounded_inventory {
+                assert_eq!(
+                    long.base_value()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"],
+                    long.base_value()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"]
+                );
+                assert_eq!(
+                    long_snapshot.produced["iron_ingot"] - prefix_snapshot.produced["iron_ingot"],
+                    3
+                );
+            } else {
+                assert_eq!(
+                    long_snapshot.produced["iron_ore"] - before.produced["iron_ore"],
+                    120
+                );
+                assert_eq!(
+                    number_at(Some(&long.parse_entity(2).unwrap()), &["resourceRemaining"]),
+                    0.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn macro_v10_quantum_upload_is_segment_invariant_with_capacity_and_finite_bounds() {
+        for bound in ["none", "capacity", "finite"] {
+            let mut initial = with_quantum_upload_station(
+                productive_closed_recipe_macro_fixture(15.0),
+                "iron_ingot",
+                "smelter",
+            );
+            let revision = initial.revision;
+            let warmup = initial
+                .advance_exact(&exact_request(revision, 30.0, 2.0))
+                .unwrap();
+            assert!(warmup.supported, "{:?}", warmup.reason);
+            if bound == "capacity" {
+                initial.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"] =
+                    json!("9967");
+                initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"] =
+                    json!("10000");
+            } else if bound == "finite" {
+                initial.base_value_mut()["settings"]["resourceMode"] = json!("finite");
+                let mut vein = initial.parse_entity(2).unwrap();
+                vein["resourceRemaining"] = json!(120);
+                vein["resourceDepletionRemainder"] = json!(0);
+                initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+                initial.rebuild_indexes().unwrap();
+            }
+            let mut long = initial.clone();
+            let revision = long.revision;
+            let result =
+                advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0))
+                    .unwrap();
+            assert!(result.supported, "{bound}: {:?}", result.reason);
+            assert!(
+                !result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("ordinary-flow tail froze")),
+                "{bound}: {:?}",
+                result.reason
+            );
+            let mut segmented = initial;
+            for seconds in [10.0, 20.0, 190.0, 190.0, 190.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+                )
+                .unwrap();
+                assert!(result.supported, "{bound}: {:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "{bound}"
+            );
+        }
+    }
+
+    #[test]
+    fn quantum_upload_does_not_mask_recipe_cycles_or_alternate_producers() {
+        let state = with_quantum_upload_station(
+            productive_closed_recipe_dag_macro_fixture(15.0),
+            "iron_gear",
+            "gear-smelter",
+        );
+        let request = pure_idle_macro_request(state.revision, 600.0, 40.0);
+        let snapshots = exact_three_window_probe(&state, &request).unwrap();
+        let flow = capture_ordinary_window_flow(
+            &snapshots[0],
+            &snapshots[1],
+            false,
+            &MaterialTotals::new(),
+        )
+        .unwrap();
+        for cycle in [true, false] {
+            let mut changed = state.clone();
+            let index = if cycle { 4 } else { 3 };
+            let mut entity = changed.parse_entity(index).unwrap();
+            if cycle {
+                Arc::make_mut(&mut changed.catalog)
+                    .recipes
+                    .get_mut("iron_ingot")
+                    .unwrap()
+                    .inputs = vec![ItemAmount {
+                    item_id: "magnet".to_owned(),
+                    amount: 1.0,
+                }];
+                entity["inputs"] = json!({ "magnet": 1000 });
+            } else {
+                Arc::make_mut(&mut changed.catalog)
+                    .recipes
+                    .get_mut("magnet")
+                    .unwrap()
+                    .outputs = vec![ItemAmount {
+                    item_id: "iron_gear".to_owned(),
+                    amount: 1.0,
+                }];
+                entity["outputs"] = json!({ "iron_gear": 0 });
+            }
+            changed.replace_entity_raw(index, serde_json::to_string(&entity).unwrap().into());
+            changed.rebuild_indexes().unwrap();
+            let hash = changed.summary().unwrap().canonical_sha256;
+            let sources = exclusive_vein_sources(&changed).unwrap();
+            let reason = build_closed_recipe_certificate(
+                &changed,
+                &sources,
+                &flow,
+                Vec::new(),
+                OrdinaryTerminalCertificates::default(),
+            )
+            .unwrap_err();
+            assert!(
+                reason.contains(if cycle {
+                    "dependency cycle"
+                } else {
+                    "alternate active producers"
+                }),
+                "{reason}"
+            );
+            assert_eq!(changed.summary().unwrap().canonical_sha256, hash);
+        }
     }
 
     fn rebuild_fixture_with_terminal(

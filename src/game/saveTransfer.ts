@@ -1,4 +1,4 @@
-import { computeSaveStateChecksumFromJson } from "./saveEnvelopeIntegrity";
+import { measureSaveStateJson } from "./saveEnvelopeIntegrity";
 import type { SaveMode } from "./types";
 import { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
 export { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
@@ -68,7 +68,7 @@ export function computeSavePayloadChecksum(bytes: ArrayBuffer | ArrayBufferView)
 export function serializeSaveEnvelopeToTransfer(state: unknown, options: SaveTransferOptions): SerializedSaveTransfer {
   const stateJson = JSON.stringify(state);
   if (typeof stateJson !== "string") throw new Error("存档状态无法序列化");
-  const stateChecksum = computeSaveStateChecksumFromJson(options.formatVersion, stateJson);
+  const { stateChecksum, byteLength: stateByteLength } = measureSaveStateJson(options.formatVersion, stateJson);
   const prefix = [
     `{"formatVersion":${JSON.stringify(options.formatVersion)}`,
     `,"kind":${JSON.stringify(options.kind)}`,
@@ -79,7 +79,7 @@ export function serializeSaveEnvelopeToTransfer(state: unknown, options: SaveTra
     ',"state":',
   ].join("");
   const suffix = `,"checksum":${JSON.stringify(stateChecksum)}}`;
-  const byteLength = utf8Length(prefix) + utf8Length(stateJson) + utf8Length(suffix);
+  const byteLength = utf8Length(prefix) + stateByteLength + utf8Length(suffix);
   const bytes = new ArrayBuffer(byteLength);
   const view = new Uint8Array(bytes);
   const encoder = new TextEncoder();

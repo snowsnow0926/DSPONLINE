@@ -10,6 +10,55 @@ import {
 import { inspectSave, parseTrustedWorkerEnvelope, prepareSaveStateForBackground } from "./storage";
 
 describe("transferable save serialization", () => {
+  it("preserves exact envelope bytes for empty, Unicode and escaped states and headers", () => {
+    const states = [
+      null, false, 0, "", {}, [],
+      { ascii: "iron_ore", unicode: "磁石🚀", twoByte: "\u0080\u07ff", threeByte: "\u0800\uffff" },
+      { control: "\u0000\u001f\n\r\t\"\\", lone: "\ud800x\udfff", pair: "\udbff\udfff" },
+      { 12: "numeric keys", 2: "before 12", nested: [{ empty: {} }, [], null], absent: undefined },
+    ];
+    for (const state of states) {
+      for (const reason of [undefined, "", "自动保存/🚀\ud800\n"]) {
+        const options = { formatVersion: 2, kind: "snapshot" as const, reason, savedAt: 1800000000000, mode: "normal" as const, slot: 2 as const };
+        const checksum = computeSaveStateChecksum(options.formatVersion, state);
+        const raw = JSON.stringify({
+          formatVersion: options.formatVersion,
+          kind: options.kind,
+          ...(reason ? { reason } : {}),
+          savedAt: options.savedAt,
+          mode: options.mode,
+          slot: options.slot,
+          state,
+          checksum,
+        });
+        const expectedBytes = new TextEncoder().encode(raw);
+        const actual = serializeSaveEnvelopeToTransfer(state, options);
+        expect(new Uint8Array(actual.bytes)).toEqual(expectedBytes);
+        expect(actual).toMatchObject({
+          stateChecksum: checksum,
+          byteLength: expectedBytes.byteLength,
+          payloadChecksum: computeSavePayloadChecksum(expectedBytes),
+          integrity: "valid",
+        });
+        expect(decodeVerifiedSaveTransfer(actual.bytes, actual)).toBe(raw);
+      }
+    }
+  });
+
+  it("serializes state once and retains rejection of unserializable state", () => {
+    const options = { formatVersion: 2, kind: "primary" as const, savedAt: 1, mode: "normal" as const, slot: "main" as const };
+    let calls = 0;
+    const transfer = serializeSaveEnvelopeToTransfer({ toJSON: () => ({ call: ++calls, label: "一次🚀" }) }, options);
+    expect(calls).toBe(1);
+    expect(JSON.parse(decodeVerifiedSaveTransfer(transfer.bytes, transfer)).state).toEqual({ call: 1, label: "一次🚀" });
+    expect(() => serializeSaveEnvelopeToTransfer(undefined, options)).toThrow("存档状态无法序列化");
+    expect(() => serializeSaveEnvelopeToTransfer(() => 1, options)).toThrow("存档状态无法序列化");
+    expect(() => serializeSaveEnvelopeToTransfer(1n, options)).toThrow(TypeError);
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    expect(() => serializeSaveEnvelopeToTransfer(circular, options)).toThrow(TypeError);
+  });
+
   it("serializes one authoritative state JSON and preserves the v2 checksum", () => {
     const state = prepareSaveStateForBackground(createInitialState());
     state.blueprints[0] = {

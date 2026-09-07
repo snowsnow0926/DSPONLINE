@@ -64,7 +64,7 @@ describe("release notes history", () => {
     expect(english.items.find((item) => item.id === "v127-release-scope")?.description).toContain("remains future work");
     expect(chinese.summary).toContain("Windows 下载版本维持现状");
     expect(english.summary).toContain("The Windows download stays at its current version");
-    expect(chinese.items.find((item) => item.id === "v127-idle-recovery")?.description).toContain("同一页面内重试会复用本次结果");
+    expect(chinese.items.find((item) => item.id === "v127-idle-recovery")?.description).toContain("同一页面内重试保存复用已完成结果");
     expect(english.items.find((item) => item.id === "v127-idle-recovery")?.description).toContain("never uploaded automatically");
     expect(JSON.stringify([chinese, english])).not.toMatch(/\d+(?:\.\d+)?\s*%/);
     expect(getReleaseNotes126("en")).toMatchObject({ id: "2026-08-31-v1.2.6", version: "1.2.6" });

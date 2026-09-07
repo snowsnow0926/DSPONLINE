@@ -411,6 +411,8 @@ function isCompleteDesktopReleaseOutput(directoryPath, channel, {
   fileSystem = fs,
   pathModule = path,
   productLabel = "Windows 桌面版",
+  expected,
+  identity,
 } = {}) {
   if (!["stable", "beta", "nightly"].includes(channel)) {
     throw new Error("Windows 桌面版更新通道无效");
@@ -424,14 +426,17 @@ function isCompleteDesktopReleaseOutput(directoryPath, channel, {
     productLabel,
   );
   if (!latest) return false;
-  return Boolean(readDirectRelativeFile(
+  const feed = readDirectRelativeFile(
     fileSystem,
     pathModule,
     directoryPath,
     ["update-feed", "desktop", channel, "release.json"],
     "update feed",
     productLabel,
-  ));
+  );
+  if (!feed) return false;
+  require("./desktop-artifact-evidence.cjs").verifyDesktopBuildEvidence(directoryPath, { expected, identity, release: true });
+  return true;
 }
 
 function selectCompleteDesktopReleaseOutput({
@@ -440,6 +445,7 @@ function selectCompleteDesktopReleaseOutput({
   channel,
   fileSystem = fs,
   pathModule = path,
+  expected,
 } = {}) {
   if (!["stable", "beta", "nightly"].includes(channel)) {
     throw new Error("Windows 桌面版更新通道无效");
@@ -452,7 +458,7 @@ function selectCompleteDesktopReleaseOutput({
     { absolute: allowed.fallback, relative: allowed.relativeFallback },
   ]) {
     if (!readDirectDirectory(fileSystem, candidate.absolute, "release output", productLabel)) continue;
-    if (isCompleteDesktopReleaseOutput(candidate.absolute, channel, { fileSystem, pathModule, productLabel })) {
+    if (isCompleteDesktopReleaseOutput(candidate.absolute, channel, { fileSystem, pathModule, productLabel, expected, identity })) {
       complete.push(candidate);
     }
   }

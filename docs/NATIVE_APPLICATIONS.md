@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> **1.2.7 第三轮本地验证候选（2026-09-07）**：目录打包生成内部 `desktop-build-evidence.json`，绑定源码 SHA、Build ID、edition/channel 及 app.asar、Host 和目录文件摘要；正式收集入口进一步验证安装器、YAML 和 feed 引用。`npm run test:desktop-package` 先验证 clean source 对应的离线性能包，缺包/错包退出 2，并为每次运行建立独立证据目录。该内部清单不是签名或发布许可；实际桌面旅程仍在返修验收，见 [第三轮开发记录](./reviews/1.2.7-round3-development-2026-09-07.md)。
+
 > **Campaign / Galaxy 原生玩家壳边界（2026-09-01，开发候选）**：当前 Windows Host 新增 `native-core-campaign-workspace-projection-v1` 与 `native-core-galaxy-account-workspace-projection-v1` capability。preload 只接受 exact-key `{sessionId,runId,expectedRevision,expectedRegistryFingerprint}`；main 只把请求路由到当前 normal-main 玩家权威 broker，不允许回落到 renderer shadow 会话。返回分别受 256 KiB 与 64 KiB 硬预算，renderer boundary 拒绝截断、额外键、重复 ID、计数漂移和 lineage 漂移。
 >
 > 原生 Campaign 页只读固定目录标签与 Rust 进度，不接收 GameState；导航只发 UI locator。原生 Galaxy 页只接收 Rust 游戏摘要和单独的本地账户状态，可创建/切换身份、编辑资料并登录/退出云账号；恢复、导入、覆盖当前主档在 active authority 下显式不可用且没有写入口。Campaign 投影目前打开时仍做 `O(E+B)` Rust 扫描，预算收紧不等于查询计算免费。该切片不生成安装包、不改变签名/更新通道，也不放开 `authorityEligible`。

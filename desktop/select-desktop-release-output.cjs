@@ -10,6 +10,7 @@ function selectDesktopReleaseOutputFromEnvironment({
   repositoryRoot = path.resolve(__dirname, ".."),
   environment = process.env,
   packageMetadata = require("../package.json"),
+  expected,
 } = {}) {
   const identity = resolveDesktopEditionIdentity(
     packageMetadata,
@@ -20,6 +21,7 @@ function selectDesktopReleaseOutputFromEnvironment({
     repositoryRoot,
     identity,
     channel,
+    expected: expected ?? require("./desktop-artifact-evidence.cjs").expectedDesktopBuild(repositoryRoot, identity, channel),
   });
 }
 

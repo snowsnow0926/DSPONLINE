@@ -153,10 +153,9 @@ export async function launch(profileRoot: string) {
 
 async function dismissIntro(page: Page) {
   await expect(page.locator(".start-menu").or(page.locator(".game-shell"))).toBeVisible({ timeout: 30000 });
-  const notes = page.getByRole("button", { name: "我知道了" });
-  if (await notes.isVisible().catch(() => false)) await notes.click();
-  const onboarding = page.getByRole("button", { name: /^(?:关闭|跳过)启动引导$/ });
-  if (await onboarding.isVisible().catch(() => false)) await onboarding.click();
+  // Trigger the registered handlers without another click on their own
+  // disappearing buttons, which would wait forever after interception.
+  await page.locator("body").click({ trial: true });
 }
 export async function enterNew(page: Page) {
   await dismissIntro(page);

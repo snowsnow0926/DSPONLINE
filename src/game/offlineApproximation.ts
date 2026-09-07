@@ -1029,7 +1029,7 @@ export function runOfflineApproximation(state: GameState, seconds: number, wallS
   const second = runExact(structuredClone(first), windowSeconds, wallWindowSeconds);
   const firstProjection = captureProjection(first);
   const secondProjection = captureProjection(second);
-  const firstRates = diffProjection(captureProjection(structuredClone(state)), firstProjection, windowSeconds);
+  const firstRates = diffProjection(captureProjection(state), firstProjection, windowSeconds);
   const secondRates = diffProjection(firstProjection, secondProjection, windowSeconds);
   if (!ratesStable(firstRates, secondRates)) return { status: "fallback", report: exactReport(windowSeconds, "连续精确校准窗口速率变化超过 5%") };
   const boundary = cacheIsAwayFromBoundary(second);
@@ -5015,10 +5015,14 @@ function clampDecimalMap(
   return { ok: true, corrections };
 }
 
+const FAST_DECIMAL_VALIDATION_CONTAINERS: ReadonlySet<string> = new Set(["warpers", "totalDestroyed", "remainingCargo"]);
+
+// Validation never retains a path: only an error serializes it immediately.
+// Reuse one depth-first path instead of allocating an array at every field.
 function findInvalidFastNumber(value: unknown, path: AffinePath = [], seen = new Set<object>()): string | null {
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return `${JSON.stringify(path)}=${String(value)} 不是有限数值`;
-    if (path.at(-1) === "cargo" && pathHasString(path, new Set(["stationRoutes"])) &&
+    if (path.at(-1) === "cargo" && path.includes("stationRoutes") &&
       (!Number.isSafeInteger(value) || value < 0)) {
       return `${JSON.stringify(path)}=${String(value)} 不是合法非负航线货物`;
     }
@@ -5027,7 +5031,7 @@ function findInvalidFastNumber(value: unknown, path: AffinePath = [], seen = new
     }
     return null;
   }
-  if (typeof value === "string" && (isDecimalAffinePath(path) || pathHasString(path, new Set(["warpers", "totalDestroyed", "remainingCargo"])))) {
+  if (typeof value === "string" && (isDecimalAffinePath(path) || pathHasString(path, FAST_DECIMAL_VALIDATION_CONTAINERS))) {
     return /^\d+$/.test(value) ? null : `${JSON.stringify(path)} 不是合法非负十进制整数`;
   }
   if (!value || typeof value !== "object") return null;
@@ -5035,13 +5039,19 @@ function findInvalidFastNumber(value: unknown, path: AffinePath = [], seen = new
   seen.add(value);
   if (Array.isArray(value)) {
     for (let index = 0; index < value.length; index += 1) {
-      const failure = findInvalidFastNumber(value[index], [...path, index], seen);
+      path.push(index);
+      let failure: string | null;
+      try { failure = findInvalidFastNumber(value[index], path, seen); }
+      finally { path.pop(); }
       if (failure) return failure;
     }
     return null;
   }
   for (const [key, child] of Object.entries(value)) {
-    const failure = findInvalidFastNumber(child, [...path, key], seen);
+    path.push(key);
+    let failure: string | null;
+    try { failure = findInvalidFastNumber(child, path, seen); }
+    finally { path.pop(); }
     if (failure) return failure;
   }
   return null;
@@ -6481,10 +6491,14 @@ export function runConservativeOfflineSettlement(
     };
   }
   const combinedCheckpoint = capturePureIdleCombinedConservationCheckpoint(source);
-  let candidate = calibratedState ?? structuredClone(source);
+  // Keep only the candidate we will actually validate. The exact-prefix path
+  // creates its isolated copy below; an eager copy here would be discarded.
+  let candidate: GameState;
   let effectiveCalibrationSeconds = Math.max(0, calibrationSeconds);
   let prefixReason: string | undefined;
-  if (!calibratedState && seconds > EPSILON) {
+  if (calibratedState) {
+    candidate = calibratedState;
+  } else if (seconds > EPSILON) {
     const prefixSeconds = Math.min(FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS, Math.max(0, seconds));
     const prefixWallSeconds = wallSeconds * prefixSeconds / Math.max(EPSILON, seconds);
     try {
@@ -6504,6 +6518,8 @@ export function runConservativeOfflineSettlement(
       candidate = structuredClone(source);
       effectiveCalibrationSeconds = 0;
     }
+  } else {
+    candidate = structuredClone(source);
   }
   const remainingSeconds = Math.max(0, seconds - effectiveCalibrationSeconds);
   let researchInvested = 0n;
@@ -7266,7 +7282,7 @@ export async function runOfflineApproximationAsync(
   options.onProgress?.(windowSeconds * 2, seconds);
   const firstProjection = captureProjection(first);
   const secondProjection = captureProjection(second);
-  const firstRates = diffProjection(captureProjection(structuredClone(state)), firstProjection, windowSeconds);
+  const firstRates = diffProjection(captureProjection(state), firstProjection, windowSeconds);
   const secondRates = diffProjection(firstProjection, secondProjection, windowSeconds);
   if (!ratesStable(firstRates, secondRates)) {
     return { status: "fallback", report: exactReport(windowSeconds, "连续精确校准窗口速率变化超过 5%") };

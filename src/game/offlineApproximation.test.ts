@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { advanceSimulation, advanceSimulationBudget, createInitialState, createPlayerInitialState } from "./engine";
 import { hashGameState } from "./benchmark";
 import {
@@ -407,6 +407,47 @@ describe("offline macro contract experiment", () => {
     expect(result.report.calibrationWindowSeconds).toBe(30);
     expect(result.report.approximatedSeconds).toBe(0);
     expect(source.elapsedSeconds).toBe(0);
+  });
+
+  it.each([0, 600])("keeps a single isolated source copy for a %s-second conservative result", (seconds) => {
+    const source = stableEmptyState();
+    source.tray.iron_ore = 25;
+    const before = JSON.stringify(source);
+    const clone = vi.spyOn(globalThis, "structuredClone");
+    try {
+      const result = runConservativeOfflineSettlement(source, seconds);
+      expect(result.status).toBe("conservative");
+      expect(clone.mock.calls.filter(([input]) => input === source)).toHaveLength(1);
+      expect(JSON.stringify(source)).toBe(before);
+      if (result.status === "conservative") {
+        expect(result.state).not.toBe(source);
+        expect(result.state.elapsedSeconds).toBe(source.elapsedSeconds + seconds);
+        expect(result.state.tray.iron_ore).toBe(25);
+        expect(result.report.calibrationWindowSeconds).toBe(seconds === 0 ? 0 : FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS);
+        result.state.tray.iron_ore = 0;
+        expect(source.tray.iron_ore).toBe(25);
+      }
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
+  it.each(["unsafe-item", "route-cargo", "decimal", "non-finite"] as const)("rejects %s without copying a candidate after visiting ordinary and derived fields", (fault) => {
+    const source = stableEmptyState();
+    // Visiting an allowed large derived float must not leak its path context
+    // into a later material, decimal or route validation branch.
+    source.timeWarp.requiredPowerKw = 1e20;
+    const extra = { derivedKw: 1e20, ordinary: "test", nested: { value: 1 } };
+    Object.assign(source, { validationProbe: extra });
+    if (fault === "unsafe-item") Object.assign(extra, { inventory: { iron_ore: Number.MAX_SAFE_INTEGER + 1 } });
+    if (fault === "route-cargo") Object.assign(extra, { stationRoutes: [{ cargo: -1 }] });
+    if (fault === "decimal") Object.assign(extra, { remainingCargo: "1.5" });
+    if (fault === "non-finite") Object.assign(extra, { nested: { value: Number.POSITIVE_INFINITY } });
+    const clone = vi.spyOn(globalThis, "structuredClone");
+    try {
+      expect(runConservativeOfflineSettlement(source, 0).status).toBe("invalid-source");
+      expect(clone).not.toHaveBeenCalled();
+    } finally { clone.mockRestore(); }
   });
 
   it("discards an invalid calibration candidate and keeps the valid source on a bounded conservative prefix", () => {

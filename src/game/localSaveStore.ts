@@ -2586,6 +2586,7 @@ export async function setLocalSavePayloadWithProof<Payload extends WorkerBinaryP
 }
 
 export function removeLocalSaveValue(key: string): void {
+  if (writerClosing) throw new LocalSaveReadOnlyError("正在安全退出，已停止新存档写入");
   if (!isSaveKey(key)) return;
   ensureSynchronousFallback();
   if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError(writerStatus.reason);
@@ -2616,7 +2617,7 @@ export function removeLocalSaveValue(key: string): void {
 
 export function writePrimarySaveEmergencyMirror(value: string): boolean {
   ensureSynchronousFallback();
-  if (backend !== "indexeddb" || writerStatus.role !== "primary") return false;
+  if (writerClosing || backend !== "indexeddb" || writerStatus.role !== "primary") return false;
   try {
     let mode: LocalSaveMode = "normal";
     try {
@@ -2705,7 +2706,7 @@ export async function closeLocalSaveWriter(signal: AbortSignal): Promise<void> {
     }
     const heads = (["normal", "speedrun"] as const).map((mode) => ({
       key: primaryKeyForMode(mode), revision: getPrimaryLocalSaveRevision(mode),
-      identity: getVerifiedPrimaryLocalSaveIdentity(mode),
+      identity: getVerifiedPrimaryLocalSaveIdentity(mode), known: knownSaveKeys.has(primaryKeyForMode(mode)),
     }));
     const transaction = database.transaction(RECORD_STORE, "readwrite");
     const done = transactionDone(transaction);
@@ -2721,8 +2722,11 @@ export async function closeLocalSaveWriter(signal: AbortSignal): Promise<void> {
       for (let index = 0; index < heads.length; index += 1) {
         const head = heads[index];
         const revision = parseLocalSaveRevision(revisions[index]?.value);
+        const matchesContent = head.known
+          ? Boolean(head.identity && !revision?.deleted && revision?.checksum === head.identity.stateChecksum)
+          : head.revision === 0 || Boolean(revision?.deleted && revision.checksum === null);
         if ((revision?.revision ?? 0) !== head.revision ||
-          (head.revision > 0 && (!head.identity || revision?.deleted || revision?.checksum !== head.identity.stateChecksum))) throw new Error("Durable primary changed during close");
+          (revision && revision.saveKey !== head.key) || !matchesContent) throw new Error("Durable primary changed during close");
       }
       const now = Date.now();
       putStoredValue(store, LOCAL_SAVE_WRITER_LEASE_KEY, JSON.stringify({ ...lease, heartbeatAt: now, expiresAt: now }), now);

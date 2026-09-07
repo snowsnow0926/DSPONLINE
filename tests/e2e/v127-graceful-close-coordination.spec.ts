@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-for (const scenario of ["release", "cancel", "new-owner", "new-revision"] as const) {
+for (const scenario of ["release", "deleted-mode", "cancel", "new-owner", "new-revision"] as const) {
   test(`graceful writer close: ${scenario}`, async ({ page }) => {
     await page.goto("/?menu=1&storageMigration=production");
     await expect(page.locator(".start-menu")).toBeVisible();
@@ -14,6 +14,13 @@ for (const scenario of ["release", "cancel", "new-owner", "new-revision"] as con
       if (!saved.success) throw new Error(saved.message);
       const leaseKey = coordination.LOCAL_SAVE_WRITER_LEASE_KEY;
       const key = "dsp-idle-network.save.v1";
+      if (scenario === "deleted-mode") {
+        const speedrunKey = `${key}.speedrun`;
+        store.setLocalSaveValue(speedrunKey, storage.serializeEnvelope({ ...state, mode: "speedrun" }));
+        await store.flushLocalSaveWrites();
+        store.removeLocalSaveValue(speedrunKey);
+        await store.flushLocalSaveWrites();
+      }
       const revisionKey = coordination.localSaveRevisionKey(key);
       const initial = { lease: await store.readPersistedLocalSaveValue(leaseKey), raw: await store.readPersistedLocalSaveValue(key), revision: await store.readPersistedLocalSaveValue(revisionKey) };
       if (scenario === "new-owner" || scenario === "new-revision") {
@@ -37,8 +44,9 @@ for (const scenario of ["release", "cancel", "new-owner", "new-revision"] as con
     }, scenario);
     expect(result.primaryUnchanged).toBe(true);
     expect(result.revisionUnchanged).toBe(true);
-    expect(result.ok).toBe(scenario === "release");
-    expect(result.leaseUnchanged).toBe(scenario !== "release");
+    const shouldRelease = scenario === "release" || scenario === "deleted-mode";
+    expect(result.ok).toBe(shouldRelease);
+    expect(result.leaseUnchanged).toBe(!shouldRelease);
     if (scenario === "release") { expect(result.expired).toBe(true); expect(result.newWriteRejected).toBe(true); }
   });
 }

@@ -62,7 +62,16 @@ export async function deployThroughUi(page: Page, title: string) {
   await page.getByTitle(title, { exact: true }).click();
   const canvas = page.locator(".react-flow__pane");
   const beforeIds = await page.locator(".react-flow__node").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-id")));
-  const chosen = await canvas.evaluate((pane) => {
+  const settleViewport = async () => {
+    let previous = ""; let unchangedSince = Date.now();
+    await expect.poll(async () => {
+      const transform = await page.locator(".react-flow__viewport").getAttribute("style");
+      if (transform !== previous) { previous = transform ?? ""; unchangedSince = Date.now(); }
+      return Date.now() - unchangedSince;
+    }, { intervals: [100], timeout: 5000 }).toBeGreaterThanOrEqual(300);
+  };
+  await settleViewport();
+  const findRoom = () => canvas.evaluate((pane) => {
     const bounds = pane.getBoundingClientRect();
     const occupied = [...document.querySelectorAll(".react-flow__node")].map((node) => node.getBoundingClientRect());
     let best: { x: number; y: number; clearance: number } | null = null;
@@ -83,12 +92,20 @@ export async function deployThroughUi(page: Page, title: string) {
     }
     return best;
   });
+  let chosen = await findRoom();
+  let zoomOutClicks = 0;
+  while (!chosen && zoomOutClicks < 4) {
+    await page.locator(".react-flow__controls-zoomout").click();
+    zoomOutClicks++;
+    await settleViewport();
+    chosen = await findRoom();
+  }
   expect(chosen, "visible room for a building clear of nodes and controls").not.toBeNull();
   await page.mouse.click(chosen!.x, chosen!.y);
   await expect.poll(() => page.locator(".react-flow__node").evaluateAll((nodes, previous) =>
     nodes.filter((node) => !previous.includes(node.getAttribute("data-id"))).length, beforeIds)).toBe(1);
   await page.keyboard.press("Escape");
-  records.push({ event: "ui-deploy", title, position: chosen,
+  records.push({ event: "ui-deploy", title, position: chosen, zoomOutClicks,
     nodes: await page.locator(".react-flow__node").evaluateAll((nodes) => nodes.map((node) => ({
       id: node.getAttribute("data-id"), transform: (node as HTMLElement).style.transform,
     }))),

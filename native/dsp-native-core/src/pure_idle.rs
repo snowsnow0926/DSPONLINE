@@ -8872,8 +8872,7 @@ fn offline_ordinary_boundary_requires_exact(
 
 fn offline_boundary_exact_budget(seconds: f64, entity_count: usize, belt_count: usize) -> bool {
     seconds.is_finite()
-        && seconds >= 0.0
-        && seconds <= OFFLINE_BOUNDARY_EXACT_MAX_SECONDS
+        && (0.0..=OFFLINE_BOUNDARY_EXACT_MAX_SECONDS).contains(&seconds)
         && (seconds.ceil() as u128)
             .saturating_mul(entity_count.saturating_add(belt_count).max(1) as u128)
             <= OFFLINE_BOUNDARY_EXACT_MAX_WORK
@@ -9564,19 +9563,19 @@ fn advance_bounded_with_runtime(
                 });
             }
         }
-        if let Some(progress) = offline_export_progress {
-            if let Err(reason) = crate::simulation::advance_offline_no_export_progress(
+        if let Some(progress) = offline_export_progress
+            && let Err(reason) = crate::simulation::advance_offline_no_export_progress(
                 &mut candidate,
                 &progress,
                 tail_seconds,
                 request.simulation_seconds,
-            ) {
-                return unsupported(
-                    state,
-                    request,
-                    format!("offline-export-window-proof-rejected: {reason}"),
-                );
-            }
+            )
+        {
+            return unsupported(
+                state,
+                request,
+                format!("offline-export-window-proof-rejected: {reason}"),
+            );
         }
         if boundary_exact_seconds <= EPSILON {
             candidate.base_value_mut().insert(

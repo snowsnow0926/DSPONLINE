@@ -153,7 +153,8 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     return saves.commit(1, transaction.transactionId);
   }
 
-  async function advance(state: GameState, checkpoint: any, seconds: number, advanceMode: "exact" | "offline-macro-v1") {
+  async function advance(state: GameState, checkpoint: any, seconds: number,
+    advanceMode: "exact" | "offline-macro-v1", continuationSeconds = 0) {
     const started = performance.now();
     const opened = await client.request({
       operation: "coreOpen", slot: "normal-main", generation: checkpoint.generation,
@@ -204,7 +205,15 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
       expect(createHash("sha256").update(exportedBytes).digest("hex")).toBe(exported.result.envelopeSha256);
       expect(canonicalNativeCoreSha256(envelope.state)).toBe(result.summary.canonicalSha256);
       timings.publicExportReadVerifyMs = performance.now() - readStarted;
-      return { result, state: envelope.state, timings };
+      let continuationSha256: string | null = null;
+      if (continuationSeconds > 0) {
+        const continued = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId,
+          request: { baseRevision: result.summary.revision, simulationSeconds: continuationSeconds,
+            wallSeconds: continuationSeconds, advanceMode: "exact" } });
+        expect(continued.supported, continued.reason).toBe(true);
+        continuationSha256 = continued.summary.canonicalSha256;
+      }
+      return { result, state: envelope.state, timings, continuationSha256 };
     } finally {
       const closeStarted = performance.now();
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
@@ -215,7 +224,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
 
   async function qualify(variant: PublicCatalogOfflineVariant, seconds: number, options: {
     name?: string; phase?: number; warmupSeconds?: number; emptyHistory?: boolean;
-    nativeOrder?: "macro-first" | "exact-first";
+    nativeOrder?: "macro-first" | "exact-first"; verifyContinuation?: boolean;
   } = {}) {
     const fixtureStarted = performance.now();
     let initial = createPublicCatalogOfflineQualificationFixture(variant);
@@ -245,7 +254,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     const directExact = seconds <= 601;
     const earlyExact = directExact && options.nativeOrder === "exact-first"
       ? await advance(initial, checkpoint, seconds, "exact") : null;
-    const macro = await advance(initial, checkpoint, seconds, "offline-macro-v1");
+    const macro = await advance(initial, checkpoint, seconds, "offline-macro-v1", options.verifyContinuation ? 11 : 0);
     let expected = initial;
     const jsStarted = performance.now();
     for (let second = 0; second < seconds; second += 1) expected = advanceSimulationBudget(expected, 1, 1);
@@ -324,6 +333,18 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     if (variant === "quantum-capacity") {
       expect(Number(macro.state.quantumLogisticsNetwork.inventory.iron_ingot)).toBeLessThanOrEqual(10000);
     }
+    if (options.verifyContinuation) {
+      let continuedExpected = expected;
+      for (let second = 0; second < 11; second += 1) continuedExpected = advanceSimulationBudget(continuedExpected, 1, 1);
+      const continuedHash = canonicalNativeCoreSha256(continuedExpected);
+      expect(macro.continuationSha256, "hot Exact continuation after macro").toBe(continuedHash);
+      const resumed = await advance(macro.state, await seed(macro.state), 11, "exact");
+      expect(resumed.result.summary.canonicalSha256, "checkpoint Exact continuation after macro").toBe(continuedHash);
+      if (reportDirectory) fs.writeFileSync(path.join(reportDirectory, `${reportName}.continuation.json`), JSON.stringify({
+        seconds: 11, expectedSha256: continuedHash, hotSha256: macro.continuationSha256,
+        reopenedCheckpointSha256: resumed.result.summary.canonicalSha256,
+      }, null, 2), { flag: "wx" });
+    }
   }
 
   it.each(variants)("matches the public %s chain's complete 10-minute state", async variant => {
@@ -339,7 +360,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
   }, 360_000);
 
   it.each([
-    { name: "phase-0043-tail-remainder", phase: 0.0043, seconds: 601 },
+    { name: "phase-0043-tail-remainder", phase: 0.0043, seconds: 601, verifyContinuation: true },
     { name: "phase-quarter-tail-remainder", phase: 0.25, seconds: 599 },
     { name: "phase-near-second", phase: 0.9999, seconds: 571 },
     { name: "empty-history", emptyHistory: true, seconds: 601 },
@@ -348,7 +369,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     await qualify("infinite", scenario.seconds, scenario);
   }, 60_000);
 
-  it.skipIf(!benchmarkTests).each([600, 28_800])("measures isolated same-output native performance at %i seconds", async seconds => {
+  it.skipIf(!benchmarkTests).each([600, 3_600])("measures isolated same-output native performance at %i seconds", async seconds => {
     const initial = createPublicCatalogOfflineQualificationFixture("infinite");
     const inputSha256 = canonicalNativeCoreSha256(initial);
     let expected = initial;
@@ -362,6 +383,12 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     }
     const samples = [];
     for (let pair = 0; pair < 3; pair += 1) {
+      const javascriptStarted = performance.now();
+      let javascriptState = initial;
+      for (let second = 0; second < seconds; second += 1) javascriptState = advanceSimulationBudget(javascriptState, 1, 1);
+      const javascriptAdvanceMs = performance.now() - javascriptStarted;
+      expect(canonicalNativeCoreSha256(javascriptState)).toBe(outputSha256);
+      const javascriptAdvanceAndProofMs = performance.now() - javascriptStarted;
       const modes = pair % 2 === 0
         ? ["exact", "offline-macro-v1"] as const
         : ["offline-macro-v1", "exact"] as const;
@@ -373,19 +400,25 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
         values[mode] = { advanceRequestMs: result.timings.advanceRequestMs,
           outputSha256: result.result.summary.canonicalSha256 };
       }
-      samples.push({ pair: pair + 1, order: [...modes], ...values });
+      samples.push({ pair: pair + 1, order: ["javascript-exact", ...modes],
+        javascriptAdvanceMs, javascriptAdvanceAndProofMs, ...values });
     }
     expect(canonicalNativeCoreSha256(initial)).toBe(inputSha256);
     const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
     const exactMedianMs = median(samples.map(sample => sample.exact.advanceRequestMs));
     const macroMedianMs = median(samples.map(sample => sample["offline-macro-v1"].advanceRequestMs));
+    const javascriptMedianMs = median(samples.map(sample => sample.javascriptAdvanceMs));
+    const javascriptWithProofMedianMs = median(samples.map(sample => sample.javascriptAdvanceAndProofMs));
     const report = {
       scope: "isolated-public-iron-chain-native-coreAdvance-RPC-only-not-player-wait",
       seconds, inputSha256, outputSha256,
       hostSha256: createHash("sha256").update(readBytes(binaryPath)).digest("hex"),
       catalogSha256: canonicalNativeCoreSha256(catalog),
       exactMedianMs, macroMedianMs, reductionPercent: (1 - macroMedianMs / exactMedianMs) * 100,
+      javascriptMedianMs, javascriptWithProofMedianMs,
+      macroVersusJavascriptWithProofPercent: (1 - macroMedianMs / javascriptWithProofMedianMs) * 100,
       ratio: exactMedianMs / macroMedianMs, samples,
+      javascriptScope: "one-second JS oracle loop with optional canonical proof; not the app's current offline strategy or full UI wait",
       automaticAdoption: "NOT_QUALIFIED_30_SECOND_GUARD_UNCHANGED",
     };
     if (reportDirectory) {

@@ -124,6 +124,145 @@ fn checked_counter_advance(initial: i128, rate: i128, seconds: usize) -> Result<
         .ok_or_else(|| "offline flow cumulative counter exceeds the exact integer range".to_owned())
 }
 
+fn check_inactive_system_station_directory(state: &CoreState) -> Result<(), String> {
+    let stations = state
+        .base_value()
+        .get("systemSpaceStations")
+        .and_then(Value::as_object)
+        .ok_or("offline flow system station directory is malformed")?;
+    // system_space_station::settle_construction requires a building hub and
+    // launcher; settle_hubs requires operational hubs with elevator entities.
+    // Neither can activate these empty not-started records. The entity guard
+    // below also excludes launchers, elevators and transitions. Keep the full
+    // directory inside the physical signature, including presentation metadata.
+    const FIELDS: [&str; 13] = [
+        "systemId",
+        "status",
+        "costRevision",
+        "costMultiplierBasisPoints",
+        "phaseIndex",
+        "delivered",
+        "constructionBuffer",
+        "inventory",
+        "itemPolicies",
+        "modules",
+        "routingCursors",
+        "viewport",
+        "decorations",
+    ];
+    for (system_id, value) in stations {
+        let station = value
+            .as_object()
+            .ok_or("offline flow system station record is malformed")?;
+        if station.len() != FIELDS.len()
+            || station.keys().any(|key| !FIELDS.contains(&key.as_str()))
+            || station.get("systemId").and_then(Value::as_str) != Some(system_id.as_str())
+            || !state
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.system_id == *system_id)
+            || station.get("status").and_then(Value::as_str) != Some("not-started")
+            || station.get("costRevision").and_then(Value::as_f64) != Some(0.0)
+            || station
+                .get("costMultiplierBasisPoints")
+                .and_then(Value::as_f64)
+                != Some(10_000.0)
+            || station.get("phaseIndex").and_then(Value::as_f64) != Some(0.0)
+            || [
+                "delivered",
+                "constructionBuffer",
+                "inventory",
+                "itemPolicies",
+                "routingCursors",
+            ]
+            .into_iter()
+            .any(|field| {
+                station
+                    .get(field)
+                    .and_then(Value::as_object)
+                    .is_none_or(|map| !map.is_empty())
+            })
+            || station
+                .get("decorations")
+                .and_then(Value::as_array)
+                .is_none_or(|rows| !rows.is_empty())
+        {
+            return Err(
+                "offline flow system station is active or outside the empty default schema"
+                    .to_owned(),
+            );
+        }
+        let modules = station
+            .get("modules")
+            .and_then(Value::as_object)
+            .ok_or("offline flow system station modules are malformed")?;
+        if modules.len() != 3
+            || ["backbone", "energy", "interstellar"]
+                .into_iter()
+                .any(|field| modules.get(field).and_then(Value::as_f64) != Some(0.0))
+        {
+            return Err("offline flow system station has active or malformed modules".to_owned());
+        }
+        let viewport = station
+            .get("viewport")
+            .and_then(Value::as_object)
+            .ok_or("offline flow system station viewport is malformed")?;
+        if viewport.len() != 3
+            || ["x", "y", "zoom"].into_iter().any(|field| {
+                viewport
+                    .get(field)
+                    .and_then(Value::as_f64)
+                    .is_none_or(|value| !value.is_finite())
+            })
+            || viewport
+                .get("zoom")
+                .and_then(Value::as_f64)
+                .is_none_or(|zoom| zoom <= 0.0)
+        {
+            return Err("offline flow system station viewport is malformed".to_owned());
+        }
+    }
+    // Fleet returns are an independent future clock writer even without an
+    // operational hub. Empty returns alone are insufficient: keep all fleet,
+    // warper and routing state at its explicit inactive value as well.
+    let network = state
+        .base_value()
+        .get("galacticHubNetwork")
+        .and_then(Value::as_object)
+        .ok_or("offline flow galactic hub network is malformed")?;
+    const NETWORK_FIELDS: [&str; 6] = [
+        "fleetInstalled",
+        "fleetBusy",
+        "fleetReturns",
+        "warpers",
+        "warperTarget",
+        "routingCursors",
+    ];
+    if network.len() != NETWORK_FIELDS.len()
+        || network
+            .keys()
+            .any(|key| !NETWORK_FIELDS.contains(&key.as_str()))
+        || ["fleetInstalled", "fleetBusy"]
+            .into_iter()
+            .any(|field| network.get(field).and_then(Value::as_f64) != Some(0.0))
+        || ["warpers", "warperTarget"]
+            .into_iter()
+            .any(|field| network.get(field).and_then(Value::as_str) != Some("0"))
+        || network
+            .get("fleetReturns")
+            .and_then(Value::as_array)
+            .is_none_or(|rows| !rows.is_empty())
+        || network
+            .get("routingCursors")
+            .and_then(Value::as_object)
+            .is_none_or(|map| !map.is_empty())
+    {
+        return Err("offline flow galactic hub network has active or malformed state".to_owned());
+    }
+    Ok(())
+}
+
 fn reject_external_writers(
     state: &CoreState,
     certificate: &OrdinaryFlowCertificate,
@@ -150,7 +289,6 @@ fn reject_external_writers(
             base.get("exploration")
                 .and_then(|value| value.get("missions")),
         )
-        || collection_has_entries(base.get("systemSpaceStations"))
         || collection_has_entries(
             base.get("orbitalStation")
                 .and_then(|value| value.get("contractBoard"))
@@ -178,6 +316,7 @@ fn reject_external_writers(
     {
         return Err("offline flow has an independent timed or material writer".to_owned());
     }
+    check_inactive_system_station_directory(state)?;
     crate::simulation::capture_offline_no_export_progress(state)?;
     if let Some(systems) = base
         .get("dysonEngineering")
@@ -792,6 +931,7 @@ fn verify_campaign_endpoint_no_write(candidate: &CoreState) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn fixture() -> CoreState {
         let mut state = super::super::tests::offline_flow_steady_fixture();
@@ -835,6 +975,162 @@ mod tests {
         )
         .unwrap();
         candidate
+    }
+
+    fn fixture_with_default_system_station_directory() -> CoreState {
+        let mut state = fixture();
+        let mut snapshot = state.catalog.snapshot.clone();
+        let mut stations = Map::new();
+        // Same eight empty records emitted by createEmptySystemSpaceStation in
+        // src/game/systemSpaceStation.ts; all systems exist in this test catalog.
+        for (index, system_id) in [
+            "helios",
+            "borealis",
+            "aurora",
+            "ember",
+            "sirius",
+            "white_dwarf",
+            "neutron",
+            "blue_giant",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 {
+                let mut planet = snapshot.planets[0].clone();
+                planet.id = format!("empty-{system_id}");
+                planet.system_id = system_id.to_owned();
+                planet.simulation_order = index as u16;
+                let profile = state.base_value()["galaxy"]["profiles"]["home"].clone();
+                state.base_value_mut()["galaxy"]["profiles"][planet.id.as_str()] = profile;
+                snapshot.planets.push(planet);
+            }
+            stations.insert(
+                system_id.to_owned(),
+                json!({
+                    "systemId": system_id, "status": "not-started", "costRevision": 0,
+                    "costMultiplierBasisPoints": 10000, "phaseIndex": 0, "delivered": {},
+                    "constructionBuffer": {}, "inventory": {}, "itemPolicies": {},
+                    "modules": {"backbone": 0, "energy": 0, "interstellar": 0},
+                    "routingCursors": {}, "viewport": {"x": 0, "y": 0, "zoom": 0.85},
+                    "decorations": [],
+                }),
+            );
+        }
+        state.catalog =
+            Arc::new(crate::catalog::RuntimeCatalog::validate(snapshot, "pure-idle-test").unwrap());
+        state.base_value_mut()["systemSpaceStations"] = Value::Object(stations);
+        state.rebuild_indexes().unwrap();
+        let revision = state.revision;
+        assert!(
+            state
+                .advance_exact(&exact_request(revision, 30.0, 30.0))
+                .unwrap()
+                .supported
+        );
+        state
+    }
+
+    #[test]
+    fn steady_flow_accepts_empty_default_system_directory_without_omitting_it_from_signature() {
+        let prefix = fixture_with_default_system_station_directory();
+        let certificate = certificate(&prefix);
+        let proof = prepare(&prefix, &certificate, 31.0).unwrap();
+        let mut candidate = with_material_tail(&prefix, &certificate, 31.0);
+        apply(&mut candidate, &proof).unwrap();
+        let mut exact = prefix.clone();
+        let revision = exact.revision;
+        assert!(
+            exact
+                .advance_exact(&exact_request(revision, 31.0, 31.0))
+                .unwrap()
+                .supported
+        );
+        for field in [
+            "systemSpaceStations",
+            "galacticHubNetwork",
+            "dysonEngineering",
+        ] {
+            assert_eq!(candidate.base_value()[field], prefix.base_value()[field]);
+            assert_eq!(candidate.base_value()[field], exact.base_value()[field]);
+        }
+        assert_eq!(
+            candidate.materialize().unwrap()["belts"],
+            exact.materialize().unwrap()["belts"]
+        );
+        assert_eq!(
+            candidate.base_value()["quantumLogisticsNetwork"],
+            exact.base_value()["quantumLogisticsNetwork"]
+        );
+        let mut changed = with_material_tail(&prefix, &certificate, 31.0);
+        changed.base_value_mut()["systemSpaceStations"]["helios"]["viewport"]["x"] = json!(99);
+        let before = changed.canonical_sha256().unwrap();
+        assert!(apply(&mut changed, &proof).is_err());
+        assert_eq!(changed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn steady_flow_rejects_active_or_malformed_system_directory_and_future_fleet_returns() {
+        let prefix = fixture_with_default_system_station_directory();
+        let certificate = certificate(&prefix);
+        for (field, value) in [
+            ("status", json!("building")),
+            ("status", json!("operational")),
+            ("systemId", json!("wrong-system")),
+            ("phaseIndex", json!(1)),
+            ("delivered", json!({"iron_ingot":"1"})),
+            ("constructionBuffer", json!({"iron_ingot":"1"})),
+            ("inventory", json!({"iron_ingot":"1"})),
+            ("itemPolicies", json!({"iron_ingot":{"mode":"supply"}})),
+            ("routingCursors", json!({"iron_ingot":1})),
+            ("modules", json!({"backbone":1,"energy":0,"interstellar":0})),
+            ("inventory", json!([])),
+            ("modules", json!({})),
+            ("futureTimedState", json!(1)),
+        ] {
+            let mut changed = prefix.clone();
+            changed.base_value_mut()["systemSpaceStations"]["helios"][field] = value;
+            let before = changed.canonical_sha256().unwrap();
+            assert!(
+                prepare(&changed, &certificate, 60.0)
+                    .unwrap_err()
+                    .contains("system station"),
+                "{field}"
+            );
+            assert_eq!(changed.canonical_sha256().unwrap(), before);
+        }
+        for value in [json!([]), json!({"helios":null})] {
+            let mut changed = prefix.clone();
+            changed.base_value_mut()["systemSpaceStations"] = value;
+            assert!(
+                prepare(&changed, &certificate, 60.0)
+                    .unwrap_err()
+                    .contains("system station")
+            );
+        }
+        for (field, value) in [
+            ("fleetInstalled", json!(1)),
+            ("fleetBusy", json!(1)),
+            ("warpers", json!("1")),
+            ("warperTarget", json!("1")),
+            ("routingCursors", json!({"route":1})),
+            (
+                "fleetReturns",
+                json!([{"routeKey":"future","returnAtSecond":500,"vesselCount":1}]),
+            ),
+            ("fleetReturns", json!({})),
+        ] {
+            let mut changed = prefix.clone();
+            changed.base_value_mut()["galacticHubNetwork"][field] = value;
+            let before = changed.canonical_sha256().unwrap();
+            assert!(
+                prepare(&changed, &certificate, 600.0)
+                    .unwrap_err()
+                    .contains("galactic hub network"),
+                "{field}"
+            );
+            assert_eq!(changed.canonical_sha256().unwrap(), before);
+        }
     }
 
     #[test]

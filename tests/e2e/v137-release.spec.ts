@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { injectOneConservativeDecision } from "./offline-decision-test-helpers";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
 const REQUIRED_TIERS = [6, 16, 17, 21] as const;
@@ -53,42 +54,6 @@ async function seedOfflineMenu(page: Page, seconds: number) {
   }, { seconds, saveKey: SAVE_KEY });
   await page.reload();
   await expect(page.locator(".start-menu")).toBeVisible();
-}
-
-async function injectOneConservativeDecision(page: Page) {
-  await page.evaluate(() => {
-    const NativeWorker = window.Worker;
-    class OneConservativeDecisionWorker extends NativeWorker {
-      constructor(url: string | URL, options?: WorkerOptions) {
-        super(url, options);
-        if (options?.name !== "offline-simulation") return;
-        this.terminate();
-        window.Worker = NativeWorker;
-        this.postMessage = ((message: { type?: string; id?: number; seconds?: number }) => {
-          if (message.type !== "start" || typeof message.id !== "number") return;
-          const totalSeconds = Number(message.seconds ?? 0);
-          window.setTimeout(() => this.dispatchEvent(new MessageEvent("message", {
-            data: {
-              type: "decision-required",
-              id: message.id,
-              totalSeconds,
-              approximation: {
-                mode: "approximate",
-                calibrationWindowSeconds: 0,
-                approximatedSeconds: totalSeconds,
-                maxEstimatedError: 1,
-                fellBack: true,
-                fallbackReason: "测试注入：快速 Worker 校准不稳定",
-                algorithmVersion: "fast-30s-v2",
-                settlementStatus: "conservative-preview",
-              },
-            },
-          })), 0);
-        }) as typeof this.postMessage;
-      }
-    }
-    window.Worker = OneConservativeDecisionWorker as typeof Worker;
-  });
 }
 
 for (const fontScale of [1, 1.5, 2] as const) {

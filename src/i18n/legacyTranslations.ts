@@ -968,6 +968,8 @@ const UI_EN: TranslationMap = {
   "重新打开 5 步基础操作和从手动采矿到白糖、跨星物流与戴森云的 13 步进阶教学。": "Replay the 5-step basic tutorial and the 13-step advanced tutorial from manual mining through White Matrices, interstellar logistics, and the Dyson Swarm.",
   "重新开始教学": "Restart Tutorial",
   "正在载入工作区": "Loading Workspace",
+  "正在后台计算生产统计，页面仍可操作": "Calculating production statistics in the background; the page remains interactive",
+  "没有符合条件的物品": "No items match the filters",
   "管理": "Management",
   "效率": "Efficiency",
   "网络": "Networks",

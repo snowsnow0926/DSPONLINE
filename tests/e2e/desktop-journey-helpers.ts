@@ -78,7 +78,7 @@ export async function deployThroughUi(page: Page, title: string) {
     // A bare hit point may still be within the snapped position of an existing
     // card. Reserve visible room for the whole card and keep clear of every
     // node (including collapsed stack proxies), using only read-only geometry.
-    for (const fy of [0.2, 0.35, 0.5, 0.65]) for (const fx of [0.2, 0.35, 0.5, 0.65, 0.8]) {
+    for (const fy of [0.2, 0.35, 0.5, 0.65]) for (const fx of [0.07, 0.2, 0.35, 0.5, 0.7]) {
       const x = bounds.x + bounds.width * fx;
       const y = bounds.y + bounds.height * fy;
       const clear = [0, 120, 240].every((dx) => [0, 125, 250].every((dy) =>

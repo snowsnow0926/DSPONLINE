@@ -124,6 +124,188 @@ fn should_replay_exact_public_seconds(base: &Map<String, Value>, total: f64) -> 
         && (elapsed - recorded).abs() <= EPSILON
 }
 
+/// A short-lived proof that the ordinary offline tail has no export writer.
+/// It is never persisted or accepted over IPC. The tail must preserve all four
+/// counters until its already-proven elapsed interval is closed below.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OfflineNoExportProgress {
+    elapsed: f64,
+    started: f64,
+    amount: f64,
+    last_minute: f64,
+    total_exported: f64,
+}
+
+impl OfflineNoExportProgress {
+    fn from_base(base: &Map<String, Value>, has_physical_exporter: bool) -> Result<Self, String> {
+        if has_physical_exporter {
+            return Err("offline export window has a physical exporter".to_owned());
+        }
+        let endgame = base
+            .get("endgame")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "offline export window endgame is missing".to_owned())?;
+        // Both writers are explicit in engine.ts: runGalacticMaterialExporters
+        // uses physical exporter rows; runGalacticExports additionally needs
+        // legacy-network mode, autoDispatch and an enabled project.
+        match endgame.get("exportInputMode").and_then(Value::as_str) {
+            Some("building") => {}
+            Some("legacy-network")
+                if endgame.get("autoDispatch").and_then(Value::as_bool) == Some(false) => {}
+            Some("legacy-network") => {
+                // An empty/partial project map cannot prove all canonical
+                // projects disabled. Automatic legacy dispatch remains
+                // outside this narrow no-writer certificate.
+                return Err("offline export window legacy writer is not disabled".to_owned());
+            }
+            _ => return Err("offline export window input mode is unknown".to_owned()),
+        }
+        let read = |object: &Map<String, Value>, key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(|| format!("offline export window {key} is invalid"))
+        };
+        let progress = Self {
+            elapsed: read(base, "elapsedSeconds")?,
+            started: read(endgame, "exportWindowStartedAt")?,
+            amount: read(endgame, "exportWindowAmount")?,
+            last_minute: read(endgame, "exportedLastMinute")?,
+            total_exported: read(endgame, "totalExported")?,
+        };
+        if progress.started > progress.elapsed
+            || (rounded(progress.elapsed, 4) - progress.elapsed).abs() > 1e-9
+        {
+            return Err("offline export window clock is not an exact source boundary".to_owned());
+        }
+        Ok(progress)
+    }
+
+    fn apply_to_base(
+        &self,
+        base: &mut Map<String, Value>,
+        has_physical_exporter: bool,
+        tail_seconds: f64,
+        request_seconds: f64,
+    ) -> Result<(), String> {
+        // Up to eight hours the public JS exact session uses one-second steps
+        // even with quantum/elevator stations. Longer and fractional requests
+        // need an independently proven step schedule, not a guessed phase.
+        if !tail_seconds.is_finite()
+            || !request_seconds.is_finite()
+            || tail_seconds < 0.0
+            || tail_seconds.fract() != 0.0
+            || request_seconds < tail_seconds
+            || request_seconds.fract() != 0.0
+            || request_seconds > 8.0 * 60.0 * 60.0
+            // Keep the four-decimal scaled clock within exact integer range.
+            || (self.elapsed + tail_seconds) * 10000.0 >= (1_u64 << 52) as f64
+        {
+            return Err("offline export window one-second budget is unsupported".to_owned());
+        }
+        if Self::from_base(base, has_physical_exporter)? != *self {
+            return Err(
+                "offline export window counters or source clock changed during the tail".to_owned(),
+            );
+        }
+        let mut next = self.clone();
+        let mut remaining = tail_seconds as u64;
+        let mut rolled_over = false;
+        // At most eleven steps reach the first complete window, including
+        // initialization at the FIRST completed step when startedAt is zero.
+        // The first window must consume a pre-existing nonzero amount at its
+        // actual duration; only later windows are known to have zero exports.
+        for _ in 0..remaining.min(11) {
+            next.elapsed = rounded(next.elapsed + 1.0, 4);
+            remaining -= 1;
+            if next.started <= 0.0 {
+                next.started = next.elapsed;
+            }
+            let window = next.elapsed - next.started;
+            if window >= 10.0 - EPSILON {
+                next.last_minute = rounded(next.amount * 60.0 / window, 2);
+                if !next.last_minute.is_finite() {
+                    return Err("offline export window rate overflowed".to_owned());
+                }
+                next.amount = 0.0;
+                next.started = next.elapsed;
+                rolled_over = true;
+                break;
+            }
+        }
+        if remaining > 0 {
+            if !rolled_over {
+                return Err("offline export window first boundary was not proved".to_owned());
+            }
+            let zero_windows = remaining / 10;
+            if zero_windows > 0 {
+                next.started = rounded(next.started + (zero_windows * 10) as f64, 4);
+                next.last_minute = 0.0;
+            }
+        }
+        // Do not advance elapsed, exports or any inventory here. The caller
+        // commits the complete candidate only after every tail proof succeeds.
+        let endgame = base
+            .get_mut("endgame")
+            .and_then(Value::as_object_mut)
+            .expect("the validated export window endgame remains present");
+        if next.started != self.started {
+            endgame.insert(
+                "exportWindowStartedAt".to_owned(),
+                Value::from(next.started),
+            );
+        }
+        if rolled_over {
+            endgame.insert("exportWindowAmount".to_owned(), Value::from(0));
+            endgame.insert(
+                "exportedLastMinute".to_owned(),
+                Value::from(next.last_minute),
+            );
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn capture_offline_no_export_progress(
+    state: &CoreState,
+) -> Result<OfflineNoExportProgress, String> {
+    // The caller additionally requires an ordinary production certificate.
+    // An empty/quiescent factory has a different public JS bulk clock rule.
+    if state.entity_index.is_empty() {
+        return Err(
+            "offline export window requires a non-quiescent production certificate".to_owned(),
+        );
+    }
+    OfflineNoExportProgress::from_base(
+        state.base_value(),
+        state.factory_topology.has_galactic_material_exporter
+            || !state
+                .factory_topology
+                .galactic_material_exporter_indices
+                .is_empty(),
+    )
+}
+
+pub(crate) fn advance_offline_no_export_progress(
+    state: &mut CoreState,
+    source: &OfflineNoExportProgress,
+    tail_seconds: f64,
+    request_seconds: f64,
+) -> Result<(), String> {
+    let has_physical_exporter = state.factory_topology.has_galactic_material_exporter
+        || !state
+            .factory_topology
+            .galactic_material_exporter_indices
+            .is_empty();
+    source.apply_to_base(
+        state.base_value_mut(),
+        has_physical_exporter,
+        tail_seconds,
+        request_seconds,
+    )
+}
+
 fn advance_quiescent_clock_boundary(
     base: &mut Map<String, Value>,
     simulation_seconds: f64,
@@ -590,5 +772,218 @@ impl CoreState {
             belt_scheduler: None,
             summary,
         })
+    }
+}
+
+#[cfg(test)]
+mod offline_no_export_progress_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn base(elapsed: f64, started: f64, amount: f64, rate: f64) -> Map<String, Value> {
+        json!({
+            "elapsedSeconds": elapsed,
+            "endgame": {
+                "exportInputMode": "building", "autoDispatch": true,
+                "exportProjects": { "fixture": { "enabled": false } },
+                "totalExported": 9000, "exportWindowStartedAt": started,
+                "exportWindowAmount": amount, "exportedLastMinute": rate,
+            },
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    // Independent literal oracle for engine.ts simulateStep finalization,
+    // not fastForwardQuiescentState's different one-call bulk diagnostics.
+    fn exact_production_seconds(base: &mut Map<String, Value>, seconds: u64) {
+        for _ in 0..seconds {
+            let elapsed =
+                ((base["elapsedSeconds"].as_f64().unwrap() + 1.0) * 10000.0).round() / 10000.0;
+            base.insert("elapsedSeconds".to_owned(), Value::from(elapsed));
+            let endgame = base.get_mut("endgame").unwrap().as_object_mut().unwrap();
+            let mut started = endgame["exportWindowStartedAt"].as_f64().unwrap();
+            if started <= 0.0 {
+                started = elapsed;
+                endgame.insert("exportWindowStartedAt".to_owned(), Value::from(started));
+            }
+            if elapsed - started >= 10.0 - 0.0001 {
+                let amount = endgame["exportWindowAmount"].as_f64().unwrap();
+                let rate = (amount * 60.0 / (elapsed - started) * 100.0).round() / 100.0;
+                endgame.insert("exportedLastMinute".to_owned(), Value::from(rate));
+                endgame.insert("exportWindowAmount".to_owned(), Value::from(0));
+                endgame.insert("exportWindowStartedAt".to_owned(), Value::from(elapsed));
+            }
+        }
+    }
+
+    fn advance(base: &mut Map<String, Value>, seconds: u64) -> Result<(), String> {
+        let proof = OfflineNoExportProgress::from_base(base, false)?;
+        proof.apply_to_base(base, false, seconds as f64, seconds as f64)?;
+        // The outer macro owns elapsed, just as the real integration does.
+        base.insert(
+            "elapsedSeconds".to_owned(),
+            Value::from(rounded(proof.elapsed + seconds as f64, 4)),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn offline_no_export_progress_preserves_600_and_8h_public_phases() {
+        for (tail, expected_started) in [(570, 621.0), (28_770, 28_821.0)] {
+            let mut actual = base(60.0, 51.0, 0.0, 0.0);
+            let mut expected = actual.clone();
+            exact_production_seconds(&mut expected, tail);
+            advance(&mut actual, tail).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual["endgame"]["exportWindowStartedAt"], expected_started);
+        }
+    }
+
+    #[test]
+    fn offline_no_export_progress_consumes_nonzero_amount_only_at_first_real_window() {
+        for (seconds, started, amount, rate) in [
+            (0, 52.0, 42.0, 17.5),
+            (1, 52.0, 42.0, 17.5),
+            (2, 62.0, 0.0, 252.0),
+            (11, 62.0, 0.0, 252.0),
+            (12, 72.0, 0.0, 0.0),
+            (570, 622.0, 0.0, 0.0),
+        ] {
+            let mut actual = base(60.0, 52.0, 42.0, 17.5);
+            let mut expected = actual.clone();
+            exact_production_seconds(&mut expected, seconds);
+            advance(&mut actual, seconds).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual["endgame"]["exportWindowStartedAt"], started);
+            assert_eq!(
+                actual["endgame"]["exportWindowAmount"].as_f64().unwrap(),
+                amount
+            );
+            assert_eq!(actual["endgame"]["exportedLastMinute"], rate);
+            assert_eq!(actual["endgame"]["totalExported"], 9000);
+        }
+    }
+
+    #[test]
+    fn offline_no_export_progress_handles_initialization_fractional_phase_and_old_windows() {
+        for (elapsed, started) in [
+            (0.0, 0.0),
+            (30.0, 0.0),
+            (60.25, 51.25),
+            (60.1234, 51.1234),
+            (60.0, 0.01),
+            (60.0, 50.0001),
+        ] {
+            for seconds in [1, 2, 9, 10, 11, 12, 21, 37, 600] {
+                let mut actual = base(elapsed, started, 13.0, 83.25);
+                let mut expected = actual.clone();
+                exact_production_seconds(&mut expected, seconds);
+                advance(&mut actual, seconds).unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "elapsed {elapsed}, started {started}, seconds {seconds}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn offline_no_export_progress_segmented_checkpoint_resume_matches_single_call() {
+        let mut single = base(60.25, 51.25, 73.0, 11.0);
+        let mut resumed = single.clone();
+        advance(&mut single, 570).unwrap();
+        for seconds in [7, 3, 60, 1, 499] {
+            advance(&mut resumed, seconds).unwrap();
+            resumed = serde_json::from_slice(&serde_json::to_vec(&resumed).unwrap()).unwrap();
+        }
+        assert_eq!(single, resumed);
+    }
+
+    #[test]
+    fn offline_no_export_progress_rejects_actual_or_unknown_writers() {
+        let building = base(60.0, 51.0, 0.0, 0.0);
+        assert!(OfflineNoExportProgress::from_base(&building, true).is_err());
+        for mode in ["legacy-network", "unknown"] {
+            let mut unsupported = building.clone();
+            unsupported["endgame"]["exportInputMode"] = Value::from(mode);
+            unsupported["endgame"]["exportProjects"]["fixture"]["enabled"] = Value::from(true);
+            assert!(OfflineNoExportProgress::from_base(&unsupported, false).is_err());
+        }
+        let mut disabled = building;
+        disabled["endgame"]["exportInputMode"] = Value::from("legacy-network");
+        assert!(OfflineNoExportProgress::from_base(&disabled, false).is_err());
+        disabled["endgame"]["exportProjects"]["fixture"]
+            .as_object_mut()
+            .unwrap()
+            .remove("enabled");
+        assert!(OfflineNoExportProgress::from_base(&disabled, false).is_err());
+        disabled["endgame"]["autoDispatch"] = Value::from(false);
+        assert!(OfflineNoExportProgress::from_base(&disabled, false).is_ok());
+    }
+
+    #[test]
+    fn offline_no_export_progress_rejects_changed_counters_and_clock_atomically() {
+        let original = base(60.0, 51.0, 42.0, 17.5);
+        let proof = OfflineNoExportProgress::from_base(&original, false).unwrap();
+        for field in [
+            "exportWindowStartedAt",
+            "exportWindowAmount",
+            "exportedLastMinute",
+            "totalExported",
+        ] {
+            let mut changed = original.clone();
+            changed["endgame"][field] = Value::from(123.0);
+            let before = changed.clone();
+            assert!(
+                proof
+                    .apply_to_base(&mut changed, false, 600.0, 600.0)
+                    .is_err()
+            );
+            assert_eq!(changed, before);
+        }
+        let mut changed = original;
+        changed.insert("elapsedSeconds".to_owned(), Value::from(61));
+        let before = changed.clone();
+        assert!(
+            proof
+                .apply_to_base(&mut changed, false, 600.0, 600.0)
+                .is_err()
+        );
+        assert_eq!(changed, before);
+    }
+
+    #[test]
+    fn offline_no_export_progress_rejects_unknown_step_budgets_and_rate_overflow_atomically() {
+        for (tail, request) in [
+            (0.5, 600.0),
+            (1.0, 600.5),
+            (600.0, 599.0),
+            (600.0, 28_801.0),
+            (-1.0, 600.0),
+            (f64::NAN, 600.0),
+        ] {
+            let mut unchanged = base(60.0, 51.0, 13.0, 17.5);
+            let proof = OfflineNoExportProgress::from_base(&unchanged, false).unwrap();
+            let before = unchanged.clone();
+            assert!(
+                proof
+                    .apply_to_base(&mut unchanged, false, tail, request)
+                    .is_err()
+            );
+            assert_eq!(unchanged, before);
+        }
+        let mut overflow = base(60.0, 51.0, f64::MAX, 1.0);
+        let proof = OfflineNoExportProgress::from_base(&overflow, false).unwrap();
+        let before = overflow.clone();
+        assert!(
+            proof
+                .apply_to_base(&mut overflow, false, 1.0, 600.0)
+                .is_err()
+        );
+        assert_eq!(overflow, before);
+        assert!(OfflineNoExportProgress::from_base(&base(60.0, 61.0, 0.0, 0.0), false).is_err());
+        assert!(OfflineNoExportProgress::from_base(&base(60.0, 51.0, -1.0, 0.0), false).is_err());
     }
 }

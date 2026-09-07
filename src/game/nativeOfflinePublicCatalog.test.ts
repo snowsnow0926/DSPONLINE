@@ -20,9 +20,39 @@ const binaryPath = path.resolve(process.env.DSP_NATIVE_CORE_HOST_BINARY ??
   path.join("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host"));
 const longTests = process.env.DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL === "1";
 const reportDirectory = process.env.DSP_NATIVE_PUBLIC_CATALOG_REPORT_DIR;
+const writePublicStates = process.env.DSP_NATIVE_PUBLIC_CATALOG_WRITE_STATES === "1";
+const expectedHostSha256 = process.env.DSP_NATIVE_PUBLIC_CATALOG_EXPECTED_HOST_SHA256;
 const variants: PublicCatalogOfflineVariant[] = ["infinite", "finite-reserve", "quantum-capacity"];
 const materialIds = ["iron_ore", "iron_ingot"] as const;
+const progressionFields = ["endgame", "research", "campaign", "achievements", "construction", "orbitalStation"] as const;
 const readBytes = fs.readFileSync as unknown as (file: string) => Uint8Array;
+
+interface PublicValueDifference {
+  path: string;
+  nativePresent: boolean;
+  javascriptPresent: boolean;
+  native: unknown;
+  javascript: unknown;
+}
+
+/** Lossless leaf locations for these public fixtures, including missing keys. */
+function differingPublicValues(native: unknown, javascript: unknown, location: string): PublicValueDifference[] {
+  if (Object.is(native, javascript)) return [];
+  if ((native !== null && typeof native === "object") ||
+    (javascript !== null && typeof javascript === "object")) {
+    const nativeRecord = native !== null && typeof native === "object" ? native as Record<string, unknown> : {};
+    const jsRecord = javascript !== null && typeof javascript === "object" ? javascript as Record<string, unknown> : {};
+    const keys = [...new Set([...Object.keys(nativeRecord), ...Object.keys(jsRecord)])].sort();
+    const differences = keys.flatMap(key => differingPublicValues(
+      nativeRecord[key], jsRecord[key], `${location}[${JSON.stringify(key)}]`));
+    if (differences.length || (native !== null && javascript !== null &&
+      typeof native === "object" && typeof javascript === "object" && Array.isArray(native) === Array.isArray(javascript))) {
+      return differences;
+    }
+  }
+  return [{ path: location, nativePresent: native !== undefined, javascriptPresent: javascript !== undefined,
+    native: native ?? null, javascript: javascript ?? null }];
+}
 
 /** This oracle is deliberately limited to the isolated, public 1:1 iron chain. */
 function materialLedger(state: GameState) {
@@ -69,10 +99,14 @@ function differingProgressionValues(native: unknown, javascript: unknown, field:
 
 describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline qualification (shadow only)", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-public-offline-"));
-  const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 60_000 });
+  const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: longTests ? 300_000 : 60_000 });
   let saves: InstanceType<typeof NativeSaveSessionRegistry>;
+  let exportSequence = 0;
 
   beforeAll(async () => {
+    if (expectedHostSha256) {
+      expect(createHash("sha256").update(readBytes(binaryPath)).digest("hex")).toBe(expectedHostSha256);
+    }
     await client.start("public-catalog-offline-qualification");
     saves = new NativeSaveSessionRegistry(client);
     // These are the real public costs and capacities, not the earlier
@@ -93,6 +127,9 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
       throw new Error("Refusing to remove a directory outside this test's temporary profile");
     }
     fs.rmSync(resolvedRoot, { recursive: true, force: true });
+    if (expectedHostSha256) {
+      expect(createHash("sha256").update(readBytes(binaryPath)).digest("hex")).toBe(expectedHostSha256);
+    }
   });
 
   async function seed(state: GameState) {
@@ -115,17 +152,26 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
   }
 
   async function advance(state: GameState, checkpoint: any, seconds: number, advanceMode: "exact" | "offline-macro-v1") {
+    const started = performance.now();
     const opened = await client.request({
       operation: "coreOpen", slot: "normal-main", generation: checkpoint.generation,
       rootHash: checkpoint.rootHash, revision: 1, registryFingerprint: runtime.fingerprint, catalog,
     });
+    const timings = { sessionOpenMs: performance.now() - started, sourceProofMs: 0,
+      advanceRequestMs: 0, projectionReadMs: 0, publicExportRequestMs: 0, publicExportReadVerifyMs: 0,
+      sessionCloseMs: 0, sessionRoundTripMs: 0 };
     try {
+      const sourceProofStarted = performance.now();
       expect(opened.summary.canonicalSha256).toBe(canonicalNativeCoreSha256(state));
+      timings.sourceProofMs = performance.now() - sourceProofStarted;
+      const advanceStarted = performance.now();
       const result = await client.request({
         operation: "coreAdvance", sessionId: opened.sessionId,
         request: { baseRevision: 1, simulationSeconds: seconds, wallSeconds: seconds, advanceMode },
       });
+      timings.advanceRequestMs = performance.now() - advanceStarted;
       expect(result.supported, result.reason).toBe(true);
+      const projectionStarted = performance.now();
       const projected: Record<string, unknown> = { entities: [], belts: [] };
       const fields = Object.keys(state).filter(field => !["entities", "belts"].includes(field));
       for (let index = 0; index < fields.length; index += 64) {
@@ -141,14 +187,34 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
       const page = await client.request({ operation: "coreProjection", sessionId: opened.sessionId,
         baseFields: [], entityIds: [], beltIds: state.belts.map(belt => belt.id) });
       projected.belts = page.belts;
-      return { result, state: projected as unknown as GameState };
+      timings.projectionReadMs = performance.now() - projectionStarted;
+      // Renderer projections intentionally omit stationRoutes. Read the real
+      // public export for a complete diff instead of inventing empty routes
+      // or reporting omitted projection fields as gameplay mismatches.
+      const exportId = `public-diagnostic-${++exportSequence}`;
+      const exportStarted = performance.now();
+      const exported = await client.request({ operation: "coreExportV47", sessionId: opened.sessionId,
+        exportId, savedAtMs: 1 + seconds * 1000 });
+      timings.publicExportRequestMs = performance.now() - exportStarted;
+      const readStarted = performance.now();
+      const exportedBytes = readBytes(path.join(root, "exports", `${exportId}.json`));
+      const envelope = JSON.parse(new TextDecoder().decode(exportedBytes)) as { state: GameState };
+      expect(createHash("sha256").update(exportedBytes).digest("hex")).toBe(exported.result.envelopeSha256);
+      expect(canonicalNativeCoreSha256(envelope.state)).toBe(result.summary.canonicalSha256);
+      timings.publicExportReadVerifyMs = performance.now() - readStarted;
+      return { result, state: envelope.state, timings };
     } finally {
+      const closeStarted = performance.now();
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+      timings.sessionCloseMs = performance.now() - closeStarted;
+      timings.sessionRoundTripMs = performance.now() - started;
     }
   }
 
   async function qualify(variant: PublicCatalogOfflineVariant, seconds: number) {
+    const fixtureStarted = performance.now();
     const initial = createPublicCatalogOfflineQualificationFixture(variant);
+    const fixtureBuildMs = performance.now() - fixtureStarted;
     expect(initial.handcraftQueue).toHaveLength(0);
     expect(initial.constructionQueue).toHaveLength(0);
     expect(initial.constructionAutomation.enabled).toBe(false);
@@ -156,27 +222,81 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     expect(initial.entities.every(entity => (entity.stationRoutes?.length ?? 0) === 0)).toBe(true);
     const initialHash = canonicalNativeCoreSha256(initial);
     const before = materialLedger(initial);
+    const seedStarted = performance.now();
     const checkpoint = await seed(initial);
+    const seedCheckpointMs = performance.now() - seedStarted;
     const macro = await advance(initial, checkpoint, seconds, "offline-macro-v1");
     let expected = initial;
+    const jsStarted = performance.now();
     for (let second = 0; second < seconds; second += 1) expected = advanceSimulationBudget(expected, 1, 1);
+    const javascriptExactAdvanceMs = performance.now() - jsStarted;
     const expectedHash = canonicalNativeCoreSha256(expected);
     const expectedLedger = materialLedger(expected);
     const macroLedger = materialLedger(macro.state);
     expectClosedIronChain(before, expectedLedger);
     expectClosedIronChain(before, macroLedger);
     const exact = seconds === 600 ? await advance(initial, checkpoint, seconds, "exact") : null;
-    if (exact) expect(exact.result.summary.canonicalSha256).toBe(expectedHash);
-    if (variant === "infinite" || (variant === "finite-reserve" && seconds === 600)) {
-      expect(macroLedger).toEqual(expectedLedger);
-      expect(macro.result.reason).not.toContain("ordinary-flow tail froze");
-    } else {
-      // A green safety test is not a qualification pass: finite-source and
-      // capacity horizons may freeze material that exact can still process
-      // in physical buffers. Preserve that observed difference in the report.
-      for (const id of materialIds) {
-        expect(macroLedger.produced[id]).toBeLessThanOrEqual(expectedLedger.produced[id]);
+    expect(canonicalNativeCoreSha256(initial)).toBe(initialHash);
+    const publicExpected = JSON.parse(JSON.stringify(expected)) as Record<string, unknown>;
+    const differingFields = Object.keys(publicExpected).filter(field =>
+      canonicalNativeCoreSha256(publicExpected[field]) !== macro.result.summary.canonicalFields[field]);
+    const publicNative = JSON.parse(JSON.stringify(macro.state)) as Record<string, unknown>;
+    const valueDifferences = Object.fromEntries(differingFields.map(field => [field,
+      differingPublicValues(publicNative[field], publicExpected[field], field)]));
+    const materialMatch = JSON.stringify(macroLedger) === JSON.stringify(expectedLedger);
+    const report = {
+      scope: "public-catalog-shadow-qualification-not-player-speedup", variant, seconds,
+      inputSha256: initialHash,
+      hostSha256: createHash("sha256").update(readBytes(binaryPath)).digest("hex"),
+      catalogSha256: canonicalNativeCoreSha256(catalog),
+      before, javascriptExact: expectedLedger, nativeMacro: macroLedger,
+      timingScope: "diagnostic RPC timings; excludes app startup, player UI, save adoption and packaging; no speedup claim",
+      timings: { fixtureBuildMs, seedCheckpointMs, nativeMacro: macro.timings,
+        nativeExact: exact?.timings ?? null, javascriptExactAdvanceMs },
+      macroReason: macro.result.reason,
+      macroExecution: {
+        algorithmVersion: macro.result.algorithmVersion ?? null,
+        exactScope: macro.result.exactScope,
+        exactCalibrationSeconds: macro.result.exactCalibrationSeconds ?? null,
+        approximatedSeconds: macro.result.approximatedSeconds ?? null,
+        classification: macro.result.approximatedSeconds === 0 && macro.result.exactCalibrationSeconds === seconds
+          ? "EXACT_ONLY_NO_MACRO_SPEEDUP_CLAIM"
+          : (macro.result.approximatedSeconds > 0 ? "MIXED_EXACT_AND_APPROXIMATION" : "UNCLASSIFIED"),
+      },
+      nativeExactCanonicalMatch: exact ? exact.result.summary.canonicalSha256 === expectedHash : "NOT_RUN_long_exact_budget",
+      materialMatch, fullStateMatch: macro.result.summary.canonicalSha256 === expectedHash, differingFields,
+      differenceCounts: Object.fromEntries(Object.entries(valueDifferences).map(([field, differences]) => [field, differences.length])),
+      valueDifferences,
+      materialParity: materialMatch ? "PASS" : "FAIL_MATERIAL_DIFFERENCE_REQUIRES_FOLLOW_UP",
+      fullStateParity: macro.result.summary.canonicalSha256 === expectedHash ? "PASS" : "FAIL_NOT_QUALIFIED",
+      progressionDifferences: progressionFields
+        .flatMap(field => differingProgressionValues(
+          (macro.state as unknown as Record<string, unknown>)[field], publicExpected[field], field)),
+      automaticAdoption: "NOT_QUALIFIED_30_SECOND_GUARD_UNCHANGED",
+    };
+    if (reportDirectory) {
+      fs.mkdirSync(reportDirectory, { recursive: true });
+      fs.writeFileSync(path.join(reportDirectory, `${variant}-${seconds}.json`), JSON.stringify(report, null, 2), { flag: "wx" });
+      if (writePublicStates) {
+        for (const [label, value] of [["input", initial], ["native-macro", macro.state],
+          ["javascript-exact", expected], ["native-exact", exact?.state]] as const) {
+          if (value) fs.writeFileSync(path.join(reportDirectory, `${variant}-${seconds}.${label}.json`),
+            JSON.stringify(value), { flag: "wx" });
+        }
       }
+    }
+    // Write public diagnostic evidence before differential assertions, so a
+    // regression remains inspectable instead of disappearing with a red test.
+    if (exact) expect(exact.result.summary.canonicalSha256).toBe(expectedHash);
+    expect(macroLedger, `${variant} ${seconds}s complete material parity`).toEqual(expectedLedger);
+    for (const field of progressionFields) {
+      expect(publicNative[field], `${variant} ${seconds}s ${field} parity`).toEqual(publicExpected[field]);
+    }
+    if (macro.result.approximatedSeconds === 0 && macro.result.exactCalibrationSeconds === seconds) {
+      // A full exact fallback must earn the same complete-state requirement
+      // as the direct Exact oracle. Calling it through a macro request does
+      // not excuse different physical buffers, counters, histories or clocks.
+      expect(macro.result.summary.canonicalSha256, `${variant} ${seconds}s full exact fallback parity`).toBe(expectedHash);
     }
     if (variant === "finite-reserve") {
       const mined = macroLedger.produced.iron_ore - before.produced.iron_ore;
@@ -186,31 +306,6 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     if (variant === "quantum-capacity") {
       expect(Number(macro.state.quantumLogisticsNetwork.inventory.iron_ingot)).toBeLessThanOrEqual(10000);
     }
-    expect(canonicalNativeCoreSha256(initial)).toBe(initialHash);
-    const publicExpected = JSON.parse(JSON.stringify(expected)) as Record<string, unknown>;
-    const differingFields = Object.keys(publicExpected).filter(field =>
-      canonicalNativeCoreSha256(publicExpected[field]) !== macro.result.summary.canonicalFields[field]);
-    const materialMatch = JSON.stringify(macroLedger) === JSON.stringify(expectedLedger);
-    const report = {
-      scope: "public-catalog-shadow-qualification-not-player-speedup", variant, seconds,
-      inputSha256: initialHash,
-      hostSha256: createHash("sha256").update(readBytes(binaryPath)).digest("hex"),
-      catalogSha256: canonicalNativeCoreSha256(catalog),
-      before, javascriptExact: expectedLedger, nativeMacro: macroLedger,
-      macroReason: macro.result.reason,
-      nativeExactCanonicalMatch: exact ? exact.result.summary.canonicalSha256 === expectedHash : "NOT_RUN_long_exact_budget",
-      materialMatch, fullStateMatch: macro.result.summary.canonicalSha256 === expectedHash, differingFields,
-      materialParity: materialMatch ? "PASS" : "FAIL_UNDERPRODUCTION_REQUIRES_FOLLOW_UP",
-      fullStateParity: macro.result.summary.canonicalSha256 === expectedHash ? "PASS" : "FAIL_NOT_QUALIFIED",
-      progressionDifferences: ["endgame", "research", "campaign", "achievements", "construction", "orbitalStation"]
-        .flatMap(field => differingProgressionValues(
-          (macro.state as unknown as Record<string, unknown>)[field], publicExpected[field], field)),
-      automaticAdoption: "NOT_QUALIFIED_30_SECOND_GUARD_UNCHANGED",
-    };
-    if (reportDirectory) {
-      fs.mkdirSync(reportDirectory, { recursive: true });
-      fs.writeFileSync(path.join(reportDirectory, `${variant}-${seconds}.json`), JSON.stringify(report, null, 2), { flag: "wx" });
-    }
   }
 
   it.each(variants)("checks conservation and records the public %s chain's 10-minute parity gaps", async variant => {
@@ -219,7 +314,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
 
   it.skipIf(!longTests).each(variants)("records the public %s chain's 8-hour material and qualification boundary", async variant => {
     await qualify(variant, 8 * 60 * 60);
-  }, 120_000);
+  }, 360_000);
 
   it("keeps automatic adoption closed beyond 30 seconds despite shadow macro support", async () => {
     const initial = createPublicCatalogOfflineQualificationFixture("infinite");

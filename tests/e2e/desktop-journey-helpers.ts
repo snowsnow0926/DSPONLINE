@@ -122,6 +122,13 @@ export async function launch(profileRoot: string) {
   children.set(app, app.process());
   try {
   const page = await app.firstWindow();
+  // Lazy startup dialogs can arrive after dismissIntro's visibility check.
+  // Use normal UI clicks when they intercept a later action; never force a
+  // click through the modal background or race creation of a second game.
+  const startupNotes = page.getByRole("button", { name: "我知道了", exact: true });
+  const startupGuide = page.getByRole("button", { name: /^(?:关闭|跳过)启动引导$/ });
+  await page.addLocatorHandler(startupNotes, () => startupNotes.click());
+  await page.addLocatorHandler(startupGuide, () => startupGuide.click());
   await app.evaluate(({ BrowserWindow }) => {
     const window = BrowserWindow.getAllWindows()[0];
     if (window.isMinimized()) window.restore();

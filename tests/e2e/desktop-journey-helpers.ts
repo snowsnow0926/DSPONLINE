@@ -160,9 +160,9 @@ export async function holdNextPersistenceCommit(page: Page) {
     };
   });
 }
-export async function importFixture(page: Page, label: string, raw = fixture) {
-  const input = path.join(runDirectory, `${label}.json`);
-  fs.writeFileSync(input, raw, { flag: "wx" });
+export async function importFixture(page: Page, label: string, raw = fixture, compressedSource?: string) {
+  const input = path.join(runDirectory, `${label}.json${compressedSource ? ".gz" : ""}`);
+  fs.writeFileSync(input, compressedSource ? fs.readFileSync(compressedSource) : raw, { flag: "wx" });
   const digest = sha256(fs.readFileSync(input));
   const operations = await saveTab(page);
   await operations.getByLabel("选择要导入的存档文件").setInputFiles(input);

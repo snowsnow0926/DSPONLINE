@@ -92,7 +92,7 @@ export async function continueExisting(page: Page) {
   await dismissIntro(page);
   const conflict = page.getByRole("alert").filter({ hasText: "已阻止跨标签页覆盖" });
   await expect(conflict).toHaveCount(0);
-  await page.getByRole("button", { name: "继续游戏", exact: true }).click();
+  await page.getByRole("button", { name: /^恢复最近工厂\s*继续游戏$/ }).click();
   await expect(page.locator(".game-shell")).toBeVisible({ timeout: 30000 });
   await expect(conflict).toHaveCount(0);
   await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-paused", "true");

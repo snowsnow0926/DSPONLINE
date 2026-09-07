@@ -50,7 +50,25 @@ export function factoryContent(raw: string) {
   expect(state.version).toBe(47);
   // Paused gameplay content is exact. Envelope timestamps, window layout and
   // recovery journals are separate lifecycle metadata, never inventory.
-  return Object.fromEntries(["version", "mode", "activePlanetId", "entities", "belts", "tray", "planetTrays", "construction", "research", "galaxy", "dysonSphere", "dysonSwarm", "totalProduced", "elapsedSeconds", "constructionQueue", "handcraftQueue"].map((key) => [key, state[key]]));
+  return Object.fromEntries(Object.entries(state).filter(([key]) => key !== "planetViewports"));
+}
+
+export async function deployThroughUi(page: Page, title: string) {
+  await page.getByTitle(title, { exact: true }).click();
+  const canvas = page.locator(".react-flow__pane");
+  const box = (await canvas.boundingBox())!;
+  let chosen: { x: number; y: number } | null = null;
+  for (const y of [0.32, 0.5, 0.65, 0.2]) {
+    for (const x of [0.64, 0.78, 0.48, 0.35]) {
+      const point = { x: box.x + box.width * x, y: box.y + box.height * y };
+      const empty = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.classList.contains("react-flow__pane"), point);
+      if (empty) { chosen = point; break; }
+    }
+    if (chosen) break;
+  }
+  expect(chosen, "a visible canvas position free of nodes, minimap and construction controls").not.toBeNull();
+  await canvas.click({ position: { x: chosen!.x - box.x, y: chosen!.y - box.y } });
+  await page.keyboard.press("Escape");
 }
 
 export function profile() { return fs.mkdtempSync(path.join(os.tmpdir(), "dspidle-performance-smoke-")); }
@@ -63,6 +81,16 @@ export async function launch(profileRoot: string) {
   children.set(app, app.process());
   try {
   const page = await app.firstWindow();
+  await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (window.isMinimized()) window.restore();
+    window.show(); window.focus();
+  });
+  await page.bringToFront();
+  records.push({ event: "window-ready", visibility: await page.evaluate(() => document.visibilityState), window: await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    return { visible: window.isVisible(), focused: window.isFocused(), minimized: window.isMinimized(), bounds: window.getBounds() };
+  }) });
   page.on("console", (message) => { if (message.type() === "error") records.push({ event: "renderer-error", message: message.text() }); });
   expect(page.url()).toMatch(/app\.asar\/dist\/index\.html/);
   await expect(page.locator("html")).toHaveAttribute("data-app-platform", "desktop");

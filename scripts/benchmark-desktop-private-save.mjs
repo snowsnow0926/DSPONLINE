@@ -1,4 +1,4 @@
-/** Opt-in local player-save IMPORT measurement. Never a return/offline speedup gate.
+/** Opt-in private normal-save import/return diagnostic. Keep the two scopes separate.
  * Usage: node scripts/benchmark-desktop-private-save.mjs --fixture <read-only.json>
  *   --package-root <release-performance-edition> --output-dir <new-private-directory>
  *   [--skip-offline] [--source-sha <trusted-40-character-commit>]
@@ -51,7 +51,7 @@ try {
   source = (() => {
     const stat = fs.statSync(fixture), bytes = fs.readFileSync(fixture);
     const value = JSON.parse(bytes.toString("utf8"));
-    if (value.formatVersion !== 2 || value.state?.version !== 47 || !Number.isSafeInteger(value.savedAt) || value.savedAt < 0) throw new Error("unsupported-fixture");
+    if (value.formatVersion !== 2 || value.state?.version !== 47 || value.mode !== 'normal' || value.state.mode !== 'normal' || !Number.isSafeInteger(value.savedAt) || value.savedAt < 0) throw new Error("unsupported-fixture");
     return { bytes: stat.size, mtimeMs: stat.mtimeMs, sha256: createHash("sha256").update(bytes).digest("hex"), savedAt: value.savedAt };
   })();
   report.source = source;
@@ -87,7 +87,7 @@ try {
       for (const entry of list.getEntries()) window.__dspPrivateMetrics.longTasks.push(entry.duration);
     }).observe({ type: 'longtask' });
     window.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {}, counters: {} };
-    const names = new Set(["save-inspection", "offline-simulation", "save-serialization", "authoritative-save-persistence", "runtime-recovery-persistence"]);
+    const names = new Set(["save-inspection", "offline-simulation", "save-serialization", "save-snapshot-rewrap", "authoritative-save-persistence", "runtime-recovery-persistence"]);
     const record = (name, direction, data, extra = {}) => {
       const row = { name, direction, at: performance.now(), ...extra };
       for (const key of ["id", "seconds", "wallSeconds", "deadlineMs", "durationMs", "byteLength", "wallClockMs"]) if (Number.isFinite(data?.[key])) row[key] = data[key];

@@ -34,10 +34,10 @@ import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
 import {
   computeSavePayloadTextChecksum,
   decodeVerifiedSaveTransfer,
-  rewrapVerifiedPrimarySaveAsSnapshot,
   serializeSaveEnvelopeToTransfer,
   type SaveTransferVerification,
 } from "./saveTransfer";
+import { rewrapVerifiedPrimarySaveAsSnapshotInWorker } from "./snapshotSaveRewrap";
 import { createEmptyGalacticHubNetwork, createEmptySystemSpaceStations } from "./systemSpaceStation";
 import { normalizeHubInteger, SYSTEM_HUB_MAX_DIGITS } from "./systemHubLogistics";
 import { createEmptyQuantumLogisticsNetworkState, normalizeQuantumInteger, normalizeQuantumLogisticsNetworkState, QUANTUM_MAX_INTEGER_DIGITS } from "./quantumLogisticsNetwork";
@@ -4645,7 +4645,7 @@ async function saveGameSnapshotVerifiedInternal(
   try {
     // Only the automatic snapshot following this invocation's successful
     // primary commit receives this immutable, read-back-verified source.
-    const reframed = primary ? rewrapVerifiedPrimarySaveAsSnapshot(primary.raw, primary.verification, {
+    const reframed = primary ? await rewrapVerifiedPrimarySaveAsSnapshotInWorker(primary.raw, primary.verification, {
       formatVersion: SAVE_FORMAT_VERSION, savedAt: primary.savedAt, mode,
     }, savedAt, reason) : null;
     const serialized = reframed

@@ -41,6 +41,16 @@ function saveEnvelopeSuffix(stateChecksum: string): string {
   return `,"checksum":${JSON.stringify(stateChecksum)}}`;
 }
 
+function matchesEnvelopeFrame(raw: string, prefix: string, suffix: string): boolean {
+  return raw.startsWith(prefix) && raw.endsWith(suffix) && raw.length > prefix.length + suffix.length &&
+    raw[prefix.length] === "{" && raw[raw.length - suffix.length - 1] === "}";
+}
+
+/** Outer framing only; callers must separately verify the complete payload. */
+export function matchesSaveEnvelopeFrame(raw: string, options: SaveTransferOptions, stateChecksum: string): boolean {
+  return matchesEnvelopeFrame(raw, saveEnvelopePrefix(options), saveEnvelopeSuffix(stateChecksum));
+}
+
 function utf8Length(value: string): number {
   let bytes = 0;
   for (let index = 0; index < value.length; index += 1) {
@@ -120,8 +130,7 @@ export function rewrapVerifiedPrimarySaveAsSnapshot(
     !/^[a-f0-9]{8}$/.test(verification.stateChecksum) || !/^[a-f0-9]{8}$/.test(verification.payloadChecksum)) return null;
   const prefix = saveEnvelopePrefix({ ...source, kind: "primary", slot: "main" });
   const suffix = saveEnvelopeSuffix(verification.stateChecksum);
-  if (!raw.startsWith(prefix) || !raw.endsWith(suffix) || raw.length <= prefix.length + suffix.length ||
-    raw[prefix.length] !== "{" || raw[raw.length - suffix.length - 1] !== "}") return null;
+  if (!matchesEnvelopeFrame(raw, prefix, suffix)) return null;
   const sourcePayload = computeSavePayloadTextChecksum(raw);
   if (sourcePayload.checksum !== verification.payloadChecksum || sourcePayload.byteLength !== verification.byteLength) return null;
   const snapshotRaw = saveEnvelopePrefix({ ...source, kind: "snapshot", slot: "main", savedAt, reason }) +

@@ -14,6 +14,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { RecoveryDataExportButton } from "./RecoveryDataExportButton";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { PureIdleMacroSummary, PureIdleTerminalSnapshot } from "../game/pureIdleMacro";
 import { projectPureIdleTerminalSnapshot } from "../game/pureIdlePresentation";
@@ -279,6 +280,11 @@ export function TimeWarpIdleOverlay({
             </> : <button className="time-warp-idle-stop" type="button" aria-label={stopping ? "取消结算并保留原存档" : "停止并结算纯挂机"} onClick={() => void stop()}>{stopping ? <X size={16} /> : <Square size={16} />}{stopping ? "取消并保留原档" : "停止并结算"}</button>}
           </div>
         </footer>
+        <RecoveryDataExportButton
+          checkpointState={recovery?.state ?? baselineGame}
+          recovery={recovery}
+          recoveryStatus={recoveryStatus}
+        />
       </div>
     </div>
   );

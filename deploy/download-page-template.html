@@ -44,19 +44,19 @@
   <body>
     <header><div><img src="/icon.svg" alt="" /><span><h1>DSP极简网络</h1><p>Windows 与 Android 稳定版客户端下载</p></span></div></header>
     <main>
-      <p class="intro">当前稳定版 <strong>__VERSION__</strong>（构建 __BUILD_ID__）。网页版与原生客户端使用相同的游戏规则和存档格式。安装或更新前建议先在游戏中导出一份本地存档；旧版本文件仍保留在下载目录中。</p>
+      <p class="intro">网页版当前版本 <strong>__VERSION__</strong>（构建 __BUILD_ID__）。各平台的客户端稳定版本见下方。安装或更新前建议先在游戏中导出一份本地存档；旧版本文件仍保留在下载目录中。</p>
       <section class="release" aria-label="客户端下载">
         <article>
           <header><h2>Windows x64</h2><span>__DESKTOP_SIZE_HUMAN__</span></header>
-          <dl><div><dt>版本</dt><dd>__VERSION__</dd></div><div><dt>平台</dt><dd>Windows x64</dd></div><div><dt>文件大小</dt><dd>__DESKTOP_SIZE__ 字节</dd></div><div><dt>更新通道</dt><dd>stable</dd></div></dl>
+          <dl><div><dt>版本</dt><dd>__DESKTOP_VERSION__</dd></div><div><dt>平台</dt><dd>Windows x64</dd></div><div><dt>文件大小</dt><dd>__DESKTOP_SIZE__ 字节</dd></div><div><dt>更新通道</dt><dd>stable</dd></div></dl>
           <p class="warning">Windows 安装程序目前未配置 Authenticode 证书，系统可能显示“未知发布者”或 SmartScreen 提示。请仅从本页面下载并核对 SHA-256。</p>
-          <a class="download" href="/downloads/desktop/stable/__DESKTOP_FILE__" download>下载 Windows __VERSION__</a>
+          <a class="download" href="/downloads/desktop/stable/__DESKTOP_FILE__" download>下载 Windows __DESKTOP_VERSION__</a>
         </article>
         <article>
           <header><h2>Android 7+</h2><span>__ANDROID_SIZE_HUMAN__</span></header>
-          <dl><div><dt>版本</dt><dd>__VERSION__（__ANDROID_CODE__）</dd></div><div><dt>平台</dt><dd>Android 7+</dd></div><div><dt>文件大小</dt><dd>__ANDROID_SIZE__ 字节</dd></div><div><dt>签名</dt><dd>APK v2 / v3，长期证书</dd></div></dl>
+          <dl><div><dt>版本</dt><dd>__ANDROID_VERSION__（__ANDROID_CODE__）</dd></div><div><dt>平台</dt><dd>Android 7+</dd></div><div><dt>文件大小</dt><dd>__ANDROID_SIZE__ 字节</dd></div><div><dt>签名</dt><dd>APK v2 / v3，长期证书</dd></div></dl>
           <p class="verified">Android 包保持历史长期发布证书，可从同包名旧版本覆盖升级并保留本地存档。首次安装时，系统可能要求允许浏览器安装未知来源应用。</p>
-          <a class="download" href="/downloads/android/__ANDROID_FILE__" download>下载 Android __VERSION__</a>
+          <a class="download" href="/downloads/android/__ANDROID_FILE__" download>下载 Android __ANDROID_VERSION__</a>
         </article>
       </section>
       <section class="hashes"><h2>版本说明</h2><p class="intro">__RELEASE_SUMMARY__</p></section>

@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **第三轮桌面验收入口（2026-09-07，开发中）**：`npm run test:desktop-package` 已改为包身份预检包装器，缺包/错包不能以全套 skip 返回绿色；每次运行的 Playwright JSON、进程与保存回执及合成输入写入唯一 `artifacts/desktop-journey-*`。旧 4/4 结果不证明立即重开、生产闭环或跨 profile 往返。专项结果和未完成项见 [第三轮开发记录](./reviews/1.2.7-round3-development-2026-09-07.md)。
+> **第三轮桌面验收入口（2026-09-07，开发中）**：`npm run test:desktop-package` 已改为包身份预检包装器，缺包/错包不能以全套 skip 返回绿色；每次运行的 Playwright JSON、进程与保存回执及合成输入写入唯一 `artifacts/desktop-journey-*`。旧 4/4 结果不证明立即重开、生产闭环或跨 profile 往返。冻结新包 1.2.7+27c4f15fd621 已 8/8、0 重试；单元 3052/29/0、native 623/1/0、定向 Web 23+13、durable 7 通过，适用范围与未执行门禁见 [第三轮开发记录](./reviews/1.2.7-round3-development-2026-09-07.md)。
 
 > **1.2.7 Windows/Rust 原生整合候选新鲜门禁（2026-09-02，未部署）**：本候选在已开发一周的 Windows/Rust 原生工作树上以真正双父合并方式纳入线上 1.2.6（父提交分别为 `f0cd0c26d82a82b9cdca7de40691e69692cdef04` 与 `6b3c88f0cf474ba4add47a69f78c5e7e0b5b48b3`），不是重新实现网页版本。完整 Vitest **385 文件通过 / 13 条件跳过；3,053 项通过 / 28 跳过 / 0 失败**；Rust workspace **Core 1,057 通过 / 3 ignored、Host library 239/0、Host binary 3/0**；native/desktop **585/1 条件跳过/0 失败**；server **390/2 + station 4/4**；Ops **56/6**；backup **2/2**；原生长差分 **51/51**；typecheck、fmt、strict Clippy、licenses（125）、coverage、thin-UI、Web build 全部通过。完整 Chromium 第二轮 **437 通过 / 27 跳过 / 0 失败（464）**，durable WAL **7/7**，nightly Firefox/WebKit **2/2**；首轮 Chromium 的 4 个旧 1.2.6 文案/Build ID 断言已修正，首轮失败日志保留。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 不变；Windows 仍为 `NotSigned` 本地候选，未连接生产。详见 [1.2.7 Windows 原生整合开发报告](./releases/1.2.7-windows-native-integration-development-report-2026-09-02.md)。
 

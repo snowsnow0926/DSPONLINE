@@ -167,6 +167,13 @@ test("invalid import explicitly rejects and preserves full content and revision"
     await enterNew(page);
     await importFixture(page, "invalid-import-baseline");
     const before = await boundary(page);
+    const visibleFactory = () => page.evaluate(() => ({
+      tray: Array.from(document.querySelectorAll(".tray-row"), (element) => element.textContent),
+      nodes: Array.from(document.querySelectorAll(".react-flow__node"), (element) => ({ id: element.getAttribute("data-id"), text: element.textContent })),
+      edges: Array.from(document.querySelectorAll(".react-flow__edge"), (element) => element.getAttribute("data-id")),
+    }));
+    const visibleBefore = await visibleFactory();
+    expect(visibleBefore.nodes.length).toBeGreaterThan(1);
     const operations = await saveTab(page);
     await operations.getByLabel("选择要导入的存档文件").setInputFiles({ name: "truncated.json", mimeType: "application/json", buffer: Buffer.from('{"formatVersion":2,"state":{') });
     await expect(operations).toContainText(/无法解析|无效|格式错误|校验失败|损坏|不是有效/, { timeout: 30000 });
@@ -174,6 +181,7 @@ test("invalid import explicitly rejects and preserves full content and revision"
     const after = await boundary(page);
     expect(after.raw).toBe(before.raw);
     expect(after.revision).toEqual(before.revision);
+    expect(await visibleFactory()).toEqual(visibleBefore);
     await normalClose(app);
   } finally { await forceKill(app, "failure-cleanup"); }
 });
@@ -190,7 +198,7 @@ test("main and renderer reject external probes in the isolated package", async (
     expect(await app.evaluate(async ({ net }) => { try { await net.fetch("https://example.invalid/dsp-isolation-probe"); return false; } catch { return true; } })).toBe(true);
     expect(await app.evaluate(() => (globalThis as any).__dspIsolatedNetworkAudit.chromiumBlocked)).toBeGreaterThan(0);
     expect(await page.evaluate(async () => { try { await fetch("https://example.invalid/dsp-isolation-probe"); return false; } catch { return true; } })).toBe(true);
-    records.push({ event: "network-probes", result });
+    records.push({ event: "network-probes", result, finalAudit: await app.evaluate(() => (globalThis as any).__dspIsolatedNetworkAudit) });
     await normalClose(app);
   } finally { await forceKill(app, "failure-cleanup"); }
 });

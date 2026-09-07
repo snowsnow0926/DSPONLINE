@@ -16523,7 +16523,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "semanticSupported" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
     const progress = technology ? canvasGame.research.progressByTech[technology.id] ?? {} : {};
-    const planetProfile = getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
+    // During the first main-process authority pull there is deliberately no
+    // confirmed native planet. Native rows carry their own power telemetry;
+    // never resolve a pending/native ID through the legacy planet registry.
+    const planetProfile = nativePlayerAuthorityOwnsRuntime ? null : getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
     return {
       readOnly: nativePlayerAuthorityOwnsRuntime,
       manualMiningEnabled: nativeManualMiningEnabled,
@@ -16554,9 +16557,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       completedTechIds: canvasGame.research.completedTechIds,
       paused: nativePlayerAuthorityOwnsRuntime ? factoryRunStatusReadModel.paused : canvasGame.paused,
       powerDemandMultiplier: getDifficultyDefinition(canvasGame.settings.difficulty).powerDemandMultiplier,
-      solarGenerationMultiplier: getPlanetSolarPowerMultiplier(canvasGame, factoryCanvasPlanetId),
-      windGenerationMultiplier: planetProfile.windMultiplier,
-      geothermalGenerationMultiplier: planetProfile.geothermalMultiplier,
+      solarGenerationMultiplier: nativePlayerAuthorityOwnsRuntime ? 0 : getPlanetSolarPowerMultiplier(canvasGame, factoryCanvasPlanetId),
+      windGenerationMultiplier: planetProfile?.windMultiplier ?? 0,
+      geothermalGenerationMultiplier: planetProfile?.geothermalMultiplier ?? 0,
       activeLogisticsEntityIds: beltNodeIndex.activeEntityIds,
       dysonSwarm: canvasGame.dysonSwarm,
       dysonSphere: canvasGame.dysonSphere,

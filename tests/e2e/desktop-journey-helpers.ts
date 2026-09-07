@@ -196,6 +196,10 @@ export async function forceKill(app: ElectronApplication, mode = "intentional-cr
     if (mode !== "failure-cleanup") throw new Error("Process exited before intentional crash");
     return;
   }
+  if (mode === "failure-cleanup") {
+    try { await app.windows()[0]?.screenshot({ path: path.join(runDirectory, `failure-${child.pid}.png`), timeout: 3000 }); }
+    catch { records.push({ event: "failure-screenshot-unavailable", pid: child.pid }); }
+  }
   const result = spawnSync("taskkill", ["/F", "/T", "/PID", String(child.pid)], { windowsHide: true, encoding: "utf8" });
   if (result.status !== 0) throw new Error(`Failed to kill task PID ${child.pid}: ${result.status}`);
   await waitExit(app, mode);

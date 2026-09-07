@@ -893,11 +893,21 @@ async function withBrowserCoordinationLockRetry<T>(operation: () => Promise<T>, 
   return { acquired: false };
 }
 
-async function writeLease(db: IDBDatabase, lease: LocalSaveWriterLease): Promise<void> {
+async function writeLease(
+  db: IDBDatabase,
+  lease: LocalSaveWriterLease,
+  expectedPrevious?: Pick<LocalSaveWriterLease, "ownerId" | "fencingToken">,
+): Promise<void> {
   const transaction = db.transaction(RECORD_STORE, "readwrite");
   const done = transactionDone(transaction);
   const store = transaction.objectStore(RECORD_STORE);
   const current = parseLocalSaveWriterLease((await requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>))?.value);
+  if (expectedPrevious && (current?.ownerId !== expectedPrevious.ownerId || current.fencingToken !== expectedPrevious.fencingToken ||
+    current.expiresAt > Date.now() || writerClosing || document.visibilityState === "hidden")) {
+    transaction.abort();
+    void done.catch(() => undefined);
+    throw new LocalSaveReadOnlyError();
+  }
   if (current && current.ownerId !== writerId && current.expiresAt > lease.heartbeatAt) {
     transaction.abort();
     void done.catch(() => undefined);
@@ -1255,7 +1265,7 @@ export async function inspectLocalSaveNativeAuthorityHandoff(
   return { storage: "indexeddb", journalState: journal.phase, writerLease, journal };
 }
 
-async function claimWriterLease(): Promise<boolean> {
+async function claimWriterLease(expectedPrevious?: Pick<LocalSaveWriterLease, "ownerId" | "fencingToken">): Promise<boolean> {
   const now = Date.now();
   if (backend !== "indexeddb" || !database) {
     publishWriterStatus({ role: "primary", writerId, fencingToken: 1, leaseExpiresAt: Number.MAX_SAFE_INTEGER, reason: "当前环境使用兼容存储后端" });
@@ -1263,9 +1273,13 @@ async function claimWriterLease(): Promise<boolean> {
   }
   const attempt = await withBrowserCoordinationLock(async () => {
     const previous = parseLocalSaveWriterLease(await readCoordinationValue(database!, LOCAL_SAVE_WRITER_LEASE_KEY));
+    if (expectedPrevious && (document.visibilityState === "hidden" || writerClosing ||
+      previous?.ownerId !== expectedPrevious.ownerId || previous.fencingToken !== expectedPrevious.fencingToken)) {
+      return { ok: false as const, previous };
+    }
     if (!canClaimLocalSaveWriterLease(previous, writerId, now)) return { ok: false as const, previous };
     const lease = createLocalSaveWriterLease(writerId, previous, now);
-    await writeLease(database!, lease);
+    await writeLease(database!, lease, expectedPrevious);
     return { ok: true as const, previous, lease };
   });
   if (!attempt.acquired) {
@@ -1295,6 +1309,26 @@ async function claimWriterLease(): Promise<boolean> {
   publishWriterStatus({ role: "primary", writerId, fencingToken: lease.fencingToken, leaseExpiresAt: lease.expiresAt, reason: "当前标签页负责本地存档" });
   postCoordinationMessage({ schemaVersion: 1, type: "lease", writerId, sentAt: now, fencingToken: lease.fencingToken, leaseExpiresAt: lease.expiresAt });
   return true;
+}
+
+async function retryInitialAndroidWriterLease(blocked: LocalSaveWriterLease | null): Promise<void> {
+  const canWait = () => writerStatus.role === "secondary" && !writerClosing && document.visibilityState !== "hidden";
+  if (__APP_PLATFORM__ !== "android" || backend !== "indexeddb" || !database ||
+    !canWait()) return;
+  if (!blocked || blocked.ownerId === writerId) return;
+  const remainingMs = Math.max(0, blocked.expiresAt - Date.now());
+  // Native authority and anomalously distant leases must never become short
+  // timers or an implicit takeover. Only the ordinary 15-second lease applies.
+  if (remainingMs > LOCAL_SAVE_LEASE_DURATION_MS) return;
+  const deadline = performance.now() + remainingMs + 500;
+  while (performance.now() < deadline && canWait()) {
+    const current = parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY));
+    if (!current || current.ownerId !== blocked.ownerId || current.fencingToken !== blocked.fencingToken) return;
+    // A live writer renewing its lease is not an interrupted Android document.
+    if (current.expiresAt > blocked.expiresAt) return;
+    if (current.expiresAt <= Date.now() && await claimWriterLease(blocked)) return;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
+  }
 }
 
 async function releaseWriterLeaseForReload(): Promise<void> {
@@ -1868,7 +1902,16 @@ export function initializeLocalSaveStore(): Promise<void> {
       initializeFallback();
     }
     installCoordinationListeners();
-    await claimWriterLease();
+    const initialAndroidLease = __APP_PLATFORM__ === "android" && backend === "indexeddb" && database
+      ? parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY))
+      : null;
+    const claimed = await claimWriterLease();
+    // main.tsx awaits this initialization before mounting any menu or loading
+    // candidate. A prior Android document's lease can outlive that document;
+    // retry here only, never after a read-only page has captured player state.
+    if (!claimed && !startupConflictId) {
+      await retryInitialAndroidWriterLease(initialAndroidLease).catch(() => undefined); // Keep the original read-only boundary on storage failure.
+    }
     if (startupConflictId) {
       publishWriterStatus({ ...writerStatus, role: "conflict", reason: "检测到旧标签页留下的急救存档，已保留双方版本", conflictId: startupConflictId });
     }

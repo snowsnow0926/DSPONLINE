@@ -43,8 +43,8 @@ export function getCurrentReleaseNotes(locale: AppLocale) {
         id: "v127-idle-recovery",
         title: english ? "More reliable idle stopping and recovery" : "挂机停止与恢复更可靠",
         description: english
-          ? "Fixes a case where stopping idle mode could reopen the recovery screen. If saving fails after settlement completes, retry reuses that result while the page remains open. Export Recovery Data stays available independently; its private diagnostic file is not a completed save and is never uploaded automatically."
-          : "修复停止挂机时恢复界面可能被再次触发的问题。结算完成但保存失败时，同一页面内重试会复用本次结果；也可独立“导出恢复数据”。诊断文件包含私人数据，不代表已结算存档，不会自动上传。",
+          ? "Fixes recovery reopening and hidden offline reports blocking idle controls. Save retries reuse the completed result while the page remains open. Android startup can wait for the previous page's expired save lease. Export Recovery Data stays available independently; its private diagnostic file is not a completed save and is never uploaded automatically."
+          : "修复恢复界面重复启动、隐藏离线报告阻挡挂机操作的问题。同一页面内重试保存复用已完成结果，安卓快速重开可等待上一页面的存档写入权正常交还；也可独立“导出恢复数据”。诊断文件包含私人数据，不代表已结算存档，不会自动上传。",
       },
       {
         id: "v127-gameplay-compatibility",

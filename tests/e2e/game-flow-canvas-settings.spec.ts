@@ -2845,6 +2845,16 @@ test("performance mode keeps a 500-device 1000-line factory responsive", async (
   }));
   expect(frameLatency).toBeLessThan(500);
 
+  // DOM evaluation does not run locator handlers; dismiss a pending report
+  // and wait for its modal background lock to release before hit-testing.
+  const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
+  await expect.poll(async () => {
+    if (await offlineReport.isVisible()) {
+      await offlineReport.getByRole("button", { name: "确认结算" }).click({ force: true });
+    }
+    return page.locator(".react-flow__pane").evaluate((pane) => pane.closest("[inert]") === null);
+  }).toBe(true);
+
   const blankPoint = await page.evaluate(() => {
     const pane = document.querySelector<HTMLElement>(".react-flow__pane");
     if (!pane) return null;

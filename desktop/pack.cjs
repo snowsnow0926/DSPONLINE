@@ -152,6 +152,7 @@ function identityBuilderArgs(identity, targetOutputDirectory) {
 
 async function main() {
   if (!["pack", "dist", "release"].includes(mode)) throw new Error(`Unsupported desktop build mode: ${mode}`);
+  await (await import("../scripts/build-desktop-preload.mjs")).buildDesktopPreload();
   const builderArgs = [
     ...(mode === "pack" ? ["--dir"] : []),
     ...identityBuilderArgs(desktopIdentity, outputDirectory),

@@ -36,9 +36,8 @@ export const fixture = fixtureEnvelope();
 
 export function productionFixture() {
   const state = inspectSaveEnvelopeChecksum(fixture).state! as any;
-  state.entities = state.entities.filter((entity: any) => entity.id === "vein_iron");
-  state.entities[0].position = { x: 0, y: 0 };
-  state.entities[0].outputs = { iron_ore: 50 };
+  state.entities = state.entities.filter((entity: any) => entity.kind === "vein");
+  state.entities.find((entity: any) => entity.id === "vein_iron").outputs = { iron_ore: 50 };
   state.belts = [];
   return serializeEnvelope(state, 1788739200000);
 }
@@ -64,7 +63,10 @@ export async function launch(profileRoot: string) {
   children.set(app, app.process());
   try {
   const page = await app.firstWindow();
+  page.on("console", (message) => { if (message.type() === "error") records.push({ event: "renderer-error", message: message.text() }); });
   expect(page.url()).toMatch(/app\.asar\/dist\/index\.html/);
+  await expect(page.locator("html")).toHaveAttribute("data-app-platform", "desktop");
+  expect(await page.evaluate(() => typeof (window as any).dspDesktop?.confirmClose)).toBe("function");
   records.push({ event: "launch", pid: app.process().pid, profileRoot, buildId: run.expected.buildId, url: page.url() });
   page.on("pageerror", (error) => records.push({ event: "pageerror", message: error.message }));
   app.process().stderr?.on("data", (bytes) => fs.appendFileSync(path.join(runDirectory, "electron-stderr.log"), bytes));
@@ -182,6 +184,7 @@ async function waitExit(app: ElectronApplication, mode: string) {
     child.once("exit", () => { clearTimeout(timer); resolve(); });
   });
   records.push({ event: "exit", mode, pid: child.pid, code: child.exitCode, signal: child.signalCode });
+  if (mode === "normal-window-close" && child.exitCode !== 0) throw new Error(`Normal close exited with ${child.exitCode}/${child.signalCode}`);
 }
 export async function normalClose(app: ElectronApplication) {
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());

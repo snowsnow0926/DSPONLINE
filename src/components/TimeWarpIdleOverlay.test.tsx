@@ -1,13 +1,16 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialState } from "../game/engine";
 import {
   createTimeWarpComputeGovernor,
   resolveTimeWarpComputeLimits,
 } from "../game/timeWarpComputeGovernor";
 import { TimeWarpIdleOverlay } from "./TimeWarpIdleOverlay";
+
+const { exportRecoveryData } = vi.hoisted(() => ({ exportRecoveryData: vi.fn() }));
+vi.mock("../game/recoveryDataExport", () => ({ exportRecoveryData }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -16,6 +19,7 @@ describe("TimeWarpIdleOverlay", () => {
   let root: Root;
 
   beforeEach(() => {
+    exportRecoveryData.mockReset();
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
@@ -57,5 +61,34 @@ describe("TimeWarpIdleOverlay", () => {
     expect(host.textContent).toContain("首个验证快照生成中，校准完成后显示增量");
     expect(host.textContent).toContain("关键产线最低效率校准中");
     expect(host.textContent).not.toContain("本次 +0");
+  });
+
+  it("keeps recovery export clickable while stop is pending and the main save has failed", async () => {
+    const game = createInitialState();
+    const governor = createTimeWarpComputeGovernor(game.settings.simulationSpeed);
+    const limits = resolveTimeWarpComputeLimits(governor, 15, 15, 1);
+    let finishStop!: () => void;
+    const stop = vi.fn(() => new Promise<void>((resolve) => { finishStop = resolve; }));
+    const retry = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => undefined);
+    exportRecoveryData.mockResolvedValue({ destination: "browser", partial: false });
+    act(() => root.render(<TimeWarpIdleOverlay
+      game={game} baselineGame={game} startedAt={Date.now()}
+      saveFailure={{ success: false, code: "quota", message: "保存失败" }} workerActive={false}
+      computeLimits={limits} computeState={governor} pendingSimulationSeconds={10}
+      macroSummary={null} recovery={null} recoveryStatus="停止结算未完成"
+      onStop={stop} onCancelSettlement={cancel} continueAvailable={false}
+      onRetryRecovery={retry} onContinueNormally={retry}
+    />));
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="停止并结算纯挂机"]')!.click());
+    expect(stop).toHaveBeenCalledOnce();
+    const exportButton = host.querySelector<HTMLButtonElement>(".recovery-data-export button")!;
+    expect(exportButton.disabled).toBe(false);
+    await act(async () => { exportButton.click(); await vi.dynamicImportSettled(); });
+    expect(exportRecoveryData).toHaveBeenCalledOnce();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+    await act(async () => finishStop());
   });
 });

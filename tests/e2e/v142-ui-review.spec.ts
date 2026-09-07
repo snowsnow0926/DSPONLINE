@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-09-02-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-08-v1.2.7";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,14 +520,15 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "Windows 原生性能整合与大存档内存优化");
+  await expect(dialog).toHaveAttribute("aria-label", "网页版与安卓版：保存及离线准备优化");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.7");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("1.2.6 功能原样进入原生候选");
-  await expect(dialog).toContainText("Rust 原生候选继续使用确定性边界");
-  await expect(dialog).toContainText("并发测试与 Worker 线程使用有界栈");
-  await expect(dialog).toContainText("大存档检查改用可转移字节");
-  await expect(dialog).toContainText("协议与存档边界保持兼容");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
+  await expect(dialog).toContainText("保存与导入减少重复处理");
+  await expect(dialog).toContainText("自动快照减少重复处理");
+  await expect(dialog).toContainText("离线准备更轻量");
+  await expect(dialog).toContainText("挂机停止与恢复更可靠");
+  await expect(dialog).toContainText("保留 1.2.6 玩法与旧存档");
+  await expect(dialog).toContainText("本次更新范围");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

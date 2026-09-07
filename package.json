@@ -2,7 +2,7 @@
   "name": "dsp-idle-network",
   "private": true,
   "version": "1.2.7",
-  "releaseChannel": "beta",
+  "releaseChannel": "stable",
   "updateBaseUrl": "",
   "cloudApiBaseUrl": "",
   "description": "戴森球计划风格的 2D 生产网络挂机游戏",

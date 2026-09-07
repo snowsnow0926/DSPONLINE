@@ -7,7 +7,7 @@ test("statistics uses its narrow read model while Dyson requests deferred top-le
   const raw = JSON.stringify({ savedAt: Date.now(), state });
   await page.addInitScript(({ saveRaw }) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-02-v1.2.7");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-08-v1.2.7");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.save.v1", saveRaw);
     const tracker: {

@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 const SNAPSHOT_KEY = "dsp-idle-network.save.v1.snapshot.manual.idb-migration";
-const RELEASE_NOTE_ID = "2026-09-02-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-08-v1.2.7";
 
 test("verified IndexedDB migration removes the legacy localStorage save copy", async ({ page }) => {
   const legacyValue = JSON.stringify({ savedAt: 1_777_777_777_000, kind: "snapshot", reason: "迁移验证" });

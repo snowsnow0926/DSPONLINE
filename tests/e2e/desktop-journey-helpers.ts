@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { expect, type ElectronApplication, type Page, _electron as electron } from "@playwright/test";
 import { connectBelt, createInitialState, placeBuilding, setEntityRecipe } from "../../src/game/engine";
-import { serializeEnvelope } from "../../src/game/storage";
+import { migrateGame, serializeEnvelope } from "../../src/game/storage";
 import { inspectSaveEnvelopeChecksum } from "../../src/game/saveEnvelopeIntegrity";
 
 export const runDirectory = process.env.DSP_DESKTOP_JOURNEY_RUN_DIR!;
@@ -30,6 +30,10 @@ function fixtureEnvelope() {
   const machine = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
   state = setEntityRecipe(state, machine.id, "iron_ingot");
   state = connectBelt(state, "vein_iron", machine.id, "iron_ore");
+  // Freeze a fully normalized v47 fixture, including zero-valued station
+  // deliveries and the achievement already earned by its existing belt.
+  state = migrateGame(state)!;
+  state.achievements.unlockedIds = ["first_logistics_line"];
   return serializeEnvelope(state, 1788739200000);
 }
 export const fixture = fixtureEnvelope();
@@ -194,6 +198,7 @@ export async function importFixture(page: Page, label: string, raw = fixture, co
   const input = path.join(runDirectory, `${label}.json${compressedSource ? ".gz" : ""}`);
   fs.writeFileSync(input, compressedSource ? fs.readFileSync(compressedSource) : raw, { flag: "wx" });
   const digest = sha256(fs.readFileSync(input));
+  records.push({ event: "fixed-input", file: path.basename(input), sha256: digest, bytes: fs.statSync(input).size });
   const operations = await saveTab(page);
   await operations.getByLabel("选择要导入的存档文件").setInputFiles(input);
   await expect(operations.locator(".save-import-preview")).toContainText("校验通过", { timeout: 30000 });

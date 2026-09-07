@@ -1,0 +1,299 @@
+# Rust 核心性能提升：逐步开发、验收与上线计划
+
+Role: develop
+
+- 计划 ID：RUST-PERF-20260907，版本 1.0。
+- 编制日期：2026-09-07；依据代码提交：`f7c907408bf2a3500368ef80abd71e111670b85c`。
+- 执行状态：**计划已建立；RP0 待开始；新性能收益 NOT_MEASURED；Rust 实时玩家资格关闭。**
+- 主要平台：Windows 性能开发版，保留现有 Electron/React 界面。
+- 后续平台：Web/PWA、Android 复用 Rust 核心的可行性评估，单独排期。
+- 本次交付是计划文档；以下开发、测量和上线步骤尚未执行。
+
+## 1. 目标与实施原则
+
+先用现有代码证明收益，再把收益交付到实际游戏，最终完成可回滚的正式上线。优先改善大档返回游戏时的离线等待，再推进运行中的实时模拟、内存和保存体验。
+
+第一笔投入是 **1–2 人日的性能基线与路径核验**。优先验证已接入的 Rust 离线结算：如果它已经正确且更快，就复用；发现缺陷时修复最小缺口。实时接管、WebAssembly、Android 原生桥接和更换桌面界面分别计量，避免混成一次大重写。
+
+每阶段交付一组可核验结果：实际源码与制品身份、功能结果、性能样本、失败记录和下一阶段决定。进入下一阶段依据验收结果，工作量百分比不替代运行证据。
+
+## 2. 当前真实基线
+
+| 项目 | 已核实状态 | 对本计划的含义 |
+| --- | --- | --- |
+| 本地应用版本 | 1.2.7；已验收包 `1.2.7+27c4f15fd621`，performance / beta / NotSigned | 这是本地候选，不等于线上版本 |
+| 已验收运行/驱动源码 | `27c4f15fd621800cf6000c1f156a0a401526f810` | f7c90740 相对它仅有六份 Markdown 差异 |
+| 实时玩家模拟 | JS 权威；Rust `authority_eligible` 固定为 false | 当前不能声称 Rust 实时接管已让玩家变快 |
+| Rust 核心 | 已有模拟、宏观结算、存档/WAL、命令、投影和接管协调代码 | 复用现有实现，不重做上一轮 100 个代码单位 |
+| 覆盖清单 | 63 项领域标记为 true，57 项 Host 能力；29 类写面中 28 类标记 Rust implemented，1 类旧规则设置明确保留 Web | 这些是实现清单；真实 Native 路径仍需逐项验证 |
+| Rust 离线入口 | 普通主档可尝试原生快速离线结算；要求非暂停、支持的模式/格式、匹配的原生检查点和完整结果证明 | 是第一条值得实测的现有用户路径，不保证每次命中 |
+| 原生存档 | 已有事务、WAL、恢复及合并桥接；具体场景是否进入需记录 | 不把 Host 存在或文件生成当作性能提升 |
+| Round 3 验证 | 实包 8/8；单元 3052 pass / 29 skip；native 623 pass / 1 skip；定向 Web 23+13、durable 7 通过 | 作为前态证据；实包主要是暂停小厂的 JS 路径，不能替代新性能或 Native 接管验收 |
+| 当前性能结论 | NOT_MEASURED | 不复用旧版本局部倍率宣传新包 |
+
+源码入口：[资格值](../native/dsp-native-core/src/state.rs)、[Host 资格判断](../native/dsp-native-host/src/core_runtime.rs)、[离线启动条件](../src/game/nativeOfflineStartup.ts)、[主菜单实际调用](../src/components/StartMenu.tsx)、[原生存档桥](../src/game/nativeSave.ts)、[覆盖清单](../native/native-coverage-manifest.json)。
+
+前态依据：[Round 3 报告](./reviews/1.2.7-round3-development-2026-09-07.md)、[上一轮 100/100 代码候选结算，第 26–28 节](./WINDOWS_NATIVE_PERFORMANCE_DEVELOPMENT_PLAN_2026-08.md)、[已交付包与补丁清单](../artifacts/1.2.7-codex-round3-20260907-c7e39a12/delivery-summary.json)。上述证据保持原有身份；本计划后续产物另建目录。
+
+## 3. 阶段、优先级与投入
+
+下表是**从当前状态到相应里程碑的累计粗估**，不能逐行相加。人日包含实现、联调与验证，不是 AI 连续运行小时数；硬件、证书、测试账号及观察窗口的等待另计。估算置信度中低，RP0、RP2 结束后重估并记录原因，不靠降低验收标准维持原工期。
+
+| 阶段 | 优先级 | 玩家或审查者拿到的结果 | 累计粗估 | 初始状态 |
+| --- | --- | --- | ---: | --- |
+| RP0：现状与大档 A/B | P0 | 知道瓶颈在哪里、Rust 路径有没有真实收益 | 1–2 人日 | READY |
+| RP1：离线收益闭环 | P1 | 可重复验证的 Rust 离线加速候选，含取消/回退/重开证据 | 3–7 人日 | PLANNED，依赖 RP0 |
+| RP2：可信准入与实时测试候选 | P1 | Rust 单所有者运行的隔离验证、完整核心操作与恢复；产品资格仍须由发布证据决定 | 15–30 人日 | PLANNED，依赖 RP0 的瓶颈结论 |
+| RP3：完整功能与性能候选 | P1 | 模式、玩法、云边界、MOD、内存和长时间行为逐项收口 | 30–55 人日 | PLANNED，依赖 RP2 |
+| RP4：发布资格与邀请 Beta | P1 | 多硬件与系统故障证据、可信资格、签名安装器和真实发布包验收 | 40–75 人日 | PLANNED，依赖 RP3 |
+| RP5：分阶段正式上线 | P1 | 逐批发布、观察、停止与恢复方案均可执行 | 45–90 人日 | PLANNED，依赖 RP4 |
+
+RP1 是最短收益路径，不是实时接管的技术前置。若 RP0 证明主要问题是运行中的模拟或画布，记录决定后可优先 RP2 或对应共享热点；不能用离线改善声称运行中卡顿已解决。45–90 人日仅覆盖 Windows 路线，不包含重写壳层或 Web/Android 的 Rust 接入。
+
+```mermaid
+flowchart LR
+    A[RP0 基线与路径证据] --> B[RP1 离线收益]
+    A --> C[RP2 可信准入与实时验证]
+    B -. 复用经验与修复 .-> C
+    C --> D[RP3 完整候选]
+    D --> E[RP4 发布资格与邀请 Beta]
+    E --> F[RP5 逐批上线]
+```
+
+## 4. RP0：先证明现有代码能带来什么
+
+### 4.1 工作内容
+
+1. 冻结实际测量的 source SHA、驱动 SHA、EXE/ASAR/Host SHA、版本、edition/channel 和设置。使用已交付包时绑定原有可信清单；重新构建时从新的干净提交产生真实 Build ID。文档 SHA 单列，不伪造构建来源。
+2. 用合法引擎/内容定义生成合成工厂，补齐固定 seed、时间和迁移字段，**只生成一次并持久化**。各子进程读取相同字节，计时前后核对大小、SHA 和初始规范状态。真实玩家档只在另行明确授权后只读使用，缺少它不阻塞合成档工作。
+3. 建立工厂分层：小厂验证链路；中厂约 5k 实体/10k 线路；大厂约 20k/40k；极限层约 80k/155k。规模是设计目标，记录实际值，不伪称已有同规模夹具。至少包含稳定稀疏与稠密活动网络，避免只选择容易加速的形状。
+4. 记录每次实际路径：实时 owner、离线 backend、是否命中原生检查点、是否 fallback 及原因、是否完成原生事务。诊断放入开发报告/日志；按钮名称或“Host 已启动”不能证明调用了 Rust。
+5. 分别测暂停浏览、实时 1×、建造/连线/蓝图、手动与自动保存、恢复进入游戏、快速离线结算。离线基线先选 10 分钟与 8 小时；更长边界留给后续正确性矩阵。
+6. 采集计算阶段与用户等待的端到端耗时，另记解析、IPC、结果安装、保存和 GC。完整进程树包含主进程、renderer/Worker、GPU/utility 和独立 Host，按 PID 去重汇总 Private Bytes；单个 Host 的 RSS 不能代表整个应用。
+
+### 4.2 A/B 约束与现有工具
+
+- 对照必须是相同输入、实际模拟时长、设置和结算语义。不同宏观策略若未证明结果等价，分别列时间与结果差异，不能直接计算“同效果加速”。任何库存、进度或历史分叉先处理正确性。
+- 离线 A/B 需要一致的逻辑时钟边界。允许在隔离测试宿主明确控制输入时钟，禁止改变系统时钟、生产时钟或结算逻辑来凑结果。无法证明时长一致的样本不计为有效配对。
+- 先测普通用户默认线程、Normal 优先级和相同电源状态；固定 affinity/线程矩阵作为第二组诊断。不能把某个固定 mask 直接当作 P 核，也不修改全局系统配置。
+- 首轮至少三组交错配对，收益候选扩到五组并跨独立进程重复；保留预热、样本、波动和失败。少量样本报告中位数、范围及样本数，不用少量运行宣称稳定 P95/P99；尾延迟门禁采样设计在执行前冻结。
+- 复用 [核心基准](../src/game/nativeCoreRealSaveBenchmark.test.ts)、[Host A/B 编排](../scripts/benchmark-native-core-ab.mjs)、[固定输入工具](../scripts/native-fixed-v47-fixture.mjs)、[固定亲和性编排](../scripts/benchmark-native-core-fixed-affinity-ab.mjs)、[线程矩阵](../scripts/benchmark-native-core-thread-matrix.mjs)、[存档基准](../scripts/benchmark-native-save.mjs)。所有 fixture 参数明确指定为本任务合成文件，不能落到脚本中历史玩家路径默认值。
+- Host A/B 脚本的 baseline/candidate 是两份 Rust Host；它不自动等价于 JS/Rust 整包对照。核心 JS 对照指标和玩家完整应用指标分别列出；缺少合适编排时只补最小驱动。
+
+### 4.3 RP0 验收与决策
+
+- 交付 `baseline-report.md`、原始样本、输入/环境/制品清单、路径命中记录和瓶颈排序。
+- 输出三类结果：VERIFIED_GAIN、NO_GAIN、INCONCLUSIVE。没有净收益或噪声过大也可以完成“测量任务”，但不能宣称性能优化完成。
+- 推荐 RP1 的投入阈值：至少一类代表性大档的**完整离线等待中位数下降 20%**，跨进程配对方向稳定，正确性通过且其他目标场景无已证实回退。这是本计划提出的筛选目标，不是现有成绩，也不替代既有实时 Gate C。
+- 若 Rust 内核快而整包不快，按数据排序解析、复制、保存和 UI 成本；若热点在共享 JS/画布，先登记最小共享优化。输出下一阶段的具体热点和预算，不能继续盲加 Rust 并行。
+
+## 5. RP1：把已有 Rust 离线能力做成可交付收益
+
+### 5.1 工作内容
+
+1. 沿实际 UI 路径完成“普通主档保存 → 安全退出 → 一致的离线时间边界 → 快速结算 → 结果验证 → 新持久提交 → 立即重开”。先验证现有实现，按复现修缺口。
+2. 记录 `native complete` 与 `JS fallback`，证明结果来自实际 Host；反例覆盖 savedAt/revision/catalog 不匹配、缺原生检查点、暂停、竞速、精确结算选择、损坏结果和不支持内容。
+3. 对取消、Host 退出、传输失败、验证失败、提交失败及重试逐一检查原始主档、时间预算和 revision。计算中的候选不能提前成为已保存结果；失败回退必须从原始已确认边界开始，避免重复付离线收益。
+4. 比较完整离线等待、峰值内存和结果；热点确实落在传输/解析时，复用已有流式和有界机制。保持现有快速/精确选择含义，不通过少结算或少产出制造速度。
+5. 只在该局部路径内补诊断、测试和必要修复；它不要求放开持续 Rust 玩家权威，也不能充当放行旁路。
+
+主要文件：[StartMenu](../src/components/StartMenu.tsx)、[nativeOfflineStartup](../src/game/nativeOfflineStartup.ts)、[nativeSave](../src/game/nativeSave.ts)、[主进程](../desktop/main.cjs)、[离线传输](../desktop/native-offline-startup-transfer.cjs)、[Host 运行时](../native/dsp-native-host/src/core_runtime.rs)。
+
+### 5.2 RP1 交付与验收
+
+- 新冻结源码的离线性能候选包、完整路径测试、同档对照图表、失败与回退证据；公开 v47/envelope-v2 往返无损。
+- 有效样本满足 RP0 冻结的收益条件；源档完整、没有时间预算重复、没有静默回档；fallback 和取消分别记录，不能当 Native PASS。
+- 候选包仅声称被测离线场景收益，不宣传运行中模拟或帧率改善。若现有代码已达标，可只补必要证据和诊断，无须新增模拟算法。
+- 若安排局部上线，仍须执行适用于该包的签名、升级、恢复与发布检查，并明确目标和发布授权；局部离线上线不自动开放 Rust 实时权威。
+
+## 6. RP2：可信准入与 Rust 实时测试候选
+
+### 6.1 先解决真正的接管阻断
+
+当前 Host 把玩家资格固定为 false，测试 override 仅在 `cfg(test)` 下存在；renderer 的门禁字段不是一条可用于生产的证明生成管线。硬件到位也不能只改一个 boolean。
+
+1. 先交付 `qualification-design.md`：列出证据生产者、可信验证者、构建身份、允许的模式/内容、有效期或失效规则、撤销方式和拒绝条件。沿用现有发布信任模型，敏感信任材料不进入 renderer。
+2. 证明必须绑定实际 source/Host/ASAR、目录与规则指纹、验收矩阵及状态。更换运行输入后原证据不能继续放行；缺失、篡改、过期或错包均拒绝。
+3. 明确实验执行与正式资格的边界，消除“必须已放行才能采集放行证据”的循环。开发验证可以使用受限测试宿主和临时合成数据，其产物标明 TEST_ONLY，不得被普通包当成资格证明。若需要调整既有准入设计，先形成可审查 ADR，不用环境变量、UI 按钮或假证明绕过门槛。
+4. RP2 的代码与测试候选可以完成，但**普通发布包的 Native 玩家端到端验收**要在真实资格具备后执行；此前明确标为 NOT_RUN/BLOCKED，不能用测试 Host 的通过替代。RP4 最终补齐这一项后才进入邀请 Beta。
+
+### 6.2 实时最小闭环
+
+首个范围是 **Windows 普通模式 1×、受支持内置内容**，复用现有 Rust 语义命令，不新增玩法。
+
+- 从已确认的同 revision 状态进入交接：停止 JS 编辑、时钟、异步回调和 Worker；等待在途任务；原子转移持久所有权。失败在移交前保持原 JS 状态，移交后不确定则暂停在可证明的原生边界。
+- 验证首次原生 tick、暂停/继续、采矿、供电、建造、连线、加工、库存操作、保存、导出和工作区读模型。
+- 用运行证据与堆/进程采样确认 renderer、Worker 不长期保留第二份完整工厂；“Worker 已停止”不等于对象图已释放。导出时的临时有界流与长期可写镜像分别检查。
+- 接入 Native 自身的退出边界：停止接收命令、结清时钟与 WAL、取得 checkpoint/公开兼容恢复点、释放对应租约，再允许正常退出。Round 3 的 JS 关闭通过不能直接复用为 Native 关闭通过；当前受保护原生/纯挂机会话的拒绝条件不可直接删除。
+- 注入在途命令、保存失败、ACK 丢失、Host 强杀、主进程退出、启动恢复与重复请求；检查 command ID、owner/fence、revision、预算及完整状态，禁止双写、部分提交和自动装回旧 JS 镜像。
+- 测试 Native 模式必须要求实际 owner=Rust 且确认原生提交序列；退回 JS 不能通过该场景。
+
+主要触点：[App 协调](../src/App.tsx)、[Beta controller](../src/game/nativeCoreBetaController.ts)、[门禁状态机](../src/game/nativeCoreAuthority.ts)、[主进程 handoff](../desktop/native-player-authority-handoff.cjs)、[玩家运行时](../desktop/native-player-authority-runtime.cjs)、[持久协调](../desktop/native-player-authority-persistence-broker.cjs)、[Host](../native/dsp-native-host/src/core_runtime.rs)。
+
+### 6.3 RP2 交付
+
+交付准入设计与实现、受限实时测试候选、核心操作/恢复矩阵、单所有者证据和端到端性能报告。15–30 人日是这一开发里程碑的预算，不保证外部资格已齐备，也不等于真实玩家可以长期使用。未具备普通包资格时，其正式 Native 实包项继续保留缺口。
+
+## 7. RP3：完整功能、兼容和性能候选
+
+### 7.1 逐项核验已有能力
+
+建立 `feature-matrix.json`，把“代码存在、测试执行、实际 Native 路径、实包通过、发布允许”分列。覆盖清单的 true/implemented 不能自行生成已测结论。
+
+| 领域 | 必须覆盖的玩家行为与边界 |
+| --- | --- |
+| 建造与物流 | 单个/批量建造、扩建、升级、回收、重复线路、特殊端口、蓝图和退款；材料守恒 |
+| 库存与科研 | 拿取/放入/转移/丢弃、量子库存、有限/无限科研、低供电、堵塞与资源耗尽 |
+| 时间与宏观结算 | 精确、离线、纯挂机、时间扭曲，单段/分段、取消、保存与重启；预算不能重复消费 |
+| 星空与终局系统 | 勘探、殖民、星图动作、戴森、空间站、合同、制造与跨星系物流 |
+| 历史与交互 | durable undo/redo、区域/视角归属、统计失效、工作区切换、触摸/DPI/后台恢复 |
+| 模式与内容 | 普通、竞速分别检查接管合同；现有 `normal-main` 限制不得直接泛化。声明式内容包按组合验证；旧规则与脚本型扩展的明确不支持项列出，保留数据和受控 JS 路线 |
+| 存档与云 | v46/v47 导入、v47 导出、gzip、Web/Android 往返、本地 mock 云冲突、超时与重试；不让 renderer 重新持有完整云档正文 |
+
+非 Native 的 Web/PWA/Android 保持兼容回归。任何新模式、新扩展或外壳重写均单列范围，不能藏在“全覆盖”字样里。
+
+### 7.2 性能验收
+
+继承 [既有三层计划第 25.6–25.7 节](./WINDOWS_NATIVE_PERFORMANCE_DEVELOPMENT_PLAN_2026-08.md) 与 [ADR-008](./architecture/ADR-008-WINDOWS-PERFORMANCE-EDITION.md)，不把代码中的少量门禁字段当作全部发布条件。
+
+| 指标 | 验收要求 |
+| --- | --- |
+| 完整权威链路 | 同等结果、同环境下，相对固定 JS 基线净吞吐至少 1.5×；包括必要 IPC、安装与持久化成本 |
+| IPC 与投影 | 编码、传输、安装占比低于帧预算 20%；比例的分母与采样方法提前冻结 |
+| 全进程内存 | 实测总量及峰值；沿用组合峰值约 1.5–2.5 GB 或相对冻结第一层基线再降至少 30% 的目标。基线缺失不能拿旧报告数字推算通过 |
+| 持续增长 | 30 分钟先行检查、24 小时最终长跑；在同等工作负载下无持续正增长趋势，测量窗口和判断方法提前记录 |
+| 用户交互 | 记录帧 P50/P95/P99、输入延迟、超过 50 ms 的长任务、保存与恢复等待；独立列样本数与热/冷状态 |
+| 正确性 | 精确路径的规范状态、领域摘要及守恒一致；宏观路径按同一规则合同核验，不增加数值容差或牺牲产出 |
+| 多核 | 1/2/4/8/auto 及适用最大线程的确定性；只接受有端到端净收益的并行，记录稠密与不支持形状的确定性退化 |
+
+性能不达标时按 RP0/RP2 profile 选择最热的现有模块，补一个有清晰收益假设的修复。若主因是复制或 UI，则先解决该处；只有测量触发阈值时才重开共享内存、GPU 重写或新壳层方案。没有数据支持的“更多线程”“更多 Rust 代码”不算交付。
+
+## 8. RP4–RP5：从资格验证到逐批上线
+
+### 8.1 RP4 发布前证据
+
+1. 在冻结候选上执行要求的完整规则、Rust/Host、浏览器、桌面、兼容与发布工具矩阵，保留首次失败和最终复验，记录每项真实 backend。
+2. Windows 10/11，低配/主流/高配三档 CPU/内存/GPU；同夹具比较 JS、shadow 和受控 Rust 单所有者场景，覆盖每档至少 24 小时的实时/纯挂机组合。开发测试产生的数据与实际发布包的最终验收分别列出。
+3. 验证 Defender 文件锁、只读目录、进程强杀、休眠/唤醒、RDP/GPU context loss、磁盘空间不足；优先可控故障注入，禁止把用户真实系统盘填满。必须在专用可丢弃测试环境验证真实系统行为。
+4. 使用获授权测试账号验证真实云往返与冲突；账号和目的地在执行前明确，不使用玩家账号、玩家主档或直接写生产数据库。
+5. 准备签名、安装、覆盖升级、卸载保留数据和受支持回滚/兼容导出证据；此前版本的硬件或签名豁免不能默认继承。
+6. 由可信生成链产出匹配候选身份的资格材料，并在实际发布构建中验证 Native 接管、命令、保存、退出与冷恢复。正式包未执行即 NOT_RUN，测试 override 不能补这一项。
+7. 重新验证 EXE/ASAR/Host、installer/feed 引用、大小/摘要、edition/channel 和隔离数据目录，输出可审查开发交接。正式版本号在冻结时确定，不提前把 RP 编号当作版本号。
+
+RP4 的邀请 Beta 仅在相应资格和发布前检查齐备、用户明确选择且发布目标得到授权后开始。缺硬件、账号或签名时继续完成独立本地工作，缺项保留 BLOCKED，不假称已发布。
+
+### 8.2 RP5 灰度与停止
+
+建议顺序：内部隔离候选 → 获准邀请 Beta → 5% → 25% → 100%。实际人群、观察窗口、崩溃/保存/恢复阈值与负责人在首次公开发布前写入 `rollout-config`，未填完不能扩大范围；低样本量不等于没有问题。
+
+- 每批检查真实 Native 命中率、崩溃率、保存/恢复失败、状态分叉、用户等待及内存分布。收益只按被测平台、模式和设备范围声明。
+- 发现不可解释状态分叉、部分提交、静默回档或重复付预算：立即停止扩量并阻止新原生会话进入。
+- 已运行的 Native 会话先按自身持久边界暂停/结束，再从同 revision 的已验证 checkpoint 或兼容导出恢复。不能把所有活跃会话直接切到旧 JS 对象或旧存档。
+- 保留上一受支持程序版本与数据兼容路径。优先回滚程序；数据库和玩家存档不得随程序回滚自动恢复旧备份。
+- 若此次只发布 Windows 客户端/下载与更新制品，不能顺带切换 Web/API 或 Android。目标节点、通道、签名与生产变更在具体发布交接中明确。
+
+开发阶段按已授权范围连续推进，不为每个小提交重复询问。发布前先完成候选、验证和回滚材料，再就具体发布动作取得最终授权；本计划不是立即签名、push 或操作生产的指令。
+
+## 9. Web/PWA 与 Android 的后续路线
+
+这两端目前仍使用 JS 权威，不会随 Windows Rust 接管自动获得相同加速；共享 JS、Worker、画布和保存优化可以随各自版本更新复用。后续保留一套 Rust 规则核心，把线程、存储、生命周期和桥接放在平台层。
+
+| 扩展阶段 | 目标 | 决策依据 |
+| --- | --- | --- |
+| XW：Web/PWA 试验 | Rust 核心适配 WebAssembly，接入 Worker、浏览器存储和有界数据传输 | 先审计 std/线程/文件依赖；测下载与初始化成本、大档耗时和内存，达到净收益才扩大 |
+| XA：Android 试验 | 比较复用 WebAssembly 与 ARM64 原生库＋平台插件两条接入路线 | 同一手机、同档比较性能、桥接成本、热降频、耗电、内存和后台恢复，按证据选路线 |
+
+XW/XA 不计入 Windows 45–90 人日预算，未安排承诺日期；在 Windows 核心合同稳定且已有可复用收益后，单独形成工作量与验收计划。它们不要求重写三套游戏规则，也不自动要求更换界面框架。
+
+能力参考：[Rust WebAssembly 目标](https://doc.rust-lang.org/rustc/platform-support/wasm32-unknown-unknown.html)、[Rust Android 目标](https://doc.rust-lang.org/rustc/platform-support/android.html)、[Capacitor Android 插件](https://capacitorjs.com/docs/plugins/android)。支持编译目标不代表当前仓库已完成对应接入。
+
+## 10. 验证策略与证据交付
+
+### 10.1 按改动选择测试
+
+| 实际改动 | 最少验证 |
+| --- | --- |
+| 计划文档 | 链接、Markdown 结构、`git diff --check`；不重复运行游戏全量测试 |
+| 基准/观测工具 | 输入、时间、路径、来源绑定、采样、统计、超时与清理负例；真实命令一次完整输出验证 |
+| 离线结算接入 | `nativeOfflineStartup` 与传输/Host 专项；Native 命中、JS 回退、取消/失败、保存重开和原档不变的实际桌面场景 |
+| 模拟、线程或宏观规则 | Rust/JS 精确差分、完整字段与守恒、分段/重载/多线程、有限资源/断电/堵塞；受影响性能场景 |
+| 存档、租约、WAL 与生命周期 | 原子提交、owner/fence、跨标签、镜像、在途退出、强杀与冷恢复；受影响 Web 与实际桌面回归 |
+| UI/桥接/内容/模式 | 语义命令与真实操作、边界/失败响应、DPI/触摸及模式矩阵；不能用静态字符串匹配代替行为 |
+| 最终可发布候选 | 按 [项目测试规范](./TESTING_RELEASE.md) 和既有 Rust 计划执行完整适用矩阵，以及 RP4 的系统/硬件/签名/更新验证 |
+
+开发时先保留红灯，完成定向绿灯后按影响扩大。运行输入变化后重新冻结、构建和复验；同一无变化候选不为堆测试数字反复全量。明确列出 PASS、FAIL、SKIP、NOT_RUN、BLOCKED、NO_GAIN 或 INCONCLUSIVE，跳过不计通过。
+
+### 10.2 每阶段的独立目录
+
+建议结构，实际运行时将日期与 UUID 替换为真实值，不覆盖旧目录：
+
+```text
+artifacts/rust-performance/RP0/YYYYMMDD-HHMMSS-UUID/
+  README.md
+  source-and-artifact-manifest.json
+  environment.sanitized.json
+  fixture-manifest.json
+  scenarios.json
+  route-events.jsonl
+  samples.csv
+  test-results.json
+  performance-report.md
+  decision.md
+  logs/
+  screenshots/
+  SHA256SUMS.txt
+```
+
+RP1 以后另附小型 review ZIP、完整变更/补丁及独立可运行包；review ZIP 不包含 EXE/Host、依赖、真实数据或 `.git`。外层 ZIP 的字节数和 SHA-256 单独输出。截图只作辅助，实际路由、revision、输入/输出摘要与进程退出记录是主要证据。
+
+必须记录：输入生成规则与实际字节、source/driver/documentation SHA、构建日志、EXE/ASAR/Host 摘要、平台/CPU/RAM/GPU、线程/affinity/电源状态、热/冷条件、算法与时钟、样本顺序、取消/失败、PID 和残留。环境记录不含密钥、令牌、完整命令行或玩家正文。
+
+### 10.3 每阶段开发交接模板
+
+```text
+Task ID / title / priority:
+Source and attachments:
+Observed evidence / reproduced issue:
+User-visible acceptance criteria:
+Compatibility and data-preservation constraints:
+Target platforms / modes / content scope:
+Required tests and actual results:
+Runtime source / driver / documentation SHA:
+Changed files:
+Artifact paths / Build ID / edition / channel / hashes:
+Baseline / raw samples / measured effect / confidence:
+Known gaps / failures / risks:
+Rollback or same-revision recovery:
+Stage decision and next bounded task:
+Release target and version (unknown until frozen):
+Implementation / verification / artifacts / release status:
+```
+
+交接中“实现完成、验证完成、制品就绪、已发布”四栏分别填写。正式发布另补目标节点/通道、发布前验证、旧/新制品、回滚指针、健康与下载读回、观察窗口及残余风险。
+
+## 11. 数据、规则与失败边界
+
+- 保持 GameState v47、envelope v2、cloud schema v8、SQLite layout v3。需要真实格式变更时单独提出迁移和兼容方案，不能让优化暗中改变合同。
+- 不降低模拟精度、物流频率、公平性或产出；不删除历史、MOD 或玩家数据换性能。GPU/界面只展示和提交意图，不拥有权威库存。
+- 不缩短租约、删除 fencing、吞掉正常退出失败或自动选择冲突。Native 已接管后的故障必须遵守同 revision 恢复，不能随意回退旧快照。
+- 合成档是默认输入；真实档、真实账号、签名凭据和生产访问按具体任务授权处理，不能因计划里写了这些词就执行。已有 1.2.7 审查包与已冻结夹具只作前态证据。
+- 不承诺“Rust 必然快几倍”。核心算法、接入传输、UI 与存储分别计量；收益不明显时记录无收益并调整优先级。
+
+## 12. 执行看板与下一步
+
+| ID | 当前状态 | 完成证据 | 下一动作 |
+| --- | --- | --- | --- |
+| PLAN | DOCUMENTED | 本文及路线图入口；仅文档验证 | 按阶段维护状态与链接 |
+| RP0 | READY / NOT_MEASURED | 无新测量 | 冻结合成大档、版本与场景；验证实际路由和 A/B |
+| RP1 | PLANNED | 无新 Native 离线实包证据 | 等 RP0 收益/瓶颈结论，复用现有离线链路 |
+| RP2 | PLANNED | 有旧候选实现，正式准入与 Native 实包证据未闭合 | 先形成资格依赖图与隔离实时验证方案 |
+| RP3 | PLANNED | 不复用旧清单冒充本阶段通过 | 逐项功能、兼容、性能与状态所有权核验 |
+| RP4 | PLANNED | 外部门禁未完成 | 多硬件、签名、真实测试账号及正式包验收 |
+| RP5 | PLANNED | 未发布 | 候选与发布授权齐备后按批次执行 |
+| XW / XA | DEFERRED | 无接入实测 | Windows 合同稳定后单独评估和估算 |
+
+下一次启动开发时，以 **RP0** 为首个有界任务：
+
+> 依据本计划执行 RP0。确认当前树与包的实际来源，使用一次生成并冻结的合成中/大档，核对 Windows 1.2.7 的实时 owner、原生存档及快速离线结算实际路径，完成相同时钟/时长/设置下的 JS/Rust 正确性与性能对照。优先复用已有编排，只补必要诊断或测试工具；不要把性能阶段扩大为新玩法、WASM/Android 或正式权威放行。交付原始样本、完整进程内存、耗时分解、失败/回退原因和明确的 RP1/RP2 优先级决定。报告实现、验证、制品和发布状态；测量未完成时保留 NOT_MEASURED。
+
+RP0 收口后据证据更新本文的状态、估算和下一阶段范围，不修改历史测量成绩，也不重置此前 100/100 代码工作单位的分母。

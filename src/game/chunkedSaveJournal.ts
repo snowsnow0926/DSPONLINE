@@ -588,14 +588,23 @@ export async function clearChunkedSaveJournal(mode: SaveMode): Promise<void> {
  * v47 payload, preserving backward compatibility with 1.1.7.
  */
 export async function restoreChunkedSavePayload(baseRaw: string, mode: SaveMode): Promise<RestoredChunkedSave | null> {
+  return restoreChunkedSavePayloadWithReader(baseRaw, mode, readLocalSaveInternalValue);
+}
+
+/** Validate the primary and manifest before pulling any large native/IDB chunks. */
+export async function restoreChunkedSavePayloadWithReader(
+  baseRaw: string,
+  mode: SaveMode,
+  readRecord: (key: string) => Promise<string | null>,
+): Promise<RestoredChunkedSave | null> {
   const integrity = inspectSaveEnvelopeChecksum(baseRaw);
   const baseChecksum = integrity.recordedChecksum;
   if (!baseChecksum || integrity.status === "invalid") return null;
-  const manifest = parseManifest(await readLocalSaveInternalValue(manifestKey(mode)));
+  const manifest = parseManifest(await readRecord(manifestKey(mode)));
   if (!manifest || manifest.mode !== mode || manifest.basePrimaryChecksum !== baseChecksum) return null;
   const values = new Map<string, string>();
   for (const chunk of manifest.chunks) {
-    const text = await readLocalSaveInternalValue(chunkKey(mode, chunk.id));
+    const text = await readRecord(chunkKey(mode, chunk.id));
     if (text === null) return null;
     const identity = computeSavePayloadTextChecksum(text);
     if (identity.checksum !== chunk.checksum || identity.byteLength !== chunk.bytes) return null;

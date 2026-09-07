@@ -3,6 +3,8 @@
  *   --package-root <release-performance-edition> --output-dir <new-private-directory>
  *   [--skip-offline] [--source-sha <trusted-40-character-commit>]
  *   [--resume-profile <closed-private-profile> --offline-seconds <seconds>]
+ *   [--expect-decision] measures a decision dialog followed by real UI cancellation,
+ *   checking that the persisted checkpoint is unchanged; it never counts as settlement.
  * Raw saves stay in the source file and a fresh private Electron profile. No screenshots,
  * traces, video, console text, response bodies or exception messages are recorded.
  */
@@ -20,7 +22,7 @@ const { PERFORMANCE_EDITION_IDENTITY: identity } = require("../desktop/performan
 const args = new Map();
 for (let i = 2; i < process.argv.length; i++) {
   const key = process.argv[i];
-  if (key === "--skip-offline") args.set(key, true);
+  if (key === "--skip-offline" || key === "--expect-decision") args.set(key, true);
   else if (["--fixture", "--package-root", "--output-dir", "--source-sha", "--resume-profile", "--offline-seconds"].includes(key) && process.argv[i + 1]) args.set(key, process.argv[++i]);
   else { console.error("Invalid arguments; see the usage comment in this driver."); process.exit(2); }
 }
@@ -39,6 +41,7 @@ async function normalClose() {
 }
 try {
   if (!["--fixture", "--package-root", "--output-dir"].every(key => typeof args.get(key) === "string")) throw new Error("missing-arguments");
+  if (args.has('--expect-decision') && (!args.has('--resume-profile') || args.has('--skip-offline'))) throw new Error('invalid-decision-scope');
   const fixture = path.resolve(args.get("--fixture")), packageRoot = path.resolve(args.get("--package-root"));
   output = path.resolve(args.get("--output-dir"));
   if (output === fixture || output === packageRoot || output.startsWith(packageRoot + path.sep)) throw new Error("invalid-output-location");
@@ -129,7 +132,9 @@ try {
       try {
         const value = await new Promise((resolve, reject) => { const request = db.transaction("records", "readonly").objectStore("records").get(`dsp-idle-network.local-save-coordination.v1.revision.${encodeURIComponent("dsp-idle-network.save.v1")}`); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error("read-failed")); });
         const revision = JSON.parse(value.value);
-        return { revision: revision.revision, savedAt: revision.savedAt, stateChecksum: revision.checksum };
+        const primary = await new Promise((resolve, reject) => { const request = db.transaction('records', 'readonly').objectStore('records').get('dsp-idle-network.save.v1'); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error('read-failed')); });
+        const payloadSha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(primary.value)))].map(value => value.toString(16).padStart(2, '0')).join('');
+        return { revision: revision.revision, savedAt: revision.savedAt, stateChecksum: revision.checksum, payloadSha256 };
       } finally { db.close(); }
     });
     const seconds = Number(args.get("--offline-seconds"));
@@ -176,12 +181,22 @@ try {
       .or(page.getByRole("alertdialog", { name: "快速结算需要玩家选择" }));
     for (let attempt = 0; attempt < 3; attempt++) {
       await activeShell.or(recovery).or(fast).or(decision).first().waitFor();
-      if (await decision.isVisible()) { report.offlineOutcome = "decision-required"; throw new Error("decision-required"); }
+      if (await decision.isVisible()) {
+        report.offlineOutcome = "decision-required";
+        if (!args.has('--expect-decision')) throw new Error("decision-required");
+        report.scope = 'return-decision';
+        report.returnToDecisionMs = await page.evaluate(start => performance.now() - start, started);
+        await decision.getByRole('button', { name: '取消并返回', exact: true }).click();
+        await decision.waitFor({ state: 'hidden' });
+        break;
+      }
       if (await activeShell.isVisible()) break;
       if (await recovery.isVisible()) { report.checkpointRecoverySelected = true; await recovery.click(); }
       else await fast.click();
     }
   }
+  if (args.has('--expect-decision') && report.offlineOutcome !== 'decision-required') throw new Error('expected-decision-not-observed');
+  if (report.scope !== 'return-decision') {
   await activeShell.waitFor();
   const settlement = page.getByRole("button", { name: "确认结算", exact: true });
   if (await settlement.isVisible()) await settlement.click();
@@ -189,6 +204,7 @@ try {
   await page.getByRole("dialog", { name: "运营中心" }).waitFor();
   report.importToInteractiveMs = await page.evaluate(start => performance.now() - start, started);
   if (args.has("--resume-profile")) { report.returnToInteractiveMs = report.importToInteractiveMs; delete report.importToInteractiveMs; }
+  }
   const metrics = await page.evaluate(() => window.__dspPrivateMetrics);
   report.workerEvents = metrics.events; report.droppedWorkerEvents = metrics.dropped;
   report.mainThreadLongTasks = { count: metrics.longTasks.length, maxMs: Math.max(0, ...metrics.longTasks), totalMs: metrics.longTasks.reduce((total, duration) => total + duration, 0) };
@@ -218,6 +234,11 @@ try {
     } finally { db.close(); }
   });
   if (report.scope === 'import' && !report.persisted.snapshotMatchesPrimary) throw new Error('automatic-snapshot-state-mismatch');
+  if (report.scope === 'return-decision') {
+    report.persistedUnchanged = report.persisted.sha256 === report.seedRevision.payloadSha256 &&
+      report.persisted.revision === report.seedRevision.revision && report.persisted.stateChecksum === report.seedRevision.stateChecksum;
+    if (!report.persistedUnchanged) throw new Error('decision-altered-persisted-checkpoint');
+  }
   mark("normal-close"); await normalClose();
   if (report.rendererErrors || report.droppedWorkerEvents) throw new Error("diagnostic-gate-failed");
   report.status = "PASS";
@@ -244,5 +265,5 @@ try {
     if (!report.sourceUnchanged) { report.status = "FAILED"; process.exitCode = 1; }
   }
   if (outputCreated) fs.writeFileSync(path.join(output, "report.json"), JSON.stringify(report, null, 2), { flag: "wx" });
-  console.log(JSON.stringify({ scope: report.scope, status: report.status, failurePhase: report.failurePhase, inspectionReadyMs: report.inspectionReadyMs, importToInteractiveMs: report.importToInteractiveMs, sourceUnchanged: report.sourceUnchanged, normalClose: report.normalClose }));
+  console.log(JSON.stringify({ scope: report.scope, status: report.status, failurePhase: report.failurePhase, inspectionReadyMs: report.inspectionReadyMs, importToInteractiveMs: report.importToInteractiveMs, returnToDecisionMs: report.returnToDecisionMs, persistedUnchanged: report.persistedUnchanged, sourceUnchanged: report.sourceUnchanged, normalClose: report.normalClose }));
 }

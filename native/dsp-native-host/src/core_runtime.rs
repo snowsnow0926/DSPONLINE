@@ -4819,22 +4819,6 @@ impl CoreRegistry {
             .saturating_sub(source.saved_at_ms)
             .min(offline_limit_milliseconds)
             / 1_000;
-        if settled_seconds == 0 {
-            return Ok(CorePrepareOfflineSettlementExportResult {
-                prepared: false,
-                strategy: "macro-v1",
-                source_saved_at_ms: source.saved_at_ms,
-                settled_at_ms: source.saved_at_ms,
-                settled_seconds: 0,
-                reason: Some(
-                    "native offline interval is shorter than one complete second".to_owned(),
-                ),
-                advance: None,
-                export: None,
-                source_summary,
-                candidate_summary: None,
-            });
-        }
         let settled_at_ms = source
             .saved_at_ms
             .checked_add(
@@ -4844,6 +4828,26 @@ impl CoreRegistry {
             )
             .filter(|value| *value <= MAX_SAFE_INTEGER)
             .ok_or_else(|| anyhow!("native offline candidate clock overflowed"))?;
+        // OfflineMacroV1 may truthfully report support while freezing an
+        // unproven productive tail. Such a candidate must never bypass the
+        // browser's conservative-settlement decision. Qualify longer intervals
+        // separately; the first 30 seconds use the exact calibration path.
+        if settled_seconds == 0 || settled_seconds > 30 {
+            return Ok(CorePrepareOfflineSettlementExportResult {
+                prepared: false,
+                strategy: "macro-v1",
+                source_saved_at_ms: source.saved_at_ms,
+                settled_at_ms,
+                settled_seconds,
+                reason: Some(
+                    "native offline automatic adoption requires an exact interval of 1 to 30 seconds".to_owned(),
+                ),
+                advance: None,
+                export: None,
+                source_summary,
+                candidate_summary: None,
+            });
+        }
         let mut candidate = source_state.clone();
         let advance = candidate.advance(&CoreAdvanceRequest {
             base_revision: source.revision,
@@ -8535,14 +8539,14 @@ mod tests {
                 offline_candidate_request(
                     &source,
                     &before,
-                    source.saved_at_ms + 600_999,
+                    source.saved_at_ms + 30_999,
                     "offline-candidate-one",
                 ),
             )
             .unwrap();
         assert!(result.prepared);
-        assert_eq!(result.settled_seconds, 600);
-        assert_eq!(result.settled_at_ms, source.saved_at_ms + 600_000);
+        assert_eq!(result.settled_seconds, 30);
+        assert_eq!(result.settled_at_ms, source.saved_at_ms + 30_000);
         assert_eq!(
             result.source_summary.canonical_sha256,
             before.canonical_sha256
@@ -8560,7 +8564,11 @@ mod tests {
         assert_eq!(bytes.len() as u64, exported.result.byte_length);
         let envelope: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(envelope["savedAt"].as_u64(), Some(result.settled_at_ms));
-        assert_eq!(envelope["state"]["elapsedSeconds"].as_f64(), Some(602.0));
+        assert_eq!(envelope["state"]["elapsedSeconds"].as_f64(), Some(32.0));
+        assert_eq!(
+            result.advance.as_ref().unwrap().approximated_seconds,
+            Some(0.0)
+        );
 
         let after = registry.status(&imported.session_id).unwrap();
         assert_eq!(after.revision, before.revision);
@@ -8627,7 +8635,9 @@ mod tests {
                 ),
             )
             .unwrap();
-        assert!(result.prepared);
+        assert!(!result.prepared);
+        assert!(result.advance.is_none());
+        assert!(result.export.is_none());
         assert_eq!(result.settled_seconds, 7 * 24 * 60 * 60);
         assert_eq!(
             result.settled_at_ms,
@@ -8636,6 +8646,49 @@ mod tests {
         let after = registry.status(&imported.session_id).unwrap();
         assert_eq!(after.revision, before.revision);
         assert_eq!(after.canonical_sha256, before.canonical_sha256);
+    }
+
+    #[test]
+    fn offline_candidate_rejects_unqualified_tail_without_spending_or_publishing() {
+        let (root, store, registry, imported, _catalog) = offline_settlement_fixture();
+        let source = store.recover("normal-main").unwrap().unwrap();
+        let before = registry.status(&imported.session_id).unwrap();
+        for seconds in [31, 600, 28_800] {
+            let result = registry
+                .prepare_offline_settlement_export(
+                    &store,
+                    &imported.session_id,
+                    offline_candidate_request(
+                        &source,
+                        &before,
+                        source.saved_at_ms + seconds * 1_000,
+                        "unqualified-tail",
+                    ),
+                )
+                .unwrap();
+            assert!(!result.prepared);
+            assert!(result.advance.is_none());
+            assert!(result.export.is_none());
+            assert!(result.reason.unwrap().contains("1 to 30 seconds"));
+            assert_eq!(
+                registry
+                    .status(&imported.session_id)
+                    .unwrap()
+                    .canonical_sha256,
+                before.canonical_sha256
+            );
+            assert_eq!(
+                store.recover("normal-main").unwrap().unwrap().root_hash,
+                source.root_hash
+            );
+            assert!(
+                store
+                    .read_wal("normal-main", source.revision)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!root.path().join("exports/unqualified-tail.json").exists());
+        }
     }
 
     fn player_authority_fixture_with_probe(

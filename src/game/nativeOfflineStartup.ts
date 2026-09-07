@@ -121,6 +121,12 @@ export async function tryNativeOfflineStartupSettlement(input: {
   onProgress?: (phase: NativeOfflineStartupProgressPhase) => void;
 }, dependencies: NativeOfflineStartupDependencies = {}): Promise<NativeOfflineStartupAttempt> {
   const { loaded, runtime } = input;
+  // The macro can report `supported` after freezing an unproven productive
+  // tail. Until long-interval parity is qualified, only its exact prefix may
+  // be adopted automatically. Keep the original state for the JS decision path.
+  if (loaded.offlineSeconds > 30) {
+    return fallback("长时原生离线结算尚未通过产出一致性验收，使用现有结算流程");
+  }
   if (loaded.offlineSeconds < 1 || loaded.state.version !== 47 ||
       loaded.state.mode !== "normal" || loaded.state.speedrun?.enabled ||
       loaded.state.paused || !Number.isSafeInteger(loaded.savedAt) ||
@@ -192,7 +198,9 @@ export async function tryNativeOfflineStartupSettlement(input: {
     } else {
       input.onProgress?.("verifying");
       const maximumOfflineSeconds = getOfflineSimulationLimitSeconds(loaded.state);
-      if (result.sourceSavedAtMs !== loaded.savedAt || result.settledSeconds < 1 ||
+      if (!result.advance.supported || result.advance.approximatedSeconds !== 0 ||
+          result.advance.exactCalibrationSeconds !== result.settledSeconds || result.settledSeconds > 30 ||
+          result.sourceSavedAtMs !== loaded.savedAt || result.settledSeconds < 1 ||
           result.settledSeconds > maximumOfflineSeconds ||
           result.settledAtMs !== result.sourceSavedAtMs + result.settledSeconds * 1_000 ||
           !sourceSummaryMatches(result.sourceSummary, {

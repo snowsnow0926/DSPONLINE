@@ -112,9 +112,13 @@ try {
     const { NativeHostClient } = nativeRequire(app.getAppPath() + "/desktop/native-host.cjs");
     const original = NativeHostClient.prototype.request;
     global.__recoveryReads = [];
+    global.__recoveryRpcErrors = [];
     NativeHostClient.prototype.request = function(request, ...args) {
       if (request.operation === "saveRead") global.__recoveryReads.push({ key: request.key, generation: request.generation, rootHash: request.rootHash });
-      return original.call(this, request, ...args);
+      return original.call(this, request, ...args).catch(error => {
+        global.__recoveryRpcErrors.push({ operation: request.operation, code: error.code ?? "unknown" });
+        throw error;
+      });
     };
   });
   const processTree = packageProcesses(packageDirectory);
@@ -158,9 +162,11 @@ try {
   const after = await page.evaluate(() => window.dspDesktop.recoverNativeSave({ slot: "normal-main" }));
   if (after.rootHash !== checkpoint.rootHash || after.generation !== checkpoint.generation || after.revision !== checkpoint.revision) throw new Error("Read-only recovery changed the checkpoint");
   const reads = await app.evaluate(() => global.__recoveryReads);
+  const rpcErrors = await app.evaluate(() => global.__recoveryRpcErrors);
   const { raw: _resultRaw, ...timing } = measured;
-  report = { ...report, ...timing, asset, reads, resultStateHash, expectedStateHash: scenario === "matching" ? expectedStateHash : null, equality, checkpointUnchanged: true, processesAfterMeasurement, privateBytesPeak: completeMemory ? Math.max(...samples.map(s => s.privateBytes)) : null, memoryStatus: completeMemory ? "SAMPLED_COMPLETE_PROCESS_SET" : "NOT_MEASURED", memorySamples: samples.length, sameFixtureBytes: hash(fs.readFileSync(fixturePath)) === fixtureSha };
+  report = { ...report, ...timing, asset, reads, rpcErrors, resultStateHash, expectedStateHash: scenario === "matching" ? expectedStateHash : null, equality, checkpointUnchanged: true, processesAfterMeasurement, privateBytesPeak: completeMemory ? Math.max(...samples.map(s => s.privateBytes)) : null, memoryStatus: completeMemory ? "SAMPLED_COMPLETE_PROCESS_SET" : "NOT_MEASURED", memorySamples: samples.length, sameFixtureBytes: hash(fs.readFileSync(fixturePath)) === fixtureSha };
   if (!equality || !report.sameFixtureBytes) throw new Error("Recovery is not equivalent to the fixed input");
+  if (rpcErrors.length || !completeMemory) throw new Error("Recovery measurement had an RPC failure or incomplete process memory evidence");
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
   for (let i = 0; i < 250 && appChild.exitCode === null; i++) await delay(100);
   if (appChild.exitCode !== 0) throw new Error("Normal close did not complete successfully");

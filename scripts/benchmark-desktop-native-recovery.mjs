@@ -55,6 +55,24 @@ env.DSP_PERFORMANCE_SMOKE_ISOLATION = "1"; env.DSP_PERFORMANCE_SMOKE_APP_DATA_RO
 let app, sampler, report = { kind: "packaged-native-recovery-stage", scope: "Not whole startup or offline computation", scenario, expected, fixturePath, fixtureSha, inputSha256: hash(inputRaw), fixtureBytes: Buffer.byteLength(raw), entities: state.entities.length, belts: state.belts.length, recordCount: records.length, profile, evidence: verified.evidence, driverSha256: hash(fs.readFileSync(new URL(import.meta.url))) };
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 let appChild;
+let samplerDone, samplerStatus;
+const watchdog = setTimeout(() => {
+  report.timeout = "Driver exceeded 150 seconds; this run is invalid";
+  fs.writeFileSync(path.join(output, "timeout.json"), JSON.stringify(report, null, 2));
+  if (sampler) fs.writeFileSync(path.join(output, "sampler.stop"), "stop");
+  if (appChild?.exitCode === null) appChild.kill();
+}, 150000);
+async function stopSampler() {
+  if (!sampler) return;
+  fs.writeFileSync(path.join(output, "sampler.stop"), "stop");
+  let outcome = await Promise.race([samplerDone, delay(5000).then(() => ({ error: "Memory sampler did not stop within 5 seconds" }))]);
+  if (outcome.error && sampler.exitCode === null) {
+    sampler.kill();
+    await Promise.race([samplerDone, delay(2000)]);
+  }
+  sampler = null;
+  if (outcome.error || outcome.code !== 0) throw new Error(outcome.error ?? `Memory sampler exited ${outcome.code}`);
+}
 try {
   console.log("launch");
   app = await electron.launch({ executablePath: path.join(packageDirectory, "dsp-idle-performance-edition.exe"), cwd: packageDirectory, env, timeout: 60000 });
@@ -74,6 +92,9 @@ try {
   const status = await page.evaluate(() => window.dspDesktop.getNativePerformanceStatus());
   console.log("host", status.available);
   if (!status.available || status.nativeFormatVersion !== 1) throw new Error("Actual native Host unavailable");
+  report.hostStatus = status;
+  report.networkPolicy = await app.evaluate(() => globalThis.__dspIsolatedNetworkAudit?.policy);
+  if (report.networkPolicy !== "loopback-only-v1") throw new Error("Missing package network isolation");
   const tx = await page.evaluate(request => window.dspDesktop.beginNativeSave(request), { slot: "normal-main", mode: "normal", stateVersion: 47, baseChecksum: envelope.checksum, registryFingerprint: fixtureTools.runtime.fingerprint, revision: 1, savedAtMs: envelope.savedAt });
   for (let index = 0; index < records.length; index += 8) await page.evaluate(request => window.dspDesktop.writeNativeSave(request), { transactionId: tx.transactionId, records: records.slice(index, index + 8) });
   const checkpoint = await page.evaluate(transactionId => window.dspDesktop.commitNativeSave({ transactionId }), tx.transactionId);
@@ -93,8 +114,15 @@ try {
   if (!processTree.some(p => p.Name === "dsp-native-host.exe")) throw new Error("Native Host missing from package process inventory");
   report.processTree = processTree;
   const ready = path.join(output, "sampler.ready"), stop = path.join(output, "sampler.stop"), memoryFile = path.join(output, "private-bytes.json");
-  sampler = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", path.resolve("scripts/sample-desktop-private-bytes.ps1"), "-ProcessIds", processTree.map(p => p.ProcessId).join(","), "-OutputPath", memoryFile, "-ReadyPath", ready, "-StopPath", stop], { windowsHide: true, stdio: "ignore" });
-  for (let i = 0; i < 100 && !fs.existsSync(ready); i++) await delay(50);
+  sampler = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", path.resolve("scripts/sample-desktop-private-bytes.ps1"), "-ProcessIds", processTree.map(p => p.ProcessId).join(","), "-OutputPath", memoryFile, "-ReadyPath", ready, "-StopPath", stop], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+  sampler.stderr.on("data", bytes => fs.appendFileSync(path.join(output, "sampler-stderr.log"), bytes));
+  // Observe immediately: attaching an exit listener after the measurement can
+  // miss an early failure and leave the driver waiting forever.
+  samplerDone = new Promise(resolve => {
+    sampler.once("error", error => resolve({ error: String(error) }));
+    sampler.once("exit", (code, signal) => resolve({ code, signal }));
+  }).then(value => { samplerStatus = value; return value; });
+  for (let i = 0; i < 200 && !fs.existsSync(ready) && !samplerStatus; i++) await delay(50);
   if (!fs.existsSync(ready)) throw new Error("Memory sampler did not start");
   const measured = await page.evaluate(async asset => {
     const startedAtMs = Date.now(), start = performance.now();
@@ -105,10 +133,14 @@ try {
     const durationMs = performance.now() - start, endedAtMs = Date.now();
     return { durationMs, startedAtMs, endedAtMs, raw: result?.raw ?? null, manifest: result?.manifest ?? null };
   }, asset);
-  fs.writeFileSync(stop, "stop");
-  await new Promise((resolve, reject) => { sampler.once("exit", code => code === 0 ? resolve() : reject(new Error(`Sampler exited ${code}`))); }); sampler = null;
+  await stopSampler();
   const memory = JSON.parse(fs.readFileSync(memoryFile, "utf8").replace(/^\uFEFF/, ""));
   const samples = (Array.isArray(memory) ? memory : [memory]).filter(row => row.timestampMs >= measured.startedAtMs && row.timestampMs <= measured.endedAtMs);
+  const processesAfterMeasurement = packageProcesses(packageDirectory);
+  const ids = rows => rows.map(row => row.ProcessId).sort((a, b) => a - b).join(",");
+  const expectedIds = ids(processTree);
+  const completeMemory = samples.length > 0 && ids(processesAfterMeasurement) === expectedIds && samples.every(row =>
+    row.processIds.slice().sort((a, b) => a - b).join(",") === expectedIds && Number.isFinite(row.privateBytes) && row.privateBytes > 0 && (!row.errors || row.errors.length === 0));
   const resultStateHash = measured.raw === null ? null : hash(canonical(JSON.parse(measured.raw).state));
   const equality = scenario === "obsolete" ? measured.raw === null : resultStateHash === expectedStateHash;
   if (!equality && measured.raw) {
@@ -120,7 +152,7 @@ try {
   if (after.rootHash !== checkpoint.rootHash || after.generation !== checkpoint.generation || after.revision !== checkpoint.revision) throw new Error("Read-only recovery changed the checkpoint");
   const reads = await app.evaluate(() => global.__recoveryReads);
   const { raw: _resultRaw, ...timing } = measured;
-  report = { ...report, ...timing, asset, reads, resultStateHash, expectedStateHash: scenario === "matching" ? expectedStateHash : null, equality, checkpointUnchanged: true, privateBytesPeak: samples.length ? Math.max(...samples.map(s => s.privateBytes)) : null, memorySamples: samples.length, sameFixtureBytes: hash(fs.readFileSync(fixturePath)) === fixtureSha };
+  report = { ...report, ...timing, asset, reads, resultStateHash, expectedStateHash: scenario === "matching" ? expectedStateHash : null, equality, checkpointUnchanged: true, processesAfterMeasurement, privateBytesPeak: completeMemory ? Math.max(...samples.map(s => s.privateBytes)) : null, memoryStatus: completeMemory ? "SAMPLED_COMPLETE_PROCESS_SET" : "NOT_MEASURED", memorySamples: samples.length, sameFixtureBytes: hash(fs.readFileSync(fixturePath)) === fixtureSha };
   if (!equality || !report.sameFixtureBytes) throw new Error("Recovery is not equivalent to the fixed input");
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
   for (let i = 0; i < 250 && appChild.exitCode === null; i++) await delay(100);
@@ -130,7 +162,8 @@ try {
   if (report.residualProcesses.length) throw new Error("Package processes remain after normal close");
 } catch (error) { report.error = String(error); console.error(error); fs.writeFileSync(path.join(output, "failure.json"), JSON.stringify(report, null, 2)); process.exitCode = 1; }
 finally {
-  if (sampler) { fs.writeFileSync(path.join(output, "sampler.stop"), "stop"); await new Promise(resolve => sampler.once("exit", resolve)); }
+  clearTimeout(watchdog);
+  if (sampler) await stopSampler().catch(error => { report.samplerCleanupError = String(error); process.exitCode = 1; });
   if (app && appChild.exitCode === null) { await Promise.race([app.evaluate(({ app }) => app.exit(1)).catch(() => {}), delay(5000)]); if (appChild.exitCode === null) appChild.kill(); }
   fs.writeFileSync(path.join(output, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ output, durationMs: report.durationMs, equality: report.equality, reads: report.reads?.length, privateBytesPeak: report.privateBytesPeak, error: report.error }));

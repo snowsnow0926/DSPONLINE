@@ -133,6 +133,24 @@ export function createQuantumProductionFixture(tiles: number) {
   return state;
 }
 
+export type PublicCatalogOfflineVariant = "infinite" | "finite-reserve" | "quantum-capacity";
+
+/** A bounded qualification chain using the unmodified public production catalog. */
+export function createPublicCatalogOfflineQualificationFixture(variant: PublicCatalogOfflineVariant): GameState {
+  const state = createQuantumProductionFixture(1);
+  state.settings.resourceMode = variant === "finite-reserve" ? "finite" : "infinite";
+  if (variant === "finite-reserve") {
+    const vein = state.entities.find(entity => entity.kind === "vein" && (entity.minerCount ?? 0) > 0)!;
+    vein.resourceCapacity = 2_000;
+    vein.resourceRemaining = 2_000;
+    vein.resourceDepletionRemainder = 0;
+  } else if (variant === "quantum-capacity") {
+    state.quantumLogisticsNetwork.itemCapacities.iron_ingot = "10000";
+    state.quantumLogisticsNetwork.inventory.iron_ingot = "9950";
+  }
+  return state;
+}
+
 export { serializeEnvelope, inspectSave, migrateGame, buildChunkedSaveJournal, streamChunkedSaveJournalFromRuntimeState, projectPersistentSaveState, createNativeCoreRevisionProof,
   advanceSimulationBudget, runFastOfflineSettlement, runFastOfflineSettlementAsync, runConservativeOfflineSettlement, classifyOfflineWorkload };
 export type { GameState };

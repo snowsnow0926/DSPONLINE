@@ -36,10 +36,15 @@ const bundle = await rolldown({ input: "tests/fixtures/rust-offline-performance.
 await bundle.write({ file: path.join(output, "fixture-tools.mjs"), format: "esm", codeSplitting: false }); await bundle.close();
 const fixtureTools = await import(pathToFileURL(path.join(output, "fixture-tools.mjs")));
 const state = fixtureTools.migrateGame(envelope.state);
-const journal = fixtureTools.buildChunkedSaveJournal(state, { mode: "normal", basePrimaryChecksum: envelope.checksum, savedAt: envelope.savedAt, retainAllChunks: true });
+const saveOptions = { mode: "normal", basePrimaryChecksum: envelope.checksum, savedAt: envelope.savedAt };
+const journal = fixtureTools.buildChunkedSaveJournal(fixtureTools.projectPersistentSaveState(state, fixtureTools.runtime.registry), { ...saveOptions, retainAllChunks: true });
 const prefix = "dsp-idle-network.internal.v1.chunked.v1.normal.";
-const records = [...journal.chunks].map(([key, value]) => ({ key: prefix + "chunk." + encodeURIComponent(key), value }));
-records.push({ key: prefix + "manifest", value: JSON.stringify(journal.manifest) });
+const records = [];
+const streamed = await fixtureTools.streamChunkedSaveJournalFromRuntimeState(state, fixtureTools.runtime.registry, saveOptions,
+  { mode: "normal", basePrimaryChecksum: envelope.checksum, previous: null, previousChunkIds: [], existingKeys: [] }, async batch => records.push(...batch));
+const expectedRecords = new Map([...journal.chunks].map(([key, value]) => [prefix + "chunk." + encodeURIComponent(key), value]));
+expectedRecords.set(prefix + "manifest", JSON.stringify(journal.manifest));
+if (records.length !== expectedRecords.size || records.some(record => expectedRecords.get(record.key) !== record.value)) throw new Error("Production streaming records differ from the reference persistent projection");
 const newerState = structuredClone(state); newerState.elapsedSeconds += 1;
 const inputRaw = scenario === "matching" ? raw : fixtureTools.serializeEnvelope(newerState, envelope.savedAt + 1000);
 // Compare the complete state, independent of envelope field ordering/metadata.
@@ -55,6 +60,8 @@ env.DSP_PERFORMANCE_SMOKE_ISOLATION = "1"; env.DSP_PERFORMANCE_SMOKE_APP_DATA_RO
 let app, sampler, report = { kind: "packaged-native-recovery-stage", scope: "Not whole startup or offline computation", scenario, expected, fixturePath, fixtureSha, inputSha256: hash(inputRaw), fixtureBytes: Buffer.byteLength(raw), entities: state.entities.length, belts: state.belts.length, recordCount: records.length, profile, evidence: verified.evidence, driverSha256: hash(fs.readFileSync(new URL(import.meta.url))) };
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 let appChild;
+report.seedMethod = "streamChunkedSaveJournalFromRuntimeState; exact bytes checked against full persistent projection";
+report.nativeWireBytes = streamed.totalBytes;
 let samplerDone, samplerStatus;
 const watchdog = setTimeout(() => {
   report.timeout = "Driver exceeded 150 seconds; this run is invalid";

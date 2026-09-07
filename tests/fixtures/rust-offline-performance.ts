@@ -3,7 +3,8 @@ import { migrateGame, serializeEnvelope, inspectSave } from "../../src/game/stor
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "../../src/game/contentPacks";
 import { createNativeCoreCatalog } from "../../src/game/nativeCoreCatalog";
 import { createNativeCoreRevisionProof } from "../../src/game/nativeCoreProof";
-import { buildChunkedSaveJournal } from "../../src/game/chunkedSaveJournal";
+import { buildChunkedSaveJournal, streamChunkedSaveJournalFromRuntimeState } from "../../src/game/chunkedSaveJournal";
+import { projectPersistentSaveState } from "../../src/game/saveProjection";
 import { runFastOfflineSettlement, runFastOfflineSettlementAsync, runConservativeOfflineSettlement } from "../../src/game/offlineApproximation";
 import { classifyOfflineWorkload } from "../../src/game/offlineComplexity";
 import type { FactoryEntity, GameState } from "../../src/game/types";
@@ -132,6 +133,6 @@ export function createQuantumProductionFixture(tiles: number) {
   return state;
 }
 
-export { serializeEnvelope, inspectSave, migrateGame, buildChunkedSaveJournal, createNativeCoreRevisionProof,
+export { serializeEnvelope, inspectSave, migrateGame, buildChunkedSaveJournal, streamChunkedSaveJournalFromRuntimeState, projectPersistentSaveState, createNativeCoreRevisionProof,
   advanceSimulationBudget, runFastOfflineSettlement, runFastOfflineSettlementAsync, runConservativeOfflineSettlement, classifyOfflineWorkload };
 export type { GameState };

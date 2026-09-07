@@ -5,11 +5,54 @@ import {
   computeSavePayloadChecksum,
   computeSavePayloadTextChecksum,
   decodeVerifiedSaveTransfer,
+  rewrapVerifiedPrimarySaveAsSnapshot,
   serializeSaveEnvelopeToTransfer,
 } from "./saveTransfer";
 import { inspectSave, parseTrustedWorkerEnvelope, prepareSaveStateForBackground } from "./storage";
 
 describe("transferable save serialization", () => {
+  it("rewraps a verified primary as exact fresh snapshot bytes without changing state JSON", () => {
+    for (const mode of ["normal", "speedrun"] as const) {
+      const state = { version: 47, mode, data: { text: '磁石🚀\ud800\n\\\"checksum\\\":\\\"abcdef00\\\"}', empty: {}, list: [] } };
+      const source = { formatVersion: 2, mode, savedAt: 1800000000000 };
+      const savedAt = source.savedAt + 1200;
+      const reason = "自动快照/🚀\udfff\n";
+      const primary = serializeSaveEnvelopeToTransfer(state, { ...source, kind: "primary", slot: "main" });
+      const primaryRaw = decodeVerifiedSaveTransfer(primary.bytes, primary);
+      const snapshot = rewrapVerifiedPrimarySaveAsSnapshot(primaryRaw, primary, source, savedAt, reason);
+      const expected = serializeSaveEnvelopeToTransfer(state, { ...source, savedAt, kind: "snapshot", slot: "main", reason });
+      expect(snapshot).not.toBeNull();
+      expect(snapshot!.raw).toBe(decodeVerifiedSaveTransfer(expected.bytes, expected));
+      expect(snapshot!.verification).toEqual({ integrity: "valid", stateChecksum: expected.stateChecksum, payloadChecksum: expected.payloadChecksum, byteLength: expected.byteLength });
+      expect(snapshot!.verification.stateChecksum).toBe(primary.stateChecksum);
+      expect(snapshot!.verification.payloadChecksum).not.toBe(primary.payloadChecksum);
+      expect(JSON.parse(snapshot!.raw)).toMatchObject({ kind: "snapshot", reason, savedAt, mode, slot: "main", state });
+      expect(JSON.parse(primaryRaw)).toMatchObject({ kind: "primary", savedAt: source.savedAt });
+    }
+  });
+
+  it("declines altered proofs, payloads and noncanonical primary framing", () => {
+    const state = { version: 47, mode: "normal", value: 123 };
+    const source = { formatVersion: 2, mode: "normal" as const, savedAt: 100 };
+    const primary = serializeSaveEnvelopeToTransfer(state, { ...source, kind: "primary", slot: "main" });
+    const raw = decodeVerifiedSaveTransfer(primary.bytes, primary);
+    const rewrap = (value: string, proof = primary, options = source, savedAt = 200) =>
+      rewrapVerifiedPrimarySaveAsSnapshot(value, proof, options, savedAt, "自动快照");
+    expect(rewrap(raw.replace('"value":123', '"value":124'))).toBeNull();
+    expect(rewrap(raw.slice(0, -1))).toBeNull();
+    expect(rewrap(raw, { ...primary, byteLength: primary.byteLength + 1 })).toBeNull();
+    expect(rewrap(raw, { ...primary, payloadChecksum: "00000000" })).toBeNull();
+    expect(rewrap(raw, { ...primary, stateChecksum: "00000000" })).toBeNull();
+    expect(rewrap(raw, primary, { ...source, savedAt: 101 })).toBeNull();
+    expect(rewrap(raw, primary, { ...source, formatVersion: 3 })).toBeNull();
+    expect(rewrap(raw, primary, source, Number.NaN)).toBeNull();
+    const parsed = JSON.parse(raw);
+    for (const reordered of [JSON.stringify({ savedAt: parsed.savedAt, ...parsed }), ` ${raw}`, raw.replace('"kind":"primary"', '"kind":"snapshot"')]) {
+      const payload = computeSavePayloadTextChecksum(reordered);
+      expect(rewrap(reordered, { ...primary, payloadChecksum: payload.checksum, byteLength: payload.byteLength })).toBeNull();
+    }
+  });
+
   it("preserves exact envelope bytes for empty, Unicode and escaped states and headers", () => {
     const states = [
       null, false, 0, "", {}, [],

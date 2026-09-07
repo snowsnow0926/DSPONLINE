@@ -34,6 +34,7 @@ import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
 import {
   computeSavePayloadTextChecksum,
   decodeVerifiedSaveTransfer,
+  rewrapVerifiedPrimarySaveAsSnapshot,
   serializeSaveEnvelopeToTransfer,
   type SaveTransferVerification,
 } from "./saveTransfer";
@@ -3658,10 +3659,12 @@ async function saveGameVerifiedOnce(
   const previousPrimaryIdentity = getVerifiedPrimaryLocalSaveIdentity(mode);
   let raw: string;
   let workerVerification: SaveTransferVerification | undefined;
+  let primarySummary: CloudSaveSummary | undefined;
   try {
     const serialized = await serializeEnvelopeInWorker(state, savedAt);
     raw = serialized.raw;
     workerVerification = serialized.verification;
+    primarySummary = serialized.summary;
   } catch {
     return failedSave("unavailable", "无法生成本地主存档，请立即导出当前进度");
   }
@@ -3763,7 +3766,9 @@ async function saveGameVerifiedOnce(
 
   const automaticSnapshotStartedAt = monotonicNow();
   try {
-    await maybeSaveAutomaticSnapshotVerified(state, mode);
+    await maybeSaveAutomaticSnapshotVerified(state, mode, workerVerification
+      ? { raw, verification: workerVerification, savedAt, summary: primarySummary }
+      : undefined);
   } catch {
     // Recovery points never downgrade a successful primary commit.
   }
@@ -4422,10 +4427,21 @@ function maybeSaveAutomaticSnapshot(state: GameState, mode = saveModeForState(st
   }
 }
 
-async function maybeSaveAutomaticSnapshotVerified(state: GameState, mode = saveModeForState(state)): Promise<void> {
+interface VerifiedPrimarySnapshotSource {
+  raw: string;
+  verification: SaveTransferVerification;
+  savedAt: number;
+  summary?: CloudSaveSummary;
+}
+
+async function maybeSaveAutomaticSnapshotVerified(
+  state: GameState,
+  mode: SaveMode,
+  primary?: VerifiedPrimarySnapshotSource,
+): Promise<void> {
   const latest = latestAutomaticSnapshotSummary(mode);
   if (!latest || state.elapsedSeconds < latest.elapsedSeconds || state.elapsedSeconds - latest.elapsedSeconds >= AUTO_SNAPSHOT_MIN_SECONDS) {
-    await saveGameSnapshotVerified(state, "自动快照");
+    await saveGameSnapshotVerifiedInternal(state, "自动快照", primary);
   }
 }
 
@@ -4613,13 +4629,28 @@ export function saveGameSnapshot(state: GameState, reason = "自动快照"): Sav
 }
 
 export async function saveGameSnapshotVerified(state: GameState, reason = "自动快照"): Promise<SaveSnapshotSummary | null> {
+  return saveGameSnapshotVerifiedInternal(state, reason);
+}
+
+async function saveGameSnapshotVerifiedInternal(
+  state: GameState,
+  reason: string,
+  primary?: VerifiedPrimarySnapshotSource,
+): Promise<SaveSnapshotSummary | null> {
   const mode = saveModeForState(state);
   const savedAt = Date.now();
   const sequence = nextSnapshotSequence(mode, savedAt);
   const id = `${savedAt}-${sequence}`;
   const key = `${snapshotSavePrefix(mode)}.${id}`;
   try {
-    const serialized = await serializeEnvelopeInWorker(state, savedAt, "snapshot", reason);
+    // Only the automatic snapshot following this invocation's successful
+    // primary commit receives this immutable, read-back-verified source.
+    const reframed = primary ? rewrapVerifiedPrimarySaveAsSnapshot(primary.raw, primary.verification, {
+      formatVersion: SAVE_FORMAT_VERSION, savedAt: primary.savedAt, mode,
+    }, savedAt, reason) : null;
+    const serialized = reframed
+      ? { ...reframed, summary: primary?.summary ? { ...primary.summary, savedAt } : undefined }
+      : await serializeEnvelopeInWorker(state, savedAt, "snapshot", reason);
     const raw = serialized.raw;
     const capacity = await hasLocalSaveCapacity(key, raw);
     if (!capacity.ok) return null;

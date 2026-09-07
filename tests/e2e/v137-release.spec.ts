@@ -325,6 +325,8 @@ test("cancel keeps the pending interval and confirmed skip commits zero rewards"
 });
 
 test("the recommended exact retry restarts from the unchanged original state", async ({ page }) => {
+  // Fix Date for the exact 120-second fixture; timers and real settlement run normally.
+  await page.clock.setFixedTime(new Date());
   await seedOfflineMenu(page, 120);
   const sourceRaw = await page.evaluate((key) => window.localStorage.getItem(key), SAVE_KEY);
   await injectOneConservativeDecision(page);

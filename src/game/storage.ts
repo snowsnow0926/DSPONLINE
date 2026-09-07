@@ -1105,7 +1105,13 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
     // `quantumTarget` was briefly written to every building by an older
     // client. Keep it only for interstellar stations; ordinary buildings
     // must not carry the extension back into the next cloud save.
-    const { quantumTarget: _legacyQuantumTarget, ...entityWithoutLegacyQuantumTarget } = entity;
+    // Most current saves have no legacy key. Avoid allocating and copying a
+    // second full entity just to remove a property that is already absent.
+    let entityWithoutLegacyQuantumTarget = entity;
+    if (Object.hasOwn(entity, "quantumTarget")) {
+      const { quantumTarget: _legacyQuantumTarget, ...withoutLegacyTarget } = entity;
+      entityWithoutLegacyQuantumTarget = withoutLegacyTarget;
+    }
     const currentResource = initialResourceById?.get(entity.id);
     const legacyRelocation = currentResource
       ? { planetId: currentResource.planetId, position: currentResource.position }

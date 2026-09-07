@@ -2118,7 +2118,9 @@ describe("game storage", () => {
     station.quantumTarget = true;
 
     const legacy = JSON.parse(JSON.stringify(state));
+    const originalLegacyJson = JSON.stringify(legacy);
     const migrated = migrateGame(legacy)!;
+    expect(JSON.stringify(legacy)).toBe(originalLegacyJson);
     expect((migrated.entities.find((entity) => entity.id === ordinary.id) as any).quantumTarget).toBeUndefined();
     expect(migrated.entities.find((entity) => entity.id === station.id)?.quantumTarget).toBe(true);
 
@@ -2128,6 +2130,27 @@ describe("game storage", () => {
     const reloaded = importGame(JSON.stringify(saved))!;
     expect((reloaded.entities.find((entity) => entity.id === ordinary.id) as any).quantumTarget).toBeUndefined();
     expect(reloaded.entities.find((entity) => entity.id === station.id)?.quantumTarget).toBe(true);
+  });
+
+  it("migrates current entities without legacy keys into independently normalized records", () => {
+    const state = createInitialState();
+    const entity = state.entities[0];
+    expect(entity).not.toHaveProperty("quantumTarget");
+    entity.inputs = { iron_ore: 31 };
+    entity.outputs = { iron_ore: 17 };
+    const sourceJson = JSON.stringify(state);
+    Object.freeze(entity);
+
+    const migrated = migrateGame(state)!;
+    const normalized = migrated.entities.find((value) => value.id === entity.id)!;
+    expect(normalized).not.toBe(entity);
+    expect(normalized).not.toHaveProperty("quantumTarget");
+    expect(normalized.inputs).toEqual({ iron_ore: 31 });
+    expect(normalized.outputs).toEqual({ iron_ore: 17 });
+    normalized.inputs.iron_ore = 1;
+    normalized.outputs.iron_ore = 2;
+    normalized.position.x += 100;
+    expect(JSON.stringify(state)).toBe(sourceJson);
   });
 
   it("migrates v10 power records into the current energy model", () => {

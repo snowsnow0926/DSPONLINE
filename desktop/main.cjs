@@ -1,4 +1,5 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell, session } = require("electron");
+require("./isolated-test-network.cjs").installIsolatedTestNetwork({ app, session, shell, metadata: require("../package.json") });
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const nodeOs = require("node:os");

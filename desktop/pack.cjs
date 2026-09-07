@@ -12,6 +12,7 @@ const {
   verifyPackagedDesktopEditionIdentity,
 } = require("./performance-edition-identity.cjs");
 const { extractFile } = require("@electron/asar");
+const { expectedDesktopBuild, writeDesktopBuildEvidence } = require("./desktop-artifact-evidence.cjs");
 
 const repositoryRoot = path.resolve(__dirname, "..");
 const packageMetadata = require("../package.json");
@@ -95,10 +96,20 @@ async function finalizePackagedOutput(sourceDirectory, {
     process.execPath,
     createDesktopUpdateFeedArguments(directory),
   ),
+  recordEvidence = (directory) => writeDesktopBuildEvidence(directory, {
+    expected: expectedDesktopBuild(repositoryRoot, desktopIdentity, releaseChannel, { requireClean: releaseMode }),
+    identity: desktopIdentity,
+    release: releaseMode,
+    repositoryRoot,
+  }),
 } = {}) {
   verify(sourceDirectory);
-  if (!releaseMode) return 0;
-  return createUpdateFeed(sourceDirectory);
+  if (releaseMode) {
+    const result = await createUpdateFeed(sourceDirectory);
+    if (result !== 0) return result;
+  }
+  recordEvidence(sourceDirectory);
+  return 0;
 }
 
 function verifyPackagedOutput(outputDirectory) {

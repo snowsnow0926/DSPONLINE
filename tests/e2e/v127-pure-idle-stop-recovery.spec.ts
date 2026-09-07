@@ -129,12 +129,12 @@ async function installProbe(page: Page): Promise<void> {
   });
 }
 
-async function seedRecoverableRun(page: Page, startedPaused: boolean, expiredBackground = false): Promise<{ primary: string; inventory: unknown }> {
+async function seedRecoverableRun(page: Page, startedPaused: boolean, expiredBackground = false, withOrdinaryReport = false): Promise<{ primary: string; inventory: unknown }> {
   await page.route("**/__v127_stop_seed.html", (route) => route.fulfill({
     contentType: "text/html; charset=utf-8", body: "<!doctype html><html><body>public synthetic stop recovery seed</body></html>",
   }));
   await page.goto("/__v127_stop_seed.html");
-  return page.evaluate(async ({ pausedBeforeStart, background }) => {
+  return page.evaluate(async ({ pausedBeforeStart, background, ordinaryReport }) => {
     const engine = await import("/src/game/engine.ts");
     const storage = await import("/src/game/storage.ts");
     const local = await import("/src/game/localSaveStore.ts");
@@ -185,13 +185,15 @@ async function seedRecoverableRun(page: Page, startedPaused: boolean, expiredBac
     if (background && !await recovery.markPureIdleBackground(created.record.sessionId, owner, now - 360_000)) {
       throw new Error("synthetic background boundary was not persisted");
     }
-    const saved = await storage.saveGameVerified(state);
+    const saved = ordinaryReport
+      ? await storage.saveVerifiedPayload(storage.serializeEnvelope(state, now - 5_000), { mode: "normal" })
+      : await storage.saveGameVerified(state);
     if (!saved.success) throw new Error(saved.message);
     const primary = await local.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
     if (!primary) throw new Error("synthetic recovery primary was not committed");
     await recovery.releasePureIdleRecoveryLease(created.record.sessionId, owner);
     return { primary, inventory: JSON.parse(primary).state.tray };
-  }, { pausedBeforeStart: startedPaused, background: expiredBackground });
+  }, { pausedBeforeStart: startedPaused, background: expiredBackground, ordinaryReport: withOrdinaryReport });
 }
 
 async function readProbe(page: Page): Promise<StopProbe> {
@@ -515,4 +517,33 @@ test("failed-stop recovery export downloads a diagnostic without mutating storag
     })).toEqual({ panelOverflow: false, overlayOverflow: false, outsideViewport: false });
     await page.screenshot({ path: testInfo.outputPath(`public-recovery-export-${viewport.width}x${viewport.height}.png`) });
   }
+});
+
+test("legacy startup retains an ordinary offline report without hiding the active pure-idle controls", async ({ page }) => {
+  test.setTimeout(90_000);
+  test.skip(durableMode, "The durable menu delegates the journal interval directly; this case targets the default synchronous loader returning both dialogs.");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installProbe(page);
+  await seedRecoverableRun(page, true, false, true);
+  await openRecovery(page);
+  const idle = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  const report = page.getByRole("dialog", { name: "离线结算报告", exact: true });
+  await expect(page.locator(".offline-report")).toHaveCount(0);
+  const stop = idle.getByRole("button", { name: "停止并结算纯挂机", exact: true });
+  await expect(stop).toBeEnabled();
+  expect(await stop.evaluate((button) => ({
+    ariaHidden: button.closest('[aria-hidden="true"]') !== null,
+    inert: button.closest("[inert]") !== null,
+  }))).toEqual({ ariaHidden: false, inert: false });
+  await stop.click();
+  await expect(idle).toBeHidden({ timeout: 30_000 });
+  await expect.poll(() => readRecovery(page)).toBeNull();
+  await expect(report).toBeVisible();
+  await expect(report).toContainText("原始离线时长");
+  await expect(report).toContainText("精确结算");
+  await report.getByRole("button", { name: "关闭离线结算报告", exact: true }).click();
+  await expect(report).toHaveCount(0);
+  const primary = await readPrimary(page);
+  expect(primary).toMatchObject({ enabled: false, paused: true, currentRunStartedAt: null });
+  expect((await readProbe(page)).finalizes).toBe(1);
 });

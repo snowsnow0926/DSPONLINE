@@ -5494,6 +5494,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const mobileNavigation = useMobileNavigation({ enabled: nextMobileShell, onFactoryRequested: returnMobileToFactory });
   const offlineMobileModalRef = useRef(false);
   useEffect(() => {
+    // Retain the report until the idle overlay releases modal ownership.
+    // A hidden report must not make the visible recovery controls inert.
+    if (pureIdleActive) return;
     if (!nextMobileShell) {
       offlineMobileModalRef.current = false;
       return;
@@ -5508,7 +5511,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       offlineMobileModalRef.current = false;
       setOfflineReport(null);
     }
-  }, [mobileNavigation.openModal, mobileNavigation.overlay, nextMobileShell, offlineReport]);
+  }, [mobileNavigation.openModal, mobileNavigation.overlay, nextMobileShell, offlineReport, pureIdleActive]);
   const closeOfflineReport = useCallback(() => {
     if (nextMobileShell && mobileNavigation.overlay?.kind === "modal" && mobileNavigation.overlay.id === "offline") {
       mobileNavigation.requestBack();
@@ -24368,7 +24371,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
           />
         ) : null}
-        {offlineReport ? <OfflineReportWorkspace report={offlineReport} onClose={closeOfflineReport} /> : null}
+        {offlineReport && !pureIdleActive ? <OfflineReportWorkspace report={offlineReport} onClose={closeOfflineReport} /> : null}
         {tutorialOpen ? <TutorialWorkspace open mobile={nextMobileShell} initialSectionId={tutorialSectionId} onClose={() => { setTutorialOpen(false); setTutorialSectionId(undefined); }} /> : null}
       </Suspense>
       <button className="mobile-backdrop" type="button" aria-label="关闭侧栏" onClick={() => setMobilePanel(null)} />

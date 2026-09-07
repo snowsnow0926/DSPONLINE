@@ -2830,11 +2830,11 @@ fn is_ordinary_quantum_upload_endpoint(state: &CoreState, entity: &Value) -> boo
             .is_some_and(|routes| routes.as_array().is_none_or(|routes| !routes.is_empty()))
         || number_at(Some(entity), &["stationDrones"]) != 0.0
         || number_at(Some(entity), &["stationVessels"]) != 0.0
-        || !state
+        || state
             .catalog
             .buildings
             .get("interstellar_logistics_station")
-            .is_some_and(|building| building.kind == "station")
+            .is_none_or(|building| building.kind != "station")
     {
         return false;
     }

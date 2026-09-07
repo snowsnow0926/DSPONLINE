@@ -8286,13 +8286,28 @@ mod tests {
         CoreImportV47Result,
         Value,
     ) {
-        // Long-tail WAL acceptance needs a real certified flow. The old
-        // unpowered import fixture only exercised an unqualified frozen tail.
+        offline_productive_settlement_fixture_with_upload(true)
+    }
+
+    fn offline_productive_settlement_fixture_with_upload(
+        with_upload: bool,
+    ) -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        CoreImportV47Result,
+        Value,
+    ) {
+        // Positive long-tail WAL cases need a physically steady source/smelter/
+        // upload chain. Retain the old two-miner, no-station state as a negative
+        // fixture: enabled quantum storage alone does not prove a stable flow.
         let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
         let state = &mut envelope["state"];
         state["historyRecordedAt"] = state["elapsedSeconds"].clone();
         state["quantumLogisticsNetwork"]["enabled"] = json!(true);
-        state["quantumLogisticsNetwork"]["itemCapacities"] = json!({"iron_ore": "10000000000"});
+        state["quantumLogisticsNetwork"]["itemCapacities"] = json!({
+            "iron_ore": "10000000000", "iron_ingot": "10000000000"
+        });
         state["campaign"]["completedTaskIds"] = json!([
             "mine_first_ore",
             "smelt_iron",
@@ -8312,6 +8327,52 @@ mod tests {
             "position": {"x": 0, "y": 0}, "inputs": {}, "outputs": {}, "progress": 0,
             "routingCursor": 0, "utilization": 0, "productionRate": 0,
         }));
+        if with_upload {
+            entities[0]["minerCount"] = json!(1);
+            entities.push(json!({
+                "id": "offline-smelter", "kind": "machine", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "arc_smelter", "recipeId": "iron_ingot",
+                "machineCount": 1, "minerCount": 0, "position": {"x": 3, "y": 0},
+                "inputs": {"iron_ore": 20}, "outputs": {"iron_ingot": 0},
+                "progress": 0, "routingCursor": 0, "utilization": 0, "productionRate": 0,
+            }));
+            let mut slots = vec![json!({
+                "itemId": "iron_ingot", "localMode": "storage", "remoteMode": "supply",
+                "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000,
+                "priority": 1, "routePolicy": "direct", "warperBudget": 0,
+            })];
+            slots.extend((0..4).map(|_| {
+                json!({
+                    "itemId": null, "localMode": "storage", "remoteMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000,
+                    "priority": 1, "routePolicy": "direct", "warperBudget": 0,
+                })
+            }));
+            entities.push(json!({
+                "id": "offline-upload", "kind": "station", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "interstellar_logistics_station",
+                "stationTier": 2, "quantumMode": "quantum", "machineCount": 1,
+                "position": {"x": 4, "y": 0}, "stationSlots": slots,
+                "stationRoutes": [], "stationDrones": 0, "stationVessels": 0,
+                "stationWarpEnabled": false, "stationWarpers": 0,
+                "stationDispatchCursor": 0, "stationLastSupplyPeerBySlot": {},
+                "stationProgress": 0, "stationCongestion": 0, "stationTrips": 0,
+                "stationLastTransfer": 0, "inputs": {"iron_ingot": 0}, "outputs": {"iron_ingot": 0},
+                "progress": 0, "routingCursor": 0, "utilization": 0, "productionRate": 0,
+            }));
+            state["belts"] = json!([
+                {
+                    "id": "offline-ore-feed", "planetId": "home", "source": "vein",
+                    "target": "offline-smelter", "itemId": "iron_ore", "lanes": 1, "tier": 1,
+                    "priority": 1, "progress": 0, "lastFlow": 0, "totalTransferred": 0,
+                },
+                {
+                    "id": "offline-upload-feed", "planetId": "home", "source": "offline-smelter",
+                    "target": "offline-upload", "itemId": "iron_ingot", "lanes": 1, "tier": 1,
+                    "priority": 1, "progress": 0, "lastFlow": 0, "totalTransferred": 0,
+                }
+            ]);
+        }
         let body = serde_json::to_string(state).unwrap();
         envelope["checksum"] = Value::from(utf16_fnv(&format!(
             "{{\"formatVersion\":2,\"state\":{body}}}"
@@ -8322,10 +8383,17 @@ mod tests {
             "id": "wind_turbine", "kind": "power", "speed": 1,
             "inputCapacity": 0, "outputCapacity": 0, "powerDemandKw": 0, "powerGenerationKw": 1000,
         }));
+        if with_upload {
+            catalog["buildings"].as_array_mut().unwrap().push(json!({
+                "id": "interstellar_logistics_station", "kind": "station", "speed": 1,
+                "inputCapacity": 1000000, "outputCapacity": 1000000,
+                "powerDemandKw": 1, "powerGenerationKw": 0,
+            }));
+        }
         let root = tempdir().unwrap();
         let mut store = SaveStore::open(root.path()).unwrap();
         let mut registry = CoreRegistry::default();
-        let imported = registry
+        let mut imported = registry
             .import_v47(
                 &mut store,
                 Cursor::new(bytes.clone()),
@@ -8334,6 +8402,28 @@ mod tests {
                 catalog.clone(),
             )
             .unwrap();
+        if with_upload {
+            // The real offline request adds its own 30-second prefix; together
+            // these 60 seconds let the belt diagnostics reach their fixed point.
+            let warmup = registry
+                .advance(
+                    &imported.session_id,
+                    &CoreAdvanceRequest {
+                        base_revision: imported.summary.revision,
+                        simulation_seconds: 30.0,
+                        wall_seconds: 30.0,
+                        advance_mode: CoreAdvanceMode::Exact,
+                        include_diagnostics: true,
+                    },
+                )
+                .unwrap();
+            assert!(warmup.supported, "{warmup:?}");
+            let checkpoint = registry
+                .checkpoint(&mut store, &imported.session_id, 42)
+                .unwrap();
+            imported.checkpoint = checkpoint.checkpoint;
+            imported.summary = checkpoint.summary;
+        }
         (root, store, registry, imported, catalog)
     }
 
@@ -8547,7 +8637,50 @@ mod tests {
                 &[],
             )
             .unwrap();
-        assert_eq!(state["base"]["elapsedSeconds"].as_f64(), Some(602.0));
+        assert_eq!(state["base"]["elapsedSeconds"].as_f64(), Some(632.0));
+    }
+
+    #[test]
+    fn offline_settlement_rejects_unsteady_quantum_source_before_wal_or_checkpoint() {
+        let (_root, mut store, mut registry, imported, _catalog) =
+            offline_productive_settlement_fixture_with_upload(false);
+        let source = store.recover("normal-main").unwrap().unwrap();
+        let before = registry.status(&imported.session_id).unwrap();
+        let wal_before =
+            serde_json::to_value(store.read_wal("normal-main", source.revision).unwrap()).unwrap();
+        let error = registry
+            .commit_offline_settlement(
+                &mut store,
+                &imported.session_id,
+                offline_settlement_request(&source, source.saved_at_ms + 600_000),
+            )
+            .unwrap_err();
+        let reason = error.to_string();
+        assert!(reason.contains("unsupported domain"), "{reason}");
+        assert!(reason.contains("offline flow"), "{reason}");
+        let after = registry.status(&imported.session_id).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.canonical_sha256, before.canonical_sha256);
+        assert_eq!(after.domain_sha256, before.domain_sha256);
+        let recovered = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(
+            (
+                recovered.generation,
+                recovered.root_hash,
+                recovered.revision,
+                recovered.saved_at_ms,
+            ),
+            (
+                source.generation,
+                source.root_hash,
+                source.revision,
+                source.saved_at_ms,
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(store.read_wal("normal-main", source.revision).unwrap()).unwrap(),
+            wal_before
+        );
     }
 
     #[test]
@@ -8626,6 +8759,11 @@ mod tests {
                 (
                     600.0,
                     Some("native-offline-macro-v1-closed-ledger-one-shot-v1"),
+                    false,
+                ),
+                (
+                    600.0,
+                    Some("native-offline-macro-v1-closed-ledger-one-shot-v2-boundary-exact"),
                     false,
                 ),
                 (600.0, Some("unknown-future-algorithm"), false),
@@ -8710,6 +8848,7 @@ mod tests {
         for version in [
             None,
             Some("native-offline-macro-v1-closed-ledger-one-shot-v1"),
+            Some("native-offline-macro-v1-closed-ledger-one-shot-v2-boundary-exact"),
         ] {
             let (_root, store, mut registry, imported, catalog) = offline_settlement_fixture();
             let source = store.recover("normal-main").unwrap().unwrap();

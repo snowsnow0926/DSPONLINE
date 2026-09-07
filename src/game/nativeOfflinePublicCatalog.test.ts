@@ -19,6 +19,7 @@ const { NativeHostClient, NativeSaveSessionRegistry } = require("../../desktop/n
 const binaryPath = path.resolve(process.env.DSP_NATIVE_CORE_HOST_BINARY ??
   path.join("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host"));
 const longTests = process.env.DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL === "1";
+const benchmarkTests = process.env.DSP_RUN_NATIVE_OFFLINE_PARITY_BENCHMARK === "1";
 const reportDirectory = process.env.DSP_NATIVE_PUBLIC_CATALOG_REPORT_DIR;
 const writePublicStates = process.env.DSP_NATIVE_PUBLIC_CATALOG_WRITE_STATES === "1";
 const expectedHostSha256 = process.env.DSP_NATIVE_PUBLIC_CATALOG_EXPECTED_HOST_SHA256;
@@ -99,7 +100,8 @@ function differingProgressionValues(native: unknown, javascript: unknown, field:
 
 describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline qualification (shadow only)", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-public-offline-"));
-  const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: longTests ? 300_000 : 60_000 });
+  const client = new NativeHostClient({ binaryPath, rootPath: root,
+    requestTimeoutMs: longTests || benchmarkTests ? 300_000 : 60_000 });
   let saves: InstanceType<typeof NativeSaveSessionRegistry>;
   let exportSequence = 0;
 
@@ -211,9 +213,24 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     }
   }
 
-  async function qualify(variant: PublicCatalogOfflineVariant, seconds: number) {
+  async function qualify(variant: PublicCatalogOfflineVariant, seconds: number, options: {
+    name?: string; phase?: number; warmupSeconds?: number; emptyHistory?: boolean;
+    nativeOrder?: "macro-first" | "exact-first";
+  } = {}) {
     const fixtureStarted = performance.now();
-    const initial = createPublicCatalogOfflineQualificationFixture(variant);
+    let initial = createPublicCatalogOfflineQualificationFixture(variant);
+    for (let step = 0; step < (options.warmupSeconds ?? 0); step += 1) {
+      initial = advanceSimulationBudget(initial, 1, 1);
+    }
+    if (options.emptyHistory) initial.productionHistory = [];
+    if (options.phase) {
+      const shift = (value: number) => Math.round((value + options.phase!) * 10_000) / 10_000;
+      initial.elapsedSeconds = shift(initial.elapsedSeconds);
+      initial.historyRecordedAt = shift(initial.historyRecordedAt);
+      initial.productionHistory = initial.productionHistory.map(sample => ({ ...sample,
+        elapsedSeconds: shift(sample.elapsedSeconds) }));
+    }
+    const reportName = `${variant}-${seconds}${options.name ? `-${options.name}` : ""}`;
     const fixtureBuildMs = performance.now() - fixtureStarted;
     expect(initial.handcraftQueue).toHaveLength(0);
     expect(initial.constructionQueue).toHaveLength(0);
@@ -225,6 +242,9 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     const seedStarted = performance.now();
     const checkpoint = await seed(initial);
     const seedCheckpointMs = performance.now() - seedStarted;
+    const directExact = seconds <= 601;
+    const earlyExact = directExact && options.nativeOrder === "exact-first"
+      ? await advance(initial, checkpoint, seconds, "exact") : null;
     const macro = await advance(initial, checkpoint, seconds, "offline-macro-v1");
     let expected = initial;
     const jsStarted = performance.now();
@@ -235,7 +255,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     const macroLedger = materialLedger(macro.state);
     expectClosedIronChain(before, expectedLedger);
     expectClosedIronChain(before, macroLedger);
-    const exact = seconds === 600 ? await advance(initial, checkpoint, seconds, "exact") : null;
+    const exact = earlyExact ?? (directExact ? await advance(initial, checkpoint, seconds, "exact") : null);
     expect(canonicalNativeCoreSha256(initial)).toBe(initialHash);
     const publicExpected = JSON.parse(JSON.stringify(expected)) as Record<string, unknown>;
     const differingFields = Object.keys(publicExpected).filter(field =>
@@ -246,6 +266,8 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     const materialMatch = JSON.stringify(macroLedger) === JSON.stringify(expectedLedger);
     const report = {
       scope: "public-catalog-shadow-qualification-not-player-speedup", variant, seconds,
+      scenario: options.name ?? "baseline-public", sourcePhase: options.phase ?? 0,
+      nativeOrder: options.nativeOrder ?? "macro-first",
       inputSha256: initialHash,
       hostSha256: createHash("sha256").update(readBytes(binaryPath)).digest("hex"),
       catalogSha256: canonicalNativeCoreSha256(catalog),
@@ -276,11 +298,11 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     };
     if (reportDirectory) {
       fs.mkdirSync(reportDirectory, { recursive: true });
-      fs.writeFileSync(path.join(reportDirectory, `${variant}-${seconds}.json`), JSON.stringify(report, null, 2), { flag: "wx" });
+      fs.writeFileSync(path.join(reportDirectory, `${reportName}.json`), JSON.stringify(report, null, 2), { flag: "wx" });
       if (writePublicStates) {
         for (const [label, value] of [["input", initial], ["native-macro", macro.state],
           ["javascript-exact", expected], ["native-exact", exact?.state]] as const) {
-          if (value) fs.writeFileSync(path.join(reportDirectory, `${variant}-${seconds}.${label}.json`),
+          if (value) fs.writeFileSync(path.join(reportDirectory, `${reportName}.${label}.json`),
             JSON.stringify(value), { flag: "wx" });
         }
       }
@@ -292,12 +314,8 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     for (const field of progressionFields) {
       expect(publicNative[field], `${variant} ${seconds}s ${field} parity`).toEqual(publicExpected[field]);
     }
-    if (macro.result.approximatedSeconds === 0 && macro.result.exactCalibrationSeconds === seconds) {
-      // A full exact fallback must earn the same complete-state requirement
-      // as the direct Exact oracle. Calling it through a macro request does
-      // not excuse different physical buffers, counters, histories or clocks.
-      expect(macro.result.summary.canonicalSha256, `${variant} ${seconds}s full exact fallback parity`).toBe(expectedHash);
-    }
+    expect(macro.result.summary.canonicalSha256, `${reportName} complete state parity`).toBe(expectedHash);
+    expect(macro.result.algorithmVersion).toContain("v3-state-parity");
     if (variant === "finite-reserve") {
       const mined = macroLedger.produced.iron_ore - before.produced.iron_ore;
       expect(before.reserve[0].remaining! - macroLedger.reserve[0].remaining!).toBe(mined);
@@ -308,13 +326,93 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     }
   }
 
-  it.each(variants)("checks conservation and records the public %s chain's 10-minute parity gaps", async variant => {
+  it.each(variants)("matches the public %s chain's complete 10-minute state", async variant => {
     await qualify(variant, 600);
   }, 30_000);
 
-  it.skipIf(!longTests).each(variants)("records the public %s chain's 8-hour material and qualification boundary", async variant => {
+  it.skipIf(!longTests).each(variants)("matches the public %s chain's complete 8-hour state", async variant => {
     await qualify(variant, 8 * 60 * 60);
   }, 360_000);
+
+  it.skipIf(!longTests)("matches the complete fractional-clock public state over 8 hours", async () => {
+    await qualify("infinite", 28_800, { name: "phase-0043-long", phase: 0.0043 });
+  }, 360_000);
+
+  it.each([
+    { name: "phase-0043-tail-remainder", phase: 0.0043, seconds: 601 },
+    { name: "phase-quarter-tail-remainder", phase: 0.25, seconds: 599 },
+    { name: "phase-near-second", phase: 0.9999, seconds: 571 },
+    { name: "empty-history", emptyHistory: true, seconds: 601 },
+    { name: "aged-history", warmupSeconds: 900, seconds: 601 },
+  ])("matches the complete public state for $name", async scenario => {
+    await qualify("infinite", scenario.seconds, scenario);
+  }, 60_000);
+
+  it.skipIf(!benchmarkTests).each([600, 28_800])("measures isolated same-output native performance at %i seconds", async seconds => {
+    const initial = createPublicCatalogOfflineQualificationFixture("infinite");
+    const inputSha256 = canonicalNativeCoreSha256(initial);
+    let expected = initial;
+    for (let second = 0; second < seconds; second += 1) expected = advanceSimulationBudget(expected, 1, 1);
+    const outputSha256 = canonicalNativeCoreSha256(expected);
+    const checkpoint = await seed(initial);
+    // Both paths use the same binary/catalog/checkpoint, fresh sessions and
+    // identical public output. Keep fixture/JS/export work outside the timer.
+    for (const mode of ["exact", "offline-macro-v1"] as const) {
+      await advance(initial, checkpoint, 600, mode);
+    }
+    const samples = [];
+    for (let pair = 0; pair < 3; pair += 1) {
+      const modes = pair % 2 === 0
+        ? ["exact", "offline-macro-v1"] as const
+        : ["offline-macro-v1", "exact"] as const;
+      const values = {} as Record<"exact" | "offline-macro-v1", { advanceRequestMs: number; outputSha256: string }>;
+      for (const mode of modes) {
+        const result = await advance(initial, checkpoint, seconds, mode);
+        expect(result.result.summary.canonicalSha256).toBe(outputSha256);
+        if (mode === "offline-macro-v1") expect(result.result.approximatedSeconds).toBe(seconds - 30);
+        values[mode] = { advanceRequestMs: result.timings.advanceRequestMs,
+          outputSha256: result.result.summary.canonicalSha256 };
+      }
+      samples.push({ pair: pair + 1, order: [...modes], ...values });
+    }
+    expect(canonicalNativeCoreSha256(initial)).toBe(inputSha256);
+    const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+    const exactMedianMs = median(samples.map(sample => sample.exact.advanceRequestMs));
+    const macroMedianMs = median(samples.map(sample => sample["offline-macro-v1"].advanceRequestMs));
+    const report = {
+      scope: "isolated-public-iron-chain-native-coreAdvance-RPC-only-not-player-wait",
+      seconds, inputSha256, outputSha256,
+      hostSha256: createHash("sha256").update(readBytes(binaryPath)).digest("hex"),
+      catalogSha256: canonicalNativeCoreSha256(catalog),
+      exactMedianMs, macroMedianMs, reductionPercent: (1 - macroMedianMs / exactMedianMs) * 100,
+      ratio: exactMedianMs / macroMedianMs, samples,
+      automaticAdoption: "NOT_QUALIFIED_30_SECOND_GUARD_UNCHANGED",
+    };
+    if (reportDirectory) {
+      fs.mkdirSync(reportDirectory, { recursive: true });
+      fs.writeFileSync(path.join(reportDirectory, `performance-${seconds}.json`), JSON.stringify(report, null, 2), { flag: "wx" });
+    }
+  }, 360_000);
+
+  it("rejects cumulative transfer overflow without changing the source", async () => {
+    const initial = createPublicCatalogOfflineQualificationFixture("infinite");
+    for (const belt of initial.belts) belt.totalTransferred = Number.MAX_SAFE_INTEGER - 50;
+    const checkpoint = await seed(initial);
+    const opened = await client.request({ operation: "coreOpen", slot: "normal-main",
+      generation: checkpoint.generation, rootHash: checkpoint.rootHash, revision: 1,
+      registryFingerprint: runtime.fingerprint, catalog });
+    try {
+      const result = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: 1, simulationSeconds: 600, wallSeconds: 600,
+          advanceMode: "offline-macro-v1" } });
+      expect(result.supported).toBe(false);
+      const current = await client.request({ operation: "coreStatus", sessionId: opened.sessionId });
+      expect(current.canonicalSha256).toBe(opened.summary.canonicalSha256);
+      expect(current.revision).toBe(opened.summary.revision);
+    } finally {
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  });
 
   it("keeps automatic adoption closed beyond 30 seconds despite shadow macro support", async () => {
     const initial = createPublicCatalogOfflineQualificationFixture("infinite");

@@ -71,6 +71,14 @@ fn rounded(value: f64, digits: i32) -> f64 {
     (value * scale).round() / scale
 }
 
+/// The shared elapsed-clock boundary used by the actual native Exact step.
+/// Replay callers must preserve the original step schedule: one bulk addition
+/// is not a proof of repeated four-decimal rounding for fractional clocks.
+#[inline]
+pub(crate) fn exact_elapsed_after_step(elapsed_before: f64, step_seconds: f64) -> f64 {
+    rounded(elapsed_before + step_seconds, 4)
+}
+
 fn array_is_empty(base: &Map<String, Value>, key: &str) -> bool {
     base.get(key)
         .and_then(Value::as_array)
@@ -175,7 +183,7 @@ impl OfflineNoExportProgress {
             total_exported: read(endgame, "totalExported")?,
         };
         if progress.started > progress.elapsed
-            || (rounded(progress.elapsed, 4) - progress.elapsed).abs() > 1e-9
+            || exact_elapsed_after_step(progress.elapsed, 0.0) != progress.elapsed
         {
             return Err("offline export window clock is not an exact source boundary".to_owned());
         }
@@ -188,7 +196,7 @@ impl OfflineNoExportProgress {
         has_physical_exporter: bool,
         tail_seconds: f64,
         request_seconds: f64,
-    ) -> Result<(), String> {
+    ) -> Result<f64, String> {
         // Up to eight hours the public JS exact session uses one-second steps
         // even with quantum/elevator stations. Longer and fractional requests
         // need an independently proven step schedule, not a guessed phase.
@@ -210,15 +218,20 @@ impl OfflineNoExportProgress {
             );
         }
         let mut next = self.clone();
-        let mut remaining = tail_seconds as u64;
         let mut rolled_over = false;
-        // At most eleven steps reach the first complete window, including
-        // initialization at the FIRST completed step when startedAt is zero.
-        // The first window must consume a pre-existing nonzero amount at its
-        // actual duration; only later windows are known to have zero exports.
-        for _ in 0..remaining.min(11) {
-            next.elapsed = rounded(next.elapsed + 1.0, 4);
-            remaining -= 1;
+        // Replay only scalar diagnostics, at most 28,800 steps. This shares
+        // Exact's real rounding boundary, including large fractional source
+        // clocks. No entity, JSON or persisted field is written in the loop.
+        // A nonzero source amount belongs only to its first real window.
+        for _ in 0..tail_seconds as u64 {
+            let elapsed_after = exact_elapsed_after_step(next.elapsed, 1.0);
+            if !elapsed_after.is_finite()
+                || elapsed_after <= next.elapsed
+                || elapsed_after * 10000.0 >= (1_u64 << 52) as f64
+            {
+                return Err("offline export window exact clock precision is unsupported".to_owned());
+            }
+            next.elapsed = elapsed_after;
             if next.started <= 0.0 {
                 next.started = next.elapsed;
             }
@@ -231,21 +244,10 @@ impl OfflineNoExportProgress {
                 next.amount = 0.0;
                 next.started = next.elapsed;
                 rolled_over = true;
-                break;
             }
         }
-        if remaining > 0 {
-            if !rolled_over {
-                return Err("offline export window first boundary was not proved".to_owned());
-            }
-            let zero_windows = remaining / 10;
-            if zero_windows > 0 {
-                next.started = rounded(next.started + (zero_windows * 10) as f64, 4);
-                next.last_minute = 0.0;
-            }
-        }
-        // Do not advance elapsed, exports or any inventory here. The caller
-        // commits the complete candidate only after every tail proof succeeds.
+        // Return the proven final elapsed for the parent's atomic candidate
+        // commit. The base clock, exports and every inventory stay untouched.
         let endgame = base
             .get_mut("endgame")
             .and_then(Value::as_object_mut)
@@ -263,7 +265,7 @@ impl OfflineNoExportProgress {
                 Value::from(next.last_minute),
             );
         }
-        Ok(())
+        Ok(next.elapsed)
     }
 }
 
@@ -292,7 +294,7 @@ pub(crate) fn advance_offline_no_export_progress(
     source: &OfflineNoExportProgress,
     tail_seconds: f64,
     request_seconds: f64,
-) -> Result<(), String> {
+) -> Result<f64, String> {
     let has_physical_exporter = state.factory_topology.has_galactic_material_exporter
         || !state
             .factory_topology
@@ -314,7 +316,7 @@ fn advance_quiescent_clock_boundary(
         .get("elapsedSeconds")
         .and_then(Value::as_f64)
         .unwrap_or(0.0);
-    let elapsed_after = rounded(elapsed_before + simulation_seconds, 4);
+    let elapsed_after = exact_elapsed_after_step(elapsed_before, simulation_seconds);
     base.insert("elapsedSeconds".to_owned(), Value::from(elapsed_after));
 
     if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {
@@ -820,13 +822,123 @@ mod offline_no_export_progress_tests {
 
     fn advance(base: &mut Map<String, Value>, seconds: u64) -> Result<(), String> {
         let proof = OfflineNoExportProgress::from_base(base, false)?;
-        proof.apply_to_base(base, false, seconds as f64, seconds as f64)?;
+        let final_elapsed = proof.apply_to_base(base, false, seconds as f64, seconds as f64)?;
         // The outer macro owns elapsed, just as the real integration does.
-        base.insert(
-            "elapsedSeconds".to_owned(),
-            Value::from(rounded(proof.elapsed + seconds as f64, 4)),
-        );
+        base.insert("elapsedSeconds".to_owned(), Value::from(final_elapsed));
         Ok(())
+    }
+
+    #[test]
+    fn offline_no_export_progress_returns_proven_fractional_elapsed_without_writing_parent_clock() {
+        let mut candidate = base(30.0043, 21.0043, 42.0, 17.5);
+        let proof = OfflineNoExportProgress::from_base(&candidate, false).unwrap();
+        let final_elapsed = proof
+            .apply_to_base(&mut candidate, false, 600.0, 600.0)
+            .unwrap();
+        assert_eq!(final_elapsed, 630.0043);
+        assert_eq!(candidate["elapsedSeconds"], 30.0043);
+        assert_eq!(candidate["endgame"]["exportWindowStartedAt"], 621.0043);
+        assert_eq!(candidate["endgame"]["exportWindowAmount"], 0);
+        assert_eq!(candidate["endgame"]["exportedLastMinute"], 0.0);
+        assert_eq!(candidate["endgame"]["totalExported"], 9000);
+    }
+
+    #[test]
+    fn offline_no_export_progress_has_independent_fractional_and_long_clock_boundaries() {
+        for (elapsed, started, seconds, final_elapsed, final_started, final_amount, final_rate) in [
+            (30.0043, 21.0043, 0, 30.0043, 21.0043, 42.0, 17.5),
+            (30.0043, 21.0043, 1, 31.0043, 31.0043, 0.0, 252.0),
+            (30.0043, 21.0043, 10, 40.0043, 31.0043, 0.0, 252.0),
+            (30.0043, 21.0043, 11, 41.0043, 41.0043, 0.0, 0.0),
+            (
+                60.0043,
+                51.0043,
+                28_770,
+                28_830.004_3,
+                28_821.004_3,
+                0.0,
+                0.0,
+            ),
+            (
+                268_435_455.999_9,
+                268_435_446.999_9,
+                11,
+                268_435_466.999_9,
+                268_435_466.999_9,
+                0.0,
+                0.0,
+            ),
+            (
+                1_000_000_000.004_3,
+                999_999_991.004_3,
+                28_800,
+                1_000_028_800.004_3,
+                1_000_028_791.004_3,
+                0.0,
+                0.0,
+            ),
+            (
+                400_000_000_000.25,
+                399_999_999_991.25,
+                28_800,
+                400_000_028_800.25,
+                400_000_028_791.25,
+                0.0,
+                0.0,
+            ),
+        ] {
+            let mut actual = base(elapsed, started, 42.0, 17.5);
+            let mut oracle = actual.clone();
+            exact_production_seconds(&mut oracle, seconds);
+            advance(&mut actual, seconds).unwrap();
+            assert_eq!(actual, oracle, "source {elapsed}, seconds {seconds}");
+            assert_eq!(actual["elapsedSeconds"], final_elapsed);
+            assert_eq!(actual["endgame"]["exportWindowStartedAt"], final_started);
+            assert_eq!(
+                actual["endgame"]["exportWindowAmount"].as_f64().unwrap(),
+                final_amount
+            );
+            assert_eq!(actual["endgame"]["exportedLastMinute"], final_rate);
+        }
+    }
+
+    #[test]
+    fn offline_no_export_progress_rejects_off_grid_rounding_neighbors_without_mutation() {
+        assert_eq!(exact_elapsed_after_step(0.0, 0.000049), 0.0);
+        assert_eq!(exact_elapsed_after_step(0.0, 0.00005), 0.0001);
+        assert_eq!(exact_elapsed_after_step(30.0043, 1.0), 31.0043);
+        let canonical = 30.0043_f64;
+        for elapsed in [
+            f64::from_bits(canonical.to_bits() - 1),
+            f64::from_bits(canonical.to_bits() + 1),
+            30.00430000001,
+            30.000049,
+            30.00005,
+            30.99995,
+        ] {
+            let unchanged = base(elapsed, 21.0, 42.0, 17.5);
+            let before = unchanged.clone();
+            assert!(
+                OfflineNoExportProgress::from_base(&unchanged, false).is_err(),
+                "off-grid source {elapsed}"
+            );
+            assert_eq!(unchanged, before);
+        }
+    }
+
+    #[test]
+    fn offline_no_export_progress_precision_limit_rejects_before_any_window_commit() {
+        let elapsed = (((1_u64 << 52) as f64) / 10000.0).floor() - 1.0;
+        let original = base(elapsed, elapsed - 9.0, 42.0, 17.5);
+        let proof = OfflineNoExportProgress::from_base(&original, false).unwrap();
+        let mut accepted = original.clone();
+        assert_eq!(
+            proof.apply_to_base(&mut accepted, false, 1.0, 1.0).unwrap(),
+            elapsed + 1.0
+        );
+        let mut rejected = original.clone();
+        assert!(proof.apply_to_base(&mut rejected, false, 2.0, 2.0).is_err());
+        assert_eq!(rejected, original);
     }
 
     #[test]
@@ -891,14 +1003,16 @@ mod offline_no_export_progress_tests {
 
     #[test]
     fn offline_no_export_progress_segmented_checkpoint_resume_matches_single_call() {
-        let mut single = base(60.25, 51.25, 73.0, 11.0);
-        let mut resumed = single.clone();
-        advance(&mut single, 570).unwrap();
-        for seconds in [7, 3, 60, 1, 499] {
-            advance(&mut resumed, seconds).unwrap();
-            resumed = serde_json::from_slice(&serde_json::to_vec(&resumed).unwrap()).unwrap();
+        for elapsed in [60.25, 60.0043, 1_000_000_000.999_9] {
+            let mut single = base(elapsed, elapsed - 9.0, 73.0, 11.0);
+            let mut resumed = single.clone();
+            advance(&mut single, 570).unwrap();
+            for seconds in [7, 3, 60, 1, 499] {
+                advance(&mut resumed, seconds).unwrap();
+                resumed = serde_json::from_slice(&serde_json::to_vec(&resumed).unwrap()).unwrap();
+            }
+            assert_eq!(single, resumed);
         }
-        assert_eq!(single, resumed);
     }
 
     #[test]

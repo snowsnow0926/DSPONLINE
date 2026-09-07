@@ -20,12 +20,15 @@ use crate::state::{
     PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS,
 };
 
+mod offline_flow;
+mod offline_history;
+
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
     "native-pure-idle-macro-v10-closed-ledger-construction-quantum-v15";
 pub(crate) const OFFLINE_MACRO_V1_ALGORITHM_VERSION: &str =
-    "native-offline-macro-v1-closed-ledger-one-shot-v2-boundary-exact";
+    "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -9182,8 +9185,9 @@ fn advance_bounded_with_runtime(
             .get("elapsedSeconds")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
-        let elapsed = checked_elapsed_after_prefix(current_elapsed, tail_seconds)?;
+        let mut elapsed = checked_elapsed_after_prefix(current_elapsed, tail_seconds)?;
         let mut offline_export_progress = None;
+        let mut offline_state_proofs = None;
         let construction_isolated_receipt_base_revision = candidate.revision;
         let mut handcraft_handled_tail = false;
         if macro_v10 && collection_has_entries(candidate.base_value().get("handcraftQueue")) {
@@ -9300,7 +9304,15 @@ fn advance_bounded_with_runtime(
                 boundary_exact_seconds = tail_seconds;
                 tail_reason = Some("ordinary capacity or finite-reserve horizon required bounded exact fallback from the real prefix; physical buffers and in-progress production settled without macro extrapolation".to_owned());
             } else if let Some(certificate) = runtime.certificate.as_mut() {
-                if offline_macro && current_elapsed.fract() != 0.0 {
+                let ordinary_state_scope = offline_macro
+                    && runtime.construction_certificate.is_none()
+                    && !construction_tail_requested(&candidate)
+                    && certificate.research.is_none()
+                    && certificate.dyson_rocket.is_none()
+                    && certificate.dyson_sail.is_none()
+                    && certificate.galactic_export.is_none()
+                    && certificate.orbital_contracts.is_none();
+                if offline_macro && current_elapsed.fract() != 0.0 && !ordinary_state_scope {
                     return unsupported(
                         state,
                         request,
@@ -9320,6 +9332,29 @@ fn advance_bounded_with_runtime(
                             }
                         },
                     );
+                }
+                if ordinary_state_scope {
+                    let flow = match offline_flow::prepare(&candidate, certificate, tail_seconds) {
+                        Ok(proof) => proof,
+                        Err(reason) => {
+                            return unsupported(
+                                state,
+                                request,
+                                format!("offline-state-proof-rejected: {reason}"),
+                            );
+                        }
+                    };
+                    let history = match offline_history::prepare(&candidate, &flow, tail_seconds) {
+                        Ok(proof) => proof,
+                        Err(reason) => {
+                            return unsupported(
+                                state,
+                                request,
+                                format!("offline-history-proof-rejected: {reason}"),
+                            );
+                        }
+                    };
+                    offline_state_proofs = Some((flow, history));
                 }
                 let quantum_inventory_before = if allow_construction_quantum_replay {
                     match capture_construction_quantum_inventory(candidate.base_value()) {
@@ -9563,19 +9598,38 @@ fn advance_bounded_with_runtime(
                 });
             }
         }
-        if let Some(progress) = offline_export_progress
-            && let Err(reason) = crate::simulation::advance_offline_no_export_progress(
+        if let Some((flow, history)) = offline_state_proofs {
+            if let Err(reason) = offline_flow::apply(&mut candidate, &flow) {
+                return unsupported(
+                    state,
+                    request,
+                    format!("offline-state-apply-rejected: {reason}"),
+                );
+            }
+            if let Err(reason) = offline_history::apply(&mut candidate, &history, tail_seconds) {
+                return unsupported(
+                    state,
+                    request,
+                    format!("offline-history-apply-rejected: {reason}"),
+                );
+            }
+        }
+        if let Some(progress) = offline_export_progress {
+            match crate::simulation::advance_offline_no_export_progress(
                 &mut candidate,
                 &progress,
                 tail_seconds,
                 request.simulation_seconds,
-            )
-        {
-            return unsupported(
-                state,
-                request,
-                format!("offline-export-window-proof-rejected: {reason}"),
-            );
+            ) {
+                Ok(final_elapsed) => elapsed = final_elapsed,
+                Err(reason) => {
+                    return unsupported(
+                        state,
+                        request,
+                        format!("offline-export-window-proof-rejected: {reason}"),
+                    );
+                }
+            }
         }
         if boundary_exact_seconds <= EPSILON {
             candidate.base_value_mut().insert(
@@ -10773,6 +10827,26 @@ mod tests {
         productive_single_recipe_macro_fixture(multiplier, "iron_ingot", "iron_ingot", false, false)
     }
 
+    pub(super) fn offline_flow_steady_fixture() -> CoreState {
+        let mut state = with_quantum_upload_station(
+            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+            "iron_ingot",
+            "smelter",
+        );
+        let index = *state.entity_index.get("vein").unwrap();
+        let mut vein = state.parse_entity(index).unwrap();
+        vein["minerCount"] = json!(1);
+        state.replace_entity_raw(index, serde_json::to_string(&vein).unwrap().into());
+        let revision = state.revision;
+        assert!(
+            state
+                .advance_exact(&exact_request(revision, 30.0, 30.0))
+                .unwrap()
+                .supported
+        );
+        state
+    }
+
     fn with_quantum_upload_station(source: CoreState, item_id: &str, source_id: &str) -> CoreState {
         let mut entities = source.parse_entities_parallel().unwrap();
         entities.push(json!({
@@ -10877,6 +10951,12 @@ mod tests {
                     "smelter",
                 );
                 initial.base_value_mut()["settings"]["resourceMode"] = json!(resource_mode);
+                // The custom unit catalog mines one item per miner/second.
+                // Match the one-item smelter before proving every physical
+                // second, instead of averaging excess ore over a window.
+                let mut vein = initial.parse_entity(2).unwrap();
+                vein["minerCount"] = json!(1);
+                initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
                 let mut tower = initial.parse_entity(4).unwrap();
                 tower["outputs"]["iron_ingot"] = json!(prefilled);
                 initial.replace_entity_raw(4, serde_json::to_string(&tower).unwrap().into());
@@ -10921,6 +11001,10 @@ mod tests {
                 assert_eq!(long_materials.consumed, exact_materials.consumed);
                 assert_eq!(long_materials.granted, exact_materials.granted);
                 assert_eq!(long_materials.finite_veins, exact_materials.finite_veins);
+                assert_eq!(
+                    long.canonical_sha256().unwrap(),
+                    exact.canonical_sha256().unwrap()
+                );
 
                 // OfflineMacroV1 is deliberately one-shot: each call owns a
                 // fresh exact prefix. Repeat the same call for deterministic
@@ -11147,25 +11231,38 @@ mod tests {
     }
 
     #[test]
-    fn offline_noninteger_ordinary_macro_source_is_rejected_atomically() {
-        let mut state = with_quantum_upload_station(
-            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
-            "iron_ingot",
-            "smelter",
+    fn offline_steady_fractional_clock_matches_complete_exact() {
+        let mut state = offline_flow_steady_fixture();
+        let before_elapsed = state.base_value()["elapsedSeconds"].as_f64().unwrap();
+        let shifted = crate::simulation::exact_elapsed_after_step(before_elapsed, 0.0043);
+        state.base_value_mut()["elapsedSeconds"] = json!(shifted);
+        state.base_value_mut()["historyRecordedAt"] = json!(shifted);
+        for sample in state.base_value_mut()["productionHistory"]
+            .as_array_mut()
+            .unwrap()
+        {
+            sample["elapsedSeconds"] = json!(crate::simulation::exact_elapsed_after_step(
+                sample["elapsedSeconds"].as_f64().unwrap(),
+                0.0043
+            ));
+        }
+        let mut exact = state.clone();
+        let exact_revision = exact.revision;
+        assert!(
+            exact
+                .advance_exact(&exact_request(exact_revision, 601.0, 601.0))
+                .unwrap()
+                .supported
         );
-        state.base_value_mut()["elapsedSeconds"] = json!(0.0043);
-        state.base_value_mut()["historyRecordedAt"] = json!(0.0043);
-        let before = state.summary().unwrap().canonical_sha256;
         let revision = state.revision;
         let result =
-            advance_macro_v10(&mut state, &offline_macro_request(revision, 600.0)).unwrap();
-        assert!(!result.supported);
+            advance_macro_v10(&mut state, &offline_macro_request(revision, 601.0)).unwrap();
+        assert!(result.supported, "{:?}", result.reason);
+        assert_eq!(result.approximated_seconds, Some(571.0));
         assert_eq!(
-            result.reason.as_deref(),
-            Some("offline-ordinary-macro-source-clock-unsupported")
+            state.summary().unwrap().canonical_sha256,
+            exact.summary().unwrap().canonical_sha256
         );
-        assert_eq!(state.revision, revision);
-        assert_eq!(state.summary().unwrap().canonical_sha256, before);
     }
 
     #[test]
@@ -11244,11 +11341,7 @@ mod tests {
 
     #[test]
     fn offline_ordinary_without_a_boundary_keeps_its_certified_macro_path() {
-        let initial = with_quantum_upload_station(
-            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
-            "iron_ingot",
-            "smelter",
-        );
+        let initial = offline_flow_steady_fixture();
         let mut macro_state = initial.clone();
         let revision = macro_state.revision;
         let result =
@@ -11266,9 +11359,36 @@ mod tests {
                 .supported
         );
         assert_eq!(
-            capture_settlement_snapshot(&macro_state).unwrap().produced,
-            capture_settlement_snapshot(&exact).unwrap().produced
+            macro_state.canonical_sha256().unwrap(),
+            exact.canonical_sha256().unwrap()
         );
+    }
+
+    #[test]
+    fn offline_periodic_material_average_without_physical_steady_state_is_rejected() {
+        for mut state in [
+            as_offline_fixture(productive_quantum_macro_fixture(15.0, "infinite")),
+            with_quantum_upload_station(
+                as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+                "iron_ingot",
+                "smelter",
+            ),
+        ] {
+            let before = state.canonical_sha256().unwrap();
+            let revision = state.revision;
+            let result =
+                advance_offline_macro_v1(&mut state, &offline_macro_request(revision, 600.0))
+                    .unwrap();
+            assert!(!result.supported, "{:?}", result.reason);
+            assert!(
+                result
+                    .reason
+                    .unwrap()
+                    .contains("offline-state-proof-rejected")
+            );
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
     }
 
     #[test]
@@ -14090,7 +14210,8 @@ mod tests {
     #[test]
     fn offline_macro_v1_is_productive_at_one_x_without_persisting_time_warp_credit() {
         for resource_mode in ["finite", "infinite"] {
-            let initial = as_offline_fixture(productive_quantum_macro_fixture(15.0, resource_mode));
+            let mut initial = offline_flow_steady_fixture();
+            initial.base_value_mut()["settings"]["resourceMode"] = json!(resource_mode);
             let before = capture_settlement_snapshot(&initial).unwrap();
 
             let mut prefix = initial.clone();
@@ -18539,16 +18660,18 @@ mod tests {
 
     #[test]
     fn durable_replay_preserves_offline_macro_mode_without_session_credit() {
-        let initial = as_offline_fixture(productive_quantum_macro_fixture(15.0, "infinite"));
+        let initial = offline_flow_steady_fixture();
+        let revision = initial.revision;
         let mut expected = initial.clone();
         let result =
-            advance_offline_macro_v1(&mut expected, &offline_macro_request(7, 600.0)).unwrap();
+            advance_offline_macro_v1(&mut expected, &offline_macro_request(revision, 600.0))
+                .unwrap();
         assert!(result.supported, "reason={:?}", result.reason);
 
         let mut replayed = initial;
         replayed
             .replay_operation(
-                7,
+                revision,
                 result.revision,
                 None,
                 600.0,

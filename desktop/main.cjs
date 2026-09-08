@@ -138,6 +138,9 @@ const desktopRuntimeIdentity = initializeDesktopEditionIdentity({
       }
     : null,
 });
+require("./background-smoke-policy.cjs").installBackgroundSmokePolicy({
+  app, dialog, identity: desktopRuntimeIdentity,
+});
 // This is deliberately initialized before app readiness. The default path does
 // not mutate Electron; only the exact experimental fallback can disable GPU use.
 const shellRuntimePolicy = initializeShellRuntimePolicy({ app, environment: process.env });

@@ -1,5 +1,7 @@
 # 系统架构
 
+> 隔离桌面测试增加显式后台策略：仅身份初始化验证后的性能开发版临时 profile 可启用 hidden-no-focus-v1，窗口不可见、不可聚焦、不进任务栏且静音，系统对话框取消或计数。实际显示/聚焦事件独立记录为验证失败，普通客户端不安装这些钩子。隐藏渲染的计时关闭后台节流并由真实驱动验证，不改变模拟规则。见[后台验证记录](./reviews/rust-rp1-background-testing-2026-09-09.md)。
+
 > Windows 普通离线已接 `startNativeOfflineSourceStartup`：renderer 先发目录/来源时间头，main 此刻取可信时钟；运行态 v2 信封 256 KiB 分块并等待 ACK，main 验证大小/SHA、同步独占临时文件，最终 canonical/domain proof 绑定临时 revision 0。每次用独立 Host/SaveStore，确认进程退出后传出候选，清理自己的临时目录再发 `sourceClosed`；取消、窗口销毁与退出排空本次请求，旧检查点兼容保留。实际普通主档、自然保存来源、取消、持久采用及正常重开均通过。仍只采用 1–30 秒精确结果，JS 实时权威不变；同步完整证明和候选缓冲的终局成本待测。见[技术证据](./reviews/rust-rp1-runtime-source-entry-2026-09-09.md)。下方 Host-only 描述保留上批事实。
 
 > 普通离线增加 Host 内部 `corePrepareOfflineSourceExport` / `native-core-offline-runtime-source-export-v1`：经受保护文件读取器验证的普通主档运行态信封，以字节数、SHA-256、保存时间、目录身份和完整 canonical/domain proof 绑定一次性 revision 0 CoreState。只允许 1–30 秒精确前缀，不注册会话、不发布检查点、不追加 WAL；候选导出复用旧路径的校验/发布逻辑。已有会话借用后按需复制，临时来源转移所有权，避免额外复制完整来源。当前只是 Host 协议，尚未开放新的 preload 或 renderer API；未来 main 必须拥有路径、时钟、传输限额和清理，来源需是既有 JS 加载校验后的完整运行态。见[接口及验证边界](./reviews/rust-rp1-runtime-source-2026-09-09.md)。

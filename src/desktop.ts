@@ -284,6 +284,19 @@ export interface DesktopNativeOfflineStartupRequest {
   readonly strategy: "macro-v1";
 }
 
+/** Main anchors time before encoding; finish binds the verified runtime proof. */
+export interface DesktopNativeOfflineSourceStartRequest {
+  readonly registryFingerprint: string;
+  readonly catalog: DesktopNativeCoreCatalog;
+  readonly sourceSavedAtMs: number;
+}
+
+export interface DesktopNativeOfflineSourceTransfer {
+  write: (chunk: ArrayBuffer) => Promise<void>;
+  finish: (proof: { readonly expectedCanonicalSha256: string; readonly expectedDomainSha256: string }) => Promise<DesktopNativeOfflineStartupResult>;
+  cancel: () => void;
+}
+
 export interface DesktopBridge {
   isDesktop: true;
   setFontScale: (scale: number) => Promise<{ scale: number; zoomFactor: number }>;
@@ -334,6 +347,10 @@ export interface DesktopBridge {
   prepareNativeOfflineStartup?: (
     request: DesktopNativeOfflineStartupRequest,
   ) => Promise<DesktopNativeOfflineStartupResult>;
+  /** Disposable read-only source upload; chunks are bounded and acknowledged. */
+  startNativeOfflineSourceStartup?: (
+    request: DesktopNativeOfflineSourceStartRequest,
+  ) => DesktopNativeOfflineSourceTransfer;
   getRuntimeDiagnostics: () => Promise<DesktopRuntimeDiagnostics>;
   getNativeProjectionSubscriptionDiagnostics?: () =>
     Promise<DesktopNativeProjectionSubscriptionDiagnostics>;

@@ -149,6 +149,83 @@ function fixture() {
 }
 
 describe("Windows native offline startup", () => {
+  async function sourceFixture() {
+    const current = fixture();
+    const status = await current.desktop.getNativePerformanceStatus();
+    current.desktop.getNativePerformanceStatus = vi.fn(async () => ({ ...status,
+      capabilities: [...status.capabilities, "native-core-offline-runtime-source-export-v1"],
+    }));
+    const original = await current.prepareNativeOfflineStartup({} as DesktopNativeOfflineStartupRequest);
+    if (!original.prepared) throw new Error("fixture must contain a candidate");
+    current.prepareNativeOfflineStartup.mockClear();
+    const sourceSummary = summary(current.state, 0, current.runtime.fingerprint);
+    const candidateSummary = summary(current.candidateState, 1, current.runtime.fingerprint);
+    const candidate = { ...original, sourceSummary, candidateSummary,
+      advance: { ...original.advance, previousRevision: 0, revision: 1, summary: candidateSummary },
+      export: { ...original.export, result: { ...original.export.result, revision: 1 } },
+    };
+    const chunks: Uint8Array[] = [];
+    const write = vi.fn(async (chunk: ArrayBuffer) => { chunks.push(new Uint8Array(chunk)); });
+    const finish = vi.fn(async (_proof: { expectedCanonicalSha256: string; expectedDomainSha256: string }) => candidate);
+    const cancel = vi.fn();
+    const start = vi.fn(() => ({ write, finish, cancel }));
+    current.desktop.startNativeOfflineSourceStartup = start;
+    return { ...current, chunks, write, finish, cancel, start, candidate };
+  }
+
+  it("uses the verified loaded runtime without reading or adopting any native checkpoint", async () => {
+    const current = await sourceFixture();
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") throw new Error("expected a candidate");
+    expect(result.state).toEqual(JSON.parse(JSON.stringify(current.candidateState)));
+    expect(current.desktop.recoverNativeSave).not.toHaveBeenCalled();
+    expect(current.desktop.openNativeCore).not.toHaveBeenCalled();
+    expect(current.prepareNativeOfflineStartup).not.toHaveBeenCalled();
+    expect(current.closeNativeCore).not.toHaveBeenCalled();
+    expect(current.cancel).toHaveBeenCalled();
+    const bytes = new Uint8Array(current.chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of current.chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    const source = JSON.parse(new TextDecoder().decode(bytes));
+    expect(source.state).toEqual(JSON.parse(JSON.stringify(current.loaded.state)));
+    expect(source.savedAt).toBe(current.loaded.savedAt);
+    expect(current.finish).toHaveBeenCalledWith({
+      expectedCanonicalSha256: current.candidate.sourceSummary.canonicalSha256,
+      expectedDomainSha256: current.candidate.sourceSummary.domainSha256,
+    });
+  });
+
+  it("cancels source upload without calculating or mutating the original loaded state", async () => {
+    const current = await sourceFixture();
+    const original = JSON.stringify(current.loaded);
+    const controller = new AbortController();
+    current.write.mockImplementationOnce(async () => { controller.abort(); });
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime, signal: controller.signal }, { desktop: current.desktop });
+    expect(result.status).toBe("fallback");
+    expect(current.finish).not.toHaveBeenCalled();
+    expect(current.cancel).toHaveBeenCalled();
+    expect(JSON.stringify(current.loaded)).toBe(original);
+  });
+
+  it("discards a temporary candidate with a changed full source proof", async () => {
+    const current = await sourceFixture();
+    current.candidate.sourceSummary.canonicalSha256 = "0".repeat(64);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("fallback");
+    expect(current.cancel).toHaveBeenCalled();
+    expect(current.closeNativeCore).not.toHaveBeenCalled();
+  });
+
+  it("retains the original loaded state when temporary Host or cleanup fails", async () => {
+    const current = await sourceFixture();
+    const original = JSON.stringify(current.loaded);
+    current.finish.mockRejectedValueOnce(new Error("temporary Host cleanup failed"));
+    expect(await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop })).toMatchObject({ status: "fallback" });
+    expect(current.cancel).toHaveBeenCalled();
+    expect(JSON.stringify(current.loaded)).toBe(original);
+  });
+
   it("keeps productive long intervals on the JS decision path without opening a native candidate", async () => {
     const current = fixture();
     current.loaded.offlineSeconds = 600;

@@ -2,10 +2,12 @@ import {
   getDesktopBridge,
   type DesktopBridge,
   type DesktopNativeCoreSummary,
+  type DesktopNativeOfflineStartupResult,
 } from "../desktop";
 import { getOfflineSimulationLimitSeconds } from "./endgame";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
-import { createNativeCoreRevisionProof } from "./nativeCoreProof";
+import { createNativeCoreRevisionProof, canonicalNativeCoreSha256, nativeCoreDomainSha256 } from "./nativeCoreProof";
+import { streamNativeOfflineSourceEnvelope } from "./nativeOfflineSource";
 import { decodeVerifiedSaveTransfer, type SaveTransferVerification } from "./saveTransfer";
 import {
   parseTrustedWorkerEnvelope,
@@ -23,6 +25,7 @@ type NativeOfflineDesktopBridge = Pick<DesktopBridge,
   | "recoverNativeSave"
   | "openNativeCore"
   | "prepareNativeOfflineStartup"
+  | "startNativeOfflineSourceStartup"
   | "closeNativeCore"
 >;
 
@@ -118,6 +121,7 @@ function nativeOfflineApproximationReport(
 export async function tryNativeOfflineStartupSettlement(input: {
   loaded: DeferredLoadedGame;
   runtime: ContentPackRuntimeSnapshot;
+  signal?: AbortSignal;
   onProgress?: (phase: NativeOfflineStartupProgressPhase) => void;
 }, dependencies: NativeOfflineStartupDependencies = {}): Promise<NativeOfflineStartupAttempt> {
   const { loaded, runtime } = input;
@@ -136,7 +140,7 @@ export async function tryNativeOfflineStartupSettlement(input: {
   const desktop = Object.hasOwn(dependencies, "desktop")
     ? dependencies.desktop
     : getDesktopBridge();
-  if (!desktop?.prepareNativeOfflineStartup) {
+  if (!desktop || (!desktop.prepareNativeOfflineStartup && !desktop.startNativeOfflineSourceStartup)) {
     return fallback("当前 Windows 外壳未提供原生离线候选能力");
   }
   const startedAt = dependencies.monotonicNow?.() ?? performance.now();
@@ -145,54 +149,95 @@ export async function tryNativeOfflineStartupSettlement(input: {
   input.onProgress?.("checking");
   try {
     const status = await desktop.getNativePerformanceStatus();
-    if (!status.available || !status.capabilities.includes(NATIVE_OFFLINE_CANDIDATE_CAPABILITY)) {
+    const useRuntimeSource = desktop.startNativeOfflineSourceStartup &&
+      status.capabilities.includes("native-core-offline-runtime-source-export-v1");
+    if (!status.available || (!useRuntimeSource && !status.capabilities.includes(NATIVE_OFFLINE_CANDIDATE_CAPABILITY))) {
       return fallback("Windows 原生 Host 不支持本次离线候选");
     }
-    const recovery = await desktop.recoverNativeSave({ slot: "normal-main" });
-    if (!recovery || recovery.slot !== "normal-main" || recovery.mode !== "normal" ||
-        recovery.stateVersion !== 47 || recovery.generation < 1 || recovery.revision < 0 ||
-        !validSha256(recovery.rootHash) || recovery.registryFingerprint !== runtime.fingerprint ||
-        recovery.savedAtMs !== loaded.savedAt || recovery.walEntryCount !== 0) {
-      return fallback("原生检查点与当前普通主存档不完全一致");
-    }
-    const sourceProof = createNativeCoreRevisionProof(
-      loaded.state,
-      recovery.revision,
-      recovery.rootHash,
-      runtime.fingerprint,
-    );
-    const opened = await desktop.openNativeCore({
-      slot: "normal-main",
-      generation: recovery.generation,
-      rootHash: recovery.rootHash,
-      revision: recovery.revision,
-      registryFingerprint: runtime.fingerprint,
-      catalog: createNativeCoreCatalog(runtime),
-    });
-    sessionId = opened.sessionId;
-    if (opened.authority !== "shadow" || opened.checkpointRevision !== recovery.revision ||
-        opened.replayedWalEntries !== 0 || opened.replayedRevision !== recovery.revision ||
-        !sourceSummaryMatches(opened.summary, {
-          revision: recovery.revision,
-          registryFingerprint: runtime.fingerprint,
-          canonicalSha256: sourceProof.canonicalSha256,
-          domainSha256: sourceProof.domainSha256,
-          state: loaded.state,
-        })) {
-      throw new Error("native source proof changed while opening");
-    }
+    input.signal?.throwIfAborted();
+    let sourceRevision = 0;
+    let sourceProof: { canonicalSha256: string; domainSha256: string };
+    let result: DesktopNativeOfflineStartupResult;
+    if (useRuntimeSource) {
+      // Main anchors the clock before encoding or the full-state proof. The
+      // temporary revision has no relationship to a persistent Native slot.
+      const transfer = desktop.startNativeOfflineSourceStartup!({
+        registryFingerprint: runtime.fingerprint,
+        catalog: createNativeCoreCatalog(runtime),
+        sourceSavedAtMs: loaded.savedAt,
+      });
+      const cancel = () => transfer.cancel();
+      input.signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        for (const chunk of streamNativeOfflineSourceEnvelope(loaded.state, loaded.savedAt)) {
+          input.signal?.throwIfAborted();
+          await transfer.write(chunk);
+        }
+        input.signal?.throwIfAborted();
+        sourceProof = {
+          canonicalSha256: canonicalNativeCoreSha256(loaded.state),
+          domainSha256: nativeCoreDomainSha256(loaded.state, 0),
+        };
+        input.signal?.throwIfAborted();
+        input.onProgress?.("calculating");
+        result = await transfer.finish({
+          expectedCanonicalSha256: sourceProof.canonicalSha256,
+          expectedDomainSha256: sourceProof.domainSha256,
+        });
+      } finally {
+        input.signal?.removeEventListener("abort", cancel);
+        transfer.cancel();
+      }
+    } else {
+      if (!desktop.prepareNativeOfflineStartup) return fallback("当前外壳缺少原生离线检查点接口");
+      const recovery = await desktop.recoverNativeSave({ slot: "normal-main" });
+      if (!recovery || recovery.slot !== "normal-main" || recovery.mode !== "normal" ||
+          recovery.stateVersion !== 47 || recovery.generation < 1 || recovery.revision < 0 ||
+          !validSha256(recovery.rootHash) || recovery.registryFingerprint !== runtime.fingerprint ||
+          recovery.savedAtMs !== loaded.savedAt || recovery.walEntryCount !== 0) {
+        return fallback("原生检查点与当前普通主存档不完全一致");
+      }
+      sourceRevision = recovery.revision;
+      sourceProof = createNativeCoreRevisionProof(
+        loaded.state,
+        recovery.revision,
+        recovery.rootHash,
+        runtime.fingerprint,
+      );
+      const opened = await desktop.openNativeCore({
+        slot: "normal-main",
+        generation: recovery.generation,
+        rootHash: recovery.rootHash,
+        revision: recovery.revision,
+        registryFingerprint: runtime.fingerprint,
+        catalog: createNativeCoreCatalog(runtime),
+      });
+      sessionId = opened.sessionId;
+      if (opened.authority !== "shadow" || opened.checkpointRevision !== recovery.revision ||
+          opened.replayedWalEntries !== 0 || opened.replayedRevision !== recovery.revision ||
+          !sourceSummaryMatches(opened.summary, {
+            revision: recovery.revision,
+            registryFingerprint: runtime.fingerprint,
+            canonicalSha256: sourceProof.canonicalSha256,
+            domainSha256: sourceProof.domainSha256,
+            state: loaded.state,
+          })) {
+        throw new Error("native source proof changed while opening");
+      }
 
-    input.onProgress?.("calculating");
-    const result = await desktop.prepareNativeOfflineStartup({
-      sessionId,
-      expectedGeneration: recovery.generation,
-      expectedRootHash: recovery.rootHash,
-      expectedRevision: recovery.revision,
-      expectedRegistryFingerprint: runtime.fingerprint,
-      expectedCanonicalSha256: sourceProof.canonicalSha256,
-      expectedDomainSha256: sourceProof.domainSha256,
-      strategy: "macro-v1",
-    });
+      input.onProgress?.("calculating");
+      result = await desktop.prepareNativeOfflineStartup({
+        sessionId,
+        expectedGeneration: recovery.generation,
+        expectedRootHash: recovery.rootHash,
+        expectedRevision: recovery.revision,
+        expectedRegistryFingerprint: runtime.fingerprint,
+        expectedCanonicalSha256: sourceProof.canonicalSha256,
+        expectedDomainSha256: sourceProof.domainSha256,
+        strategy: "macro-v1",
+      });
+    }
+    input.signal?.throwIfAborted();
     if (!result.prepared) {
       outcome = fallback(result.reason || "Rust 无法为当前存档证明守恒尾段");
     } else {
@@ -204,7 +249,7 @@ export async function tryNativeOfflineStartupSettlement(input: {
           result.settledSeconds > maximumOfflineSeconds ||
           result.settledAtMs !== result.sourceSavedAtMs + result.settledSeconds * 1_000 ||
           !sourceSummaryMatches(result.sourceSummary, {
-            revision: recovery.revision,
+            revision: sourceRevision,
             registryFingerprint: runtime.fingerprint,
             canonicalSha256: sourceProof.canonicalSha256,
             domainSha256: sourceProof.domainSha256,
@@ -224,12 +269,10 @@ export async function tryNativeOfflineStartupSettlement(input: {
       const state = parseTrustedWorkerEnvelope(raw, verification, runtime.registry, {
         persistentProjection: false,
       });
-      const candidateProof = createNativeCoreRevisionProof(
-        state,
-        result.candidateSummary.revision,
-        recovery.rootHash,
-        runtime.fingerprint,
-      );
+      const candidateProof = {
+        canonicalSha256: canonicalNativeCoreSha256(state),
+        domainSha256: nativeCoreDomainSha256(state, result.candidateSummary.revision),
+      };
       const expectedElapsedSeconds = loaded.state.elapsedSeconds + result.settledSeconds;
       if (!sourceSummaryMatches(result.candidateSummary, {
         revision: result.candidateSummary.revision,
@@ -238,7 +281,7 @@ export async function tryNativeOfflineStartupSettlement(input: {
         domainSha256: candidateProof.domainSha256,
         state,
       }) || result.advance.revision !== result.candidateSummary.revision ||
-          result.advance.previousRevision !== recovery.revision ||
+          result.advance.previousRevision !== sourceRevision ||
           result.export.result.revision !== result.candidateSummary.revision ||
           result.export.result.savedAtMs !== result.settledAtMs ||
           Math.abs(state.elapsedSeconds - expectedElapsedSeconds) > 0.000001) {

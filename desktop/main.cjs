@@ -117,6 +117,7 @@ const {
 const {
   streamNativeOfflineStartupCandidate,
 } = require("./native-offline-startup-transfer.cjs");
+const { NativeOfflineRuntimeSourceBroker } = require("./native-offline-runtime-source.cjs");
 const { RuntimeDiagnosticsSampler } = require("./runtime-diagnostics.cjs");
 const { initializeShellRuntimePolicy } = require("./shell-runtime-policy.cjs");
 const packageMetadata = require("../package.json");
@@ -194,6 +195,8 @@ const activeAccountArchiveDownloadCompletions = new Set();
 let accountArchiveQuitDrainPromise = null;
 let accountArchiveQuitDrainComplete = false;
 let nativeHostClient = null;
+let nativeOfflineRuntimeSourceBroker = null;
+let nativeOfflineSourceShutdownRequested = false;
 let nativeSaveSessions = null;
 let nativeCoreSessions = null;
 let nativePlayerAuthorityRuntime = null;
@@ -794,6 +797,13 @@ async function initializeNativeHost() {
       diskBudgetTargetPath: path.join(rootPath, ".native-save-space-probe"),
     });
     nativeCoreSessions = new NativeCoreSessionRegistry(nativeHostClient);
+    nativeOfflineRuntimeSourceBroker = new NativeOfflineRuntimeSourceBroker({
+      binaryPath,
+      temporaryParent: app.getPath("temp"),
+      createClient: (options) => new NativeHostClient({ ...options,
+        spawnEnvironment: nativePerformancePolicyStore.spawnEnvironment(),
+      }),
+    });
     nativePlayerAuthorityHandoffIpcBridge = new NativePlayerAuthorityHandoffIpcBridge({
       getRenderer: trustedRendererForNativePlayerAuthority,
     });
@@ -2879,6 +2889,25 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     .finally(() => closeTransferPort(port));
 });
 
+// Runtime source uploads use their own disposable Host and store. Main owns
+// the clock sampled at start, process, paths and cleanup; renderer sends chunks.
+ipcMain.on("desktop:native-offline-source-transfer", (event, request) => {
+  const port = event.ports?.[0];
+  if (!port) return;
+  const run = async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    const broker = nativeOfflineRuntimeSourceBroker;
+    if (!broker || nativeOfflineSourceShutdownRequested) throw new Error("原生离线来源服务不可用");
+    const onDestroyed = () => broker.cancelOwner(ownerId);
+    event.sender.once("destroyed", onDestroyed);
+    try {
+      await broker.run({ ownerId, request, observedNowMs: sampleNativeOfflineStartupWallClock(), port });
+    } finally { event.sender.removeListener("destroyed", onDestroyed); }
+  };
+  void run().catch((error) => postNativeOfflineStartupTransferError(port, error))
+    .finally(() => closeTransferPort(port));
+});
+
 // Startup settlement is a read-only candidate transaction. Renderer supplies
 // only an exact source proof; main owns both the wall clock and the temporary
 // export identity. Rust keeps the source session/checkpoint unchanged until
@@ -3590,8 +3619,9 @@ app.on("before-quit", (event) => {
   nativePlayerAuthorityRuntime?.shutdownForProcessExit();
   cancelAllAccountArchiveDownloads();
   if (updateTimer) clearInterval(updateTimer);
+  nativeOfflineSourceShutdownRequested = true;
   const accountArchiveReady = accountArchiveQuitDrainComplete || activeAccountArchiveDownloadCompletions.size === 0;
-  const nativeHostReady = nativeHostQuitDrainComplete || !nativeHostClient || nativeHostClient.exited;
+  const nativeHostReady = nativeHostQuitDrainComplete || ((!nativeHostClient || nativeHostClient.exited) && !nativeOfflineRuntimeSourceBroker?.active);
   if (accountArchiveReady && nativeHostReady) return;
   event.preventDefault();
   if (accountArchiveQuitDrainPromise || nativeHostQuitDrainPromise) return;
@@ -3599,7 +3629,10 @@ app.on("before-quit", (event) => {
   accountArchiveQuitDrainPromise = Promise.allSettled(pending).finally(() => {
     accountArchiveQuitDrainComplete = true;
   });
-  nativeHostQuitDrainPromise = (nativeHostClient ? nativeHostClient.stop() : Promise.resolve()).finally(() => {
+  nativeHostQuitDrainPromise = Promise.allSettled([
+    nativeHostClient ? nativeHostClient.stop() : Promise.resolve(),
+    nativeOfflineRuntimeSourceBroker?.close(),
+  ]).finally(() => {
     nativeHostQuitDrainComplete = true;
   });
   void Promise.allSettled([accountArchiveQuitDrainPromise, nativeHostQuitDrainPromise]).finally(() => app.quit());

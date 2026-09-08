@@ -639,6 +639,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
           const nativeResult = await nativeOffline.tryNativeOfflineStartupSettlement({
             loaded,
             runtime,
+            signal: controller.signal,
             onProgress: (phase) => setOfflineProgress((current) => ({
               label,
               completedSeconds: current?.completedSeconds ?? 0,

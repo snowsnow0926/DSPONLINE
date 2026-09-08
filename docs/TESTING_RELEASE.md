@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> Rust RP1 冷开候选 `061d6e3e`：完整 debug Core 1,104/5 ignored、release workspace 1,351/5 ignored、严格 Clippy、Host 差分 50/1 条件跳过、生命周期 1/1 和真实档一秒 Exact 1/1 通过。冷开 A/B 六次同档完整状态一致，独立采样有效；公共长离线首轮 12 通过 / 2 超时失败 / 2 性能跳过，原门槛独立复验中。历史堆异常未定因，无玩家包或 UI 发布资格。逐项原始证据见[冷开阶段记录](./reviews/rust-rp1-cold-open-admission-2026-09-08.md)。
+> Rust RP1 精确计算候选 `b39131a3`：完整 release workspace **1,355/5 ignored/0 失败**、严格 Clippy、公共长离线 **14/2 性能跳过/0 失败**通过；两项旧 8 小时超时在原门槛下通过。三对独立进程、每进程三次 1 小时 Exact 请求，完整状态和源一致，请求耗时中位缩短 90.17%。仅覆盖公开受限工厂的请求计时；新真实大档多秒、完整 UI 等待、持久采用与新包尚待验证，历史堆异常未定因。制品身份、旧失败及验证范围见[阶段记录](./reviews/rust-rp1-exact-dyson-base-2026-09-08.md)。
 
 > Rust 大档采样器（2026-09-08）：真实档诊断中，原 `Process.Refresh()` 读数循环出现 p95 108–109 ms，未满足原 50 ms 目标 / 100 ms p95 门槛，失败样本保留。采样改用仅具查询权限的目标进程句柄，通过 [GetProcessMemoryInfo](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo) 读取 [PrivateUsage](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex)，仍测私有提交内存；原频率和失败门槛不变。新增真实 64 MiB 提交与独立读数检查通过，采样/驱动文件 **6 通过 / 1 opt-in 跳过**。新旧 Host 必须使用同一新版采样器重新配对；旧样本不混算。
 

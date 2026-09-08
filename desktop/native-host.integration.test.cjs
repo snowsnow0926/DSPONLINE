@@ -1394,6 +1394,7 @@ test("real Rust host prepares a read-only offline candidate export without advan
     strategy: "macro-v1",
   };
   const candidate = await registry.prepareOfflineSettlementExport(17, request, 30_001, exportId);
+  assert.equal(normalizeRendererNativeResult("coreOfflineCandidateExport", candidate).prepared, true);
   assert.equal(candidate.prepared, true);
   assert.equal(candidate.sourceSavedAtMs, 1);
   assert.equal(candidate.settledAtMs, 30_001);
@@ -1426,6 +1427,7 @@ test("real Rust host prepares a read-only offline candidate export without advan
         17, request, 1 + seconds * 1_000, rejectedExportId,
       );
       assert.equal(rejected.prepared, false);
+      assert.equal(normalizeRendererNativeResult("coreOfflineCandidateExport", rejected).prepared, false);
       assert.equal(rejected.sourceSavedAtMs, 1);
       assert.equal(rejected.settledAtMs, 1 + seconds * 1_000);
       assert.equal(rejected.settledSeconds, seconds);

@@ -1,5 +1,7 @@
 # 系统架构
 
+> Native 普通离线 DTO 区分 macro 的短精确前缀与长尾：`pure-idle-bounded-exact` 只在 1–30 秒、exactCalibrationSeconds 等于全部结算时间且 approximatedSeconds 为零时通过；源、revision、时间、导出证明仍绑定。计算前的正常拒绝允许没有 advance，但必须有原因且没有候选或导出。自动采用的 30 秒门禁不变。
+
 > Windows 普通离线传输的导出根目录与 Host 初始化共用 `desktopRuntimeIdentity` 和对应版本目录名，经 `resolveFixedNativeSaveRootPath()` 验证；普通版与性能开发版各用自身固定目录。实际 main 处理块的回归测试覆盖这两种身份，防止变量重命名后运行时才报错并回退 JS。
 
 > 菜单恢复入口：目录中的 UTF-8 字节数和 payload checksum 标识原主档。`readLocalSavePayloadWithChunkJournalSource()` 同时保留原文引用和已验证的恢复结果；目录仍与原主档比较，恢复结果独立经过 Worker 的完整校验。JSON 顺序不同或有效增量推进不会被错当成目录损坏；主档/目录在等待期间变化仍拒绝。同步保存缓存保留原主档，加载直接使用恢复状态，避免将重组正文当成磁盘原文而误报保存冲突。IDB/native journal 必须不早于有效主档的 savedAt，在读取大块数据前检查；同一状态 checksum 不代表同一保存时间。旧字符串读取接口及 primary→backup→snapshot 顺序不变，不新增存档字段或绕过 journal 与主档的绑定。

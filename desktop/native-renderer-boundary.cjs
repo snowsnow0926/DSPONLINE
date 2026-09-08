@@ -8907,9 +8907,15 @@ function normalizeCoreOfflineCandidateExport(value) {
     throw protocolError("native offline candidate time or source binding");
   }
   if (result.prepared) {
+    // A macro request within its exact prefix reports the actual bounded-exact
+    // scope. Admit it only with a complete 1..30 second exact time ledger.
+    const boundedExact = result.advance?.exactScope === "pure-idle-bounded-exact" &&
+      result.settledSeconds >= 1 && result.settledSeconds <= 30 &&
+      result.advance.exactCalibrationSeconds === result.settledSeconds &&
+      result.advance.approximatedSeconds === 0;
     if (result.settledSeconds < 1 || result.reason !== undefined || !result.advance || !result.export ||
         !result.candidateSummary || !result.advance.supported ||
-        result.advance.exactScope !== "offline-macro-v1" ||
+        (result.advance.exactScope !== "offline-macro-v1" && !boundedExact) ||
         result.advance.previousRevision !== result.sourceSummary.revision ||
         result.advance.revision !== result.candidateSummary.revision ||
         result.export.mode !== "normal" ||
@@ -8919,7 +8925,7 @@ function normalizeCoreOfflineCandidateExport(value) {
       throw protocolError("native offline candidate prepared binding");
     }
   } else if (result.export || result.candidateSummary || result.settledSeconds === 0 && result.advance ||
-      result.settledSeconds > 0 && !result.advance || result.reason === undefined) {
+      result.reason === undefined) {
     throw protocolError("native offline candidate unavailable binding");
   }
   return result;

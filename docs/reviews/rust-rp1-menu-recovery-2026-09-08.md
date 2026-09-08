@@ -53,3 +53,7 @@ Role: develop。后续版本开发候选，未发布。Rust Host 仍为 `b39131a
 修正夹具后的真实包确认：Worker 加载状态与 Core 打开状态的 canonical/domain SHA 相同，发出了离线传输请求，但还未调用 Host 的候选方法即返回通用失败。实际 `main.cjs` 入口仍引用已不存在的 `performanceEditionRuntimeIdentity`。现在复用 Host 初始化所用的 `desktopRuntimeIdentity`、路径模块及该版本目录名，继续通过固定目录验证，不改变源证明、时间或权威边界。
 
 新增测试执行实际 main 事件处理块，使用真实固定目录解析器，覆盖性能开发版和普通版；修复前两例均捕获该未定义变量，修复后与传输、preload、固定目录保护、版本身份和 Host 合计 **67 通过 / 1 条件跳过 / 0 失败**。完整 Native 工具测试另行 **632 通过 / 1 条件跳过 / 0 失败**；新包实际结算/取消/重开继续验证。
+
+`f9feb88a` 新包确实到达 Host，公开 5 秒候选完整状态与 JS 相同，但 renderer DTO 仍误拒：短前缀实际标记为 `pure-idle-bounded-exact`，旧边界只接受 `offline-macro-v1`。已增加仅 1–30 秒、全部时间精确校准且估算时间为零的匹配分支，保留源、revision、导出与时间绑定。Host 在计算前拒绝超范围请求时没有 advance，现在也能作为无候选的拒绝结果传回，不会误报协议损坏。未改变 Rust 算法、30 秒采用限制或实时权威。
+
+DTO 新反例修复前失败，补齐缺失/不完整校准、估算尾段、31 秒伪装精确及拒绝结果夹带导出的负例；实际 Host 集成新增将成功与超范围拒绝送入同一 renderer 校验器。当前完整 Native 工具测试再次 **632 通过 / 1 条件跳过 / 0 失败**。证据 `offline-exact-dto-{before,full-native}.log`、实际包 `packaged-offline-complete-v8/report.json` 和 `-v9/live.json`。v9 驱动后续教学关闭按钮被真实弹窗遮挡而中断，不计完整 UI 通过。

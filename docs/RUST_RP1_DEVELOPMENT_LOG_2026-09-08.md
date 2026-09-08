@@ -1,5 +1,7 @@
 # Rust RP1 持续开发记录
 
+> 大工厂实际入口已完成本批验证：`67a2ffbe` 六例三对完整等待中位 21.003→5.854 秒，完整状态/持久/两次重开一致；加取消与自然来源，共 32 次隐藏静音正常关闭。云端第三轮已通过 Rust/Native 并上传带范围标注的候选 Host，全量 JS 正在执行。原始终局 timeWarp 准入和历史堆异常仍未收口；目标保持进行中。见[本批报告](./RUST_BATCH_REPORT_2026-09-09_UI_WAIT.md)与[证据](./reviews/rust-rp1-buffered-large-ui-wait-2026-09-09.md)。下方为此前时点状态。
+
 > 最新后台结果：本机正常优化 `6bf9f983` Host 已取得公开文件导入/运行态候选的三对收益，完整状态一致，新本地接口/后台专项 49/49。原始终局来源明确被 timeWarp 准入拒绝，未生成候选，原文件不变。云端 `34274908889` 已结束，Rust/Native/类型通过，但完整单元 3,157/39 跳过/2 失败；独立 JS 诊断 31/0 跳过/2 失败。新 run `34280286855` 仍在 Rust 验证，不作为全绿。私人诊断继续要求 6 GiB 启动余量。见[本批易读报告](./RUST_BATCH_REPORT_2026-09-09_BUFFERED.md)、[读取缓冲进展](./reviews/rust-rp1-v47-read-buffer-2026-09-09.md)及[监控证据](./reviews/rust-rp1-private-source-memory-guard-2026-09-09.md)。
 
 > 旧堆异常补充只读审计：原登记 5 份转储现存 4 份并逐件 SHA 校验，其中 9 月 2 日三份访问/非法指令异常属于另一 PDB GUID，不能用本批归档 PDB 展开或合并成同一回归；9 月 8 日 `b208e79c…` 堆异常仍与归档构建相符。其模块清单仅见该测试 EXE 及 Windows/VC 运行库名称，没有支持第三方注入的模块证据；这不证明破坏来源或排除硬件。四份现存转储另复制到忽略目录并校验，原文件未改；一份旧转储缺失。证据为开发 worktree 的 `artifacts/rust-rp1-loop/heap-crash-identity-audit-v1.json`、`heap-registered-dumps-frozen-v1/receipt.json`。仍未宣称原堆异常根因已解决。

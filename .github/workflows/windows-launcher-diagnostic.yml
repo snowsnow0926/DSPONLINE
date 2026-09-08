@@ -1,0 +1,42 @@
+name: Windows launcher diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["codex/rust-rp1-**"]
+    paths:
+      - ".github/workflows/windows-launcher-diagnostic.yml"
+      - ".github/diagnostics/windows-launcher.mjs"
+
+permissions:
+  contents: read
+
+jobs:
+  original-case:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Record runner topology and execute the original cleanup case
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts/windows-launcher-diagnostic | Out-Null
+          [ordered]@{
+            sourceSha = (git rev-parse HEAD)
+            logicalProcessors = [Environment]::ProcessorCount
+            inheritedAffinity = [Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity.ToInt64().ToString('X')
+            node = (node --version)
+          } | ConvertTo-Json | Set-Content artifacts/windows-launcher-diagnostic/runner.json
+          node .github/diagnostics/windows-launcher.mjs 2>&1 | Tee-Object artifacts/windows-launcher-diagnostic/original-case.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve the observation whether the original case passes or fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-launcher-diagnostic-${{ github.sha }}
+          path: artifacts/windows-launcher-diagnostic/
+          if-no-files-found: error
+          retention-days: 14

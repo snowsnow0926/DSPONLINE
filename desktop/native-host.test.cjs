@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { PassThrough } = require("node:stream");
+const path = require("node:path");
 const test = require("node:test");
 
 const {
@@ -442,7 +443,7 @@ test("save session checks the exact normalized batch against the fixed native fi
       return { acceptedRecords: request.records.length };
     },
   };
-  const targetPath = "C:\\DSPidle2-Performance-Edition\\native-save-v1\\.native-save-space-probe";
+  const targetPath = path.resolve("DSPidle2-Performance-Edition", "native-save-v1", ".native-save-space-probe");
   const registry = new NativeSaveSessionRegistry(client, {
     diskBudgetTargetPath: targetPath,
     diskBudgetCheck(request) {

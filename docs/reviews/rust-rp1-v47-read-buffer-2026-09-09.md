@@ -8,6 +8,10 @@ Role: develop。承接运行态来源入口和后台测试阶段；未发布，�
 
 本机内存仍不足以安全重复正式优化构建，新增 [Windows 云端验证工作流](../../.github/workflows/native-windows-validation.yml)，使用同一仓库独立 RP1 分支、Rust 1.96.1、正常 release 优化和公开测试数据。工作流依次运行 fmt、严格 Clippy、完整 Rust workspace、Windows Host、完整 Native 工具、类型检查与完整游戏单元；失败保留日志，仅全部成功后上传 Host 及精确提交/哈希回执。不接触玩家档，不构建发布包或部署，云端结果待实际运行。
 
+工作流提交 `74b57f1e4e6d235a216e0382a4455382c0f66377` 已推到 `codex/rust-rp1-after-1.2.7`，main 保持 `9f4ac5c3`。[首次云端运行](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34268571075)的 job 为 `102204086329`：fmt 与严格 release Clippy 已通过，完整优化 Rust workspace 步骤已开始但尚未返回结果，其余门禁仍待完成。继续时复查这个具体运行，不因观察超时重开任务。
+
+下步公开耗时样本已生成：1,000 个合成产线单元、9,107 实体、20,000 传送带，共 4,143,963 字节，源 SHA-256 `7767eff12ef110a4dd7bccc9d385c9a7551d49f1561489055d2fa2d73a266d1a`。保存于开发 worktree 的 `artifacts/rust-rp1-loop/public-v47-read-fixture-v1`；原工作区 `artifacts/rust-rp1-next/run-public-v47-read-pairs.mjs` 已做语法检查，拟交替三对、完整导出状态和正常退出校验，尚未运行性能对照。旧本机与新云端二进制的编译环境不同，后续即使观察到耗时改善也必须注明；不得把这项文件导入 RPC 当作玩家完整等待。
+
 以下保留先前失败和边界记录；正式优化 Host、终局复验及完整 UI 等待仍未完成。
 
 授权终局档的只读副本经现有 JS 校验和运行态流式传输进入旧 Host 后，在原 300 秒请求期限内未返回候选。诊断使用 1 秒绑定时钟，不是实际 UI 等待配对。原文件字节数、修改时间和 SHA-256 在结束后保持不变；本次临时 Host 已终止，原失败证据保留在开发 worktree 的 `artifacts/rust-rp1-loop/private-runtime-source-v1/report.json`。报告不含玩家存档内容。不能据此认定唯一超时原因已经查明。

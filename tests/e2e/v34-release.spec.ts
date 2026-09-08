@@ -112,6 +112,8 @@ test("next mobile construction finds both v1.0 megastructures at 200 percent fon
 });
 
 test("Dyson command bar stays reachable across desktop height and font gates", async ({ page }) => {
+  // Five serial factory boots need a larger total budget; layout checks keep theirs.
+  test.slow();
   await page.addInitScript(() => {
     const state = {
       version: 14,
@@ -141,20 +143,24 @@ test("Dyson command bar stays reachable across desktop height and font gates", a
   ]) {
     await page.setViewportSize({ width: gate.width, height: gate.height });
     await page.goto("/");
+    // Vite's load event precedes the simulation Worker bootstrap. Apply the
+    // font gate only after App has initialized its own font-scale effect.
+    await expect(page.locator(".react-flow__pane")).toBeVisible({ timeout: 15_000 });
     await dismissOnboarding(page);
     await page.evaluate((fontScale) => {
       document.documentElement.dataset.uiFontScale = fontScale;
     }, gate.fontScale);
     const directEntry = page.getByRole("button", { name: "打开戴森球规划", exact: true });
     const overflowEntry = page.getByRole("button", { name: "更多工作区", exact: true });
-    // Choose from the rendered header. A click timeout can occur after its
-    // input was delivered and must not be treated as a hidden direct entry.
+    // Compact shells keep the resource rail mounted outside the viewport.
+    // Prefer their displayed workspace menu over the offscreen rail button.
     await expect.poll(async () => await directEntry.isVisible() || await overflowEntry.isVisible()).toBe(true);
-    if (await directEntry.isVisible()) {
-      await directEntry.click({ timeout: 5_000 });
+    if (await overflowEntry.isVisible()) {
+      await expect(overflowEntry).toBeInViewport();
+      await overflowEntry.click({ timeout: 5_000 });
+      await page.getByRole("menuitem", { name: "戴森球规划" }).click({ timeout: 5_000 });
     } else {
-      await overflowEntry.click();
-      await page.getByRole("menuitem", { name: "戴森球规划" }).click();
+      await directEntry.click({ timeout: 5_000 });
     }
     const planner = page.getByRole("dialog", { name: "戴森球规划" });
     const plannerBox = await planner.boundingBox();

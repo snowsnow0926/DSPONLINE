@@ -1396,3 +1396,7 @@ production-preview Chrome 的匿名活动行星为 106 节点，默认与 expand
 匿名 byte-shape 性能夹具分别为 31,142,707 和 62,285,414 bytes；后者低于 64 MiB 云正文边界，但两者只用于 catalog/惰性读取性能，不是第 54 节的玩家同形容量证据。Chromium 各冷重载五轮并等待真实“继续游戏”摘要可见的合并 p95 为 220 ms：catalog-backed 两种尺寸均为 payload get 0、`getAll` 0、主线程大正文 `JSON.parse` 0、raw cache 0；35 MiB legacy 建索引为严格串行两次 payload get（Worker 输入与提交前精确复核）、主线程大正文解析 0、同步 fallback 0。损坏 primary 只读一次后按原顺序读取 backup 并选中正确状态；冷启动槽位/快照摘要不读正文，玩家选择后各只读对应 payload 一次且 raw cache 仍为 0。
 
 开发侧门禁为 catalog/store/preview/mode/transfer Vitest 31/31、完整 storage/mode Vitest 107/107、catalog Chromium 4/4、既有 IndexedDB v1→v2、lease/fencing/CAS/conflict/35 MiB readback Chromium 18/18、速通云恢复 7/7，以及既有快照批量管理 1/1；typecheck、启动长任务门禁与生产 build 全部通过。catalog key 明确位于 1.0.43 精确 payload key 命名空间之外；回滚客户端的旧 `isSaveKey` 对 primary/backup/slot/snapshot/conflict catalog 均返回 false，旧版不会将 side-record 误当存档、槽位、快照或正文缓存。最终菜单静态闭包为 267,852 gzip bytes，低于 286,720-byte 预算 18,868 bytes；无 budget 放宽。测试仅使用匿名运行时夹具和浏览器临时 IndexedDB，未部署、未写入玩家数据。
+
+Android configuration regression coverage: `node --test scripts/native-build-config.test.mjs`.
+It checks missing and malformed official endpoints, offline/desktop isolation,
+release profile propagation, and rejection of bundles missing the API/update URLs.

@@ -1,11 +1,11 @@
 import { realpathSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const supportedPlatforms = new Set(["web", "desktop", "android"]);
 
-export async function verifyBuiltPlatform(expectedPlatform, distRoot = path.resolve("dist")) {
+export async function verifyBuiltPlatform(expectedPlatform, distRoot = path.resolve("dist"), requiredUrls = []) {
   if (!supportedPlatforms.has(expectedPlatform)) {
     throw new Error(`Unsupported expected platform: ${expectedPlatform}`);
   }
@@ -13,6 +13,14 @@ export async function verifyBuiltPlatform(expectedPlatform, distRoot = path.reso
   const metadata = JSON.parse(await readFile(versionPath, "utf8"));
   if (metadata.platform !== expectedPlatform) {
     throw new Error(`Built platform mismatch: expected ${expectedPlatform}, received ${String(metadata.platform)}`);
+  }
+  if (requiredUrls.length) {
+    const assets = path.join(distRoot, "assets");
+    const scripts = (await readdir(assets)).filter((name) => name.endsWith(".js"));
+    const compiled = (await Promise.all(scripts.map((name) => readFile(path.join(assets, name), "utf8")))).join("\n");
+    for (const url of requiredUrls) {
+      if (!compiled.includes(JSON.stringify(url))) throw new Error("Built native JavaScript is missing a configured service URL");
+    }
   }
   return metadata;
 }

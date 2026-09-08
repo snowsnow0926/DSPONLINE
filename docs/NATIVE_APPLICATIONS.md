@@ -213,3 +213,15 @@ node scripts/create-native-update-manifests.mjs `
 - GitHub Android/Desktop Release 工作流已具备签名门禁，但 GitHub Actions Secrets 尚未配置；本机 Android SDK 和长期 keystore 已恢复并记录在受保护 vault 中。后续配置 CI 时只能导入同一 Android 密钥，不能新建证书替代覆盖升级链。Windows 继续沿用历史未签名测试包策略。
 - Android 系统浏览器安装 APK 时，玩家设备可能要求允许该来源安装应用；正式商店分发可作为后续渠道，但不改变包名和签名连续性要求。
 - Windows 可信代码签名、iOS 壳层、App Store/Google Play 发布、崩溃收集和物理 Android/iPhone 30 分钟温度耗电测试仍在后续范围。
+
+## 2026-09-09 Android 1.2.8 cloud configuration hotfix
+
+The protected official signing helper now sets `DSP_ANDROID_BUILD_PROFILE=official`.
+Its build requires explicit HTTPS `DSP_ANDROID_API_BASE_URL`,
+`DSP_ANDROID_UPDATE_BASE_URL` and origin-only `DSP_ANDROID_PUBLIC_ORIGIN`.
+Missing endpoints fail before compilation; the completed JavaScript must contain
+all three configured addresses. Community offline builds retain their existing default.
+The candidate is Android-only, version 1.2.8 / 1002008, based on the released
+1.2.7 source plus the approved Hong Kong historical display adjustment.
+It does not change app identity, storage origin, save format or signing identity.
+Publication and device evidence must be recorded separately after verification.

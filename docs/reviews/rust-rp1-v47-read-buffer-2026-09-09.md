@@ -26,6 +26,10 @@ Role: develop。承接运行态来源入口和后台测试阶段；未发布。�
 
 本机另完成[独立内存监控 3/3](./rust-rp1-private-source-memory-guard-2026-09-09.md)，用于覆盖 Node 同步计算阶段内部定时器无法及时执行的情况。当前可用内存约 3–4 GiB，未满足私人诊断 6 GiB 启动条件；没有运行新终局档或使用旧 Host 冒充新制品。
 
+公开运行态对照的新参数化驱动及外部监控已实际验证一个旧版成员：`public-runtime-source-baseline-p1-v1/report.json` 与 `-guard/result.json` 均 PASS。9,107 实体 / 20,000 带，源文件 4,143,963 字节，实际来源传输 10,234,284 字节、候选 11,051,481 字节；固定 1 秒的完整状态与 JS 相同，原状态/原文件不变，临时目录清理及一次正常退出 0/null 通过。`native-candidate → verify-complete-candidate` 约 **16,729 ms**，外层执行约 20.52 秒，观测最低空闲 3,536,908 KiB，未触发停止。该报告仍只有旧 Host，不能当作已完成的一对或三对性能结果。
+
+原工作区 `artifacts/rust-rp1-next/probe-public-runtime-source-pair-v1.mjs` SHA-256 为 `fd8050338aa567b63f532c6e2aea02148f29809ca1a8f932b31c7fb9ea88f58d`，配套 `run-public-runtime-source-guarded-v1.ps1`；仅使用公开固定 SHA 文件。历史 Host 只接受冻结的 `a9019611…` / `f7f10391…` 对应身份，候选 Host 要求其来源提交与当前运行代码相同且文件哈希一致。公开入口以 3 GiB 启动余量复用外部监控，私人入口的 6 GiB 要求不变。后续独立进程交替配对，并分别报告来源编码/证明、候选请求及完整候选检查，不把这些诊断耗时当作 UI 完整等待。
+
 下步公开耗时样本已生成：1,000 个合成产线单元、9,107 实体、20,000 传送带，共 4,143,963 字节，源 SHA-256 `7767eff12ef110a4dd7bccc9d385c9a7551d49f1561489055d2fa2d73a266d1a`。保存于开发 worktree 的 `artifacts/rust-rp1-loop/public-v47-read-fixture-v1`；原工作区 `artifacts/rust-rp1-next/run-public-v47-read-pairs.mjs` 已做语法检查，拟交替三对、完整导出状态和正常退出校验，尚未运行性能对照。旧本机与新云端二进制的编译环境不同，后续即使观察到耗时改善也必须注明；不得把这项文件导入 RPC 当作玩家完整等待。
 
 随后完成两项**旧 Host 单次基线验证**，均非新旧性能对照：

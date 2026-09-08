@@ -8,7 +8,10 @@
 
 use super::offline_flow::OfflineFlowProof;
 use super::*;
-use crate::production_history::{append_production_history_sample, production_history_boundary};
+use crate::production_history::{
+    ProductionHistoryAppender, append_production_history_sample, production_history_boundary,
+    production_history_clock_boundary,
+};
 use crate::simulation::exact_elapsed_after_step;
 
 const CYCLE_SECONDS: usize = 10;
@@ -172,24 +175,24 @@ fn reconstruct(
     {
         return Err("offline-history-prefix-or-tail-changed".to_owned());
     }
-    let mut replay = Map::from_iter([
-        ("elapsedSeconds".to_owned(), proof.source_elapsed.clone()),
-        (
-            "historyRecordedAt".to_owned(),
-            proof.source_recorded.clone(),
-        ),
-        ("productionHistory".to_owned(), proof.source_history.clone()),
-    ]);
+    let mut elapsed = clock_number(candidate, "elapsedSeconds")?;
+    let mut recorded = clock_number(candidate, "historyRecordedAt")?;
+    let history = proof
+        .source_history
+        .as_array()
+        .ok_or_else(|| "offline-history-replay-missing".to_owned())?;
+    let mut history = ProductionHistoryAppender::new(history.clone());
     for index in 0..steps {
         let observed = if index < CYCLE_SECONDS {
             &proof.first_cycle[index]
         } else {
             &proof.repeating_cycle[index % CYCLE_SECONDS]
         };
-        let next_elapsed = exact_elapsed_after_step(clock_number(&replay, "elapsedSeconds")?, 1.0);
-        replay.insert("elapsedSeconds".to_owned(), Value::from(next_elapsed));
-        let boundary = production_history_boundary(&replay)
-            .map_err(|error| format!("offline-history-replay-boundary: {error}"))?
+        elapsed = exact_elapsed_after_step(elapsed, 1.0);
+        if !elapsed.is_finite() || elapsed < 0.0 {
+            return Err("offline-history-replay-clock-invalid".to_owned());
+        }
+        let boundary = production_history_clock_boundary(elapsed, recorded, history.is_empty())
             .ok_or_else(|| "offline-history-replay-not-due".to_owned())?;
         if boundary.refresh != observed.refresh {
             return Err("offline-history-refresh-phase-changed".to_owned());
@@ -200,9 +203,19 @@ fn reconstruct(
             "sampleDurationSeconds".to_owned(),
             Value::from(boundary.duration),
         );
-        append_to_replay(&mut replay, Value::Object(sample), boundary.elapsed)?;
+        history
+            .append(Value::Object(sample))
+            .map_err(|error| format!("offline-history-compact: {error}"))?;
+        recorded = boundary.elapsed;
     }
-    Ok(replay)
+    Ok(Map::from_iter([
+        ("elapsedSeconds".to_owned(), Value::from(elapsed)),
+        ("historyRecordedAt".to_owned(), Value::from(recorded)),
+        (
+            "productionHistory".to_owned(),
+            Value::Array(history.into_history()),
+        ),
+    ]))
 }
 
 /// Build and compact on a local history array before touching the disposable
@@ -234,6 +247,115 @@ mod tests {
     use crate::catalog::{CatalogSnapshot, RuntimeCatalog};
     use crate::state::CoreCheckpointIdentity;
     use serde_json::json;
+
+    // Frozen pre-optimization reconstruction: keep the per-step Map clock and
+    // ordinary append/sort path as an independent byte-for-byte reference.
+    fn reconstruct_reference(proof: &OfflineHistoryProof, steps: usize) -> Map<String, Value> {
+        let mut replay = Map::from_iter([
+            ("elapsedSeconds".to_owned(), proof.source_elapsed.clone()),
+            (
+                "historyRecordedAt".to_owned(),
+                proof.source_recorded.clone(),
+            ),
+            ("productionHistory".to_owned(), proof.source_history.clone()),
+        ]);
+        for index in 0..steps {
+            let observed = if index < CYCLE_SECONDS {
+                &proof.first_cycle[index]
+            } else {
+                &proof.repeating_cycle[index % CYCLE_SECONDS]
+            };
+            let next =
+                exact_elapsed_after_step(clock_number(&replay, "elapsedSeconds").unwrap(), 1.0);
+            replay.insert("elapsedSeconds".to_owned(), Value::from(next));
+            let boundary = production_history_boundary(&replay).unwrap().unwrap();
+            assert_eq!(boundary.refresh, observed.refresh);
+            let mut sample = observed.payload.clone();
+            sample.insert("elapsedSeconds".to_owned(), Value::from(boundary.elapsed));
+            sample.insert(
+                "sampleDurationSeconds".to_owned(),
+                Value::from(boundary.duration),
+            );
+            append_to_replay(&mut replay, Value::Object(sample), boundary.elapsed).unwrap();
+        }
+        replay
+    }
+
+    #[test]
+    fn ordered_reconstruction_matches_original_bytes_for_fractional_and_unsorted_history() {
+        let (state, mut prefix, mut entities) = recorder_fixture(0.0043);
+        for step in 0..900 {
+            actual_sample(&state, &mut prefix, &mut entities, step % CYCLE_SECONDS);
+        }
+        let ordered_prefix = prefix.clone();
+        for unsorted in [false, true] {
+            prefix = ordered_prefix.clone();
+            if unsorted {
+                prefix["productionHistory"]
+                    .as_array_mut()
+                    .unwrap()
+                    .reverse();
+            }
+            let source_bytes = serde_json::to_vec(&prefix).unwrap();
+            let samples = observations(&state, &prefix, &entities);
+            for seconds in [1, 9, 11, 599, 601, 3_661] {
+                let proof = prepare_observed(&prefix, &samples, seconds as f64).unwrap();
+                let actual = reconstruct(&prefix, &proof, seconds as f64).unwrap();
+                let expected = reconstruct_reference(&proof, seconds);
+                assert_eq!(
+                    serde_json::to_vec(&actual).unwrap(),
+                    serde_json::to_vec(&expected).unwrap(),
+                    "seconds={seconds}, unsorted={unsorted}"
+                );
+                assert_eq!(serde_json::to_vec(&prefix).unwrap(), source_bytes);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated release-mode history reconstruction A/B; not a player or whole-core benchmark"]
+    fn benchmark_ordered_history_reconstruction() {
+        use std::time::Instant;
+        let (state, mut prefix, mut entities) = recorder_fixture(0.0043);
+        for step in 0..900 {
+            actual_sample(&state, &mut prefix, &mut entities, step % CYCLE_SECONDS);
+        }
+        let source_bytes = serde_json::to_vec(&prefix).unwrap();
+        let samples = observations(&state, &prefix, &entities);
+        let warmup = prepare_observed(&prefix, &samples, 600.0).unwrap();
+        assert_eq!(
+            reconstruct_reference(&warmup, 600),
+            reconstruct(&prefix, &warmup, 600.0).unwrap()
+        );
+        for seconds in [600, 3_600, 28_800] {
+            let proof = prepare_observed(&prefix, &samples, seconds as f64).unwrap();
+            let mut rows = Vec::new();
+            for pair in 0..5 {
+                let mut results = [None, None];
+                let mut millis = [0.0; 2];
+                for variant in if pair % 2 == 0 { [0, 1] } else { [1, 0] } {
+                    let began = Instant::now();
+                    let result = if variant == 0 {
+                        reconstruct_reference(&proof, seconds)
+                    } else {
+                        reconstruct(&prefix, &proof, seconds as f64).unwrap()
+                    };
+                    millis[variant] = began.elapsed().as_secs_f64() * 1_000.0;
+                    results[variant] = Some(std::hint::black_box(result));
+                }
+                assert_eq!(
+                    serde_json::to_vec(&results[0]).unwrap(),
+                    serde_json::to_vec(&results[1]).unwrap()
+                );
+                assert_eq!(serde_json::to_vec(&prefix).unwrap(), source_bytes);
+                rows.push(json!({"pair":pair, "legacyMs":millis[0], "orderedMs":millis[1], "fullBytesEqual":true}));
+            }
+            println!(
+                "HISTORY_REPLAY_AB {}",
+                json!({"seconds":seconds, "pairs":rows, "scope":"history reconstruction only; no factory simulation, IPC or persistence", "sourceUnchanged":true})
+            );
+        }
+    }
 
     // This fixture drives the real public history recorder with explicit
     // periodic per-second telemetry. It tests history reconstruction separately

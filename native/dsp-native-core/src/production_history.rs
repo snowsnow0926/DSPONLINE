@@ -316,18 +316,33 @@ pub(crate) fn production_history_boundary(
     if elapsed - recorded < SAMPLE_SECONDS - EPSILON {
         return Ok(None);
     }
-    let duration = SAMPLE_SECONDS.max(elapsed - recorded);
     let history = base
         .get("productionHistory")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("native production history is missing"))?;
+    Ok(production_history_clock_boundary(
+        elapsed,
+        recorded,
+        history.is_empty(),
+    ))
+}
+
+pub(crate) fn production_history_clock_boundary(
+    elapsed: f64,
+    recorded: f64,
+    history_empty: bool,
+) -> Option<ProductionHistoryBoundary> {
+    if elapsed - recorded < SAMPLE_SECONDS - EPSILON {
+        return None;
+    }
+    let duration = SAMPLE_SECONDS.max(elapsed - recorded);
     let previous_boundary = ((elapsed - duration).max(0.0) / 10.0).floor();
     let current_boundary = (elapsed.max(0.0) / 10.0).floor();
-    Ok(Some(ProductionHistoryBoundary {
+    Some(ProductionHistoryBoundary {
         elapsed,
         duration,
-        refresh: history.is_empty() || duration >= 10.0 || previous_boundary != current_boundary,
-    }))
+        refresh: history_empty || duration >= 10.0 || previous_boundary != current_boundary,
+    })
 }
 
 pub(crate) fn belt_flow_requirement(
@@ -931,6 +946,10 @@ fn compact_history(history: &mut Vec<Value>) -> anyhow::Result<()> {
             .partial_cmp(&finite_number(right.get("elapsedSeconds")).unwrap_or(0.0))
             .unwrap_or(Ordering::Equal)
     });
+    compact_ordered_history(history)
+}
+
+fn compact_ordered_history(history: &mut Vec<Value>) -> anyhow::Result<()> {
     let latest = history
         .last()
         .and_then(|sample| finite_number(sample.get("elapsedSeconds")))
@@ -957,6 +976,47 @@ pub(crate) fn append_production_history_sample(
 ) -> anyhow::Result<()> {
     history.push(sample);
     compact_history(history)
+}
+
+/// Owns a disposable replay's rows so no external edit can invalidate ordering.
+/// The first append retains the legacy stable sort. Subsequent monotonic rows
+/// reuse that order; compaction replaces a run at its last timestamp and only
+/// removes a prefix, so neither operation can reorder the remaining rows.
+pub(crate) struct ProductionHistoryAppender {
+    history: Vec<Value>,
+    ordered: bool,
+}
+
+impl ProductionHistoryAppender {
+    pub(crate) fn new(history: Vec<Value>) -> Self {
+        Self {
+            history,
+            ordered: false,
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.history.is_empty()
+    }
+
+    pub(crate) fn append(&mut self, sample: Value) -> anyhow::Result<()> {
+        let elapsed = finite_number(sample.get("elapsedSeconds")).unwrap_or(0.0);
+        let monotonic = self.history.last().is_none_or(|previous| {
+            finite_number(previous.get("elapsedSeconds")).unwrap_or(0.0) <= elapsed
+        });
+        self.history.push(sample);
+        if self.ordered && monotonic {
+            compact_ordered_history(&mut self.history)?;
+        } else {
+            compact_history(&mut self.history)?;
+        }
+        self.ordered = true;
+        Ok(())
+    }
+
+    pub(crate) fn into_history(self) -> Vec<Value> {
+        self.history
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
@@ -2247,6 +2307,65 @@ mod tests {
     use crate::state::CoreCheckpointIdentity;
     use serde_json::json;
     use std::time::Instant;
+
+    #[test]
+    fn ordered_history_append_matches_legacy_bytes_at_every_bucket_and_retention_step() {
+        for offset in [0.0, 0.0043, 900.25] {
+            let mut legacy = Vec::new();
+            let mut ordered = ProductionHistoryAppender::new(Vec::new());
+            for step in 1..=4_000 {
+                let mut sample =
+                    history_sample(offset + f64::from(step), f64::from(step % 17) / 7.0, 1.0);
+                sample["inventory"] = json!({"iron_ore": step, "mod:β": step % 19});
+                sample["pureIdleReplication"] = json!({
+                    "researchInvestmentByItem":{"universe_matrix": step.to_string()},
+                    "structurePointsBySystem":{"helios": step},
+                    "shellSailsBySystem":{"helios": step / 3}
+                });
+                append_production_history_sample(&mut legacy, sample.clone()).unwrap();
+                ordered.append(sample).unwrap();
+                assert_eq!(
+                    serde_json::to_vec(&ordered.history).unwrap(),
+                    serde_json::to_vec(&legacy).unwrap(),
+                    "offset={offset}, step={step}"
+                );
+            }
+            assert_eq!(ordered.into_history(), legacy);
+        }
+    }
+
+    #[test]
+    fn ordered_history_append_preserves_stable_ties_and_repairs_unknown_or_regressing_order() {
+        let mut seed = vec![
+            history_sample(3.0, 1.0, 1.0),
+            history_sample(-0.0, 2.0, 1.0),
+            history_sample(3.0, 3.0, 1.0),
+            json!({"elapsedSeconds":null, "sampleDurationSeconds":1.0, "sentinel":"missing-clock"}),
+            history_sample(-1.0, 4.0, 1.0),
+        ];
+        seed[0]["sentinel"] = json!("first-tie");
+        seed[2]["sentinel"] = json!("second-tie");
+        let mut legacy = seed.clone();
+        let mut ordered = ProductionHistoryAppender::new(seed);
+        for step in 0..1_000 {
+            let elapsed = if step % 97 == 0 {
+                -0.0
+            } else if step % 13 == 0 {
+                3.0
+            } else {
+                f64::from(step)
+            };
+            let mut sample = history_sample(elapsed, f64::from(step % 17) / 11.0, 1.25);
+            sample["sentinel"] = json!(step);
+            append_production_history_sample(&mut legacy, sample.clone()).unwrap();
+            ordered.append(sample).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&ordered.history).unwrap(),
+                serde_json::to_vec(&legacy).unwrap(),
+                "step={step}"
+            );
+        }
+    }
 
     #[test]
     fn inventory_runtime_tracks_empty_to_populated_rows_across_revisions() {

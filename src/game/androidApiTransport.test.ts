@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Buffer } from "node:buffer";
 import {
   androidBase64FileSupported,
   androidBlobToBase64,
@@ -15,7 +16,9 @@ describe("Android cloud transport", () => {
     for (let index = 0; index < bytes.length; index += 1) bytes[index] = index % 251;
     const encoded = bytesToBase64(bytes);
     const decoded = Uint8Array.from(atob(encoded), (value) => value.charCodeAt(0));
-    expect(decoded).toEqual(bytes);
+    // Compare every byte and the complete length without expanding two million
+    // typed-array entries through the assertion library's generic object walk.
+    expect(Buffer.from(decoded).equals(Buffer.from(bytes))).toBe(true);
   });
 
   it("does not claim native Android capability in a web test runtime", async () => {

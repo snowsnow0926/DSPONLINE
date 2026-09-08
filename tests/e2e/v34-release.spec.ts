@@ -146,10 +146,14 @@ test("Dyson command bar stays reachable across desktop height and font gates", a
       document.documentElement.dataset.uiFontScale = fontScale;
     }, gate.fontScale);
     const directEntry = page.getByRole("button", { name: "打开戴森球规划", exact: true });
-    try {
+    const overflowEntry = page.getByRole("button", { name: "更多工作区", exact: true });
+    // Choose from the rendered header. A click timeout can occur after its
+    // input was delivered and must not be treated as a hidden direct entry.
+    await expect.poll(async () => await directEntry.isVisible() || await overflowEntry.isVisible()).toBe(true);
+    if (await directEntry.isVisible()) {
       await directEntry.click({ timeout: 5_000 });
-    } catch {
-      await page.getByLabel("更多工作区").click();
+    } else {
+      await overflowEntry.click();
       await page.getByRole("menuitem", { name: "戴森球规划" }).click();
     }
     const planner = page.getByRole("dialog", { name: "戴森球规划" });

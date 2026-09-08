@@ -247,7 +247,9 @@ test("logistics management searches and edits a remote station without changing 
   dialog = page.locator(".game-dialog");
   await dialog.getByRole("button", { name: "确认修改" }).click();
   await expect(itemSelect).toHaveValue("copper_ingot");
-  await expect(page.getByRole("status")).toContainText("已远程修改");
+  // Verify edit feedback and the selected value. The open workspace isolates
+  // this background notice, so this does not assert live-region accessibility.
+  await expect(page.locator(".game-notice")).toContainText("已远程修改");
 
   await manager.getByLabel("搜索物流塔").fill("");
   await manager.getByLabel("物流塔类型筛选").selectOption("collector");

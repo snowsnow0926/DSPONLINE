@@ -1494,8 +1494,12 @@ test("the production workspace fits a medium desktop", async ({ page }) => {
   const smelter = page.locator(".construction-item-shell").filter({ hasText: "电弧熔炉" });
   await expect(smelter.getByLabel("制造电弧熔炉")).toHaveClass(/construction-item-craft--upstream/);
   await smelter.getByLabel("制造电弧熔炉").click();
-  await expect(smelter.locator(".construction-item > strong")).toHaveText("×4");
-  await expect(page.locator(".interaction-burst")).toContainText("已消耗");
+  // The burst lasts 900 ms while the inventory panel publishes separately.
+  // Observe both outcomes immediately instead of waiting out the short burst.
+  await Promise.all([
+    expect(page.locator(".interaction-burst")).toContainText("已消耗"),
+    expect(smelter.locator(".construction-item > strong")).toHaveText("×4"),
+  ]);
   await page.screenshot({ path: "artifacts/qa/factory-network-1280.png", fullPage: true });
 });
 

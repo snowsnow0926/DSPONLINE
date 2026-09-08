@@ -80,6 +80,10 @@ test("settings opens a category overview and returns without changing the select
 });
 
 test("each planet restores its last canvas viewport", async ({ page }) => {
+  const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
+  await page.addLocatorHandler(offlineReport, async () => {
+    await offlineReport.getByRole("button", { name: "确认结算" }).click();
+  });
   await openFactory(page);
   await page.getByTitle("保存并返回主菜单").click();
   await expect(page.locator(".start-menu")).toBeVisible();

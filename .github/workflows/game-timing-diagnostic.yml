@@ -6,6 +6,10 @@ on:
     branches: ["codex/rust-rp1-**"]
     paths:
       - ".github/workflows/game-timing-diagnostic.yml"
+      - "src/game/engine.ts"
+      - "src/game/idleResourceSettlement.test.ts"
+      - "src/game/p2Batching.test.ts"
+      - "src/game/emptyPlanetSimulationWork.test.ts"
 
 permissions:
   contents: read
@@ -21,7 +25,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - name: Execute both original files with unchanged assertions and deadlines
+      - name: Execute original timing files and empty-planet regression checks
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path artifacts/game-timing-diagnostic | Out-Null
@@ -29,11 +33,11 @@ jobs:
             sourceSha = (git rev-parse HEAD)
             logicalProcessors = [Environment]::ProcessorCount
             node = (node --version)
-            sourceFiles = @('src/game/idleResourceSettlement.test.ts', 'src/game/p2Batching.test.ts') | ForEach-Object {
+            sourceFiles = @('src/game/engine.ts', 'src/game/idleResourceSettlement.test.ts', 'src/game/p2Batching.test.ts', 'src/game/emptyPlanetSimulationWork.test.ts') | ForEach-Object {
               [ordered]@{ path = $_; sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() }
             }
           } | ConvertTo-Json -Depth 4 | Set-Content artifacts/game-timing-diagnostic/source.json
-          node node_modules/vitest/vitest.mjs run src/game/idleResourceSettlement.test.ts src/game/p2Batching.test.ts --maxWorkers=1 --reporter=json --outputFile=artifacts/game-timing-diagnostic/results.json 2>&1 | Tee-Object artifacts/game-timing-diagnostic/run.log
+          node node_modules/vitest/vitest.mjs run src/game/idleResourceSettlement.test.ts src/game/p2Batching.test.ts src/game/emptyPlanetSimulationWork.test.ts --maxWorkers=1 --reporter=json --outputFile=artifacts/game-timing-diagnostic/results.json 2>&1 | Tee-Object artifacts/game-timing-diagnostic/run.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve original pass and failure evidence
         if: always()

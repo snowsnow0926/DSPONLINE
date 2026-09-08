@@ -5467,7 +5467,9 @@ function runMachines(
   skippedEntityIds?: ReadonlySet<string>,
 ): void {
   const profile = getPlanetIndustrialProfile(state, planetId);
-  const runtimes = lookup?.machineRuntimesByPlanet.get(planetId) ?? state.entities.flatMap((entity): IndexedMachineRuntime[] => {
+  // An absent planet entry in a complete lookup means there are no machines;
+  // it is not a missing lookup that needs a scan of every planet's entities.
+  const runtimes = lookup ? (lookup.machineRuntimesByPlanet.get(planetId) ?? []) : state.entities.flatMap((entity): IndexedMachineRuntime[] => {
     const recipe = getRecipe(entity.recipeId);
     if (entity.planetId !== planetId || entity.kind !== "machine" || entity.buildingId === "ray_receiver" || !entity.buildingId || !recipe) return [];
     const building = getBuilding(entity.buildingId);
@@ -5489,6 +5491,7 @@ function runMachines(
       matrixResearch: recipe.id === "matrix_research",
     }];
   });
+  if (runtimes.length === 0) return;
   let industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
   let matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
   // Technology membership is read for every machine. Large factories can
@@ -12858,8 +12861,9 @@ function runConstructionCenters(
   profiler?: SimulationProfiler,
   lookup?: SimulationLookupContext,
 ): void {
-  const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
   const centerEntities = entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center");
+  if (centerEntities.length === 0) return;
+  const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
   const activeTargetCountForBudget = getActiveConstructionAutomationTargets(state).length;
   const extendedBudget = batchConstructionAutomation && activeTargetCountForBudget > 1 &&
     centerEntities.some((entity) => entity.machineCount >= CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD);

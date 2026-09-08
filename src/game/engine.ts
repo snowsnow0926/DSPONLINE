@@ -27,6 +27,7 @@ import {
   getTechnology,
   isDeprecatedTechnology,
 } from "./content";
+import { constructionMaterialsAvailable } from "./constructionMaterialAvailability";
 import {
   DEFAULT_GALAXY_SEED,
   createGalaxyState,
@@ -12164,7 +12165,7 @@ function constructionAutomationInputsAvailable(
 ): boolean {
   const tray = trayForPlanet(state, planetId);
   const quantumBuffer = entityId ? constructionAutomationQuantumBuffer(state, entityId) : {};
-  return Boolean(planConstructionAutomationConsumptionWithQuantum(job.inventory, tray, quantumBuffer, constructionAutomationRequirements(step)));
+  return constructionMaterialsAvailable(job.inventory, tray, quantumBuffer, constructionAutomationRequirements(step));
 }
 
 function finishConstructionAutomationStep(

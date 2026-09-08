@@ -1,6 +1,6 @@
 # 系统架构
 
-> v47 读取缓冲候选在 BoundedHashReader 内层新增 64 KiB BufReader，减少普通文件的逐字节读取，同时让哈希/UTF-16 分类继续跟随已消费字节。公开回归确认 524,708 字节由同量底层读取降至最多 9 次；正常优化 Rust 1,363/5 ignored/0 失败及云端 Host 编译通过。Native 工具仍有一项云端启动夹具失败，合格 Host 和终局性能尚待验证，见[开发记录](./reviews/rust-rp1-v47-read-buffer-2026-09-09.md)。
+> v47 读取缓冲候选在 BoundedHashReader 内层新增 64 KiB BufReader，减少普通文件的逐字节读取，同时让哈希/UTF-16 分类继续跟随已消费字节。正常优化 Rust 1,363/5 ignored/0 失败、Native 全量 674/1 跳过/0 失败通过；本机 `6bf9f983` Host 的公开三对文件导入和运行态请求中位缩短 92.25%/89.64%，完整状态相同。授权终局来源仍因 timeWarp 激活被宏结算准入拒绝，原档不变；未开放新状态类别、长离线或实时接管。新大工厂完整 UI 等待和全量 JS 两项计时失败待验，见[开发记录](./reviews/rust-rp1-v47-read-buffer-2026-09-09.md)。
 
 > `33d96597` 的 hidden-no-focus-offscreen-v2 已通过三组实际流程和 12 次正常关闭：从未显示/聚焦且静音，每次有实际绘制，菜单就绪后三帧 186.5–213.4 ms。这是后续桌面测试的必需入口；普通用户窗口保持原行为。完整证据见[后台验收记录](./reviews/rust-rp1-background-testing-2026-09-09.md)。
 

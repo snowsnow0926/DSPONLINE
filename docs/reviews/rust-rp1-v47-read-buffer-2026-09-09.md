@@ -1,6 +1,32 @@
 # Rust RP1 大存档读取缓冲｜开发中
 
-Role: develop。承接运行态来源入口和后台测试阶段；未发布。云端已编译正常优化 Host，但整组门禁失败，未取得合格 Host 制品或生成新安装包。
+Role: develop。承接运行态来源入口和后台测试阶段；未发布。现已取得本机正常优化 Host 并完成公开三对收益验证；整组云端门禁仍有失败，新安装包和终局完整结算待验。
+
+## 当前已验证的收益与终局限制
+
+干净源码 `6bf9f983bcbc4593ceb9761f22c30217c2400a67` 使用本机 rustc 1.96.1 正常 release 构建（不覆盖 opt-level，CARGO_BUILD_JOBS=1）。约 348.08 秒正常退出 0，最低可用内存 6,331,760 KiB，未触发资源停止。17,878,016 字节 Host SHA-256 为 `1f19d28a92702096492293b8cde667252dc44859790b4a3055230122851ef80a`，另冻结为原工作区 `artifacts/rust-rp1-next/buffered-host-6bf9f983-frozen-v1.exe` 并复核摘要。构建回执 `buffered-host-release-build-local-v1/receipt.json` 只证明构建，不授予发布资格。
+
+基线仍为历史本机正常 release 的 `f7f10391` / `a9019611…`。两者原生源码差异只有 v47 读取缓冲和覆盖清单；本次两种对照均在同机执行，不能称作新云端二进制测量。基线不是这次重编译的二进制，各自来源和构建回执独立保留。
+
+公开 9,107 实体 / 20,000 带工厂：文件 4,143,963 字节，运行态传输 10,234,284 字节，候选 11,051,481 字节。每种试验按 AB / BA / AB 三对独立进程执行，Host 两线程、低优先级且外部内存监控。完整文件导出状态、检查点身份、原文件及正常退出全部通过；运行态试验则六次完整 JS 状态一致、源状态/原文件不变、临时目录清理及正常退出 0/null 全部通过。
+
+| 计时范围（ms） | 基线三次 | 候选三次 | 基线→候选中位 | 缩短 |
+| --- | --- | --- | --- | --- |
+| 文件导入 RPC | 5177.225 / 5149.607 / 5196.664 | 401.189 / 396.772 / 402.497 | 5177.225→401.189 | 92.25% |
+| 运行态候选请求，含返回及正常关闭 | 16951.955 / 16966.712 / 17072.504 | 1758.028 / 1777.202 / 1754.216 | 16966.712→1758.028 | 89.64% |
+| 诊断来源验证至完成 JS 对照 | 18850.036 / 18842.443 / 18909.741 | 3562.033 / 3608.260 / 3565.578 | 18850.036→3565.578 | 81.08% |
+
+后两行使用 savedAt + 1 秒的绑定诊断时钟。第三行包含测试专用 JS 参考计算；三行都不是 UI 完整等待，也不是长离线或终局档完成收益。报告位于开发 worktree `artifacts/rust-rp1-loop/public-v47-read-pairs-v2/report.json`、`public-runtime-source-{baseline,candidate}-p{1,2,3}-v2/report.json`、各自 `-guard/result.json` 及 `public-runtime-source-pairs-v2-summary.json`。两种驱动 SHA-256 分别为 `ab29e9a049e3710d9de0b7f055ca797ea0d5ec3d1e2d9b72adf1481933a444d3`、`02aa5abb448983c469aacdeb43c93b79ffdd077584dd1ac0e686c77e4a85ae2d`；历史 v1 驱动摘要不复用给本次。
+
+新本机 Host 原文件前后 SHA 固定，串行运行 `desktop/native-host.integration.test.cjs`、`desktop/native-offline-runtime-source.test.cjs`、`desktop/background-smoke-policy.test.cjs`：**49 通过 / 0 失败 / 0 跳过 / 0 取消**，约 46.76 秒正常退出。日志与监控为 `artifacts/rust-rp1-loop/buffered-host-local-integration-v1/`。没有启动实际 Electron 窗口，旧 33d 小工厂的 UI 通过不作为新 Host UI 通过。
+
+授权终局原档以既有 6 GiB 启动余量、独立内存监控和原 300 秒 Host 期限运行 **private-runtime-source-buffered-v1**，本次 **FAILED**：110,042 实体 / 233,300 带，实际传输 **200,841,424 字节**，Host 明确返回 `offline-macro-time-warp-active`，prepared=false。外层约 32.11 秒结束，最低可用内存 5,452,916 KiB，未触发资源停止；来源完整校验不变，临时目录清理通过，Host 正常退出 0/null。原 300 秒超时失败保留；当前拒绝与旧超时不是完成同一工作的新旧性能样本。没有禁用玩家 timeWarp 或放宽准入，尚未取得这份原始终局来源的完整候选。证据为相应 `report.json` 与 `-guard/result.json`，不含玩家存档内容。
+
+独立云端 JS 诊断 run `34280286908` / job `102243130724` 已结束：原两个文件 **31 通过 / 2 失败 / 0 跳过**。有限矿脉宏结算实际 2,386.167 ms，要求低于 2,000 ms；递归建设参考例约 5,147.622 ms，触发默认 5 秒超时。四逻辑处理器、Node 24.19.0，文件 SHA 与未修改原测试一致。artifact `10077352510` 已取回并核对 ZIP SHA `72dba341336b15edbf0606734e5f2418d36945d473c24ec79ea1d3a875d1afc4`，本地 `cloud-game-timing-6bf9f983.zip`。新完整 run `34280286855` 当前仍在正常优化 Rust 测试步骤，不记为通过；未改变原断言。
+
+下一阶段为大工厂真实离屏 UI 完整等待配对与取消、保存、重开；同时处理时间加速来源的精确兼容边界及两项 JS 计时失败。历史堆异常根因仍未确定。超过 30 秒采用和实时资格继续关闭。[本批易读报告](../RUST_BATCH_REPORT_2026-09-09_BUFFERED.md)区分已测收益与未完成范围。
+
+以下保留各次早期诊断的当时状态；“未取得新 Host”“尚未运行对照”已经由上方本机新证据更新。
 
 ## 后续轻量验证
 

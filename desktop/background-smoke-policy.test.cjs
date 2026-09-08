@@ -21,7 +21,10 @@ function windowFixture(calls, visible = false) {
   for (const name of ["hide", "blur", "setFocusable", "setSkipTaskbar", "show", "showInactive", "focus", "restore", "maximize", "moveTop", "setFullScreen", "flashFrame"]) {
     window[name] = (...args) => calls.push([name, ...args]);
   }
-  window.webContents = { setBackgroundThrottling: (value) => calls.push(["throttle", value]), setAudioMuted: (value) => calls.push(["mute", value]) };
+  window.webContents = Object.assign(new EventEmitter(), {
+    setBackgroundThrottling: (value) => calls.push(["throttle", value]), setAudioMuted: (value) => calls.push(["mute", value]),
+    isOffscreen: () => true, setFrameRate: (value) => calls.push(["frameRate", value]),
+  });
   return window;
 }
 test("normal launches do not mutate app, dialog or window behavior", () => {
@@ -42,7 +45,7 @@ test("background cannot activate outside the verified performance profile", () =
 test("all reveal/focus methods are suppressed while hidden rendering stays scheduled", () => {
   const f = fixture(); const audit = installBackgroundSmokePolicy(f); const window = windowFixture(f.calls);
   f.app.emit("browser-window-created", {}, window);
-  assert.deepEqual(f.calls, [["setFocusable", false], ["setSkipTaskbar", true], ["mute", true], ["throttle", false]]);
+  assert.deepEqual(f.calls, [["setFocusable", false], ["setSkipTaskbar", true], ["mute", true], ["throttle", false], ["frameRate", 60]]);
   f.calls.length = 0;
   for (const name of ["show", "showInactive", "focus", "restore", "maximize", "moveTop", "setFullScreen", "flashFrame"]) window[name](true);
   f.app.focus();
@@ -82,4 +85,12 @@ test("actual main initializes background policy after verified identity and star
   assert.equal(received.identity, "verified"); assert.equal(received.app, "app");
   const options = main.slice(main.indexOf("const window = new BrowserWindow({"), main.indexOf("mainWindow = window;"));
   assert.match(options, /show: false/);
+  for (const backgroundSmokePolicy of [null, {}]) {
+    let captured;
+    vm.runInNewContext(options, { saved: null, BrowserWindow: function(value) { captured = value; },
+      desktopRuntimeIdentity: { productName: "test" }, path, __dirname, backgroundSmokePolicy });
+    assert.equal(captured.show, false);
+    assert.equal(captured.webPreferences.backgroundThrottling, !backgroundSmokePolicy);
+    assert.equal(captured.webPreferences.offscreen, backgroundSmokePolicy ? true : undefined);
+  }
 });

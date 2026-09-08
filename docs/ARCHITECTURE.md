@@ -1,5 +1,7 @@
 # 系统架构
 
+> 后台测试后续改为 hidden-no-focus-offscreen-v2：只对已经验证的隔离后台 profile 启用离屏窗口和 60 FPS 绘制，普通窗口设置不变。原因是 Windows 隐藏窗口即使关闭节流仍可能停止 requestAnimationFrame；实际探针要求从未显示/聚焦、静音、真实绘制以及菜单就绪后 3 帧不超过 500 ms。性能对照必须注明并保持相同离屏合成方式。下方 v1 为前一实现，见[失败与调整记录](./reviews/rust-rp1-background-testing-2026-09-09.md)。
+
 > 隔离桌面测试增加显式后台策略：仅身份初始化验证后的性能开发版临时 profile 可启用 hidden-no-focus-v1，窗口不可见、不可聚焦、不进任务栏且静音，系统对话框取消或计数。实际显示/聚焦事件独立记录为验证失败，普通客户端不安装这些钩子。隐藏渲染的计时关闭后台节流并由真实驱动验证，不改变模拟规则。见[后台验证记录](./reviews/rust-rp1-background-testing-2026-09-09.md)。
 
 > Windows 普通离线已接 `startNativeOfflineSourceStartup`：renderer 先发目录/来源时间头，main 此刻取可信时钟；运行态 v2 信封 256 KiB 分块并等待 ACK，main 验证大小/SHA、同步独占临时文件，最终 canonical/domain proof 绑定临时 revision 0。每次用独立 Host/SaveStore，确认进程退出后传出候选，清理自己的临时目录再发 `sourceClosed`；取消、窗口销毁与退出排空本次请求，旧检查点兼容保留。实际普通主档、自然保存来源、取消、持久采用及正常重开均通过。仍只采用 1–30 秒精确结果，JS 实时权威不变；同步完整证明和候选缓冲的终局成本待测。见[技术证据](./reviews/rust-rp1-runtime-source-entry-2026-09-09.md)。下方 Host-only 描述保留上批事实。

@@ -138,7 +138,7 @@ const desktopRuntimeIdentity = initializeDesktopEditionIdentity({
       }
     : null,
 });
-require("./background-smoke-policy.cjs").installBackgroundSmokePolicy({
+const backgroundSmokePolicy = require("./background-smoke-policy.cjs").installBackgroundSmokePolicy({
   app, dialog, identity: desktopRuntimeIdentity,
 });
 // This is deliberately initialized before app readiness. The default path does
@@ -1636,7 +1636,8 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       spellcheck: false,
-      backgroundThrottling: true,
+      backgroundThrottling: !backgroundSmokePolicy,
+      ...(backgroundSmokePolicy ? { offscreen: true } : {}),
     },
   });
   mainWindow = window;

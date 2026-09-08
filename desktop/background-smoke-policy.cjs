@@ -9,8 +9,8 @@ function installBackgroundSmokePolicy({ app, dialog, identity, environment = pro
     throw new Error("Background smoke requires a verified isolated performance profile");
   }
   const audit = {
-    policy: "hidden-no-focus-v1", windowsCreated: 0, initiallyVisible: 0,
-    showEvents: 0, focusEvents: 0, blocked: {}, dialogs: {},
+    policy: "hidden-no-focus-offscreen-v2", windowsCreated: 0, initiallyVisible: 0,
+    showEvents: 0, focusEvents: 0, paintEvents: 0, blocked: {}, dialogs: {},
   };
   const count = (collection, name) => { collection[name] = (collection[name] ?? 0) + 1; };
   app.focus = () => count(audit.blocked, "app.focus");
@@ -25,6 +25,9 @@ function installBackgroundSmokePolicy({ app, dialog, identity, environment = pro
     // Keep the hidden renderer's scheduling equivalent to a foreground window;
     // a real probe also verifies document.visibilityState and timer progress.
     window.webContents.setBackgroundThrottling(false);
+    if (!window.webContents.isOffscreen()) throw new Error("Background smoke window requires offscreen rendering");
+    window.webContents.setFrameRate(60);
+    window.webContents.on("paint", () => { audit.paintEvents += 1; });
     for (const name of ["show", "showInactive", "focus", "restore", "maximize", "moveTop", "setFullScreen", "flashFrame"]) {
       window[name] = () => count(audit.blocked, `window.${name}`);
     }

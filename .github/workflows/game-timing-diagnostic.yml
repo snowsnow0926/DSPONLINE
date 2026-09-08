@@ -1,0 +1,45 @@
+name: Windows game timing diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["codex/rust-rp1-**"]
+    paths:
+      - ".github/workflows/game-timing-diagnostic.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  original-cases:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Execute both original files with unchanged assertions and deadlines
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts/game-timing-diagnostic | Out-Null
+          [ordered]@{
+            sourceSha = (git rev-parse HEAD)
+            logicalProcessors = [Environment]::ProcessorCount
+            node = (node --version)
+            sourceFiles = @('src/game/idleResourceSettlement.test.ts', 'src/game/p2Batching.test.ts') | ForEach-Object {
+              [ordered]@{ path = $_; sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() }
+            }
+          } | ConvertTo-Json -Depth 4 | Set-Content artifacts/game-timing-diagnostic/source.json
+          node node_modules/vitest/vitest.mjs run src/game/idleResourceSettlement.test.ts src/game/p2Batching.test.ts --maxWorkers=1 --reporter=json --outputFile=artifacts/game-timing-diagnostic/results.json 2>&1 | Tee-Object artifacts/game-timing-diagnostic/run.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve original pass and failure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: game-timing-diagnostic-${{ github.sha }}
+          path: artifacts/game-timing-diagnostic/
+          if-no-files-found: error
+          retention-days: 14

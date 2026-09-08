@@ -6,7 +6,7 @@ Role: develop。承接运行态来源入口和后台测试阶段；未发布。�
 
 `840ec68d` 的真实 v47 模块 12/12 通过（含新增 3 项），命令保留 release 的其余设置，仅以 `--config profile.release.package.dsp-native-core.opt-level=0` 关闭本 crate 的编译优化。同一 524,708 字节回归夹具现满足最多 9 次非空来源读取，完整结果与校验相同。单编译任务、低优先级、单测试线程，并以 1.5 GiB 剩余内存设自动终止线；此次约 77.7 秒，观测最少可用内存 2,147,032 KiB，没有触发停止。证据为原工作区 `artifacts/rust-rp1-next/v47-buffer-low-memory-v1/{stdout.log,stderr.log,receipt.json}`。Cargo 的日志仍显示 release，不可忽略明确的 opt-level=0 覆盖而称正式优化构建通过。
 
-本机内存仍不足以安全重复正式优化构建，新增 [Windows 云端验证工作流](../../.github/workflows/native-windows-validation.yml)，使用同一仓库独立 RP1 分支、Rust 1.96.1、正常 release 优化和公开测试数据。工作流依次运行 fmt、严格 Clippy、完整 Rust workspace、Windows Host、完整 Native 工具、类型检查与完整游戏单元；失败保留日志，仅全部成功后上传 Host 及精确提交/哈希回执。不接触玩家档，不构建发布包或部署。
+本机内存仍不足以安全重复大规模 Rust 测试编译，新增 [Windows 云端验证工作流](../../.github/workflows/native-windows-validation.yml)，使用同一仓库独立 RP1 分支、Rust 1.96.1、正常 release 优化和公开测试数据。工作流依次运行 fmt、严格 Clippy、完整 Rust workspace、Windows Host、完整 Native 工具、类型检查与完整游戏单元；失败保留日志，仅全部成功后上传最终 Host 及精确提交/哈希回执。后续另保留范围明确的待验候选，见下方改进。不接触玩家档，不构建发布包或部署。
 
 工作流提交 `74b57f1e4e6d235a216e0382a4455382c0f66377` 已推到 `codex/rust-rp1-after-1.2.7`，推送时 main 为 `9f4ac5c3`。[首次云端运行](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34268571075)（job `102204086329`）已结束，结论为失败：fmt、严格 release Clippy、完整优化 Rust workspace **1,363 通过 / 5 ignored / 0 失败**及 Host 构建通过；Native Node **673 通过 / 1 失败 / 1 跳过 / 0 取消**。类型检查和完整游戏单元没有执行，合格 Host 没有上传。仅保留诊断 artifact `10073972545`，ZIP SHA-256 `0ad2f00d0aa87c108d6ef5c15768ccd34bd937c29042bc77d47c3096971ba205`；完整 job 日志在原工作区 `artifacts/rust-rp1-next/cloud-ci-74b57f1e-job.log`。
 
@@ -22,7 +22,13 @@ Role: develop。承接运行态来源入口和后台测试阶段；未发布。�
 
 修正后本机完整 `benchmark-native-core-fixed-affinity-ab.test.mjs` **15 通过 / 0 失败 / 0 跳过**，约 77.5 秒，其中真实六进程清理例约 76.5 秒。执行 Node 使用低于正常优先级，未启动游戏窗口；日志 `artifacts/rust-rp1-next/ci-launcher-default-grace-local-v1.log`。这不是全部 Native 套件或云端门禁完成；[本批易读报告](../RUST_BATCH_REPORT_2026-09-09_BACKGROUND.md)分别说明后台收益与未完成的玩家性能验证。
 
-修正提交 `056b9b0840eaeab14c3f7c9c8c44ec4a8b0ca7ea` 的[原测试云端复验](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34274908998) **1/1 通过**，约 78 秒，两次均在 38 秒真实期限下生成 PID 文件并通过全部清理断言。日志在原工作区 `cloud-launcher-056b9b08.log`（`artifacts/rust-rp1-next/`）；诊断 artifact `10075350743`，ZIP SHA-256 `651da87135fc39cbbf5b5882c067ff4c69b2651f1baf642dd0bdb0c6cb65767b`。[完整云端运行 34274908889](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34274908889) / job `102225411083` 仍在运行：fmt、严格 release Clippy 已通过，完整优化 Rust 步骤尚未结束，其后门禁未完成。下一次应观察这个具体运行，不因等待重开。
+修正提交 `056b9b0840eaeab14c3f7c9c8c44ec4a8b0ca7ea` 的[原测试云端复验](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34274908998) **1/1 通过**，约 78 秒，两次均在 38 秒真实期限下生成 PID 文件并通过全部清理断言。日志在原工作区 `cloud-launcher-056b9b08.log`（`artifacts/rust-rp1-next/`）；诊断 artifact `10075350743`，ZIP SHA-256 `651da87135fc39cbbf5b5882c067ff4c69b2651f1baf642dd0bdb0c6cb65767b`。
+
+[完整云端运行 34274908889](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34274908889) / job `102225411083` **已结束，整组失败**：fmt、严格 release Clippy、完整优化 Rust **1,363/5 ignored/0 失败**、Host build、Native Node **674/1 跳过/0 失败**及类型检查通过；完整 Vitest **3,157 通过 / 2 失败 / 39 跳过**（394 文件通过、2 失败、14 跳过）。失败一是有限矿脉边界宏结算的耗时断言，实际约 2,298.95 ms、要求低于 2,000 ms，之前的资源/科研守恒断言已通过；另一是递归量子建设新旧完整状态对照超过框架默认 5 秒期限。原日志 `cloud-ci-056b9b08-job.log` 已保存；只有诊断 artifact `10076692516`，ZIP SHA-256 `4204dc4a1aed92e7dcb11de314aa043da34e4e6785cd16a0e9d9dfd3a1b33cad`，没有上传 Host。
+
+本机按用户要求以低优先级、单 worker 原样运行上述两个完整文件，**32 通过 / 1 失败 / 0 跳过**：宏耗时约 2,197.33 ms，仍未满足原 2 秒断言；递归量子建设例约 4,916 ms，通过完整状态及批处理数量断言。证据 `cloud-game-failures-original-local-v1.{json,log}` 位于原工作区 `artifacts/rust-rp1-next/`。不能只凭这些结果把全部异常归为云端环境，断言和游戏代码暂未改变。新增[两文件云端原样诊断](../../.github/workflows/game-timing-diagnostic.yml)，无需重复编译 Rust。
+
+为避免后续测试失败又丢失已编译的开发程序，工作流增加按原生 Git tree、构建脚本 blob、Rust 版本和 runner 镜像版本精确绑定的 `native/target` 缓存；仍执行全部编译检查与测试，不按缓存命中跳过断言。Rust/Native 检查通过后，另存明确标注“仅这些检查通过”的 `host-candidate`，供后续诊断；最终 Host 仍须全部门禁通过，并核对二进制未在游戏单元期间变化。缓存使用固定 SHA 的官方 [actions/cache v5](https://github.com/actions/cache/tree/caa296126883cff596d87d8935842f9db880ef25)，缺少镜像标识时不使用缓存。这些新流程尚待实际运行，当前仍没有新 Host 性能结果。
 
 本机另完成[独立内存监控 3/3](./rust-rp1-private-source-memory-guard-2026-09-09.md)，用于覆盖 Node 同步计算阶段内部定时器无法及时执行的情况。当前可用内存约 3–4 GiB，未满足私人诊断 6 GiB 启动条件；没有运行新终局档或使用旧 Host 冒充新制品。
 

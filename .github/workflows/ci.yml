@@ -51,6 +51,12 @@ jobs:
       - run: npm ci
       - run: npm --prefix server ci
       - run: npm run test:server
+      - name: Provide the production Node entry point for Linux service tests
+        run: |
+          if [ ! -e /usr/bin/node ]; then
+            sudo ln -s "$(command -v node)" /usr/bin/node
+          fi
+          /usr/bin/node --version
       - run: npm run test:ops
       - run: npm run test:native-core:serial
       - run: npm run native:build-host
@@ -83,6 +89,7 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
+      - run: npm --prefix server ci
       - name: Cache Playwright browsers
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
@@ -114,6 +121,7 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
+      - run: npm --prefix server ci
       - name: Cache Playwright browsers
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:

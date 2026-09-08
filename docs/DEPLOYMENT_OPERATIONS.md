@@ -8,12 +8,14 @@
 | --- | --- | --- | --- |
 | 香港正式 | `https://dsponline.cn` | `hk-origin.example.invalid` | 正式 Web、云账号、云存档、排行榜 |
 | 香港别名 | `https://www.dsponline.cn` | 同上 | 301 到根域名 |
-| 上海旧节点 | `http://shanghai-node.example.invalid` | `shanghai-node.example.invalid` | 独立 HTTP 入口和备用试玩；不提供账号密码输入 |
-| 上海下载节点 | `https://download.dsponline.cn` | `shanghai-node.example.invalid` | Windows/Android 安装包与稳定更新清单 |
+| 上海独立节点 | `http://shanghai-new-node.example.invalid` | `shanghai-new-node.example.invalid` | 已迁新机的独立 HTTP 入口和备用试玩；不提供账号密码输入 |
+| 上海下载节点 | `https://download.dsponline.cn` | `shanghai-new-node.example.invalid` | Windows/Android 安装包与稳定更新清单 |
 | 本地前端 | `http://127.0.0.1:4318` | 开发机 | Vite |
 | 本地 API | `http://127.0.0.1:4320` | 开发机 | Node 云服务 |
 
 硬边界：上海节点必须继续由上海本机提供前端与 `/api`，不得改成香港反代或域名跳转。上海为 HTTP，前端必须继续拒绝云账号密码传输。
+
+> 当前上海状态（2026-09-08，全业务迁机）：新上海承接原旧上海业务和公开下载，DSP Web/API current 为 `1.2.6-df828869e276`、previous 为 `1.2.5-0a1c6629ced1`，generation 32 / proxy 92，green/4322；下载 current/previous 同为 1.2.6/1.2.5。健康、下载完整哈希、Range、权威/公共 DNS 和节点磁盘监控通过。后续运维必须从受保护 `DSP_SH_NEW_*` 在单个调用子进程内映射到 Shanghai helper；原 `DSP_SH_*` 仍指旧机，不要继续向旧机部署。旧机保留数据、停止写入并设置自动启动保护，到期前仅转发新上海；跨机回退必须先冻结新机并保全新增数据。香港不在此次变更范围，其异地备份 timer 的 inactive 状态需另行核实。完整证据见 [迁移记录](./releases/ops-shanghai-vps-migration-2026-09-08.md)；以下按日期保留的旧发布状态不是迁机后的拓扑。
 
 > 当前生产状态（2026-08-31，1.2.6 已稳定发布）：香港/上海 Web/API current 均为 `1.2.6-df828869e276`，previous 均为 `1.2.5-0a1c6629ced1`；香港 generation 48 / proxy generation 192，上海 generation 32 / proxy generation 92，均为 green / 4322。上海下载页 current 为 `download-site-1.2.6-df828869e276`、previous 为 1.2.5；香港 `/canary/previous/` 302/no-store 到不可变 1.2.5。两地 API/proxy/health timer active、`NRestarts=0`、pending 与 disposable preflight 均为空、health/ready 200、Nginx 有效。香港/上海正式发布快照分别为 4,460,781,568 / 462,848 B，并通过完整 SHA、quick-check、schema 8、layout 3 和文件身份绑定；香港异地备份 timer active，上海恢复演练 timer active。最终磁盘 81% / 77%。`download.dsponline.cn` 的唯一 A 记录已按明确授权回切旧上海，默认线路和 TTL 600 不变；新上海继续在线但不承担当前公开下载。Windows 1.2.6 为 `NotSigned`；Android `1.2.6 / 1002006` 保持长期证书。完整证据与香港到旧上海区域性 TLS 合成探针的残余边界见 [1.2.6 发布记录](./releases/1.2.6.md)。
 

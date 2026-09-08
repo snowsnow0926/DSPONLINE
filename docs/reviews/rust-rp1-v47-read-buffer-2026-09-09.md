@@ -22,6 +22,10 @@ Role: develop。承接运行态来源入口和后台测试阶段；未发布。�
 
 修正后本机完整 `benchmark-native-core-fixed-affinity-ab.test.mjs` **15 通过 / 0 失败 / 0 跳过**，约 77.5 秒，其中真实六进程清理例约 76.5 秒。执行 Node 使用低于正常优先级，未启动游戏窗口；日志 `artifacts/rust-rp1-next/ci-launcher-default-grace-local-v1.log`。这不是全部 Native 套件或云端门禁完成；[本批易读报告](../RUST_BATCH_REPORT_2026-09-09_BACKGROUND.md)分别说明后台收益与未完成的玩家性能验证。
 
+修正提交 `056b9b0840eaeab14c3f7c9c8c44ec4a8b0ca7ea` 的[原测试云端复验](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34274908998) **1/1 通过**，约 78 秒，两次均在 38 秒真实期限下生成 PID 文件并通过全部清理断言。日志在原工作区 `cloud-launcher-056b9b08.log`（`artifacts/rust-rp1-next/`）；诊断 artifact `10075350743`，ZIP SHA-256 `651da87135fc39cbbf5b5882c067ff4c69b2651f1baf642dd0bdb0c6cb65767b`。[完整云端运行 34274908889](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34274908889) / job `102225411083` 仍在运行：fmt、严格 release Clippy 已通过，完整优化 Rust 步骤尚未结束，其后门禁未完成。下一次应观察这个具体运行，不因等待重开。
+
+本机另完成[独立内存监控 3/3](./rust-rp1-private-source-memory-guard-2026-09-09.md)，用于覆盖 Node 同步计算阶段内部定时器无法及时执行的情况。当前可用内存约 3–4 GiB，未满足私人诊断 6 GiB 启动条件；没有运行新终局档或使用旧 Host 冒充新制品。
+
 下步公开耗时样本已生成：1,000 个合成产线单元、9,107 实体、20,000 传送带，共 4,143,963 字节，源 SHA-256 `7767eff12ef110a4dd7bccc9d385c9a7551d49f1561489055d2fa2d73a266d1a`。保存于开发 worktree 的 `artifacts/rust-rp1-loop/public-v47-read-fixture-v1`；原工作区 `artifacts/rust-rp1-next/run-public-v47-read-pairs.mjs` 已做语法检查，拟交替三对、完整导出状态和正常退出校验，尚未运行性能对照。旧本机与新云端二进制的编译环境不同，后续即使观察到耗时改善也必须注明；不得把这项文件导入 RPC 当作玩家完整等待。
 
 随后完成两项**旧 Host 单次基线验证**，均非新旧性能对照：

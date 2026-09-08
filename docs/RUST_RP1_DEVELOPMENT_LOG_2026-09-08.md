@@ -1,5 +1,9 @@
 # Rust RP1 持续开发记录
 
+> 后台继续：`056b9b08` 修正后的原 Windows 清理测试云端 1/1 通过，完整云端 run `34274908889` 仍在正常优化 Rust 步骤。独立内存监控公开自测 3/3，覆盖 Node 同步阶段、正常结束及低内存拒绝，私人诊断仍要求 6 GiB 余量。见[读取缓冲进展](./reviews/rust-rp1-v47-read-buffer-2026-09-09.md)及[监控证据](./reviews/rust-rp1-private-source-memory-guard-2026-09-09.md)。
+
+> 旧堆异常补充只读审计：原登记 5 份转储现存 4 份并逐件 SHA 校验，其中 9 月 2 日三份访问/非法指令异常属于另一 PDB GUID，不能用本批归档 PDB 展开或合并成同一回归；9 月 8 日 `b208e79c…` 堆异常仍与归档构建相符。其模块清单仅见该测试 EXE 及 Windows/VC 运行库名称，没有支持第三方注入的模块证据；这不证明破坏来源或排除硬件。四份现存转储另复制到忽略目录并校验，原文件未改；一份旧转储缺失。证据为开发 worktree 的 `artifacts/rust-rp1-loop/heap-crash-identity-audit-v1.json`、`heap-registered-dumps-frozen-v1/receipt.json`。仍未宣称原堆异常根因已解决。
+
 > 后台循环新结果：云端正常优化 Rust **1,363/5 ignored/0 失败**及 Host 编译通过；Native 工具一项 Windows 进程树超时测试失败，原测试本机独立通过，尚待云端启动观察。后续类型及单元未运行，没有取得新 Host 制品，不能宣称终局等待改善。只把公开代码/测试发往云端，本机保持隐藏和低负载。见[读取缓冲记录](./reviews/rust-rp1-v47-read-buffer-2026-09-09.md)。
 
 > 下一循环已有进展：`840ec68d` 低优化的真实 v47 模块 12/12 通过，公开样本底层读取从 524,708 次降至最多 9 次，完整解析及校验一致；不代表玩家等待改善。新增同仓库 Windows 云端验证，接续正常优化构建和完整回归，避免继续挤占用户桌面内存。见[读取缓冲记录](./reviews/rust-rp1-v47-read-buffer-2026-09-09.md)。

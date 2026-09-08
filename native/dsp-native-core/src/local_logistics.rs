@@ -1789,8 +1789,20 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
     let entities = (0..state.entity_index.len())
         .map(|index| state.parse_entity(index))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let indexes = entity_index(&entities);
-    for station_index in station_indices(&entities) {
+    admission_reason_with_entities(state, &entities)
+}
+
+/// Reuse startup's immutable decoded records rather than holding a second
+/// complete entity graph while checking station routes and their owners.
+pub(crate) fn admission_reason_with_entities(
+    state: &CoreState,
+    entities: &[Value],
+) -> anyhow::Result<Option<&'static str>> {
+    if entities.len() != state.entity_index.len() {
+        bail!("native local admission entity topology changed");
+    }
+    let indexes = entity_index(entities);
+    for station_index in station_indices(entities) {
         let station = entities[station_index].as_object().expect("station object");
         if string_at(station, "buildingId") == Some("orbital_collector") {
             continue;
@@ -4083,6 +4095,62 @@ mod tests {
                 station
             })
             .collect()
+    }
+
+    #[test]
+    fn borrowed_admission_preserves_routes_rejections_and_source() {
+        for case in 0..6 {
+            let mut entities = vec![route_station(0, "supply"), route_station(1, "demand")];
+            entities[1]["stationRoutes"] = json!([
+                local_route(0, 1, 0.25, 10.0, 11.0),
+                local_route(1, 0, 0.5, 20.0, 7.0),
+            ]);
+            entities[0]["mod:unknown/Ω"] = json!({"text": "保留", "fraction": 0.125});
+            let expected = match case {
+                1 => {
+                    entities[1]["stationRoutes"][1]["vehicleStationId"] = json!("missing-owner");
+                    Some("local-logistics-route-invalid")
+                }
+                2 => {
+                    entities[1]["stationRoutes"][1]["peerId"] = json!("missing-peer");
+                    Some("local-logistics-route-invalid")
+                }
+                3 => {
+                    entities[1]["stationSlots"] = Value::Null;
+                    Some("local-logistics-slots-invalid")
+                }
+                4 => {
+                    entities[1]["buildingId"] = json!("interstellar_logistics_station");
+                    entities[1]["stationOperationMode"] = json!("elevator");
+                    Some("local-logistics-operation-mode-unsupported")
+                }
+                5 => {
+                    entities[1]["stationRoutes"][1] = json!({"scope": "remote"});
+                    None
+                }
+                _ => None,
+            };
+            let state = route_fixture_state(&entities);
+            let before = state.summary().unwrap();
+            let bytes = serde_json::to_vec(&entities).unwrap();
+            assert_eq!(
+                admission_reason(&state).unwrap(),
+                expected,
+                "raw case {case}"
+            );
+            assert_eq!(
+                admission_reason_with_entities(&state, &entities).unwrap(),
+                expected,
+                "borrowed case {case}"
+            );
+            assert!(admission_reason_with_entities(&state, &entities[..1]).is_err());
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), bytes);
+            assert_eq!(
+                state.summary().unwrap().canonical_sha256,
+                before.canonical_sha256
+            );
+            assert_eq!(state.revision, before.revision);
+        }
     }
 
     fn route_fixture_state(entities: &[Value]) -> CoreState {

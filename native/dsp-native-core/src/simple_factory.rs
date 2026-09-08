@@ -2593,13 +2593,23 @@ fn static_admission_reason_with_records(
     if let Some(reason) = crate::dyson::admission_reason(state)? {
         return Ok(Some(reason));
     }
-    if let Some(reason) = crate::local_logistics::admission_reason(state)? {
+    let local_reason = match parsed_entities {
+        Some(entities) => crate::local_logistics::admission_reason_with_entities(state, entities)?,
+        None => crate::local_logistics::admission_reason(state)?,
+    };
+    if let Some(reason) = local_reason {
         return Ok(Some(reason));
     }
     if let Some(reason) = crate::quantum_logistics::admission_reason(state)? {
         return Ok(Some(reason));
     }
-    if let Some(reason) = crate::interstellar_logistics::admission_reason(state)? {
+    let interstellar_reason = match parsed_entities {
+        Some(entities) => {
+            crate::interstellar_logistics::admission_reason_with_entities(state, entities)?
+        }
+        None => crate::interstellar_logistics::admission_reason(state)?,
+    };
+    if let Some(reason) = interstellar_reason {
         return Ok(Some(reason));
     }
     Ok(None)

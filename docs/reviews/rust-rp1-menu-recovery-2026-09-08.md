@@ -45,3 +45,11 @@ Role: develop。后续版本开发候选，未发布。Rust Host 仍为 `b39131a
 新增证据：`menu-recovery-unit-failure-isolated.json`、`menu-recovery-full-e2e-v4.json`、`menu-recovery-e2e-failed-serial.json`、`menu-recovery-serial-membership.json`、`menu-recovery-final-seven-e2e.json`，以及 `recovery-control/cold-{baseline,candidate}-driver.log` 与配置目录下嵌套的 JSON 报告。旧模块工作区在对照时为干净 `0cc971d8`，当前运行模块为 `8a8e859e`。
 
 完整玩家等待的收益、真实终局档实际采用与取消、持久提交及正常退出重开仍需完成。本阶段没有部署、没有修改授权原玩家文件，超过 30 秒自动采用及实时权威继续关闭。
+
+## 2026-09-09：实际桌面通信入口补修
+
+干净 `31991bcf` 的本地 beta 目录包构建及制品验证通过，仍为 `NotSigned`。真实 UI 已不再误拒目录，可以进入工厂；但公开样本在正式 Native 候选请求前回退 JS。诊断先纠正了驱动把精简主档当成原生运行检查点，以及诊断 canonical 未忽略 undefined 的问题，原失败 v3–v7 全部保留，不计 Native 成功。
+
+修正夹具后的真实包确认：Worker 加载状态与 Core 打开状态的 canonical/domain SHA 相同，发出了离线传输请求，但还未调用 Host 的候选方法即返回通用失败。实际 `main.cjs` 入口仍引用已不存在的 `performanceEditionRuntimeIdentity`。现在复用 Host 初始化所用的 `desktopRuntimeIdentity`、路径模块及该版本目录名，继续通过固定目录验证，不改变源证明、时间或权威边界。
+
+新增测试执行实际 main 事件处理块，使用真实固定目录解析器，覆盖性能开发版和普通版；修复前两例均捕获该未定义变量，修复后与传输、preload、固定目录保护、版本身份和 Host 合计 **67 通过 / 1 条件跳过 / 0 失败**。完整 Native 工具测试另行 **632 通过 / 1 条件跳过 / 0 失败**；新包实际结算/取消/重开继续验证。

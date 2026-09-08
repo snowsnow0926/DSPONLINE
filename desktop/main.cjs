@@ -2894,7 +2894,9 @@ ipcMain.on("desktop:native-offline-startup-transfer", (event, request) => {
       request,
       observedNowMs: sampleNativeOfflineStartupWallClock(),
       nativeRootPath: resolveFixedNativeSaveRootPath(
-        performanceEditionRuntimeIdentity.userDataPath,
+        desktopRuntimeIdentity.userDataPath,
+        path,
+        desktopRuntimeIdentity.userDataDirectoryName,
       ),
       port,
       normalizeResult: (value) => normalizeRendererNativeResult(

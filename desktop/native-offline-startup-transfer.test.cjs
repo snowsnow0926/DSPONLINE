@@ -5,6 +5,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
+const { resolveFixedNativeSaveRootPath, NATIVE_SAVE_DIRECTORY_NAME } = require("./native-exact-realtime-startup-guard.cjs");
+const { PERFORMANCE_EDITION_IDENTITY, STABLE_IDENTITY } = require("./performance-edition-identity.cjs");
 
 const {
   MAX_NATIVE_OFFLINE_EXPORT_BYTES,
@@ -255,3 +258,47 @@ test("Electron main keeps native offline startup time and export identity outsid
   assert.doesNotMatch(block, /request\.observedNowMs/);
   assert.doesNotMatch(block, /request\.exportId/);
 });
+
+for (const identity of [PERFORMANCE_EDITION_IDENTITY, STABLE_IDENTITY]) {
+  test(`actual main offline handler uses the ${identity.editionId} save root`, async () => {
+    const main = fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8");
+    const start = main.indexOf('ipcMain.on("desktop:native-offline-startup-transfer"');
+    const end = main.indexOf('ipcMain.handle("desktop:native-core-apply-command"', start);
+    assert.ok(start >= 0 && end > start);
+    const userDataPath = path.join(os.tmpdir(), "dsp-offline-handler-test", identity.userDataDirectoryName);
+    const request = intent();
+    const port = new EventEmitter();
+    const registry = {};
+    const calls = [];
+    const errors = [];
+    let listener;
+    let complete;
+    const closed = new Promise((resolve) => { complete = resolve; });
+    vm.runInNewContext(main.slice(start, end), {
+      ipcMain: { on(channel, handler) {
+        assert.equal(channel, "desktop:native-offline-startup-transfer");
+        listener = handler;
+      } },
+      requireTrustedNativeSender: () => 17,
+      nativeCoreSessions: registry,
+      sampleNativeOfflineStartupWallClock: () => 61_999,
+      desktopRuntimeIdentity: { userDataPath, userDataDirectoryName: identity.userDataDirectoryName },
+      path,
+      resolveFixedNativeSaveRootPath,
+      streamNativeOfflineStartupCandidate: async (options) => { calls.push(options); },
+      normalizeRendererNativeResult: (_kind, value) => value,
+      postNativeOfflineStartupTransferError: (_port, error) => { errors.push(error.message); },
+      closeTransferPort: (actualPort) => { assert.equal(actualPort, port); complete(); },
+    });
+    listener({ ports: [port] }, request);
+    await closed;
+    assert.deepEqual(errors, []);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].nativeRootPath, path.join(userDataPath, NATIVE_SAVE_DIRECTORY_NAME));
+    assert.equal(calls[0].registry, registry);
+    assert.equal(calls[0].request, request);
+    assert.equal(calls[0].observedNowMs, 61_999);
+    assert.equal(calls[0].ownerId, 17);
+    assert.equal(calls[0].port, port);
+  });
+}

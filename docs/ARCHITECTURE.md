@@ -1,5 +1,7 @@
 # 系统架构
 
+> Windows 普通离线传输的导出根目录与 Host 初始化共用 `desktopRuntimeIdentity` 和对应版本目录名，经 `resolveFixedNativeSaveRootPath()` 验证；普通版与性能开发版各用自身固定目录。实际 main 处理块的回归测试覆盖这两种身份，防止变量重命名后运行时才报错并回退 JS。
+
 > 菜单恢复入口：目录中的 UTF-8 字节数和 payload checksum 标识原主档。`readLocalSavePayloadWithChunkJournalSource()` 同时保留原文引用和已验证的恢复结果；目录仍与原主档比较，恢复结果独立经过 Worker 的完整校验。JSON 顺序不同或有效增量推进不会被错当成目录损坏；主档/目录在等待期间变化仍拒绝。同步保存缓存保留原主档，加载直接使用恢复状态，避免将重组正文当成磁盘原文而误报保存冲突。IDB/native journal 必须不早于有效主档的 savedAt，在读取大块数据前检查；同一状态 checksum 不代表同一保存时间。旧字符串读取接口及 primary→backup→snapshot 顺序不变，不新增存档字段或绕过 journal 与主档的绑定。
 
 > Rust 戴森逐秒环境：`load()` 独立复制四份戴森记录，吸收/衰减及发电汇总直接只读借用基础状态，全部成功后才 `save()`。不再为这两处计算每秒复制整份基础状态及无关生产历史；四份结果的写入顺序、失败原子性、浮点和模拟步长不变。

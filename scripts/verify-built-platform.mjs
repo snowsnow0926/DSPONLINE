@@ -19,7 +19,8 @@ export async function verifyBuiltPlatform(expectedPlatform, distRoot = path.reso
     const scripts = (await readdir(assets)).filter((name) => name.endsWith(".js"));
     const compiled = (await Promise.all(scripts.map((name) => readFile(path.join(assets, name), "utf8")))).join("\n");
     for (const url of requiredUrls) {
-      if (!compiled.includes(JSON.stringify(url))) throw new Error("Built native JavaScript is missing a configured service URL");
+      const literals = [JSON.stringify(url), `'${url.replaceAll("'", "\\'")}'`, `\`${url.replaceAll("`", "\\`").replaceAll("${", "\\${")}\``];
+      if (!literals.some((literal) => compiled.includes(literal))) throw new Error("Built native JavaScript is missing a configured service URL");
     }
   }
   return metadata;

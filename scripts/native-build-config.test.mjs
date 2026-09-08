@@ -57,6 +57,8 @@ test("built-platform verification rejects the original empty bundle and missing 
     await assert.rejects(verifyBuiltPlatform("android", dir, urls), /missing/);
     await writeFile(file, `const configured=${JSON.stringify(urls)};`);
     await verifyBuiltPlatform("android", dir, urls);
+    await writeFile(file, `const configured=[${urls.map((url) => "`" + url + "`").join(",")}];`);
+    await verifyBuiltPlatform("android", dir, urls);
     await assert.rejects(verifyBuiltPlatform("web", dir, urls), /mismatch/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

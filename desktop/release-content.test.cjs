@@ -10,7 +10,8 @@ const { writeFixture, context } = require("../tests/fixtures/desktop-release.cjs
 const { verifyDesktopBuildEvidence, EVIDENCE_FILE } = require("./desktop-artifact-evidence.cjs");
 const { selectDesktopReleaseOutputFromEnvironment } = require("./select-desktop-release-output.cjs");
 
-const expected = Object.freeze({ version: "1.2.7", sourceSha: "a".repeat(40), buildId: `1.2.7+${"a".repeat(12)}`, editionId: "stable-v1", channel: "stable" });
+const version = require("../package.json").version;
+const expected = Object.freeze({ version, sourceSha: "a".repeat(40), buildId: `${version}+${"a".repeat(12)}`, editionId: "stable-v1", channel: "stable" });
 
 for (const kind of ["empty", "malformed", "stale", "foreign-edition"]) {
   test(`release collection rejects ${kind} manifests without an installer`, (t) => {

@@ -2,6 +2,18 @@
 
 Role: develop。用户要求不再显示测试窗口或抢焦点。本次代码仅增加隔离开发测试策略，不变更 Rust 算法、玩家存档或离线采用资格，未发布。
 
+## 最终验收
+
+运行提交 `33d96597d0ba05930bf6e663bb65b6aeaaa4d587`、beta 包 `1.2.7+33d96597d0ba` 的 v4 实际后台驱动已通过完成结算、取消结算、真实游戏保存来源三组流程。12 次启动全部保持窗口不可见、不可聚焦、静音、离屏渲染；显示/聚焦事件与原生对话框计数全部为零，12 次正常关闭退出码均为 0。每次关闭前有实际 paint 事件，每次菜单就绪后的三帧耗时 186.5–213.4 ms，均满足原 500 ms 阈值。
+
+完成及自然来源两例 Rust 完整状态与 JS 一致，持久保存与候选一致，普通加载器重进及第二次重开通过。取消例主档及原生文件不变、重开有效。公开样本为 110 实体、2 条传送带及 5 秒离线；不得当作终局档验收。两例继续到可操作观察值分别约 1,991/1,698 ms，未作新旧配对，不计新增性能收益。
+
+本地证据：开发 worktree 的 `artifacts/rust-rp1-loop/packaged-background-{complete,cancel,natural}-v4/report.json`；驱动 `probe-packaged-background-entry-v4.mjs`。包内清单 75 件制品通过，整个目录另冻结至 `artifacts/rust-rp1-loop/package-33d96597-frozen`，78 件文件逐件读回 SHA-256 相同；冻结回执为原工作区 `artifacts/rust-rp1-next/background-policy-package-33d-frozen.json`。专项 13/13、完整 Native 工具 674 通过/1 条件跳过/0 失败，精确日志为 `background-policy-offscreen-{focused-v1,native-full-v1}.log`。这些测试不包含后续 Rust 读取缓冲改动。
+
+后续只运行校验过此策略的后台驱动，禁止旧 show/focus/bringToFront 路径。测试使用独立临时资料目录、仅回环网络，并降低进程优先级/限制并发；大型私人诊断要求至少 6 GiB 可用内存。低资源时先做轻量开发，不能关闭用户进程来腾内存。
+
+以下保留实现与失败尝试的历史记录；其中“待验”已经由上方最终验收覆盖。
+
 仅当原有身份初始化已经验证性能开发版 beta/nightly 的直属系统临时资料目录，且显式 DSP_PERFORMANCE_SMOKE_BACKGROUND=1，才安装 hidden-no-focus-v1。普通启动不修改任何窗口或对话框方法；未验证隔离身份的后台请求拒绝。
 
 窗口仍由实际 main 以 show:false 创建。后台策略关闭可聚焦性和任务栏入口，静音，并阻止显示、恢复、最大化、前台激活等动作。原生文件对话框返回取消；错误/提示仅留下固定方法计数，不记录玩家内容。意外可见或聚焦有不可抹去的计数，紧急隐藏不把违规改记为成功。

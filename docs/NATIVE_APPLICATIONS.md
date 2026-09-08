@@ -32,7 +32,7 @@
 > 当前稳定版 Windows 包名：`com.dspidle.network`；本工作树性能开发版使用上方独立身份。
 > Android applicationId：`cn.dsponline.network`
 > 1.2.6 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；产率复制终端直结和星球工厂重置不改变旧档迁移边界。
-> 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
+> 公开下载入口：`https://download.dsponline.cn/`，2026-09-08 已迁至新上海，安装包与稳定清单保持 1.2.6，文件完整哈希和 Range 206 复验通过；不消耗香港游戏节点流量。主机与后续运维入口见 [上海迁移记录](./releases/ops-shanghai-vps-migration-2026-09-08.md)。
 
 > 冻结 APK：5,394,620 B，SHA-256 `671a6acb3579c175fc8ea87d8e4f921f5f63f9c36116956e9970a0c187367886`；AAB：5,183,622 B，SHA-256 `7f422c4df00ef56b05d70ff28a6eafd0f657751ab5c813c6af1431171e0ea0e1`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；实体 Android 设备门禁由用户只针对本 Release ID 明确豁免，未创建新证书。
 

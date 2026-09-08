@@ -2459,6 +2459,23 @@ pub(crate) fn run_ray_receivers(
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
+    admission_reason_with_records(state, None)
+}
+
+pub(crate) fn admission_reason_with_entities(
+    state: &CoreState,
+    entities: &[Value],
+) -> anyhow::Result<Option<&'static str>> {
+    if entities.len() != state.entity_index.len() {
+        bail!("native Dyson admission entity topology changed");
+    }
+    admission_reason_with_records(state, Some(entities))
+}
+
+fn admission_reason_with_records(
+    state: &CoreState,
+    parsed_entities: Option<&[Value]>,
+) -> anyhow::Result<Option<&'static str>> {
     let base = state.base_value();
     for system_id in SYSTEM_IDS {
         if !base
@@ -2475,10 +2492,18 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             return Ok(Some("dyson-state-shape-unsupported"));
         }
     }
-    for entity in (0..state.entity_index.len())
-        .map(|index| state.parse_entity(index))
-        .collect::<anyhow::Result<Vec<_>>>()?
-    {
+    // Keep base-shape validation before decoding and decode every fallback row
+    // before target checks, preserving the historical error precedence.
+    let decoded;
+    let entities = if let Some(entities) = parsed_entities {
+        entities
+    } else {
+        decoded = (0..state.entity_index.len())
+            .map(|index| state.parse_entity(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        &decoded
+    };
+    for entity in entities {
         let Some(entity) = entity.as_object() else {
             bail!("native Dyson entity is invalid");
         };
@@ -2715,6 +2740,61 @@ mod tests {
             })
             .collect();
         (entities, receiver_indices)
+    }
+
+    #[test]
+    fn borrowed_admission_preserves_dyson_target_rejections_and_source() {
+        for case in 0..4 {
+            let mut entities = vec![receiver_entity(3), receiver_entity(4)];
+            entities[1]["buildingId"] = json!("em_rail_ejector");
+            entities[1]["targetDysonOrbitId"] = json!("orbit/Ω");
+            let expected = match case {
+                1 => {
+                    entities[1]["targetDysonOrbitId"] = json!("missing-orbit");
+                    Some("dyson-ejector-target-unsupported")
+                }
+                2 => {
+                    entities[1]["planetId"] = json!("missing-planet");
+                    Some("dyson-ejector-target-unsupported")
+                }
+                3 => Some("dyson-state-shape-unsupported"),
+                _ => None,
+            };
+            let mut state = fixture_state(&entities);
+            let base = state.base_value_mut();
+            for system in SYSTEM_IDS {
+                base["dysonPlans"]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(system.to_owned(), json!({}));
+                base["dysonEngineering"]["orbitsBySystem"]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(system.to_owned(), json!([{"id": "orbit/Ω"}]));
+            }
+            if case == 3 {
+                base["dysonPlans"].as_object_mut().unwrap().remove("aurora");
+            }
+            let before = state.summary().unwrap();
+            let bytes = serde_json::to_vec(&entities).unwrap();
+            assert_eq!(
+                admission_reason(&state).unwrap(),
+                expected,
+                "raw case {case}"
+            );
+            assert_eq!(
+                admission_reason_with_entities(&state, &entities).unwrap(),
+                expected,
+                "borrowed case {case}"
+            );
+            assert!(admission_reason_with_entities(&state, &entities[..1]).is_err());
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), bytes);
+            assert_eq!(
+                state.summary().unwrap().canonical_sha256,
+                before.canonical_sha256
+            );
+            assert_eq!(state.revision, before.revision);
+        }
     }
 
     fn fixture_state(entities: &[Value]) -> CoreState {

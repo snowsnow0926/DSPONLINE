@@ -2590,7 +2590,11 @@ fn static_admission_reason_with_records(
     if let Some(reason) = belt_reason {
         return Ok(Some(reason));
     }
-    if let Some(reason) = crate::dyson::admission_reason(state)? {
+    let dyson_reason = match parsed_entities {
+        Some(entities) => crate::dyson::admission_reason_with_entities(state, entities)?,
+        None => crate::dyson::admission_reason(state)?,
+    };
+    if let Some(reason) = dyson_reason {
         return Ok(Some(reason));
     }
     let local_reason = match parsed_entities {

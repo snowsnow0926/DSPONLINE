@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::io::{Error as IoError, ErrorKind, Read};
+use std::io::{BufReader, Error as IoError, ErrorKind, Read};
 
 use anyhow::{Context, bail};
 use serde::de::{DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor};
@@ -16,6 +16,7 @@ pub const MAX_V47_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
 pub const V47_IMPORT_JS_COMPATIBILITY_REQUIRED_CODE: &str =
     "NATIVE_V47_IMPORT_JS_COMPATIBILITY_REQUIRED";
 const MAX_BASE_FIELD_BYTES: usize = 64 * 1024 * 1024;
+const SOURCE_READ_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024 - 2;
 const MAX_STATE_FIELDS: usize = 512;
 const MAX_ENTITY_COUNT: usize = 2_000_000;
@@ -644,7 +645,12 @@ fn parse_v47_envelope_with_length<R: Read>(
     reader: R,
     expected_byte_length: Option<u64>,
 ) -> anyhow::Result<ParsedV47Envelope> {
-    let mut reader = BoundedHashReader::new(reader);
+    // serde_json requests individual bytes. Buffer the source so file-backed
+    // imports do not issue one disk read per byte. Keep hashing and UTF-16
+    // inspection outside the buffer: read-ahead must not change which bytes
+    // count toward error classification after an earlier syntax error.
+    let mut reader =
+        BoundedHashReader::new(BufReader::with_capacity(SOURCE_READ_BUFFER_BYTES, reader));
     let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
     let envelope_result = Envelope::deserialize(&mut deserializer);
     let trailing_result = if envelope_result.is_ok() {
@@ -979,6 +985,68 @@ mod tests {
         .into_bytes();
         let parsed = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap();
         assert_eq!(parsed.proof().state_checksum, "9c35dbff");
+    }
+
+    #[test]
+    fn batches_underlying_reads_without_changing_envelope_proofs() {
+        let mut bytes = fixture(false);
+        // Legal trailing whitespace crosses several reader-buffer boundaries.
+        bytes.extend(std::iter::repeat_n(b' ', 512 * 1024));
+        let expected = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap();
+        let mut reader = TinyChunkReader {
+            bytes: &bytes,
+            offset: 0,
+            reads: 0,
+            maximum_chunk: usize::MAX,
+        };
+        let parsed = parse_v47_envelope(&mut reader, bytes.len() as u64).unwrap();
+        assert_eq!(reader.offset, bytes.len());
+        assert_eq!(parsed.proof().source_sha256, expected.proof().source_sha256);
+        assert_eq!(parsed.proof().source_byte_length, bytes.len() as u64);
+        assert_eq!(
+            parsed.proof().state_checksum,
+            expected.proof().state_checksum
+        );
+        assert_eq!(parsed.base, expected.base);
+        assert_eq!(parsed.entities, expected.entities);
+        assert_eq!(parsed.belts, expected.belts);
+        assert!(
+            reader.reads <= bytes.len().div_ceil(64 * 1024),
+            "expected bounded chunk reads, got {} for {} bytes",
+            reader.reads,
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn buffered_source_still_requires_successful_final_eof() {
+        struct RejectEof<'a>(&'a [u8]);
+        impl Read for RejectEof<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() {
+                    return Err(IoError::new(
+                        ErrorKind::InvalidData,
+                        "fixture identity changed at EOF",
+                    ));
+                }
+                self.0.read(buffer)
+            }
+        }
+        let bytes = fixture(false);
+        let error = parse_v47_envelope(RejectEof(&bytes), bytes.len() as u64).unwrap_err();
+        assert!(format!("{error:#}").contains("fixture identity changed at EOF"));
+    }
+
+    #[test]
+    fn unread_surrogate_after_a_syntax_error_does_not_change_error_classification() {
+        let bytes = br#"{! "later":"\ud800"}"#;
+        let error = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<V47ImportJavascriptCompatibilityRequired>()
+                .is_none()
+        );
+        assert!(format!("{error:#}").contains("decode native v47 envelope"));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 # 系统架构
 
+> v47 读取缓冲候选在 BoundedHashReader 内层新增 64 KiB BufReader，减少普通文件的逐字节读取，同时让哈希/UTF-16 分类继续跟随已消费字节。公开改动前已复现 524,708 字节触发同量读取；改动后完整编译因低内存主动停止，候选未验收、未生成新 Host，见[待验记录](./reviews/rust-rp1-v47-read-buffer-2026-09-09.md)。
+
 > `33d96597` 的 hidden-no-focus-offscreen-v2 已通过三组实际流程和 12 次正常关闭：从未显示/聚焦且静音，每次有实际绘制，菜单就绪后三帧 186.5–213.4 ms。这是后续桌面测试的必需入口；普通用户窗口保持原行为。完整证据见[后台验收记录](./reviews/rust-rp1-background-testing-2026-09-09.md)。
 
 > 后台测试后续改为 hidden-no-focus-offscreen-v2：只对已经验证的隔离后台 profile 启用离屏窗口和 60 FPS 绘制，普通窗口设置不变。原因是 Windows 隐藏窗口即使关闭节流仍可能停止 requestAnimationFrame；实际探针要求从未显示/聚焦、静音、真实绘制以及菜单就绪后 3 帧不超过 500 ms。性能对照必须注明并保持相同离屏合成方式。下方 v1 为前一实现，见[失败与调整记录](./reviews/rust-rp1-background-testing-2026-09-09.md)。

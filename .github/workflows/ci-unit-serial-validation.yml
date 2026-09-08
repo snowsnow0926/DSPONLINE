@@ -1,6 +1,6 @@
 # Temporary release validation branch. Remove this dispatch file at closeout;
 # the permanent CI workflow retains its verified serial Vitest setting.
-name: 1.2.7 remaining unit validation
+name: 1.2.7 test environment diagnosis
 on:
   push:
     branches: [codex/1.2.7-ci-validation]
@@ -8,10 +8,12 @@ permissions:
   contents: read
 jobs:
   unit:
-    name: Two remaining unit fixtures
+    name: Native fixtures and unchanged timing gate comparison
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24
@@ -21,6 +23,24 @@ jobs:
             server/package-lock.json
       - run: npm ci
       - run: npm --prefix server ci
-      - run: npm run licenses:check
-      - run: npm run typecheck
-      - run: npm test -- src/game/androidApiTransport.test.ts src/game/idleResourceSettlement.test.ts --maxWorkers=1
+      - run: node --test --test-concurrency=1 desktop/native-host.test.cjs scripts/benchmark-native-core-fixed-affinity-ab.test.mjs
+      - name: Compare the original performance assertion on the same runner
+        shell: bash
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/dsp-v126-reference" df828869e276e5d3a67513095a4d1c93d13c500f
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/dsp-v126-reference/node_modules"
+          mkdir -p environment-diagnosis
+          set +e
+          (cd "$RUNNER_TEMP/dsp-v126-reference" && npm test -- src/game/idleResourceSettlement.test.ts --maxWorkers=1) > environment-diagnosis/v126.log 2>&1
+          baseline_status=$?
+          npm test -- src/game/androidApiTransport.test.ts src/game/idleResourceSettlement.test.ts --maxWorkers=1 > environment-diagnosis/v127.log 2>&1
+          candidate_status=$?
+          printf '{"baselineExitCode":%s,"candidateExitCode":%s}\n' "$baseline_status" "$candidate_status" > environment-diagnosis/status.json
+          cat environment-diagnosis/v126.log environment-diagnosis/v127.log environment-diagnosis/status.json
+          test "$baseline_status" -eq 0 && test "$candidate_status" -eq 0
+      - name: Preserve original comparison results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: environment-diagnosis
+          path: environment-diagnosis

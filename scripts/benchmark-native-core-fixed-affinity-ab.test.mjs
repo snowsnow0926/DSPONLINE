@@ -793,7 +793,9 @@ test("Windows timeout closes the Job Object tree and removes its private stage",
     "fs.writeFileSync(pidFile, JSON.stringify({ ...pids, vitest: process.pid, host: host.pid, sampler: sampler.pid }));",
     "setInterval(() => {}, 1000);",
   ].join("\n"));
-  prepared.configured.timeoutMs = 2_000;
+  // The deadline also includes cold PowerShell startup and Add-Type compilation.
+  // Allow the six-process fixture to start before testing timeout tree cleanup.
+  prepared.configured.timeoutMs = 8_000;
   let stageRoot = null;
   try {
     const report = runFixedAffinityAb(prepared.configured, dependencies(prepared, {

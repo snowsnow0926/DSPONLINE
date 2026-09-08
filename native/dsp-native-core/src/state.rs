@@ -3874,7 +3874,7 @@ impl CoreState {
             if !self.save_dirty.base_is_dirty(domain)
                 && let Some(cached) = cached
             {
-                #[cfg(debug_assertions)]
+                #[cfg(any(debug_assertions, test))]
                 {
                     let (audit_text, audit_count) =
                         encode_base_checkpoint_domain(&self.base, domain)?;

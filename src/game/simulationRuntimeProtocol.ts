@@ -135,7 +135,67 @@ export function validateSimulationStateTransferIdentity(
 }
 
 export function serializeSimulationStateForTransfer(state: GameState): SimulationStateTransfer {
-  return encodeSimulationState(state).transfer;
+  // The simulation Worker can already be near its heap limit after a long run.
+  // Encode record arrays a row at a time: retain binary chunks, never a second
+  // full-state JSON string beside the authority. Keep the exact v1 JSON bytes;
+  // this is not a persistent-save projection or a change to runtime fields.
+  if ("toJSON" in state) return encodeSimulationState(state).transfer;
+  const chunks: Uint8Array[] = [];
+  let chunk = new Uint8Array(64 * 1024);
+  let used = 0;
+  let byteLength = 0;
+  const flush = () => {
+    if (used === 0) return;
+    chunks.push(chunk.subarray(0, used));
+    byteLength += used;
+    chunk = new Uint8Array(64 * 1024);
+    used = 0;
+  };
+  const append = (text: string) => {
+    let offset = 0;
+    while (offset < text.length) {
+      const encoded = textEncoder.encodeInto(text.slice(offset), chunk.subarray(used));
+      offset += encoded.read;
+      used += encoded.written;
+      // encodeInto never splits a surrogate pair. A short tail may therefore
+      // be full for the next character even when one to three bytes remain.
+      if (offset < text.length) flush();
+    }
+  };
+  const memberJson = (key: string, value: unknown): string | undefined => {
+    // A wrapper preserves native toJSON(key), undefined/function omission and
+    // all number/string escaping semantics without implementing JSON ourselves.
+    const json = JSON.stringify({ [key]: value });
+    return json === "{}" ? undefined : json.slice(JSON.stringify(key).length + 2, -1);
+  };
+  append("{");
+  let members = 0;
+  for (const key of Object.keys(state)) {
+    const value = (state as unknown as Record<string, unknown>)[key];
+    if (Array.isArray(value) && !("toJSON" in value)) {
+      append(`${members++ > 0 ? "," : ""}${JSON.stringify(key)}:[`);
+      const length = value.length;
+      for (let index = 0; index < length; index += 1) {
+        if (index > 0) append(",");
+        append(memberJson(String(index), value[index]) ?? "null");
+      }
+      append("]");
+    } else {
+      const json = memberJson(key, value);
+      if (json === undefined) continue;
+      append(`${members++ > 0 ? "," : ""}${JSON.stringify(key)}:`);
+      append(json);
+    }
+  }
+  append("}");
+  flush();
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const part of chunks) {
+    bytes.set(part, offset);
+    offset += part.byteLength;
+  }
+  return { protocolVersion: SIMULATION_RUNTIME_PROTOCOL_VERSION, byteLength, buffer: bytes.buffer };
 }
 
 /**

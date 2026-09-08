@@ -62,7 +62,7 @@ test("settings opens the complete tutorial and keeps independent reading progres
   await selectSettingsCategory(operations, "教程、版本与其他", "other");
   await operations.getByRole("button", { name: "打开新手教程" }).click();
   const tutorial = page.getByRole("dialog", { name: "新手教程" });
-  await expect(tutorial).toContainText("DSP极简网络 · v1.2.7");
+  await expect(tutorial).toContainText(`DSP极简网络 · v${process.env.npm_package_version}`);
   await expect(tutorial).toContainText("认识画布");
   await tutorial.getByRole("button", { name: "标记本节完成" }).click();
   await expect(tutorial.locator(".tutorial-progress")).toContainText("1/");

@@ -757,7 +757,7 @@ test("child exit reports never persist raw Vitest output or mismatch fragments",
   }
 });
 
-test("Windows timeout closes the Job Object tree and removes its private stage", { timeout: 20_000 }, (context) => {
+test("Windows timeout closes the Job Object tree and removes its private stage", { timeout: 100_000 }, (context) => {
   if (process.platform !== "win32") {
     context.skip("Windows Job Object integration requires Windows");
     return;
@@ -793,8 +793,9 @@ test("Windows timeout closes the Job Object tree and removes its private stage",
     "fs.writeFileSync(pidFile, JSON.stringify({ ...pids, vitest: process.pid, host: host.pid, sampler: sampler.pid }));",
     "setInterval(() => {}, 1000);",
   ].join("\n"));
-  // The deadline also includes cold PowerShell startup and Add-Type compilation.
-  // Allow the six-process fixture to start before testing timeout tree cleanup.
+  // Retain the real launcher's default 30-second startup grace: a cold Windows
+  // CI Add-Type took 26 seconds, before the six-process fixture could start.
+  // Two 8 + 30 second launches plus staging/cleanup fit the outer test deadline.
   prepared.configured.timeoutMs = 8_000;
   let stageRoot = null;
   try {
@@ -803,7 +804,6 @@ test("Windows timeout closes the Job Object tree and removes its private stage",
       onStageReady: (stage) => { stageRoot = stage.root; },
       runSample: (sampleOptions) => runPinnedFixedAffinitySample(sampleOptions, {
         platform: "win32",
-        timeoutGraceMs: 250,
       }),
     }));
     assert.equal(report.status, "NO_RESULT");

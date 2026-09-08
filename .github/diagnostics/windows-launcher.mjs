@@ -4,8 +4,9 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
 // The default observes the unchanged integration case. Explicit diagnostic
-// modes trace launcher phases; production-grace also uses the real launcher's
-// default startup grace. No mode changes the cleanup assertions or workload.
+// modes trace launcher phases; trace recreates the historical 250 ms startup
+// grace, while production-grace retains the real launcher's default grace.
+// No mode changes the cleanup assertions or workload.
 const root = process.cwd();
 const mode = process.argv[2] ?? "original";
 if (!["original", "trace", "production-grace"].includes(mode)) throw new Error("unknown diagnostic mode");
@@ -15,10 +16,10 @@ const normalized = original.replace(/\r\n/g, "\n");
 const marker = 'test("Windows timeout closes the Job Object tree and removes its private stage"';
 const offset = normalized.indexOf(marker);
 if (offset < 0 || normalized.indexOf(marker, offset + 1) >= 0) throw new Error("unexpected integration case");
-const hook = '        timeoutGraceMs: 250,\n';
+const hook = '        platform: "win32",\n';
 const tail = normalized.slice(offset);
-if (tail.split(hook).length !== 2) throw new Error("unexpected original timeout override");
-const observed = tail.replace(hook, (mode === "production-grace" ? "" : hook) + `        spawnSync: (...args) => {
+if (tail.split(hook).length !== 2) throw new Error("unexpected original launcher options");
+const observed = tail.replace(hook, hook + (mode === "trace" ? "        timeoutGraceMs: 250,\n" : "") + `        spawnSync: (...args) => {
           if (${JSON.stringify(mode)} !== "original") {
             const commandIndex = args[1].indexOf("-EncodedCommand") + 1;
             if (commandIndex === 0) throw new Error("encoded command missing");
@@ -47,12 +48,8 @@ const observed = tail.replace(hook, (mode === "production-grace" ? "" : hook) + 
           return result;
         },
 `);
-const body = mode === "production-grace"
-  ? observed.replace('{ timeout: 20_000 }', '{ timeout: 100_000 }')
-  : observed;
-if (mode === "production-grace" && body === observed) throw new Error("original test envelope missing");
 const instrumented = 'import { spawnSync as diagnosticSpawnSync } from "node:child_process";\n' +
-  normalized.slice(0, offset) + body;
+  normalized.slice(0, offset) + observed;
 const probe = path.join(root, `scripts/benchmark-native-core-fixed-affinity-ab.ci-probe-${process.pid}.test.mjs`);
 const sha = value => createHash("sha256").update(value).digest("hex");
 fs.writeFileSync(probe, instrumented, { flag: "wx" });

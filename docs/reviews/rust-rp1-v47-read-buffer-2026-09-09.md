@@ -14,7 +14,13 @@ Role: develop。承接运行态来源入口和后台测试阶段；未发布。�
 
 本机额外比较有效及超出本机 CPU 数的 START affinity，两者均能启动夹具并正常验证超时退出，未支持“亲和掩码单独导致失败”的假设。[轻量云端诊断](../../.github/workflows/windows-launcher-diagnostic.yml)的[首次运行](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34273964060)也复现 **0 通过 / 1 失败**：同一本机通过的观察脚本在 Windows Server 2025、4 CPU、继承 affinity F、Node 24.19.0 上，两次约 8.27 秒返回 ETIMEDOUT，PID 文件均未出现，标准输出/错误均为空。诊断 ZIP 已下载并核对 SHA-256 `3f4c5ae1581c9016b4dd7a26a750b624f3699ca27427edc72e66c7a94e5622ce`，保存于原工作区 `artifacts/rust-rp1-next/cloud-launcher-3175c02b.zip`。
 
-下一步[观察脚本](../../.github/diagnostics/windows-launcher.mjs)增加显式 trace 与 production-grace 模式：前者保留原期限并记录 PowerShell 就绪、Add-Type 完成、Job 挂接完成时间；后者另以实际 launcher 默认 30 秒启动宽限检查同一清理断言，并相应调整诊断测试外层时限。它们仅作问题定位，不修改生产 launcher、原测试、工作负载或六进程退出/临时目录删除断言。本机 trace **1/1 通过**，日志 `ci-launcher-instrumented-local-trace-v1.log`；云端两模式尚待结果。此次诊断矩阵不再次编译 Rust、不使用私人数据。
+定位时[观察脚本](../../.github/diagnostics/windows-launcher.mjs)增加显式 trace 与 production-grace 模式：前者保留原期限并记录 PowerShell 就绪、Add-Type 完成、Job 挂接完成时间；后者以实际 launcher 默认 30 秒启动宽限检查同一清理断言，并相应调整诊断测试外层时限。它们仅作问题定位，当时未修改生产 launcher、原测试、工作负载或六进程退出/临时目录删除断言。本机 trace **1/1 通过**，日志 `ci-launcher-instrumented-local-trace-v1.log`。此次诊断矩阵不再次编译 Rust、不使用私人数据。
+
+上述矩阵现已结束：[运行 34274304585](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34274304585)的 trace **0/1**，输出只到 PowerShell 就绪，8.25 秒期限内 Add-Type 未完成；production-grace **1/0**，同一 Add-Type 首次实际约 **26.391 秒**、第二次约 **0.200 秒**，两次均生成夹具 PID，原超时分类、六进程退出和私有执行目录删除断言全部通过，整例约 78.1 秒。整体 run 因保留旧短期限的反例而失败，不能标成整组全绿。完整日志为原工作区 `cloud-launcher-0a3f-{trace,production-grace}.log`（在 `artifacts/rust-rp1-next/`）。这说明原测试 250 ms 启动宽限不覆盖该 runner 的冷编译；没有证据把等待归为 affinity 或 Rust 计算故障。
+
+据此修正维护中的集成测试：移除测试专用的 250 ms 覆盖，使用 launcher 已有默认 30 秒启动宽限；外层 Node 测试期限改为 100 秒以覆盖两次 8 + 30 秒启动及清理。实际 benchmark 请求超时、生产启动器和游戏 300 秒期限不变，全部退出和文件断言保留。轻量云端工作流接下来只执行修正后的原测试；历史 trace 模式仍可显式复现旧问题。完整原生工具及其后门禁仍待在修正后的提交上通过，不能拿诊断成功代替。
+
+修正后本机完整 `benchmark-native-core-fixed-affinity-ab.test.mjs` **15 通过 / 0 失败 / 0 跳过**，约 77.5 秒，其中真实六进程清理例约 76.5 秒。执行 Node 使用低于正常优先级，未启动游戏窗口；日志 `artifacts/rust-rp1-next/ci-launcher-default-grace-local-v1.log`。这不是全部 Native 套件或云端门禁完成；[本批易读报告](../RUST_BATCH_REPORT_2026-09-09_BACKGROUND.md)分别说明后台收益与未完成的玩家性能验证。
 
 下步公开耗时样本已生成：1,000 个合成产线单元、9,107 实体、20,000 传送带，共 4,143,963 字节，源 SHA-256 `7767eff12ef110a4dd7bccc9d385c9a7551d49f1561489055d2fa2d73a266d1a`。保存于开发 worktree 的 `artifacts/rust-rp1-loop/public-v47-read-fixture-v1`；原工作区 `artifacts/rust-rp1-next/run-public-v47-read-pairs.mjs` 已做语法检查，拟交替三对、完整导出状态和正常退出校验，尚未运行性能对照。旧本机与新云端二进制的编译环境不同，后续即使观察到耗时改善也必须注明；不得把这项文件导入 RPC 当作玩家完整等待。
 

@@ -12,7 +12,9 @@ Role: develop。承接运行态来源入口和后台测试阶段；未发布。�
 
 唯一 Native 失败是 Windows 超时进程树清理集成测试：`scripts/benchmark-native-core-fixed-affinity-ab.test.mjs:817` 的 PID 文件存在断言失败。此前超时分类、临时执行目录删除断言已通过，但六进程夹具没有提供启动记录，不能称进程清理已经验证或认定是 Rust 崩溃。本机原样独立执行 **1/1 通过**（约 17.2 秒）；只增加真实 spawnSync 返回值观察、保留原启动参数、8 秒请求加 250 ms 宽限及全部断言后，也 **1/1 通过**，两次均在约 8.27 秒超时前产生 PID 文件。原始与观察日志分别为 `ci-launcher-original-local-v1.log` 和 `ci-launcher-instrumented-local-v1.log`。
 
-本机额外比较有效及超出本机 CPU 数的 START affinity，两者均能启动夹具并正常验证超时退出，未支持“亲和掩码单独导致失败”的假设。新增[轻量云端诊断](../../.github/workflows/windows-launcher-diagnostic.yml)和[观察脚本](../../.github/diagnostics/windows-launcher.mjs)，采集同一原测试的实际启动结果及云端 CPU 信息；只运行公开测试，不再次编译 Rust。该云端诊断尚待执行，不提前放宽断言或产品超时。
+本机额外比较有效及超出本机 CPU 数的 START affinity，两者均能启动夹具并正常验证超时退出，未支持“亲和掩码单独导致失败”的假设。[轻量云端诊断](../../.github/workflows/windows-launcher-diagnostic.yml)的[首次运行](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34273964060)也复现 **0 通过 / 1 失败**：同一本机通过的观察脚本在 Windows Server 2025、4 CPU、继承 affinity F、Node 24.19.0 上，两次约 8.27 秒返回 ETIMEDOUT，PID 文件均未出现，标准输出/错误均为空。诊断 ZIP 已下载并核对 SHA-256 `3f4c5ae1581c9016b4dd7a26a750b624f3699ca27427edc72e66c7a94e5622ce`，保存于原工作区 `artifacts/rust-rp1-next/cloud-launcher-3175c02b.zip`。
+
+下一步[观察脚本](../../.github/diagnostics/windows-launcher.mjs)增加显式 trace 与 production-grace 模式：前者保留原期限并记录 PowerShell 就绪、Add-Type 完成、Job 挂接完成时间；后者另以实际 launcher 默认 30 秒启动宽限检查同一清理断言，并相应调整诊断测试外层时限。它们仅作问题定位，不修改生产 launcher、原测试、工作负载或六进程退出/临时目录删除断言。本机 trace **1/1 通过**，日志 `ci-launcher-instrumented-local-trace-v1.log`；云端两模式尚待结果。此次诊断矩阵不再次编译 Rust、不使用私人数据。
 
 下步公开耗时样本已生成：1,000 个合成产线单元、9,107 实体、20,000 传送带，共 4,143,963 字节，源 SHA-256 `7767eff12ef110a4dd7bccc9d385c9a7551d49f1561489055d2fa2d73a266d1a`。保存于开发 worktree 的 `artifacts/rust-rp1-loop/public-v47-read-fixture-v1`；原工作区 `artifacts/rust-rp1-next/run-public-v47-read-pairs.mjs` 已做语法检查，拟交替三对、完整导出状态和正常退出校验，尚未运行性能对照。旧本机与新云端二进制的编译环境不同，后续即使观察到耗时改善也必须注明；不得把这项文件导入 RPC 当作玩家完整等待。
 

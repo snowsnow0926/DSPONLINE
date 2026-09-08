@@ -12,16 +12,22 @@ permissions:
   contents: read
 
 jobs:
-  original-case:
+  observe:
     runs-on: windows-latest
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [trace, production-grace]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24
-      - name: Record runner topology and execute the original cleanup case
+      - name: Record runner topology and observe launcher phases
         shell: pwsh
+        env:
+          DSP_LAUNCHER_DIAGNOSTIC_MODE: ${{ matrix.mode }}
         run: |
           New-Item -ItemType Directory -Path artifacts/windows-launcher-diagnostic | Out-Null
           [ordered]@{
@@ -29,14 +35,14 @@ jobs:
             logicalProcessors = [Environment]::ProcessorCount
             inheritedAffinity = [Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity.ToInt64().ToString('X')
             node = (node --version)
-          } | ConvertTo-Json | Set-Content artifacts/windows-launcher-diagnostic/runner.json
-          node .github/diagnostics/windows-launcher.mjs 2>&1 | Tee-Object artifacts/windows-launcher-diagnostic/original-case.log
+          } | ConvertTo-Json | Tee-Object artifacts/windows-launcher-diagnostic/runner.json
+          node .github/diagnostics/windows-launcher.mjs $env:DSP_LAUNCHER_DIAGNOSTIC_MODE 2>&1 | Tee-Object artifacts/windows-launcher-diagnostic/case.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve the observation whether the original case passes or fails
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: windows-launcher-diagnostic-${{ github.sha }}
+          name: windows-launcher-${{ matrix.mode }}-${{ github.sha }}
           path: artifacts/windows-launcher-diagnostic/
           if-no-files-found: error
           retention-days: 14

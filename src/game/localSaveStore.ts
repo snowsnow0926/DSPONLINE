@@ -2469,7 +2469,7 @@ export async function commitLocalSaveInternalRecords(records: readonly LocalSave
   }
 }
 
-/** Keep a user-selected payload available to synchronous lifecycle saves. */
+/** Retain persisted bytes as the expected base for synchronous lifecycle saves. */
 export function retainLocalSavePayload(key: string, value: string): boolean {
   cache.delete(key);
   cache.set(key, value);

@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> Rust RP1 恢复入口开发：当前保存/恢复专项 35/35、真实浏览器入口恢复后界面保存与完整状态重开及原保存协调 22/22、类型检查通过。全量单元、全量浏览器及新桌面包 Native 实际入口待完成；旧包完整归档并逐文件读回 78/78。中断与修复前失败不转记为通过，详见[阶段记录](./reviews/rust-rp1-menu-recovery-2026-09-08.md)。
+
 > Rust RP1 精确计算候选 `b39131a3`：完整 release workspace **1,355/5 ignored/0 失败**、严格 Clippy、公共长离线 **14/2 性能跳过/0 失败**通过；两项旧 8 小时超时在原门槛下通过。三对独立进程、每进程三次 1 小时 Exact 请求，完整状态和源一致，请求耗时中位缩短 90.17%。仅覆盖公开受限工厂的请求计时；新真实大档多秒、完整 UI 等待、持久采用与新包尚待验证，历史堆异常未定因。制品身份、旧失败及验证范围见[阶段记录](./reviews/rust-rp1-exact-dyson-base-2026-09-08.md)。
 
 > Rust 大档采样器（2026-09-08）：真实档诊断中，原 `Process.Refresh()` 读数循环出现 p95 108–109 ms，未满足原 50 ms 目标 / 100 ms p95 门槛，失败样本保留。采样改用仅具查询权限的目标进程句柄，通过 [GetProcessMemoryInfo](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo) 读取 [PrivateUsage](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex)，仍测私有提交内存；原频率和失败门槛不变。新增真实 64 MiB 提交与独立读数检查通过，采样/驱动文件 **6 通过 / 1 opt-in 跳过**。新旧 Host 必须使用同一新版采样器重新配对；旧样本不混算。

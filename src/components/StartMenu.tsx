@@ -962,7 +962,9 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         ? storage.loadInspectedGameDeferredOffline(resolved.inspection, mode, resolved.save.source)
         : null;
       if (!loaded) throw new Error("本地存档不可用");
-      if (resolved) retainLocalSavePayload(resolved.save.key, resolved.raw);
+      // Lifecycle saves compare against the persisted primary, while the
+      // loaded state may include a separately verified recovery journal.
+      if (resolved) retainLocalSavePayload(resolved.save.key, resolved.primaryRaw);
       if (resolved) mode === "normal" ? setContinueSave(resolved.save) : setSpeedrunContinueSave(resolved.save);
       if (resolved?.save.source === "primary" && isDurableSimulationRuntimeEnabled()) {
         const startupModules = await loadFactoryStartupModules();

@@ -2815,6 +2815,10 @@ function parseEnvelope(raw: string, advanceOffline: boolean): LoadedGame | null 
   const missingPacks = getMissingContentPackRequirements(parsed.state?.contentPacks ?? []);
   if (missingPacks.length > 0) throw new MissingContentPacksError(missingPacks);
   const inspection = inspectSave(raw);
+  return loadInspection(inspection, advanceOffline);
+}
+
+function loadInspection(inspection: SaveInspection, advanceOffline: boolean): LoadedGame | null {
   if (!inspection.valid || !inspection.state) return null;
   const state = inspection.state;
   const savedAt = inspection.savedAt ?? Date.now();
@@ -2830,6 +2834,23 @@ function parseEnvelope(raw: string, advanceOffline: boolean): LoadedGame | null 
     offlineSeconds,
     offlineReport: report,
   };
+}
+
+/** Synchronous local/dev loading without replacing the persisted CAS base. */
+export function loadInspectedGame(
+  inspection: SaveInspection,
+  mode: SaveMode = "normal",
+  source: SaveRecovery["source"] = "primary",
+): LoadedGame | null {
+  if (!inspection.valid || !inspection.state || inspection.mode !== mode || saveModeForState(inspection.state) !== mode) return null;
+  const missingPacks = getMissingContentPackRequirements(inspection.state.contentPacks ?? []);
+  if (missingPacks.length > 0) throw new MissingContentPacksError(missingPacks);
+  const loaded = loadInspection(inspection, true);
+  if (loaded && source !== "primary") loaded.recovery = {
+    source,
+    issues: [source === "backup" ? "主存档校验失败，已回退到最近一次有效备份" : "主存档不可用，已回退到自动快照"],
+  };
+  return loaded;
 }
 
 function parseDeferredEnvelope(raw: string): DeferredLoadedGame | null {
@@ -4117,8 +4138,20 @@ export function loadGameSlot(slotId: SaveSlotId, mode: SaveMode = "normal"): Loa
 
 /** Read an async payload and, when present, overlay the v1 chunk journal. */
 export async function readLocalSavePayloadWithChunkJournal(key: string): Promise<string | null> {
+  return (await readLocalSavePayloadWithChunkJournalSource(key))?.raw ?? null;
+}
+
+/** Preserve the exact primary bytes to which the menu catalog belongs. A
+ * verified journal may advance the state or serialize equivalent JSON in a
+ * different order, so its reconstructed bytes cannot identify that primary.
+ * These are existing string references, not additional payload copies.
+ */
+export async function readLocalSavePayloadWithChunkJournalSource(
+  key: string,
+): Promise<{ raw: string; primaryRaw: string } | null> {
   const raw = await readLocalSavePayload(key);
-  if (raw === null || (key !== SAVE_KEY && key !== `${SAVE_KEY}.speedrun`)) return raw;
+  if (raw === null) return null;
+  if (key !== SAVE_KEY && key !== `${SAVE_KEY}.speedrun`) return { raw, primaryRaw: raw };
   try {
     const { restoreChunkedSavePayload } = await import("./chunkedSaveJournal");
     const { restoreWindowsNativeSavePayload } = await import("./nativeSaveRecovery");
@@ -4132,9 +4165,9 @@ export async function readLocalSavePayloadWithChunkJournal(key: string): Promise
       windowsNative.status === "fulfilled" ? windowsNative.value : null,
     ].filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
     candidates.sort((left, right) => right.manifest.savedAt - left.manifest.savedAt);
-    return candidates[0]?.raw ?? raw;
+    return { raw: candidates[0]?.raw ?? raw, primaryRaw: raw };
   } catch {
-    return raw;
+    return { raw, primaryRaw: raw };
   }
 }
 

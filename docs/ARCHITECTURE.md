@@ -1,5 +1,7 @@
 # 系统架构
 
+> 普通离线增加 Host 内部 `corePrepareOfflineSourceExport` / `native-core-offline-runtime-source-export-v1`：经受保护文件读取器验证的普通主档运行态信封，以字节数、SHA-256、保存时间、目录身份和完整 canonical/domain proof 绑定一次性 revision 0 CoreState。只允许 1–30 秒精确前缀，不注册会话、不发布检查点、不追加 WAL；候选导出复用旧路径的校验/发布逻辑。已有会话借用后按需复制，临时来源转移所有权，避免额外复制完整来源。当前只是 Host 协议，尚未开放新的 preload 或 renderer API；未来 main 必须拥有路径、时钟、传输限额和清理，来源需是既有 JS 加载校验后的完整运行态。见[接口及验证边界](./reviews/rust-rp1-runtime-source-2026-09-09.md)。
+
 > Native 普通离线 DTO 区分 macro 的短精确前缀与长尾：`pure-idle-bounded-exact` 只在 1–30 秒、exactCalibrationSeconds 等于全部结算时间且 approximatedSeconds 为零时通过；源、revision、时间、导出证明仍绑定。计算前的正常拒绝允许没有 advance，但必须有原因且没有候选或导出。自动采用的 30 秒门禁不变。
 
 > Windows 普通离线传输的导出根目录与 Host 初始化共用 `desktopRuntimeIdentity` 和对应版本目录名，经 `resolveFixedNativeSaveRootPath()` 验证；普通版与性能开发版各用自身固定目录。实际 main 处理块的回归测试覆盖这两种身份，防止变量重命名后运行时才报错并回退 JS。

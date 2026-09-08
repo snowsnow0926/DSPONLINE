@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-09 临时来源 Host**：完整 Host release 249 library + 3 binary = 252 通过；新真实 Host 专项 22/22（含 9 组 JS 全状态对照），完整 Native 工具 654/1 条件跳过/0 失败；release workspace all-targets 严格 Clippy、Host build 与 fmt 通过。新 Host SHA-256 `a901961117d1e9aa0495403ac61663765fabfa0dac81bf71f54dfa17ef702489`。新增接口未接 UI，未重建玩家包；旧包自然保存探针失败和新测试首轮失败均保留。不能继承旧包的 UI 证据为新来源路径的通过，详见[记录](./reviews/rust-rp1-runtime-source-2026-09-09.md)。
+
 > **Rust RP1 最终公开短入口（2026-09-09）**：运行 `5274c6e1`，完整 Native 工具 632/1 条件跳过/0 失败；生产构建及 75 文件制品复验通过，NotSigned。公开匹配检查点 5 秒完成/取消两例实际 UI 通过，8 次正常退出；完整字段按原始磁盘读回及普通 JS 加载分别比较。真实终局完整入口、旧元数据兼容、单次完整发行矩阵与配对等待未完成。逐次失败及证据见[阶段记录](./reviews/rust-rp1-menu-recovery-2026-09-08.md)。
 
 > Rust RP1 main 离线根目录补修（2026-09-09）：专项 67/1 条件跳过、完整 Native 工具测试 632/1 条件跳过，均零失败。新两例直接执行实际 main 事件处理块，修复前均因未定义变量失败；原生运行核心仍为 `b39131a3`，新包入口尚待验证。证据 `artifacts/rust-rp1-loop/main-offline-root-{before,after,full-native}.log`。

@@ -14,7 +14,7 @@ use crate::core_runtime::{
     CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
     CoreCommitPlayerAuthorityTickRequest, CoreFinishPlayerAuthorityMacroSessionRequest,
     CorePlayerAuthorityStartupRecoveryReceipt, CorePrepareOfflineSettlementExportRequest,
-    CorePreparePlayerAuthorityRequest,
+    CorePrepareOfflineSourceExportRequest, CorePreparePlayerAuthorityRequest,
 };
 use crate::exact_realtime_lease::ExactRealtimeLeaseRequest;
 
@@ -557,6 +557,10 @@ pub enum ControlRequest {
     CoreCommitOfflineSettlement {
         session_id: String,
         request: CoreCommitOfflineSettlementRequest,
+    },
+    CorePrepareOfflineSourceExport {
+        source_path: String,
+        request: CorePrepareOfflineSourceExportRequest,
     },
     CorePrepareOfflineSettlementExport {
         session_id: String,

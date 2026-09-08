@@ -1459,6 +1459,160 @@ test("real Rust host prepares a read-only offline candidate export without advan
   assert.equal((await registry.close(17, opened.sessionId)).closed, true);
 });
 
+test("real Rust host computes a temporary runtime source without native checkpoint adoption", {
+  skip: !fs.existsSync(binaryPath) ? "release native host has not been built" : false,
+  timeout: 60_000,
+}, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-offline-source-"));
+  const nativeRoot = path.join(root, "native-store");
+  let client = new NativeHostClient({ binaryPath, rootPath: nativeRoot, requestTimeoutMs: 30_000 });
+  const stopHostNormally = async () => {
+    const child = client.child;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    let timer;
+    const closed = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("temporary source Host did not close normally")), 5_000);
+      child.once("close", (code, signal) => {
+        if (code === 0 && signal === null) resolve();
+        else reject(new Error(`temporary source Host exited ${code}/${signal}`));
+      });
+    });
+    try { await Promise.all([client.request({ operation: "shutdown" }, 5_000), closed]); }
+    finally { clearTimeout(timer); }
+  };
+  const { createServer } = await import("vite");
+  const vite = await createServer({ root: path.resolve("."), configFile: false,
+    cacheDir: path.join(root, "vite-cache"), appType: "custom", logLevel: "silent",
+    server: { middlewareMode: true }, optimizeDeps: { noDiscovery: true } });
+  t.after(async () => {
+    try { await stopHostNormally(); } catch (error) { await client.stop(); throw error; }
+    await vite.close();
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const [fixture, transfer, storage] = await Promise.all([
+    vite.ssrLoadModule("/tests/fixtures/rust-offline-performance.ts"),
+    vite.ssrLoadModule("/src/game/saveTransfer.ts"),
+    vite.ssrLoadModule("/src/game/storage.ts"),
+  ]);
+  const hello = await client.start("temporary-runtime-source-contract");
+  assert.ok(hello.capabilities.includes("native-core-offline-runtime-source-export-v1"));
+  const snapshot = (relative = "") => fs.readdirSync(path.join(nativeRoot, relative), { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name)).flatMap((entry) => {
+      const entryPath = path.join(relative, entry.name);
+      if (entryPath === "exports") return [];
+      const fullPath = path.join(nativeRoot, entryPath);
+      if (entry.isDirectory()) return [[entryPath, "directory"], ...snapshot(entryPath)];
+      if (entryPath === ".dsp-native-save-store.lock") {
+        assert.equal(fs.statSync(fullPath).size, 0);
+        return [[entryPath, "empty-owned-lock"]];
+      }
+      return [[entryPath, sha256(fs.readFileSync(fullPath))]];
+    });
+  let persistentBefore = snapshot();
+  let recoveryBefore = null;
+  const sourcePath = path.join(root, "loaded-runtime.json");
+  let sequence = 0;
+  const createRequest = (state, seconds = 5) => {
+    const encoded = transfer.serializeSaveEnvelopeToTransfer(state, {
+      formatVersion: 2, savedAt: fixture.SAVED_AT, kind: "primary", mode: "normal", slot: "main",
+    });
+    const bytes = Buffer.from(encoded.bytes);
+    fs.writeFileSync(sourcePath, bytes);
+    const sourceSha256 = sha256(bytes);
+    const proof = fixture.createNativeCoreRevisionProof(state, 0, sourceSha256, fixture.runtime.fingerprint);
+    return { operation: "corePrepareOfflineSourceExport", sourcePath, request: {
+      registryFingerprint: fixture.runtime.fingerprint, catalog: fixture.catalog,
+      sourceByteLength: bytes.length, sourceSha256, sourceSavedAtMs: fixture.SAVED_AT,
+      expectedCanonicalSha256: proof.canonicalSha256, expectedDomainSha256: proof.domainSha256,
+      observedNowMs: fixture.SAVED_AT + seconds * 1_000, strategy: "macro-v1",
+      exportId: `temporarysource${++sequence}`,
+    } };
+  };
+  const unchanged = async (sourceHash) => {
+    assert.equal(sha256(fs.readFileSync(sourcePath)), sourceHash);
+    assert.deepEqual(snapshot(), persistentBefore);
+    assert.deepEqual(await client.request({ operation: "saveRecover", slot: "normal-main" }), recoveryBefore);
+    assert.equal(await client.request({ operation: "saveRecover", slot: "speedrun-main" }), null);
+  };
+  for (const variant of ["infinite", "finite-reserve", "quantum-capacity"]) {
+    const state = fixture.createPublicCatalogOfflineQualificationFixture(variant);
+    for (const seconds of [1, 5, 30]) {
+      await t.test(`${variant} ${seconds}s matches the complete JavaScript state`, async () => {
+        const request = createRequest(state, seconds);
+        const result = normalizeRendererNativeResult("coreOfflineCandidateExport", await client.request(request));
+        assert.equal(result.prepared, true);
+        assert.equal(result.settledSeconds, seconds);
+        assert.equal(result.sourceSummary.revision, 0);
+        assert.equal(result.sourceSummary.canonicalSha256, request.request.expectedCanonicalSha256);
+        assert.equal(result.sourceSummary.domainSha256, request.request.expectedDomainSha256);
+        const exportPath = path.join(nativeRoot, "exports", `${request.request.exportId}.json`);
+        const rawBytes = fs.readFileSync(exportPath);
+        assert.equal(rawBytes.length, result.export.result.byteLength);
+        assert.equal(sha256(rawBytes), result.export.result.envelopeSha256);
+        const verification = { integrity: "valid", byteLength: rawBytes.length,
+          stateChecksum: result.export.result.stateChecksum, payloadChecksum: fnv1a(rawBytes) };
+        const payload = rawBytes.buffer.slice(rawBytes.byteOffset, rawBytes.byteOffset + rawBytes.length);
+        const raw = transfer.decodeVerifiedSaveTransfer(payload, verification);
+        const actual = storage.parseTrustedWorkerEnvelope(raw, verification, fixture.runtime.registry, { persistentProjection: false });
+        let expected = JSON.parse(JSON.stringify(state));
+        for (let step = 0; step < seconds; step++) expected = fixture.advanceSimulationBudget(expected, 1, 1);
+        assert.deepEqual(actual, JSON.parse(JSON.stringify(expected)));
+        const candidateProof = fixture.createNativeCoreRevisionProof(actual, result.candidateSummary.revision,
+          request.request.sourceSha256, fixture.runtime.fingerprint);
+        assert.equal(candidateProof.canonicalSha256, result.candidateSummary.canonicalSha256);
+        assert.equal(candidateProof.domainSha256, result.candidateSummary.domainSha256);
+        await unchanged(request.request.sourceSha256);
+        fs.unlinkSync(exportPath); // Discarding the candidate must leave both source stores intact.
+        await unchanged(request.request.sourceSha256);
+      });
+    }
+  }
+  const state = fixture.createPublicCatalogOfflineQualificationFixture("infinite");
+  for (const seconds of [0, 31, 600]) {
+    await t.test(`refuses ${seconds}s without publishing a candidate`, async () => {
+      const request = createRequest(state, seconds);
+      const result = normalizeRendererNativeResult("coreOfflineCandidateExport", await client.request(request));
+      assert.equal(result.prepared, false);
+      assert.equal(result.settledSeconds, seconds);
+      assert.equal(fs.existsSync(path.join(nativeRoot, "exports", `${request.request.exportId}.json`)), false);
+      await unchanged(request.request.sourceSha256);
+    });
+  }
+  for (const field of ["sourceSha256", "expectedCanonicalSha256", "expectedDomainSha256",
+    "sourceByteLength", "sourceSavedAtMs", "observedNowMs", "strategy", "expectedRevision"]) {
+    await t.test(`rejects changed ${field} before publishing`, async () => {
+      const request = createRequest(state);
+      const originalHash = request.request.sourceSha256;
+      request.request[field] = field.endsWith("Sha256") ? "0".repeat(64)
+        : field === "strategy" ? "exact" : field === "observedNowMs" ? fixture.SAVED_AT - 1 : 0;
+      await assert.rejects(client.request(request));
+      assert.equal(fs.existsSync(path.join(nativeRoot, "exports", `${request.request.exportId}.json`)), false);
+      await unchanged(originalHash);
+    });
+  }
+  await stopHostNormally();
+  client = new NativeHostClient({ binaryPath, rootPath: nativeRoot, requestTimeoutMs: 30_000 });
+  await client.start("temporary-runtime-source-restart");
+  assert.equal(await client.request({ operation: "saveRecover", slot: "normal-main" }), null);
+  const stale = await createSyntheticPureIdleFixture(path.join(root, "stale-vite-cache"), { offline: true });
+  await seedSyntheticCheckpoint(new NativeSaveSessionRegistry(client), stale);
+  recoveryBefore = await client.request({ operation: "saveRecover", slot: "normal-main" });
+  persistentBefore = snapshot();
+  await t.test("uses the loaded runtime while leaving a stale native checkpoint unchanged across restart", async () => {
+    const request = createRequest(state);
+    const result = normalizeRendererNativeResult("coreOfflineCandidateExport", await client.request(request));
+    assert.equal(result.prepared, true);
+    assert.equal(result.sourceSavedAtMs, fixture.SAVED_AT);
+    assert.notEqual(result.sourceSavedAtMs, recoveryBefore.savedAtMs);
+    await unchanged(request.request.sourceSha256);
+    await stopHostNormally();
+    client = new NativeHostClient({ binaryPath, rootPath: nativeRoot, requestTimeoutMs: 30_000 });
+    await client.start("temporary-runtime-source-stale-restart");
+    await unchanged(request.request.sourceSha256);
+  });
+});
+
 test("pure-idle conservative host operations preserve credit, WAL atomicity and v47 export", {
   skip: !fs.existsSync(binaryPath) ? "release native host has not been built" : false,
   timeout: 60_000,

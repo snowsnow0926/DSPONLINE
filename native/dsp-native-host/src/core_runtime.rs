@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 
@@ -664,6 +665,24 @@ pub struct CorePrepareOfflineSettlementExportRequest {
     pub expected_root_hash: String,
     pub expected_revision: u64,
     pub expected_registry_fingerprint: String,
+    pub expected_canonical_sha256: String,
+    pub expected_domain_sha256: String,
+    pub observed_now_ms: u64,
+    pub strategy: CoreOfflineSettlementStrategy,
+    pub export_id: String,
+}
+
+/// A verified, already-loaded runtime envelope used only for one read-only
+/// candidate. Its revision is local to this temporary computation (always 0);
+/// no native checkpoint identity or persistent session is created.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorePrepareOfflineSourceExportRequest {
+    pub registry_fingerprint: String,
+    pub catalog: Value,
+    pub source_byte_length: u64,
+    pub source_sha256: String,
+    pub source_saved_at_ms: u64,
     pub expected_canonical_sha256: String,
     pub expected_domain_sha256: String,
     pub observed_now_ms: u64,
@@ -4846,7 +4865,90 @@ impl CoreRegistry {
         {
             bail!("native offline candidate differs from the verified browser primary");
         }
-        if request.observed_now_ms < source.saved_at_ms {
+        Self::prepare_offline_source_state_export(
+            store,
+            Cow::Borrowed(source_state),
+            source_summary,
+            source.saved_at_ms,
+            request.observed_now_ms,
+            request.export_id,
+        )
+    }
+
+    /// Parses an already-verified browser runtime into an ephemeral CoreState.
+    /// Unlike import_v47 this never publishes a checkpoint, appends WAL, or
+    /// installs a session. Only a proved candidate export may be written.
+    pub fn prepare_offline_source_export<R: Read>(
+        &self,
+        store: &SaveStore,
+        reader: R,
+        expected_byte_length: u64,
+        request: CorePrepareOfflineSourceExportRequest,
+    ) -> anyhow::Result<CorePrepareOfflineSettlementExportResult> {
+        let valid_sha = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        if self.sessions.len() >= MAX_CORE_SESSIONS
+            || expected_byte_length == 0
+            || expected_byte_length > 256 * 1024 * 1024
+            || request.source_byte_length != expected_byte_length
+            || request.strategy != CoreOfflineSettlementStrategy::MacroV1
+            || request.source_saved_at_ms > MAX_SAFE_INTEGER
+            || request.observed_now_ms > MAX_SAFE_INTEGER
+            || request.observed_now_ms < request.source_saved_at_ms
+            || request.registry_fingerprint.is_empty()
+            || request.registry_fingerprint.len() > 256
+            || !valid_sha(&request.source_sha256)
+            || !valid_sha(&request.expected_canonical_sha256)
+            || !valid_sha(&request.expected_domain_sha256)
+        {
+            bail!("native offline runtime source intent is invalid");
+        }
+        let parsed = parse_v47_envelope(reader, expected_byte_length)?;
+        let proof = parsed.proof();
+        if proof.source_byte_length != request.source_byte_length
+            || proof.source_sha256 != request.source_sha256
+            || proof.saved_at_ms != request.source_saved_at_ms
+            || proof.mode != "normal"
+            || proof.kind != "primary"
+            || proof.envelope_slot != "main"
+        {
+            bail!("native offline runtime source envelope binding changed");
+        }
+        let catalog = RuntimeCatalog::from_value(request.catalog, &request.registry_fingerprint)?;
+        let (source_state, _) =
+            parsed.into_core_state(0, &request.registry_fingerprint, catalog)?;
+        let source_summary = source_state.summary()?;
+        if source_summary.canonical_sha256 != request.expected_canonical_sha256
+            || source_summary.domain_sha256 != request.expected_domain_sha256
+            || source_summary.paused
+            || source_summary.mode != "normal"
+            || source_summary.state_version != 47
+        {
+            bail!("native offline runtime source differs from the verified browser state");
+        }
+        Self::prepare_offline_source_state_export(
+            store,
+            Cow::Owned(source_state),
+            source_summary,
+            request.source_saved_at_ms,
+            request.observed_now_ms,
+            request.export_id,
+        )
+    }
+
+    fn prepare_offline_source_state_export(
+        store: &SaveStore,
+        source_state: Cow<'_, CoreState>,
+        source_summary: CoreStateSummary,
+        source_saved_at_ms: u64,
+        observed_now_ms: u64,
+        export_id: String,
+    ) -> anyhow::Result<CorePrepareOfflineSettlementExportResult> {
+        if observed_now_ms < source_saved_at_ms {
             bail!("native offline candidate clock regressed");
         }
         let offline_limit_milliseconds =
@@ -4854,13 +4956,11 @@ impl CoreRegistry {
                 .offline_limit_seconds()?
                 .checked_mul(1_000)
                 .ok_or_else(|| anyhow!("native offline candidate limit overflowed"))?;
-        let settled_seconds = request
-            .observed_now_ms
-            .saturating_sub(source.saved_at_ms)
+        let settled_seconds = observed_now_ms
+            .saturating_sub(source_saved_at_ms)
             .min(offline_limit_milliseconds)
             / 1_000;
-        let settled_at_ms = source
-            .saved_at_ms
+        let settled_at_ms = source_saved_at_ms
             .checked_add(
                 settled_seconds
                     .checked_mul(1_000)
@@ -4876,7 +4976,7 @@ impl CoreRegistry {
             return Ok(CorePrepareOfflineSettlementExportResult {
                 prepared: false,
                 strategy: "macro-v1",
-                source_saved_at_ms: source.saved_at_ms,
+                source_saved_at_ms,
                 settled_at_ms,
                 settled_seconds,
                 reason: Some(
@@ -4888,9 +4988,9 @@ impl CoreRegistry {
                 candidate_summary: None,
             });
         }
-        let mut candidate = source_state.clone();
+        let mut candidate = source_state.into_owned();
         let advance = candidate.advance(&CoreAdvanceRequest {
-            base_revision: source.revision,
+            base_revision: source_summary.revision,
             simulation_seconds: settled_seconds as f64,
             wall_seconds: settled_seconds as f64,
             advance_mode: CoreAdvanceMode::OfflineMacroV1,
@@ -4900,7 +5000,7 @@ impl CoreRegistry {
             return Ok(CorePrepareOfflineSettlementExportResult {
                 prepared: false,
                 strategy: "macro-v1",
-                source_saved_at_ms: source.saved_at_ms,
+                source_saved_at_ms,
                 settled_at_ms,
                 settled_seconds,
                 reason: advance.reason.clone(),
@@ -4911,18 +5011,17 @@ impl CoreRegistry {
             });
         }
         let candidate_summary = candidate.summary()?;
-        if advance.previous_revision != source.revision
+        if advance.previous_revision != source_summary.revision
             || candidate_summary.revision != advance.revision
-            || candidate_summary.revision <= source.revision
-            || candidate_summary.registry_fingerprint != source.registry_fingerprint
+            || candidate_summary.revision <= source_summary.revision
+            || candidate_summary.registry_fingerprint != source_summary.registry_fingerprint
         {
             bail!("native offline candidate revision or catalog identity is invalid");
         }
         let preflight = candidate.write_v47_envelope(settled_at_ms, std::io::sink())?;
-        let exported =
-            store.publish_export(&request.export_id, preflight.byte_length, |writer| {
-                candidate.write_v47_envelope(settled_at_ms, writer)
-            })?;
+        let exported = store.publish_export(&export_id, preflight.byte_length, |writer| {
+            candidate.write_v47_envelope(settled_at_ms, writer)
+        })?;
         if exported.revision != preflight.revision
             || exported.saved_at_ms != preflight.saved_at_ms
             || exported.byte_length != preflight.byte_length
@@ -4934,13 +5033,13 @@ impl CoreRegistry {
         Ok(CorePrepareOfflineSettlementExportResult {
             prepared: true,
             strategy: "macro-v1",
-            source_saved_at_ms: source.saved_at_ms,
+            source_saved_at_ms,
             settled_at_ms,
             settled_seconds,
             reason: None,
             advance: Some(advance),
             export: Some(CoreExportResult {
-                export_id: request.export_id,
+                export_id,
                 mode: candidate.identity.mode.clone(),
                 result: exported,
             }),
@@ -8997,6 +9096,303 @@ mod tests {
         assert_eq!(published.root_hash, source.root_hash);
         assert_eq!(published.revision, source.revision);
         assert_eq!(published.saved_at_ms, source.saved_at_ms);
+    }
+
+    fn offline_source_request(bytes: &[u8], now: u64) -> CorePrepareOfflineSourceExportRequest {
+        let parsed = parse_v47_envelope(Cursor::new(bytes), bytes.len() as u64).unwrap();
+        let proof = parsed.proof().clone();
+        let catalog = import_catalog();
+        let (state, _) = parsed
+            .into_core_state(
+                0,
+                "builtin:test",
+                RuntimeCatalog::from_value(catalog.clone(), "builtin:test").unwrap(),
+            )
+            .unwrap();
+        let summary = state.summary().unwrap();
+        CorePrepareOfflineSourceExportRequest {
+            registry_fingerprint: "builtin:test".to_owned(),
+            catalog,
+            source_byte_length: bytes.len() as u64,
+            source_sha256: proof.source_sha256,
+            source_saved_at_ms: proof.saved_at_ms,
+            expected_canonical_sha256: summary.canonical_sha256,
+            expected_domain_sha256: summary.domain_sha256,
+            observed_now_ms: now,
+            strategy: CoreOfflineSettlementStrategy::MacroV1,
+            export_id: "ephemeral-candidate".to_owned(),
+        }
+    }
+
+    // Compare every persistent file byte, including any unexpected new paths.
+    // Candidate exports are the only writes allowed by this read-only operation.
+    fn offline_source_persistent_files(
+        root: &std::path::Path,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let relative = path.strip_prefix(root).unwrap();
+                if relative.starts_with("exports") {
+                    continue;
+                }
+                // Windows forbids reading the store's own locked byte range.
+                // This lock contains no save data; still check its presence and size.
+                if relative == std::path::Path::new(".dsp-native-save-store.lock") {
+                    assert_eq!(entry.metadata().unwrap().len(), 0);
+                    files.insert(relative.to_path_buf(), Vec::new());
+                    continue;
+                }
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(path);
+                } else {
+                    files.insert(relative.to_path_buf(), std::fs::read(path).unwrap());
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn offline_source_candidate_needs_no_checkpoint_and_creates_no_session() {
+        let root = tempdir().unwrap();
+        let store = SaveStore::open(root.path()).unwrap();
+        let registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let before = offline_source_persistent_files(root.path());
+        let result = registry
+            .prepare_offline_source_export(
+                &store,
+                Cursor::new(&bytes),
+                bytes.len() as u64,
+                offline_source_request(&bytes, 5_042),
+            )
+            .unwrap();
+        assert!(result.prepared);
+        assert_eq!(result.source_summary.revision, 0);
+        assert_eq!(result.settled_seconds, 5);
+        assert!(registry.sessions.is_empty());
+        assert!(store.recover("normal-main").unwrap().is_none());
+        assert!(store.recover("speedrun-main").unwrap().is_none());
+        assert_eq!(offline_source_persistent_files(root.path()), before);
+        let exported = std::fs::read(root.path().join("exports/ephemeral-candidate.json")).unwrap();
+        // Native transfer checks the emitted bytes. The compatibility importer
+        // instead checks JavaScript re-stringification (e.g. 1.0 becomes 1).
+        let export_proof = result.export.unwrap().result;
+        assert_eq!(exported.len() as u64, export_proof.byte_length);
+        assert_eq!(
+            hex::encode(Sha256::digest(&exported)),
+            export_proof.envelope_sha256
+        );
+        let raw = String::from_utf8(exported).unwrap();
+        let (_, state_and_checksum) = raw.split_once(",\"state\":").unwrap();
+        let (state, _) = state_and_checksum.rsplit_once(",\"checksum\":").unwrap();
+        assert_eq!(
+            utf16_fnv(&format!("{{\"formatVersion\":2,\"state\":{state}}}")),
+            export_proof.state_checksum
+        );
+        let envelope: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(envelope["checksum"], export_proof.state_checksum);
+        assert_eq!(envelope["savedAt"], 5_042);
+        assert_eq!(
+            canonical_sha256(&envelope["state"]),
+            result.candidate_summary.unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn offline_source_candidate_matches_checkpoint_path_and_preserves_existing_store() {
+        for seconds in [1, 5, 30] {
+            let (root, store, registry, imported, _) = offline_settlement_fixture();
+            let source = store.recover("normal-main").unwrap().unwrap();
+            let before = registry.status(&imported.session_id).unwrap();
+            let files = offline_source_persistent_files(root.path());
+            let mut bytes = Vec::new();
+            registry
+                .session(&imported.session_id)
+                .unwrap()
+                .write_v47_envelope(42, &mut bytes)
+                .unwrap();
+            let now = 42 + seconds * 1_000;
+            let baseline = registry
+                .prepare_offline_settlement_export(
+                    &store,
+                    &imported.session_id,
+                    offline_candidate_request(&source, &before, now, "checkpoint-candidate"),
+                )
+                .unwrap();
+            let result = registry
+                .prepare_offline_source_export(
+                    &store,
+                    Cursor::new(&bytes),
+                    bytes.len() as u64,
+                    offline_source_request(&bytes, now),
+                )
+                .unwrap();
+            assert!(baseline.prepared && result.prepared);
+            assert_eq!(
+                result.candidate_summary.unwrap().canonical_sha256,
+                baseline.candidate_summary.unwrap().canonical_sha256
+            );
+            assert_eq!(
+                std::fs::read(root.path().join("exports/ephemeral-candidate.json")).unwrap(),
+                std::fs::read(root.path().join("exports/checkpoint-candidate.json")).unwrap()
+            );
+            assert_eq!(offline_source_persistent_files(root.path()), files);
+            assert_eq!(
+                serde_json::to_value(registry.status(&imported.session_id).unwrap()).unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+            assert_eq!(registry.sessions.len(), 1);
+        }
+    }
+
+    #[test]
+    fn offline_source_candidate_rejects_changed_proofs_clocks_and_byte_lengths() {
+        let (root, store, registry, imported, _) = offline_settlement_fixture();
+        let bytes = import_envelope();
+        let files = offline_source_persistent_files(root.path());
+        let before = registry.status(&imported.session_id).unwrap();
+        for case in 0..11 {
+            let mut request = offline_source_request(&bytes, 5_042);
+            match case {
+                0 => request.source_sha256 = "0".repeat(64),
+                1 => request.expected_canonical_sha256 = "0".repeat(64),
+                2 => request.expected_domain_sha256 = "0".repeat(64),
+                3 => request.source_saved_at_ms += 1,
+                4 => request.source_byte_length += 1,
+                5 => request.registry_fingerprint = "changed".to_owned(),
+                6 => request.observed_now_ms = 41,
+                7 => request.observed_now_ms = MAX_SAFE_INTEGER + 1,
+                8 => request.source_sha256 = "A".repeat(64),
+                9 => request.expected_domain_sha256 = "invalid".to_owned(),
+                10 => request.source_saved_at_ms = MAX_SAFE_INTEGER + 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                registry
+                    .prepare_offline_source_export(
+                        &store,
+                        Cursor::new(&bytes),
+                        bytes.len() as u64,
+                        request
+                    )
+                    .is_err(),
+                "case {case}"
+            );
+        }
+        for length in [0, bytes.len() as u64 - 1, 256 * 1024 * 1024 + 1] {
+            assert!(
+                registry
+                    .prepare_offline_source_export(
+                        &store,
+                        Cursor::new(&bytes),
+                        length,
+                        offline_source_request(&bytes, 5_042)
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            !root
+                .path()
+                .join("exports/ephemeral-candidate.json")
+                .exists()
+        );
+        assert_eq!(offline_source_persistent_files(root.path()), files);
+        assert_eq!(
+            serde_json::to_value(registry.status(&imported.session_id).unwrap()).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert_eq!(registry.sessions.len(), 1);
+    }
+
+    #[test]
+    fn offline_source_candidate_rejects_paused_and_non_primary_envelopes() {
+        let root = tempdir().unwrap();
+        let store = SaveStore::open(root.path()).unwrap();
+        let registry = CoreRegistry::default();
+        let files = offline_source_persistent_files(root.path());
+        for (pointer, value) in [
+            ("/state/paused", json!(true)),
+            ("/kind", json!("slot")),
+            ("/slot", json!(1)),
+            ("/mode", json!("speedrun")),
+        ] {
+            let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+            *envelope.pointer_mut(pointer).unwrap() = value;
+            if pointer == "/mode" {
+                envelope["state"]["mode"] = json!("speedrun");
+            }
+            let state = serde_json::to_string(&envelope["state"]).unwrap();
+            envelope["checksum"] = Value::from(utf16_fnv(&format!(
+                "{{\"formatVersion\":2,\"state\":{state}}}"
+            )));
+            let bytes = serde_json::to_vec(&envelope).unwrap();
+            let request = if pointer == "/mode" {
+                // A non-normal envelope must fail before constructing any CoreState.
+                let mut request = offline_source_request(&import_envelope(), 5_042);
+                request.source_byte_length = bytes.len() as u64;
+                request.source_sha256 = hex::encode(Sha256::digest(&bytes));
+                request
+            } else {
+                offline_source_request(&bytes, 5_042)
+            };
+            assert!(
+                registry
+                    .prepare_offline_source_export(
+                        &store,
+                        Cursor::new(&bytes),
+                        bytes.len() as u64,
+                        request
+                    )
+                    .is_err(),
+                "{pointer}"
+            );
+        }
+        assert_eq!(offline_source_persistent_files(root.path()), files);
+        assert!(registry.sessions.is_empty());
+        assert!(
+            !root
+                .path()
+                .join("exports/ephemeral-candidate.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn offline_source_candidate_does_not_qualify_zero_or_long_intervals() {
+        let root = tempdir().unwrap();
+        let store = SaveStore::open(root.path()).unwrap();
+        let registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let files = offline_source_persistent_files(root.path());
+        for milliseconds in [0, 999, 31_000, 600_000, 28_800_000] {
+            let result = registry
+                .prepare_offline_source_export(
+                    &store,
+                    Cursor::new(&bytes),
+                    bytes.len() as u64,
+                    offline_source_request(&bytes, 42 + milliseconds),
+                )
+                .unwrap();
+            assert!(!result.prepared);
+            assert_eq!(result.settled_seconds, milliseconds / 1_000);
+            assert!(result.advance.is_none());
+            assert!(result.export.is_none());
+            assert!(result.candidate_summary.is_none());
+        }
+        assert_eq!(offline_source_persistent_files(root.path()), files);
+        assert!(registry.sessions.is_empty());
+        assert!(
+            !root
+                .path()
+                .join("exports/ephemeral-candidate.json")
+                .exists()
+        );
     }
 
     #[test]

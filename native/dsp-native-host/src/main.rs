@@ -151,6 +151,7 @@ fn handle_request(
                     "native-core-v46-to-v47-stream-adapter-v1",
                     "native-core-offline-macro-v1",
                     "native-core-offline-candidate-export-v1",
+                    "native-core-offline-runtime-source-export-v1",
                     EXACT_REALTIME_LEASE_CAPABILITY,
                     EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
                     PLAYER_AUTHORITY_GATE_CAPABILITY,
@@ -841,6 +842,16 @@ fn handle_request(
             session_id,
             request,
         } => to_value(cores.commit_offline_settlement(store, &session_id, request)?)?,
+        ControlRequest::CorePrepareOfflineSourceExport {
+            source_path,
+            request,
+        } => {
+            let source = open_v47_import_source(&PathBuf::from(source_path))?;
+            let (reader, byte_length) = source.into_decoded_reader();
+            let byte_length = byte_length
+                .ok_or_else(|| anyhow!("native offline runtime source must be plain JSON"))?;
+            to_value(cores.prepare_offline_source_export(store, reader, byte_length, request)?)?
+        }
         ControlRequest::CorePrepareOfflineSettlementExport {
             session_id,
             request,

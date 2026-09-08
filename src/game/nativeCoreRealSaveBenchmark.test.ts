@@ -20,6 +20,46 @@ import type { GameState } from "./types";
 const runBenchmark = process.env.DSP_RUN_NATIVE_CORE_BENCHMARK === "1";
 const benchmarkOpenOnly = process.env.DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY === "1";
 const benchmarkExactOnly = process.env.DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY === "1";
+
+function readExactBenchmarkSeconds(environment: NodeJS.ProcessEnv): number {
+  const raw = environment.DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS;
+  if (raw === undefined) return 1;
+  if (!/^[1-9][0-9]*$/.test(raw) || Number(raw) > 30) {
+    throw new Error("Exact benchmark duration must be an integer from 1 through 30 seconds");
+  }
+  const seconds = Number(raw);
+  if (seconds !== 1 && (environment.DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY !== "1" ||
+    environment.DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY === "1" ||
+    environment.DSP_NATIVE_CORE_PROFILE === "1" ||
+    readFixedAffinityProcessPolicyRequest(environment) !== null)) {
+    throw new Error("Multi-second Exact requires exact-only mode without the fixed one-second profile contract");
+  }
+  return seconds;
+}
+
+function advanceExactBenchmarkReference(
+  source: GameState,
+  seconds: number,
+  profiler: ReturnType<typeof createSimulationProfiler>,
+) {
+  // Match nativeCoreDifferential's existing boundary contract: aligned whole
+  // seconds publish each public second; an unaligned save retains legacy
+  // outer-call history sampling. Never silently normalize a player's clock.
+  const publicSeconds = Math.abs(source.elapsedSeconds - source.historyRecordedAt) <= 0.0001;
+  const durations = publicSeconds ? Array<number>(seconds).fill(1) : [seconds];
+  let state = source;
+  let exactAdvanceDurationMs = 0;
+  let conservationFailure: string | null = null;
+  for (const duration of durations) {
+    const result = advanceExactSimulationForConservationDiagnostic(state, duration, duration, profiler);
+    state = result.state;
+    exactAdvanceDurationMs += result.exactAdvanceDurationMs;
+    conservationFailure ??= result.conservationFailure;
+  }
+  return { state, exactAdvanceDurationMs, conservationFailure,
+    boundaryPolicy: publicSeconds ? "aligned-public-seconds" : "unaligned-legacy-batch" };
+}
+
 const fixturePath = process.env.DSP_NATIVE_CORE_FIXTURE ||
   "C:\\Users\\WINDOWS\\Downloads\\dsp-idle-save-2026-08-24 (1).json\\dsp-idle-save-2026-08-24 (1).json";
 const require = createRequire(import.meta.url);
@@ -590,6 +630,29 @@ function logBenchmarkRecord(label: string, value: Record<string, unknown>): void
 }
 
 describe("fixed-affinity benchmark process-policy contract", () => {
+  it("keeps the default one-second contract and bounds opt-in multi-second diagnostics", () => {
+    expect(readExactBenchmarkSeconds({})).toBe(1);
+    expect(readExactBenchmarkSeconds({ DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS: "1" })).toBe(1);
+    for (const seconds of [2, 5, 30]) {
+      expect(readExactBenchmarkSeconds({ DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY: "1",
+        DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS: String(seconds) })).toBe(seconds);
+    }
+    for (const raw of ["", "0", "-1", "1.5", "31", "Infinity", "NaN", " 5", "5e0", "05"]) {
+      expect(() => readExactBenchmarkSeconds({ DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY: "1",
+        DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS: raw })).toThrow("integer from 1 through 30");
+    }
+    for (const incompatible of [
+      { DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY: "0" },
+      { DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY: "1" },
+      { DSP_NATIVE_CORE_PROFILE: "1" },
+      { DSP_NATIVE_CORE_BENCHMARK_AFFINITY: "F", DSP_NATIVE_CORE_BENCHMARK_NODE_PRIORITY: "Normal",
+        DSP_NATIVE_CORE_BENCHMARK_NATIVE_PRIORITY: "Normal" },
+    ]) {
+      expect(() => readExactBenchmarkSeconds({ DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY: "1",
+        DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS: "5", ...incompatible })).toThrow();
+    }
+  });
+
   it.skipIf(runBenchmark)("does not allocate real-save scratch while the benchmark suite is skipped", () => {
     expect(nativeBenchmarkScratchRootCreations).toBe(0);
   });
@@ -822,6 +885,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
   });
 
   it("loads the 80k entity / 155k belt fixture with exact v47 hash and bounded native memory", { timeout: 300_000 }, async () => {
+    const exactSeconds = readExactBenchmarkSeconds(process.env);
     const fixedAffinityProcessPolicy = readFixedAffinityProcessPolicyRequest();
     if (fixedAffinityProcessPolicy) {
       applyOrCaptureFixedAffinityProcessPolicy({
@@ -1028,8 +1092,8 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         sessionId: opened.sessionId,
         request: {
           baseRevision: resumed.revision,
-          simulationSeconds: 1,
-          wallSeconds: 1,
+          simulationSeconds: exactSeconds,
+          wallSeconds: exactSeconds,
           includeDiagnostics: false,
         },
       };
@@ -1139,7 +1203,8 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         state: expected,
         conservationFailure: conservationValidationFailure,
         exactAdvanceDurationMs: jsAdvanceDurationMs,
-      } = advanceExactSimulationForConservationDiagnostic(expectedInitial, 1, 1, jsProfiler);
+        boundaryPolicy,
+      } = advanceExactBenchmarkReference(expectedInitial, exactSeconds, jsProfiler);
       const jsAdvanceAndConservationDurationMs = performance.now() - jsDiagnosticStartedAt;
       const conservationSummary = aggregateConservationSummary(expected);
       const expectedFields = Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(expected)) as Record<string, unknown>)
@@ -1179,6 +1244,9 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         : [];
       logBenchmarkRecord("exact", {
         nativeCoreExactRealSaveAdvance: {
+          simulationSeconds: exactSeconds,
+          wallSeconds: exactSeconds,
+          javascriptBoundaryPolicy: boundaryPolicy,
           exactState: advancedSummary.canonicalSha256 === stableCanonicalSha256(expected),
           revision: advancedSummary.revision,
           expectedRevision: resumed.revision + 1,

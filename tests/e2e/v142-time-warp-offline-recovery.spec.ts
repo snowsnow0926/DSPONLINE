@@ -14,7 +14,8 @@ async function seedOrphanedBudget(page: Page, pendingWallSeconds: number, pendin
   await page.route(`**${seedPath}`, (route) => route.fulfill({
     status: 200,
     contentType: "text/html; charset=utf-8",
-    body: "<!doctype html><html><body><main>time-warp recovery seed harness</main></body></html>",
+    // Install Vite's real dev globals without mounting main.tsx or App.
+    body: '<!doctype html><html><head><script type="module" src="/@vite/client"></script></head><body><main>time-warp recovery seed harness</main></body></html>',
   }));
   // Seed from a blank same-origin harness. Leaving a mounted game page can
   // otherwise persist its current runtime during navigation and overwrite the

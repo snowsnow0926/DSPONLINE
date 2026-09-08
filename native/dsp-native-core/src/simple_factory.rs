@@ -8584,7 +8584,7 @@ fn prepare_advance_with_runtime_options(
             finalize_public_factory_boundary_before_history(state, &mut base, &mut entities)?;
             let flow_requirement = crate::production_history::belt_flow_requirement(&base)?;
             let prepared_belt_flow = belt_runtime.prepared_flow(flow_requirement)?;
-            let cumulative_history_writer_events = factory_writer_events.clone().seal();
+            let cumulative_history_writer_events = factory_writer_events.snapshot();
             let history_record = state.record_production_history_for_exact_step(
                 &mut base,
                 &entities,

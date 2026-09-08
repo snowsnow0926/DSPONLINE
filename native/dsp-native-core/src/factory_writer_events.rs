@@ -65,7 +65,7 @@ impl FactoryWriterDomain {
 }
 
 /// Candidate-local writer collection. Rows may arrive in arbitrary worker or
-/// stage order; `seal` is the only way to obtain a consumable manifest.
+/// stage order; `seal` and `snapshot` normalize them into consumable manifests.
 #[derive(Debug, Clone)]
 pub(crate) struct FactoryWriterEvents {
     source_revision: u64,
@@ -142,11 +142,31 @@ impl FactoryWriterEvents {
         rows
     }
 
-    pub(crate) fn seal(mut self) -> SealedFactoryWriterEvents {
+    fn compact_rows(&mut self) {
         for rows in &mut self.rows_by_domain {
             rows.sort_unstable();
             rows.dedup();
         }
+    }
+
+    /// Snapshot cumulative writers at an internal Exact boundary without
+    /// retaining another copy of every preceding second's duplicate rows.
+    /// The submitted count still includes every event; consumers already use
+    /// the sorted unique domain rows produced by `seal`.
+    pub(crate) fn snapshot(&mut self) -> SealedFactoryWriterEvents {
+        self.compact_rows();
+        SealedFactoryWriterEvents {
+            source_revision: self.source_revision,
+            entity_count: self.entity_count,
+            rows_by_domain: self.rows_by_domain.clone(),
+            domain_mask: self.domain_mask,
+            submitted_rows: self.submitted_rows,
+            topology_changed: self.topology_changed,
+        }
+    }
+
+    pub(crate) fn seal(mut self) -> SealedFactoryWriterEvents {
+        self.compact_rows();
         SealedFactoryWriterEvents {
             source_revision: self.source_revision,
             entity_count: self.entity_count,
@@ -159,7 +179,7 @@ impl FactoryWriterEvents {
 }
 
 /// Stable, validated writer manifest for a complete stage or advance.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SealedFactoryWriterEvents {
     source_revision: u64,
     entity_count: usize,
@@ -479,5 +499,55 @@ mod tests {
         assert!(wrong_revision.merge(&first).is_err());
         let mut wrong_count = FactoryWriterEvents::new(8, 4);
         assert!(wrong_count.merge(&first).is_err());
+    }
+
+    #[test]
+    fn cumulative_snapshots_match_uncompacted_history_and_bound_retained_rows() {
+        let mut compact = FactoryWriterEvents::new(19, 31);
+        let mut original = compact.clone();
+        for step in 0..512 {
+            let mut events = FactoryWriterEvents::new(19, 31);
+            for domain in FactoryWriterDomain::ALL {
+                if (step + domain.index()) % 5 == 0 {
+                    events.record_global(domain);
+                } else {
+                    let row = (step * 7 + domain.index()) % 31;
+                    events
+                        .record_rows(domain, &[row, (row + 23) % 31, row])
+                        .unwrap();
+                }
+            }
+            let sealed = events.seal();
+            compact.merge(&sealed).unwrap();
+            original.merge(&sealed).unwrap();
+            let snapshot = compact.snapshot();
+            // The oracle retains all historical duplicates, exactly as the
+            // previous caller did before cloning and sealing every second.
+            assert_eq!(snapshot, original.clone().seal(), "step {step}");
+            assert_eq!(snapshot, compact.snapshot(), "repeat step {step}");
+            assert!(compact.rows_by_domain.iter().all(|rows| rows.len() <= 31));
+        }
+        assert_eq!(compact.seal(), original.seal());
+    }
+
+    #[test]
+    fn cumulative_snapshot_preserves_empty_global_and_rejected_merge_state() {
+        let mut events = FactoryWriterEvents::new(5, 0);
+        assert_eq!(events.snapshot(), events.clone().seal());
+        events.record_topology_change();
+        events.record_global(FactoryWriterDomain::Power);
+        let expected = events.snapshot();
+        assert!(expected.topology_changed());
+        assert_eq!(expected.submitted_rows(), 0);
+        assert!(expected.all_rows().is_empty());
+        assert_eq!(expected.domain_names(), vec!["power", "topology"]);
+        for wrong in [
+            FactoryWriterEvents::new(6, 0),
+            FactoryWriterEvents::new(5, 1),
+        ] {
+            assert!(events.merge(&wrong.seal()).is_err());
+            assert_eq!(events.snapshot(), expected);
+        }
+        assert_eq!(events.seal(), expected);
     }
 }

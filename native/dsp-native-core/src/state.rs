@@ -3239,6 +3239,7 @@ impl CoreState {
         mut records: InternalCheckpointRecords<'_>,
         catalog: RuntimeCatalog,
     ) -> anyhow::Result<Self> {
+        let mut open_profile = crate::OpenPhaseProfile::new("checkpoint");
         if records.is_empty() || records.len() > MAX_INTERNAL_RECORDS {
             bail!("native core checkpoint record count is invalid");
         }
@@ -3370,6 +3371,7 @@ impl CoreState {
             &manifest,
             &mut remaining_chunk_references,
         )?;
+        open_profile.mark("manifest-and-base");
 
         let mut entity_raw = vec![None; manifest.entity_count];
         let mut belt_raw = vec![None; manifest.belt_count];
@@ -3428,6 +3430,7 @@ impl CoreState {
             bail!("native core checkpoint contains unreferenced records");
         }
         drop(records);
+        open_profile.mark("raw-records");
         Self::from_raw_record_parts(
             identity,
             base,
@@ -3512,6 +3515,7 @@ impl CoreState {
         pure_idle_macro_construction_quantum_pending_credits: BTreeMap<String, u64>,
         save_dirty: SaveDirtyPages,
     ) -> anyhow::Result<Self> {
+        let mut open_profile = crate::OpenPhaseProfile::new("state");
         validate_construction_quantum_pending_credits(
             &pure_idle_macro_construction_quantum_pending_credits,
         )?;
@@ -3579,9 +3583,13 @@ impl CoreState {
         // and the canonical proof. Belt records are intentionally decoded one
         // at a time by each consumer so opening a large save never owns a full
         // second `Vec<Value>` belt graph.
+        open_profile.mark("initialize");
         let parsed_entities = state.parse_entities_parallel()?;
+        open_profile.mark("parse-entities");
         state.rebuild_indexes_from_parsed_entities(&parsed_entities)?;
+        open_profile.mark("indexes");
         state.refresh_factory_static_admission_with_entities(&parsed_entities)?;
+        open_profile.mark("admission");
         let raw_entity_bytes = state
             .entity_raw
             .iter()
@@ -3636,9 +3644,11 @@ impl CoreState {
             state.prepared_interstellar_peer_directory = Some(prepared.interstellar_peer_directory);
             state.prepared_interstellar_route_activity = Some(prepared.interstellar_route_activity);
         }
+        open_profile.mark("prepare-domains");
         // `coreOpen` must return a verified canonical proof. Reuse the parsed
         // entity graph while canonicalizing each raw belt independently.
         let canonical = state.canonical_digest_bundle_with_parsed(Some(&parsed_entities), None)?;
+        open_profile.mark("canonical-proof");
         let mut summary = state.summary_from_digest(canonical);
         if !sync_record_drop_enabled() && raw_entity_bytes <= MAX_RESIDENT_PARSED_ENTITY_CACHE_BYTES
         {
@@ -3654,6 +3664,7 @@ impl CoreState {
             campaign_projection_runtime_bytes: state.campaign_projection_runtime.estimated_bytes(),
             summary,
         }));
+        open_profile.mark("summary-and-cache-retention");
         Ok(state)
     }
 

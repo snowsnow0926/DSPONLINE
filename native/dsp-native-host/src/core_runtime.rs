@@ -1165,12 +1165,14 @@ impl CoreRegistry {
         registry_fingerprint: &str,
         catalog_value: Value,
     ) -> anyhow::Result<CoreOpenResult> {
+        let mut open_profile = dsp_native_core::OpenPhaseProfile::new("host");
         if self.sessions.len() >= MAX_CORE_SESSIONS {
             bail!("native core session limit has been reached");
         }
         let recovery = store
             .recover(slot)?
             .ok_or_else(|| anyhow!("native core checkpoint slot is missing"))?;
+        open_profile.mark("recover-checkpoint");
         if recovery.generation != generation
             || recovery.root_hash != root_hash
             || recovery.revision != revision
@@ -1179,6 +1181,7 @@ impl CoreRegistry {
             bail!("native core checkpoint identity changed before open");
         }
         let catalog = RuntimeCatalog::from_value(catalog_value, registry_fingerprint)?;
+        open_profile.mark("catalog");
         let identity = CoreCheckpointIdentity {
             slot: slot.to_owned(),
             generation,
@@ -1202,6 +1205,7 @@ impl CoreRegistry {
                 )
             },
         )?;
+        open_profile.mark("load-state");
         if let Some(history) = store.read_statistics_sidecar(slot, generation, revision, root_hash)
         {
             // This file is a disposable diagnostic cache. Any schema,
@@ -1215,6 +1219,7 @@ impl CoreRegistry {
             replay_wal_entry(&mut state, entry)?;
         }
         let summary = state.summary()?;
+        open_profile.mark("sidecar-wal-summary");
         let session_id = format!("core-{}", self.next_session_id);
         self.next_session_id = self.next_session_id.saturating_add(1);
         self.sessions.insert(session_id.clone(), state);

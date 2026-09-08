@@ -52,6 +52,8 @@ mod orbital_station;
 mod ordinary_production;
 pub mod production_history;
 mod profile_evidence;
+#[doc(hidden)]
+pub use profile_evidence::OpenPhaseProfile;
 mod pure_idle;
 mod quantum_logistics;
 mod recipe_command;

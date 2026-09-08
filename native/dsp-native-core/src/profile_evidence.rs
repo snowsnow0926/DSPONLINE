@@ -164,6 +164,57 @@ pub(crate) fn profile_environment_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some())
 }
 
+/// Opt-in cold-open diagnostics. Only fixed phase labels and process timing
+/// are emitted; these observations never participate in game state or proofs.
+#[doc(hidden)]
+pub struct OpenPhaseProfile {
+    scope: &'static str,
+    started: Option<std::time::Instant>,
+    checkpoint: Option<std::time::Instant>,
+}
+
+impl OpenPhaseProfile {
+    pub fn new(scope: &'static str) -> Self {
+        let started = (std::env::var_os("DSP_NATIVE_CORE_OPEN_PROFILE").as_deref()
+            == Some(std::ffi::OsStr::new("1")))
+        .then(std::time::Instant::now);
+        let mut profile = Self {
+            scope,
+            started,
+            checkpoint: started,
+        };
+        profile.mark("start");
+        profile
+    }
+
+    pub fn mark(&mut self, phase: &'static str) {
+        let (Some(started), Some(checkpoint)) = (self.started, self.checkpoint) else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let unix_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis());
+        let record = serde_json::json!({
+            "schemaVersion": 1,
+            "pid": std::process::id(),
+            "scope": self.scope,
+            "phase": phase,
+            "durationMicros": now.duration_since(checkpoint).as_micros(),
+            "elapsedMicros": now.duration_since(started).as_micros(),
+            "unixMillis": unix_millis,
+        });
+        // A closed diagnostic pipe must not turn a valid load into a failure.
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "DSP_NATIVE_CORE_OPEN_PHASE\t{record}"
+        );
+        self.checkpoint = Some(now);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

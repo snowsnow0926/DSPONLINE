@@ -325,6 +325,9 @@ interface PrivatePeakSample {
   intervalMaxMs: number | null;
   samplingCadenceValid: boolean;
   error: string | null;
+  // Optional bounded diagnostic timeline; absent in ordinary qualification runs.
+  timeline?: Array<{ unixMillis: number; privateBytes: number }>;
+  timelineTruncated?: boolean;
 }
 
 async function startPrivatePeakSampler(
@@ -359,6 +362,7 @@ async function startPrivatePeakSampler(
   }
 
   const stopPath = path.join(os.tmpdir(), `dsp-native-private-peak-${process.pid}-${pid}-${crypto.randomUUID()}.stop`);
+  const recordTimeline = process.env.DSP_NATIVE_CORE_OPEN_PROFILE === "1";
   const quotedStopPath = stopPath.replaceAll("'", "''");
   const script = [
     "$ErrorActionPreference='Stop'",
@@ -375,7 +379,8 @@ async function startPrivatePeakSampler(
     "$lastSampleAt=0L",
     "$clockFrequency=[double][System.Diagnostics.Stopwatch]::Frequency",
     "$intervals=[System.Collections.Generic.List[long]]::new()",
-    "$sample={ param([bool]$recordInterval); $sampleAt=[System.Diagnostics.Stopwatch]::GetTimestamp(); if ($recordInterval -and $lastSampleAt -gt 0) { $elapsedMs=[long][Math]::Round((($sampleAt-$lastSampleAt)*1000.0)/$clockFrequency); [void]$intervals.Add($elapsedMs) }; $lastSampleAt=$sampleAt; try { $targetProcess.Refresh(); $value=$targetProcess.PrivateMemorySize64; if ($value -gt $peak) { $peak=$value }; $samples++; $lastReadSucceeded=$true } catch { $readErrors++; $lastReadSucceeded=$false } }",
+    `$recordTimeline=$${recordTimeline ? "true" : "false"}`,
+    "$sample={ param([bool]$recordInterval); $sampleAt=[System.Diagnostics.Stopwatch]::GetTimestamp(); if ($recordInterval -and $lastSampleAt -gt 0) { $elapsedMs=[long][Math]::Round((($sampleAt-$lastSampleAt)*1000.0)/$clockFrequency); [void]$intervals.Add($elapsedMs) }; $lastSampleAt=$sampleAt; try { $targetProcess.Refresh(); $value=$targetProcess.PrivateMemorySize64; if ($value -gt $peak) { $peak=$value }; $samples++; $lastReadSucceeded=$true; if ($recordTimeline -and $samples -le 4096) { [Console]::Out.WriteLine((\"SAMPLE`t{0}`t{1}\" -f [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(),$value)) } } catch { $readErrors++; $lastReadSucceeded=$false } }",
     ". $sample $false",
     "[Console]::Out.WriteLine('READY')",
     "[Console]::Out.Flush()",
@@ -475,7 +480,11 @@ async function startPrivatePeakSampler(
           stderr.trim() || null,
         ].filter((value): value is string => Boolean(value));
         const error = samplerFailures.length === 0 ? null : samplerFailures.join("; ");
+        const timeline = recordTimeline ? [...stdout.matchAll(/SAMPLE\t(\d+)\t(\d+)/g)].map((entry) => ({
+          unixMillis: Number(entry[1]), privateBytes: Number(entry[2]),
+        })) : undefined;
         return {
+          ...(timeline ? { timeline, timelineTruncated: sampleCount > 4096 } : {}),
           phase,
           pid,
           samplerPid: Number.isSafeInteger(child.pid) ? child.pid ?? null : null,
@@ -894,7 +903,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     // Preserve the bounded native profile tail here so the failed report still
     // names the resident indexes responsible for the excess instead of forcing
     // developers to weaken or bypass the memory assertion to diagnose it.
-    if (process.env.DSP_NATIVE_CORE_PROFILE === "1" && client.stderrTail?.trim()) {
+    if ((process.env.DSP_NATIVE_CORE_PROFILE === "1" || process.env.DSP_NATIVE_CORE_OPEN_PROFILE === "1") && client.stderrTail?.trim()) {
       console.log(client.stderrTail.trim());
     }
     // Emit the complete immutable open evidence before enforcing the memory
@@ -903,6 +912,14 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     expect(opened.summary.memory.estimatedRuntimeBytes).toBeLessThan(sourceBytes * 3);
     expect(opened.summary.canonicalComponents).toEqual(sourceComponents);
     expect(opened.summary.canonicalSha256).toBe(sourceSha256);
+    if (process.platform === "win32" && process.env.DSP_NATIVE_CORE_OPEN_PROFILE === "1") {
+      expect(openPeakSample.timelineTruncated).toBe(false);
+      expect(openPeakSample.timeline?.length).toBe(openPeakSample.sampleCount);
+      expect(openPeakSample.timeline?.length).toBeGreaterThan(1);
+      expect(Math.max(...openPeakSample.timeline!.map((sample) => sample.privateBytes))).toBe(openPeakSample.peakBytes);
+      expect(openPeakSample.readErrors).toBe(0);
+      expect(openPeakSample.samplingCadenceValid).toBe(true);
+    }
     if (benchmarkOpenOnly) {
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
       return;

@@ -30,9 +30,9 @@ jobs:
       - run: npm run licenses:check
       - run: npm run typecheck
       - run: npm run native:build-host
-      # Vitest 并行试跑（Ubuntu）：若出现 OOM/稳定性问题，回退为 --maxWorkers=1。
-      # 本地 Windows 仍保持 maxWorkers=1（vitest.config.ts），两者不冲突。
-      - run: npm test -- --maxWorkers=4
+      # Full simulation fixtures share a constrained runner; preserve their
+      # original timing thresholds and serialize file workers.
+      - run: npm test -- --maxWorkers=1
 
   server-ops-native:
     name: Server + Ops + Native

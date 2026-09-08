@@ -1,0 +1,27 @@
+# Temporary release validation branch. Remove this dispatch file at closeout;
+# the permanent CI workflow retains its verified serial Vitest setting.
+name: 1.2.7 serial unit validation
+on:
+  push:
+    branches: [codex/1.2.7-ci-validation]
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: Serial unit validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+      - run: npm ci
+      - run: npm --prefix server ci
+      - run: npm run licenses:check
+      - run: npm run typecheck
+      - run: npm run native:build-host
+      - run: npm test -- --maxWorkers=1

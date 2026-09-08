@@ -2,6 +2,7 @@
 //! this module grants production or writes an inventory, route or machine.
 
 use super::*;
+use sha2::{Digest, Sha256};
 
 const CYCLE_SECONDS: usize = 10;
 const PROBE_SECONDS: usize = 3 * CYCLE_SECONDS;
@@ -514,6 +515,7 @@ fn normalize_quantity_record(
     Ok(())
 }
 
+#[cfg(test)]
 fn normalized_physical_state(
     state: &CoreState,
     certificate: &OrdinaryFlowCertificate,
@@ -604,8 +606,145 @@ fn physical_signature(
     certificate: &OrdinaryFlowCertificate,
     seconds: usize,
 ) -> Result<String, String> {
-    normalized_physical_state(state, certificate, seconds)
-        .map(|value| crate::canonical::canonical_sha256(&value))
+    // Preserve the materialized oracle's exact canonical byte sequence while
+    // holding only a single decoded row. History and the separately proved
+    // clocks never need to be cloned just to be removed again.
+    let base = state.base_value();
+    let mut produced = base
+        .get("totalProduced")
+        .cloned()
+        .ok_or("offline flow production ledger missing")?;
+    normalize_quantity_record(
+        &mut produced,
+        &certificate.produced_units_per_second,
+        seconds,
+        "totalProduced",
+    )?;
+    let mut quantum = base
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .ok_or("offline flow quantum missing")?
+        .iter()
+        .filter(|(key, _)| key.as_str() != "runtimeFlow")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Map<_, _>>();
+    normalize_quantity_record(
+        quantum
+            .get_mut("inventory")
+            .ok_or("offline flow quantum inventory missing")?,
+        &certificate.units_per_second,
+        seconds,
+        "quantum.inventory",
+    )?;
+    let endgame = base
+        .get("endgame")
+        .and_then(Value::as_object)
+        .ok_or("offline flow endgame missing")?
+        .iter()
+        .filter(|(key, _)| key.as_str() != "exportWindowStartedAt")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Map<_, _>>();
+    let quantum = Value::Object(quantum);
+    let endgame = Value::Object(endgame);
+    let (entity_count, belt_count) = state.raw_record_counts();
+    let mut finite_overrides = BTreeMap::new();
+    for finite in &certificate.finite_veins {
+        if finite.expected.entity_index >= entity_count {
+            return Err("offline flow finite entity disappeared".to_owned());
+        }
+        let actual = finite_vein_snapshot_at(state, finite.expected.entity_index)
+            .map_err(|error| error.to_string())?
+            .ok_or("offline flow finite reserve changed mode")?;
+        let extracted = finite_vein_extracted_units(&finite.expected, &actual)?;
+        let expected = finite
+            .units_per_second
+            .checked_mul(seconds as i128)
+            .ok_or("offline flow finite rate overflowed")?;
+        if extracted != expected {
+            return Err(
+                "offline flow finite debit differs from its exact per-second certificate"
+                    .to_owned(),
+            );
+        }
+        let fields = finite_overrides
+            .entry(finite.expected.entity_index)
+            .or_insert_with(Map::new);
+        fields.insert(
+            "resourceRemaining".to_owned(),
+            Value::String(finite.expected.remaining.to_string()),
+        );
+        if finite.expected.tracks_depletion_remainder {
+            fields.insert(
+                "resourceDepletionRemainder".to_owned(),
+                Value::String(finite.expected.depletion_remainder.to_string()),
+            );
+        }
+    }
+
+    let fields = base
+        .keys()
+        .map(String::as_str)
+        .chain(["entities", "belts"])
+        .filter(|field| {
+            !matches!(
+                *field,
+                "elapsedSeconds" | "productionHistory" | "historyRecordedAt"
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut hasher = Sha256::new();
+    hasher.update(b"{");
+    for (position, field) in fields.into_iter().enumerate() {
+        if position > 0 {
+            hasher.update(b",");
+        }
+        crate::canonical::update_canonical(&mut hasher, &Value::String(field.to_owned()));
+        hasher.update(b":");
+        match field {
+            "entities" => {
+                hasher.update(b"[");
+                for index in 0..entity_count {
+                    if index > 0 {
+                        hasher.update(b",");
+                    }
+                    let mut entity = state
+                        .parse_entity(index)
+                        .map_err(|error| error.to_string())?;
+                    if let Some(fields) = finite_overrides.get(&index) {
+                        let entity = entity
+                            .as_object_mut()
+                            .ok_or("offline flow finite entity disappeared")?;
+                        for (key, value) in fields {
+                            entity.insert(key.clone(), value.clone());
+                        }
+                    }
+                    crate::canonical::update_canonical(&mut hasher, &entity);
+                }
+                hasher.update(b"]");
+            }
+            "belts" => {
+                hasher.update(b"[");
+                for index in 0..belt_count {
+                    if index > 0 {
+                        hasher.update(b",");
+                    }
+                    let mut belt = state.parse_belt(index).map_err(|error| error.to_string())?;
+                    counter(belt.get("totalTransferred"), "belt.totalTransferred")?;
+                    belt.as_object_mut()
+                        .ok_or("offline flow belt malformed")?
+                        .remove("totalTransferred");
+                    crate::canonical::update_canonical(&mut hasher, &belt);
+                }
+                hasher.update(b"]");
+            }
+            "totalProduced" => crate::canonical::update_canonical(&mut hasher, &produced),
+            "quantumLogisticsNetwork" => crate::canonical::update_canonical(&mut hasher, &quantum),
+            "endgame" => crate::canonical::update_canonical(&mut hasher, &endgame),
+            _ => crate::canonical::update_canonical(&mut hasher, &base[field]),
+        }
+    }
+    hasher.update(b"}");
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn normalized_quantum_flow(
@@ -932,6 +1071,137 @@ fn verify_campaign_endpoint_no_write(candidate: &CoreState) -> Result<(), String
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn streamed_physical_signature_matches_materialized_oracle_at_every_exact_step() {
+        for finite in [false, true] {
+            let mut prefix = fixture();
+            prefix.base_value_mut()["settings"]["resourceMode"] =
+                json!(if finite { "finite" } else { "infinite" });
+            let vein_index = *prefix.entity_index.get("vein").unwrap();
+            let mut vein = prefix.parse_entity(vein_index).unwrap();
+            vein["resourceCapacity"] = json!(1_000_000);
+            vein["resourceRemaining"] = json!(1_000_000);
+            vein["resourceDepletionRemainder"] = json!(5);
+            prefix.replace_entity_raw(vein_index, serde_json::to_string(&vein).unwrap().into());
+            prefix.rebuild_indexes().unwrap();
+            let certificate = certificate(&prefix);
+            assert_eq!(!certificate.finite_veins.is_empty(), finite);
+            for second in 0..=31 {
+                let source_hash = prefix.canonical_sha256().unwrap();
+                let expected = normalized_physical_state(&prefix, &certificate, second).unwrap();
+                assert_eq!(
+                    physical_signature(&prefix, &certificate, second).unwrap(),
+                    crate::canonical::canonical_sha256(&expected),
+                    "finite={finite}, second={second}"
+                );
+                assert_eq!(prefix.canonical_sha256().unwrap(), source_hash);
+                let revision = prefix.revision;
+                assert!(
+                    prefix
+                        .advance_exact(&exact_request(revision, 1.0, 1.0))
+                        .unwrap()
+                        .supported
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_physical_signature_retains_unknown_fields_and_rejects_invalid_counters() {
+        let mut source = fixture();
+        let certificate = certificate(&source);
+        let original = physical_signature(&source, &certificate, 0).unwrap();
+        source.base_value_mut().insert(
+            "mod:opaque-🙂".to_owned(),
+            json!({"z": [null, false, {"literal": "中文\\\"", "number": 1e-7}], "a": -0.0}),
+        );
+        let mut row = source.parse_entity(0).unwrap();
+        row["mod:row"] = json!({"unknown": [1, 2, 3]});
+        source.replace_entity_raw(0, serde_json::to_string(&row).unwrap().into());
+        let actual = physical_signature(&source, &certificate, 0).unwrap();
+        assert_ne!(actual, original);
+        assert_eq!(
+            actual,
+            crate::canonical::canonical_sha256(
+                &normalized_physical_state(&source, &certificate, 0).unwrap()
+            )
+        );
+
+        // The single-row writer must include every raw belt, even if an
+        // internal caller has not rebuilt the topology index yet.
+        source.belt_raw_mut_topology().push(
+            serde_json::to_string(&json!({
+                "id": "signature-only-unindexed", "totalTransferred": 0, "mod:extra": ["keep", 1e20]
+            }))
+            .unwrap()
+            .into(),
+        );
+        assert_eq!(
+            physical_signature(&source, &certificate, 0).unwrap(),
+            crate::canonical::canonical_sha256(
+                &normalized_physical_state(&source, &certificate, 0).unwrap()
+            )
+        );
+
+        for counter_value in [json!(-1), json!("9007199254740992"), json!(false)] {
+            let mut changed = source.clone();
+            let mut belt = changed.parse_belt(0).unwrap();
+            belt["totalTransferred"] = counter_value;
+            changed.replace_belt_raw(0, serde_json::to_string(&belt).unwrap().into());
+            assert!(physical_signature(&changed, &certificate, 0).is_err());
+            assert!(normalized_physical_state(&changed, &certificate, 0).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated release-mode physical signature A/B; no simulation or player qualification"]
+    fn benchmark_streamed_physical_signature() {
+        use std::time::Instant;
+        let original = fixture();
+        let certificate = certificate(&original);
+        let power = original.parse_entity(0).unwrap();
+        for extra_rows in [0, 256, 2_048] {
+            let mut source = original.clone();
+            for index in 0..extra_rows {
+                let mut entity = power.clone();
+                entity["id"] = json!(format!("signature-only-power-{index}"));
+                source
+                    .entity_raw_mut_topology()
+                    .push(serde_json::to_string(&entity).unwrap().into());
+            }
+            source.rebuild_indexes().unwrap();
+            let source_hash = source.canonical_sha256().unwrap();
+            let legacy = || {
+                crate::canonical::canonical_sha256(
+                    &normalized_physical_state(&source, &certificate, 0).unwrap(),
+                )
+            };
+            let streamed = || physical_signature(&source, &certificate, 0).unwrap();
+            assert_eq!(legacy(), streamed());
+            let mut rows = Vec::new();
+            for pair in 0..5 {
+                let mut signatures = [String::new(), String::new()];
+                let mut elapsed_ms = [0.0; 2];
+                for variant in if pair % 2 == 0 { [0, 1] } else { [1, 0] } {
+                    let began = Instant::now();
+                    signatures[variant] =
+                        std::hint::black_box(if variant == 0 { legacy() } else { streamed() });
+                    elapsed_ms[variant] = began.elapsed().as_secs_f64() * 1_000.0;
+                }
+                assert_eq!(signatures[0], signatures[1]);
+                assert_eq!(source.canonical_sha256().unwrap(), source_hash);
+                rows.push(json!({"pair":pair,"legacyMs":elapsed_ms[0],"streamedMs":elapsed_ms[1],"signatureEqual":true}));
+            }
+            println!(
+                "PHYSICAL_SIGNATURE_AB {}",
+                json!({
+                    "extraRows":extra_rows,"recordCounts":source.raw_record_counts(),"samples":rows,
+                    "sourceUnchanged":true,"scope":"canonical signature only; synthetic static rows; no factory qualification or complete waiting"
+                })
+            );
+        }
+    }
 
     fn fixture() -> CoreState {
         let mut state = super::super::tests::offline_flow_steady_fixture();

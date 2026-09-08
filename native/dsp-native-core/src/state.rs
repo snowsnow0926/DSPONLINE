@@ -4817,6 +4817,10 @@ impl CoreState {
         serde_json::from_str(&self.belt_raw[index]).context("decode native core belt")
     }
 
+    pub(crate) fn raw_record_counts(&self) -> (usize, usize) {
+        (self.entity_raw.len(), self.belt_raw.len())
+    }
+
     pub(crate) fn entity_raw_matches(
         &self,
         own_index: usize,

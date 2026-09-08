@@ -57,3 +57,17 @@ Role: develop。后续版本开发候选，未发布。Rust Host 仍为 `b39131a
 `f9feb88a` 新包确实到达 Host，公开 5 秒候选完整状态与 JS 相同，但 renderer DTO 仍误拒：短前缀实际标记为 `pure-idle-bounded-exact`，旧边界只接受 `offline-macro-v1`。已增加仅 1–30 秒、全部时间精确校准且估算时间为零的匹配分支，保留源、revision、导出与时间绑定。Host 在计算前拒绝超范围请求时没有 advance，现在也能作为无候选的拒绝结果传回，不会误报协议损坏。未改变 Rust 算法、30 秒采用限制或实时权威。
 
 DTO 新反例修复前失败，补齐缺失/不完整校准、估算尾段、31 秒伪装精确及拒绝结果夹带导出的负例；实际 Host 集成新增将成功与超范围拒绝送入同一 renderer 校验器。当前完整 Native 工具测试再次 **632 通过 / 1 条件跳过 / 0 失败**。证据 `offline-exact-dto-{before,full-native}.log`、实际包 `packaged-offline-complete-v8/report.json` 和 `-v9/live.json`。v9 驱动后续教学关闭按钮被真实弹窗遮挡而中断，不计完整 UI 通过。
+
+## 最终公开短流程验收
+
+最终运行源码 `5274c6e1af14c5a5d6a5da0a69b60922b40e48df`，Build ID `1.2.7+5274c6e1af14`，75 件制品独立 SHA 复验通过，`NotSigned`。Host SHA 仍为 `a3b1bf2283f5b66f2be9d156a8b9a57509fb8aff558150e2fb9498a2cbf09ba4`；EXE SHA `03a6269c5323090321298d12cd88349205dfd0f9cdb36bc43a59f663d83da96c`，ASAR SHA `324dcfe764fd5192a8d59fe910192047cf9e1a563eb33304ef27113931671e75`。
+
+v16 驱动的完成/取消两例均通过：公开 110 实体/2 带，准备匹配的完整运行检查点和标准主档 revision/catalog，真实墙钟 5 秒，真正调用 Host，再由真实 Continue 界面执行。完成例 Native 完整 canonical 与 JS 相同、初始持久投影相同；实际界面暂停/保存、正常退出/重开、再次进入暂停工厂及第二次重开通过。点击至可操作 1,659.65 ms，只是单次公开小样本观察，不是配对性能资格。
+
+取消例在真实 Host 候选准备后额外延迟响应 3 秒以便点击按钮；原主档 SHA 不变、Native generation/revision/rootHash 不变，正常退出并连续两次重开后不变。延迟不是性能样本。两例共 8 次正常进程退出码均为 0，无强制清理成功样本。
+
+完整状态核对区分磁盘读回与普通 JS 加载：磁盘暂停主档在首次重开原样保留；实际 Continue 后，既有迁移会删除未安装喷涂器的 `proliferatorBonusProgress.iron_ingot=0`。v11/v12 原严格字节断言失败保留；最终用相同暂停原文独立调用普通 JS inspect/migration/projection 生成整个预期状态，所有字段再次一致，后续磁盘重开一致。没有修改迁移、投影或忽略字段。
+
+驱动问题均保留：v10 初始夹具 autosave=0 与真实 UI 默认 30 秒不同，v11 起采用相同公开设置；v12/v14 取消未改源，但原始手写主档没有 revision，关闭保护拒绝并需失败清理；v15 补 revision 后首次关闭仍未完成，重试退出码为 0。v16 用生产纯 helper 同时生成匹配 revision/catalog，重载等待目录可用，完整关闭通过。旧式无元数据主档的自然补齐/关闭兼容仍需单独验证，不当作已修复。
+
+证据：`packaged-offline-{complete,cancel}-v16/report.json`、`probe-packaged-offline-entry-v16.mjs`、`packaged-public-fixture.ts`；23 件批次记录清单 `public-startup-batch-evidence-2026-09-09.json`，SHA `74a5504f31d6a4603ee514bc034430d384dd2c73cd09c57da0ff916256f316e1`。本轮没有重新运行真实终局完整入口，也没有配对完整用户等待，RP1 总目标仍未完成。易读交付见[批次报告](../RUST_BATCH_REPORT_2026-09-09.md)。

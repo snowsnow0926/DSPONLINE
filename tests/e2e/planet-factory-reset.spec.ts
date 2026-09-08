@@ -16,6 +16,12 @@ test("star map resets one planet only after three confirmations", async ({ page 
     window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-08-v1.2.7");
     window.localStorage.setItem("dsp-idle-network.save.v1", rawSave);
   }, { rawSave });
+  // Cold loading can legitimately cross the one-second offline threshold.
+  // Acknowledge the real report before testing the planet's three safeguards.
+  const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
+  await page.addLocatorHandler(offlineReport, async (dialog) => {
+    await dialog.getByRole("button", { name: "确认结算", exact: true }).click();
+  });
   await page.goto("/");
 
   await expect(page.locator(".factory-node:not(.vein-node)")).toHaveCount(1);

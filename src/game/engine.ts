@@ -12955,7 +12955,16 @@ function runConstructionCenters(
           break;
         }
         let resolved: CachedConstructionAutomationPlan | { plan: ConstructionAutomationPlan; batch: RepeatableConstructionAutomationBatch | null } | null;
-        if (Object.keys(quantumBuffer).length > 0) {
+        if (!batchConstructionAutomation) {
+          // The reference path plans one job from current stock. Probing or
+          // caching a batch cycle here both wastes work and couples the
+          // supposedly independent oracle to the optimization it checks.
+          if (profiler) profiler.constructionPlanBuilds += 1;
+          resolved = {
+            plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId, quantumBuffer),
+            batch: null,
+          };
+        } else if (Object.keys(quantumBuffer).length > 0) {
           // A direct quantum delivery changes the planner's virtual input set;
           // bypass the tray-only cache and spend one bounded plan build. The
           // resulting repeatable batch consumes the center buffer directly,
@@ -13006,9 +13015,7 @@ function runConstructionCenters(
             }
           }
         } else {
-          resolved = batchConstructionAutomation
-            ? resolveConstructionAutomationPlan(state, target.definition, entity.planetId, planCache, budget, profiler)
-            : { plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId), batch: null };
+          resolved = resolveConstructionAutomationPlan(state, target.definition, entity.planetId, planCache, budget, profiler);
         }
         if (!resolved) {
           if (profiler) profiler.constructionGuardHits += 1;

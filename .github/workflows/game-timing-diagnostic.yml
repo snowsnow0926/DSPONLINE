@@ -12,6 +12,7 @@ on:
       - "src/game/emptyPlanetSimulationWork.test.ts"
       - "src/game/constructionMaterialAvailability.ts"
       - "src/game/constructionMaterialAvailability.test.ts"
+      - "src/game/constructionReferencePath.test.ts"
 
 permissions:
   contents: read
@@ -35,11 +36,11 @@ jobs:
             sourceSha = (git rev-parse HEAD)
             logicalProcessors = [Environment]::ProcessorCount
             node = (node --version)
-            sourceFiles = @('src/game/engine.ts', 'src/game/idleResourceSettlement.test.ts', 'src/game/p2Batching.test.ts', 'src/game/emptyPlanetSimulationWork.test.ts', 'src/game/constructionMaterialAvailability.ts', 'src/game/constructionMaterialAvailability.test.ts') | ForEach-Object {
+            sourceFiles = @('src/game/engine.ts', 'src/game/idleResourceSettlement.test.ts', 'src/game/p2Batching.test.ts', 'src/game/emptyPlanetSimulationWork.test.ts', 'src/game/constructionMaterialAvailability.ts', 'src/game/constructionMaterialAvailability.test.ts', 'src/game/constructionReferencePath.test.ts') | ForEach-Object {
               [ordered]@{ path = $_; sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() }
             }
           } | ConvertTo-Json -Depth 4 | Set-Content artifacts/game-timing-diagnostic/source.json
-          node node_modules/vitest/vitest.mjs run src/game/idleResourceSettlement.test.ts src/game/p2Batching.test.ts src/game/emptyPlanetSimulationWork.test.ts src/game/constructionMaterialAvailability.test.ts --maxWorkers=1 --reporter=json --outputFile=artifacts/game-timing-diagnostic/results.json 2>&1 | Tee-Object artifacts/game-timing-diagnostic/run.log
+          node node_modules/vitest/vitest.mjs run src/game/idleResourceSettlement.test.ts src/game/p2Batching.test.ts src/game/emptyPlanetSimulationWork.test.ts src/game/constructionMaterialAvailability.test.ts src/game/constructionReferencePath.test.ts --maxWorkers=1 --reporter=json --outputFile=artifacts/game-timing-diagnostic/results.json 2>&1 | Tee-Object artifacts/game-timing-diagnostic/run.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve original pass and failure evidence
         if: always()

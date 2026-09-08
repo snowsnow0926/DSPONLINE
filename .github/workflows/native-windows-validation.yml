@@ -1,0 +1,111 @@
+name: Native Windows validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["codex/rust-rp1-**"]
+    paths:
+      - "native/**"
+      - "desktop/**"
+      - "src/**"
+      - "tests/**"
+      - "scripts/**"
+      - "package*.json"
+      - ".github/workflows/native-windows-validation.yml"
+  pull_request:
+    paths:
+      - "native/**"
+      - "desktop/**"
+      - ".github/workflows/native-windows-validation.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RUST_BACKTRACE: "1"
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: npm
+      - name: Prepare pinned Rust toolchain and evidence directory
+        run: |
+          New-Item -ItemType Directory -Path artifacts/native-windows-validation | Out-Null
+          rustup toolchain install 1.96.1 --profile minimal --component clippy --component rustfmt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup override set 1.96.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version --verbose | Set-Content artifacts/native-windows-validation/rustc.txt
+          node --version | Set-Content artifacts/native-windows-validation/node.txt
+          git rev-parse HEAD | Set-Content artifacts/native-windows-validation/source-sha.txt
+      - run: npm ci
+      - name: Rust formatting
+        run: cargo fmt --manifest-path native/Cargo.toml --all -- --check
+      - name: Strict release Clippy
+        run: |
+          cargo clippy --release --manifest-path native/Cargo.toml --workspace --all-targets --locked -- -D warnings 2>&1 | Tee-Object artifacts/native-windows-validation/clippy.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Full optimized Rust workspace tests
+        run: |
+          cargo test --release --manifest-path native/Cargo.toml --workspace --locked -- --test-threads=2 2>&1 | Tee-Object artifacts/native-windows-validation/rust-release.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build optimized Windows Host
+        run: |
+          npm run native:build-host 2>&1 | Tee-Object artifacts/native-windows-validation/host-build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Complete Native tooling and Windows integration tests
+        run: |
+          node -e "const p=require('./package.json'); const s=p.scripts['test:native']; if(!s.startsWith('node --test ')) throw new Error('unexpected native test entry'); const r=require('node:child_process').spawnSync(process.execPath,['--test','--test-concurrency=2',...s.slice(12).split(' ')],{stdio:'inherit',windowsHide:true}); if(r.error) throw r.error; process.exit(r.status??1);" 2>&1 | Tee-Object artifacts/native-windows-validation/native-node.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: TypeScript and full game unit tests
+        run: |
+          npm run typecheck 2>&1 | Tee-Object artifacts/native-windows-validation/typecheck.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test -- --maxWorkers=1 2>&1 | Tee-Object artifacts/native-windows-validation/vitest.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record verified Host identity
+        run: |
+          git diff --exit-code
+          if ($LASTEXITCODE -ne 0) { throw 'Validation changed tracked source files.' }
+          $taskHost = Get-Item -LiteralPath native/target/release/dsp-native-host.exe
+          [ordered]@{
+            sourceSha = (git rev-parse HEAD)
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            hostBytes = $taskHost.Length
+            hostSha256 = (Get-FileHash -LiteralPath $taskHost.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            rustc = (rustc --version)
+            profile = 'release; no optimization override'
+            scope = 'Windows Host and automated checks; no player saves, UI qualification, packaging or deployment'
+          } | ConvertTo-Json | Set-Content artifacts/native-windows-validation/host-receipt.json
+      - name: Upload diagnostics even when validation fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-windows-diagnostics-${{ github.sha }}
+          path: artifacts/native-windows-validation/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Host only after every validation step succeeds
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-windows-host-${{ github.sha }}
+          path: |
+            native/target/release/dsp-native-host.exe
+            artifacts/native-windows-validation/host-receipt.json
+            artifacts/native-windows-validation/rustc.txt
+          if-no-files-found: error
+          retention-days: 14

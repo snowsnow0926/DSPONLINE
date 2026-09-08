@@ -328,7 +328,36 @@ interface PrivatePeakSample {
   // Optional bounded diagnostic timeline; absent in ordinary qualification runs.
   timeline?: Array<{ unixMillis: number; privateBytes: number }>;
   timelineTruncated?: boolean;
+  reader?: "windows-process-memory-counters-ex-v1";
 }
+
+// Query only the exact Host handle. Process.Refresh()/PrivateMemorySize64
+// repeatedly reconstructs process information and can exceed the 50 ms
+// sampling interval on a busy desktop. Keep the same private-commit metric
+// and cadence gates using the documented single-process Win32 counter.
+const privateMemoryCounterSource = `
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class DspPrivatePeakNative {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Counters {
+    public uint Size, PageFaultCount;
+    public UIntPtr PeakWorkingSet, WorkingSet, PeakPagedPool, PagedPool;
+    public UIntPtr PeakNonPagedPool, NonPagedPool, Pagefile, PeakPagefile, PrivateUsage;
+  }
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern SafeProcessHandle OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  private static extern bool K32GetProcessMemoryInfo(SafeProcessHandle process, out Counters counters, uint size);
+  public static long Read(SafeProcessHandle process) {
+    Counters counters;
+    if (!K32GetProcessMemoryInfo(process, out counters, (uint)Marshal.SizeOf(typeof(Counters))))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    return checked((long)counters.PrivateUsage.ToUInt64());
+  }
+}`;
 
 async function startPrivatePeakSampler(
   pid: number | undefined,
@@ -371,7 +400,9 @@ async function startPrivatePeakSampler(
     `$intervalMs=${intervalMs}`,
     "$samplerProcess=[System.Diagnostics.Process]::GetCurrentProcess()",
     "try { $samplerProcess.PriorityClass=[System.Diagnostics.ProcessPriorityClass]::High } catch { }",
-    "$targetProcess=[System.Diagnostics.Process]::GetProcessById($targetPid)",
+    `Add-Type -TypeDefinition '${privateMemoryCounterSource.replaceAll("'", "''")}'`,
+    "$targetHandle=[DspPrivatePeakNative]::OpenProcess(0x1000,$false,$targetPid)",
+    "if ($targetHandle.IsInvalid) { throw 'private peak sampler could not open target query handle' }",
     "$peak=0L",
     "$samples=0L",
     "$readErrors=0L",
@@ -380,12 +411,12 @@ async function startPrivatePeakSampler(
     "$clockFrequency=[double][System.Diagnostics.Stopwatch]::Frequency",
     "$intervals=[System.Collections.Generic.List[long]]::new()",
     `$recordTimeline=$${recordTimeline ? "true" : "false"}`,
-    "$sample={ param([bool]$recordInterval); $sampleAt=[System.Diagnostics.Stopwatch]::GetTimestamp(); if ($recordInterval -and $lastSampleAt -gt 0) { $elapsedMs=[long][Math]::Round((($sampleAt-$lastSampleAt)*1000.0)/$clockFrequency); [void]$intervals.Add($elapsedMs) }; $lastSampleAt=$sampleAt; try { $targetProcess.Refresh(); $value=$targetProcess.PrivateMemorySize64; if ($value -gt $peak) { $peak=$value }; $samples++; $lastReadSucceeded=$true; if ($recordTimeline -and $samples -le 4096) { [Console]::Out.WriteLine((\"SAMPLE`t{0}`t{1}\" -f [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(),$value)) } } catch { $readErrors++; $lastReadSucceeded=$false } }",
-    ". $sample $false",
+    "$sample={ param([bool]$recordInterval); $sampleAt=[System.Diagnostics.Stopwatch]::GetTimestamp(); if ($recordInterval -and $lastSampleAt -gt 0) { $elapsedMs=[long][Math]::Round((($sampleAt-$lastSampleAt)*1000.0)/$clockFrequency); [void]$intervals.Add($elapsedMs) }; $lastSampleAt=$sampleAt; try { $value=[DspPrivatePeakNative]::Read($targetHandle); if ($value -gt $peak) { $peak=$value }; $samples++; $lastReadSucceeded=$true; if ($recordTimeline -and $samples -le 4096) { [Console]::Out.WriteLine((\"SAMPLE`t{0}`t{1}\" -f [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(),$value)) } } catch { $readErrors++; $lastReadSucceeded=$false } }",
+    "try { . $sample $false",
     "[Console]::Out.WriteLine('READY')",
     "[Console]::Out.Flush()",
     "while (-not [System.IO.File]::Exists($stopPath)) { [System.Threading.Thread]::Sleep($intervalMs); . $sample $true }",
-    ". $sample $false",
+    ". $sample $false } finally { $targetHandle.Dispose() }",
     "$sorted=@($intervals | Sort-Object)",
     "$intervalCount=$sorted.Count",
     "$intervalMin=if ($intervalCount -gt 0) { [long]$sorted[0] } else { 0L }",
@@ -484,6 +515,7 @@ async function startPrivatePeakSampler(
           unixMillis: Number(entry[1]), privateBytes: Number(entry[2]),
         })) : undefined;
         return {
+          reader: "windows-process-memory-counters-ex-v1",
           ...(timeline ? { timeline, timelineTruncated: sampleCount > 4096 } : {}),
           phase,
           pid,
@@ -560,6 +592,27 @@ function logBenchmarkRecord(label: string, value: Record<string, unknown>): void
 describe("fixed-affinity benchmark process-policy contract", () => {
   it.skipIf(runBenchmark)("does not allocate real-save scratch while the benchmark suite is skipped", () => {
     expect(nativeBenchmarkScratchRootCreations).toBe(0);
+  });
+
+  it.skipIf(process.platform !== "win32")("samples private committed memory from the exact process at the required cadence", { timeout: 20_000 }, async () => {
+    const sampler = await startPrivatePeakSampler(process.pid, "open");
+    let sample: PrivatePeakSample;
+    // Commit pages and retain them through both independent readers. This
+    // verifies the metric is private commit, not a working-set surrogate.
+    const allocation = new Uint8Array(64 * 1024 * 1024);
+    try {
+      allocation.fill(0x5a);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } finally {
+      sample = await sampler.stop();
+    }
+    expect(allocation[allocation.length - 1]).toBe(0x5a);
+    expect(sample.reader).toBe("windows-process-memory-counters-ex-v1");
+    expect(sample.error).toBeNull();
+    expect(sample.sampleCount).toBeGreaterThan(3);
+    expect(sample.peakBytes! - sample.baselineBytes!).toBeGreaterThan(48 * 1024 * 1024);
+    expect(sample.finalBytes! - sample.baselineBytes!).toBeGreaterThan(48 * 1024 * 1024);
+    expect(Math.abs(sample.peakBytes! - sample.finalBytes!)).toBeLessThan(16 * 1024 * 1024);
   });
 
   it("creates a fresh empty scratch child without reopening a prior killed sample", () => {

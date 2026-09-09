@@ -1,6 +1,6 @@
 # DSP极简网络项目现状
 
-> **2026-09-09 独立进程命令恢复（未发布）**：新增测试在五个持久边界经过 15 次独立子进程退出/恢复，重试幂等与下一 tick 状态对照通过。完整 release Host 256 pass/1 驱动入口 ignored/0 fail，fmt/严格 Clippy 通过；采集八项 8/8、工具/后台 82/82。仍为 TEST_ONLY 库测试，不是生产 Host RPC、桌面接管或断电验收，实时资格保持关闭。4c3 Windows 全部通过，但浏览器 32 unexpected/20 flaky，仍不能发布；见[证据](./reviews/rust-windows-process-recovery-2026-09-09.md)和[进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
+> **2026-09-09 大档校验优化（未发布）**：复用数值缓冲/哈希视图，原始终局档三对校验合计中位 3.871→3.098 秒，约 19.98%，摘要与原档不变；不是完整菜单提速。完整单元 3,174/39 skip、实际 Native 对照 50/1 skip、类型/Web 构建门禁通过。前批独立进程恢复 Host 256/1 驱动 ignored、采集 8/8、工具 82/82 保持 TEST_ONLY。4bc Windows/Linux 非浏览器检查通过，浏览器仍 4 unexpected/1 flaky；新实包与发布资格待验，见[证据](./reviews/rust-rp1-proof-buffer-reuse-2026-09-09.md)和[进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 
 > **2026-09-09 完整 Windows Rust Goal 已启用（未发布）**：范围包括离线收口、实时单所有者、完整玩法/兼容/性能及可交付候选。TEST_ONLY 证据检查器和 ASAR 测试写入完成修复已验证，工具/后台/打包专项 104 通过 / 1 条件跳过 / 0 失败。Rust 建造的三个已拥有映射直接移动，完整正常 release 核心 1,113/5 ignored/0 fail，fmt 与严格 Clippy 通过。实时资格仍未开放，新增性能和实包资格待验；见[最新报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 

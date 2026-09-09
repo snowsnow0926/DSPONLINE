@@ -24,6 +24,7 @@ class IncrementalSha256 {
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
   ]);
   private readonly block = new Uint8Array(64);
+  private readonly blockView = new DataView(this.block.buffer);
   private readonly words = new Uint32Array(64);
   private blockLength = 0;
   private totalBytes = 0;
@@ -39,7 +40,7 @@ class IncrementalSha256 {
       this.blockLength += copied;
       offset += copied;
       if (this.blockLength === 64) {
-        this.compress(this.block);
+        this.compress();
         this.blockLength = 0;
       }
     }
@@ -53,20 +54,20 @@ class IncrementalSha256 {
     this.block[this.blockLength++] = 0x80;
     if (this.blockLength > 56) {
       this.block.fill(0, this.blockLength);
-      this.compress(this.block);
+      this.compress();
       this.blockLength = 0;
     }
     this.block.fill(0, this.blockLength, 56);
-    const view = new DataView(this.block.buffer);
+    const view = this.blockView;
     view.setUint32(56, Math.floor(bitLength / 0x1_0000_0000), false);
     view.setUint32(60, bitLength >>> 0, false);
-    this.compress(this.block);
+    this.compress();
     return [...this.state].map((value) => value.toString(16).padStart(8, "0")).join("");
   }
 
-  private compress(block: Uint8Array): void {
+  private compress(): void {
     const words = this.words;
-    const view = new DataView(block.buffer, block.byteOffset, 64);
+    const view = this.blockView;
     for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(index * 4, false);
     for (let index = 16; index < 64; index += 1) {
       const x = words[index - 15];
@@ -116,6 +117,8 @@ class IncrementalSha256 {
 
 class ProofWriter {
   private readonly hash = new IncrementalSha256();
+  private readonly numericBytes = new Uint8Array(8);
+  private readonly numericView = new DataView(this.numericBytes.buffer);
   private pendingText = "";
 
   text(value: string): void {
@@ -127,6 +130,20 @@ class ProofWriter {
   bytes(value: Uint8Array): void {
     this.flushText();
     this.hash.update(value);
+  }
+
+  uint64LittleEndian(value: number): void {
+    if (!Number.isSafeInteger(value) || value < 0) throw new RangeError("native core revision is outside the safe integer range");
+    this.numericView.setUint32(0, value >>> 0, true);
+    this.numericView.setUint32(4, Math.floor(value / 0x1_0000_0000), true);
+    this.bytes(this.numericBytes);
+  }
+
+  float64LittleEndian(value: unknown): void {
+    const numeric = typeof value === "number" && Number.isFinite(value) ? value : 0;
+    this.numericView.setFloat64(0, numeric, true);
+    // update() consumes these bytes synchronously before this writer reuses them.
+    this.bytes(this.numericBytes);
   }
 
   finish(): string {
@@ -187,19 +204,11 @@ export function canonicalNativeCoreSha256(value: unknown): string {
 }
 
 function writeUint64LittleEndian(writer: ProofWriter, value: number): void {
-  if (!Number.isSafeInteger(value) || value < 0) throw new RangeError("native core revision is outside the safe integer range");
-  const bytes = new Uint8Array(8);
-  const view = new DataView(bytes.buffer);
-  view.setUint32(0, value >>> 0, true);
-  view.setUint32(4, Math.floor(value / 0x1_0000_0000), true);
-  writer.bytes(bytes);
+  writer.uint64LittleEndian(value);
 }
 
 function writeFloat64LittleEndian(writer: ProofWriter, value: unknown): void {
-  const numeric = typeof value === "number" && Number.isFinite(value) ? value : 0;
-  const bytes = new Uint8Array(8);
-  new DataView(bytes.buffer).setFloat64(0, numeric, true);
-  writer.bytes(bytes);
+  writer.float64LittleEndian(value);
 }
 
 function optionalString(value: unknown): string | null {
@@ -305,4 +314,3 @@ export function createNativeCoreRevisionProof(
     registryFingerprint,
   };
 }
-

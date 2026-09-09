@@ -1,6 +1,6 @@
 # 系统架构
 
-> 开发证据生产器运行八项正常 release Rust Host 库测试，绑定源码/依赖、程序和原始日志；七项标为进程内重开，新项标为独立子进程在持久边界退出。新测试只编入 cfg(test)，经过五个命令边界、恢复响应丢失、幂等重试与后续 tick；不改变生产准入。报告仍为 TEST_ONLY，包/资格 scope 为空，详见[执行与范围](./reviews/rust-windows-process-recovery-2026-09-09.md)。
+> 跨语言状态校验的流式 SHA-256 复用固定块 DataView，ProofWriter 复用 8 字节数值缓冲；同步消费后再覆写，原字节序、字段顺序、Unicode、数值和 revision 规则保持。完整摘要与实际 Rust 对照通过，详见[校验优化](./reviews/rust-rp1-proof-buffer-reuse-2026-09-09.md)。开发证据生产器仍有八项 TEST_ONLY 库测试，七项进程内重开、一项独立子进程持久边界恢复；没有改变生产准入或接入正式资格，见[恢复范围](./reviews/rust-windows-process-recovery-2026-09-09.md)。
 
 > 开发侧新增 TEST_ONLY 资格证据一致性检查：有界读取同一份字节做摘要和解析，绑定独立冻结的 source/Host/ASAR/catalog/rules/matrix，区分实际执行方式和 passed/failed/skipped/flaky。它未接入 renderer/main/Host，始终不授予身份认证、实时权威或发布许可；正式信任链仍待实现，见[ADR-009](./architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)。
 

@@ -10,6 +10,7 @@ const require = createRequire(import.meta.url);
 const { digestFile, requireDirect } = require("../desktop/desktop-artifact-evidence.cjs");
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PREFIX = "core_runtime::tests::";
+const ABRUPT_RECOVERY_NAME = "process_recovery::command_recovers_after_abrupt_subprocess_exit_at_every_durable_boundary";
 export const FOUNDATION_TESTS = Object.freeze([
   "player_authority_tick_derives_the_full_durable_chain_and_is_idempotent",
   "player_authority_commands_are_idempotent_and_share_order_with_ticks",
@@ -18,6 +19,7 @@ export const FOUNDATION_TESTS = Object.freeze([
   "acknowledged_player_authority_session_resumes_after_clean_or_lost_hello_restart",
   "startup_resume_revalidates_current_domain_coverage_before_rebinding",
   "player_authority_command_checkpoint_failure_keeps_pending_wal_recoverable",
+  ABRUPT_RECOVERY_NAME,
 ].map((name) => `${PREFIX}${name}`));
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
@@ -149,7 +151,9 @@ export async function collectNativeRealtimeFoundation(directory) {
     report.testBinary = { path: relative, sha256: digestFile(binary), size: fs.statSync(binary).size, profile: artifact.profile };
     for (const [index, name] of FOUNDATION_TESTS.entries()) {
       const result = await runOwned(binary, [name, "--exact", "--test-threads=1", "--color", "never"], env, output, `check-${index + 1}`);
-      const check = { test: name, execution: "rust-host-library-test", recoveryIsolation: "registry-reopen-in-test-process", ...result.receipt };
+      const check = { test: name, execution: "rust-host-library-test",
+        recoveryIsolation: name === `${PREFIX}${ABRUPT_RECOVERY_NAME}`
+          ? "abrupt-exit-in-owned-child-processes" : "registry-reopen-in-test-process", ...result.receipt };
       report.checks.push(check);
       if (result.receipt.overflow) fail("test-output-overflow");
       check.result = parseFoundationTestResult(result.stdout, name, result.receipt.code);

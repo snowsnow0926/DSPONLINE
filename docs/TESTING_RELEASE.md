@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **2026-09-09 实时基础证据采集**：正常 release Host 库测试七项实际执行 7/7；工具/链接入口/后台专项 82/82，源码/程序/日志及 CI 步骤核验通过。恢复断言仍为进程内重开，未取得实包、完整守恒/性能或发布资格。重测 6/2 GiB、工具 3/2 GiB 守护正常退出，零游戏窗口。4c3 云端 Ops 新失败已修复且通过原检查，当前提交完整云端待验。见[证据](./reviews/rust-windows-realtime-foundation-2026-09-09.md)。
+> **2026-09-09 独立进程恢复验证**：完整 release Host 253 库 + 3 入口 = 256 pass/1 驱动入口 ignored/0 fail，父测试实际显式启动该入口 15 次；fmt/严格 Clippy 通过。采集 8/8，明确区分七项进程内重开和一项独立子进程恢复；工具/后台 82/82，89 个源码/依赖及程序/日志摘要核验通过。6/2 GiB 重测与 3/2 GiB 工具守护正常退出、零游戏窗口；仍无生产 Host RPC、桌面或发布资格。4c3 Windows 全部通过，浏览器 403 expected/33 skip/32 unexpected/20 flaky；新提交云端待验，见[完整证据](./reviews/rust-windows-process-recovery-2026-09-09.md)。
 
 > **2026-09-09 Windows Rust 证据基础与验证补修**：工具/ASAR/后台/身份/发布内容专项 104 通过 / 1 条件跳过 / 0 失败，ASAR 旧写入反例先失败后通过；跳过为缺跨平台符号链接权限，Windows 联接负例通过。Rust 建造候选的完整正常 release 核心 1,113/5 ignored/0 fail、fmt 与严格 workspace/all-targets Clippy 通过。重测 6/2 GiB 守护正常退出，零游戏启动；新 Host/性能 A/B/实包及新云端尚待验。见[本批证据](./reviews/rust-windows-qualification-foundation-2026-09-09.md)。
 

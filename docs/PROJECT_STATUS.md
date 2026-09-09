@@ -1,6 +1,6 @@
 # DSP极简网络项目现状
 
-> **2026-09-09 实时 Rust 测试证据生产（未发布）**：正常 release Host 库测试七项实际执行全部通过；工具/链接入口/后台专项 82/82。已修复 4c3 云端发现的 CLI 链接入口判断。结果为 TEST_ONLY，恢复仍属进程内重开，未证明桌面接管或真正进程崩溃恢复，实时资格保持关闭。详见[本批证据](./reviews/rust-windows-realtime-foundation-2026-09-09.md)和[最新进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
+> **2026-09-09 独立进程命令恢复（未发布）**：新增测试在五个持久边界经过 15 次独立子进程退出/恢复，重试幂等与下一 tick 状态对照通过。完整 release Host 256 pass/1 驱动入口 ignored/0 fail，fmt/严格 Clippy 通过；采集八项 8/8、工具/后台 82/82。仍为 TEST_ONLY 库测试，不是生产 Host RPC、桌面接管或断电验收，实时资格保持关闭。4c3 Windows 全部通过，但浏览器 32 unexpected/20 flaky，仍不能发布；见[证据](./reviews/rust-windows-process-recovery-2026-09-09.md)和[进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 
 > **2026-09-09 完整 Windows Rust Goal 已启用（未发布）**：范围包括离线收口、实时单所有者、完整玩法/兼容/性能及可交付候选。TEST_ONLY 证据检查器和 ASAR 测试写入完成修复已验证，工具/后台/打包专项 104 通过 / 1 条件跳过 / 0 失败。Rust 建造的三个已拥有映射直接移动，完整正常 release 核心 1,113/5 ignored/0 fail，fmt 与严格 Clippy 通过。实时资格仍未开放，新增性能和实包资格待验；见[最新报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 

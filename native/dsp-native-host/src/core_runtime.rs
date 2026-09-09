@@ -6209,6 +6209,8 @@ fn validate_session_id(value: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    include!("core_runtime_process_recovery_tests.rs");
+
     use super::*;
     use crate::disk_budget::{DiskSpaceProbe, DiskSpaceQuery, MINIMUM_FREE_SPACE_RESERVE_BYTES};
     use sha2::{Digest, Sha256};

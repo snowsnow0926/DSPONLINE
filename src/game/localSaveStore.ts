@@ -2696,6 +2696,16 @@ export function clearPrimarySaveEmergencyMirror(committedValue: string): void {
   ensureSynchronousFallback();
   if (backend !== "indexeddb" || preserveDevelopmentMirror()) return;
   try {
+    // Most saves have no emergency copy. Avoid parsing the entire committed
+    // factory just to choose a mode when neither mode has anything to clean up.
+    // Metadata-only entries still need the existing orphan reconciliation.
+    const hasEmergencyMirror = (["normal", "speedrun"] as const).some((candidateMode) => {
+      const keys = localSaveEmergencyMirrorKeys(candidateMode);
+      return window.localStorage.getItem(keys.payload) !== null ||
+        window.localStorage.getItem(keys.metadata) !== null;
+    });
+    const legacyKey = `${SAVE_KEY}.speedrun.emergency`;
+    if (!hasEmergencyMirror && !knownSaveKeys.has(legacyKey) && !cache.has(legacyKey)) return;
     let mode: LocalSaveMode = "normal";
     try {
       const parsed = JSON.parse(committedValue) as { mode?: unknown; state?: { mode?: unknown } };
@@ -2713,7 +2723,6 @@ export function clearPrimarySaveEmergencyMirror(committedValue: string): void {
     // Remove the pre-1.0.40 speedrun emergency key after its content is known
     // to be no newer than the committed primary. Old readers remain supported.
     if (mode === "speedrun") {
-      const legacyKey = `${SAVE_KEY}.speedrun.emergency`;
       const legacy = getLocalSaveValue(legacyKey);
       if (legacy !== null && savedAt(legacy) <= savedAt(committedValue)) removeLocalSaveValue(legacyKey);
     }

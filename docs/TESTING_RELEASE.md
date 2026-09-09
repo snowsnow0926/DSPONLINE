@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **2026-09-09 当前验证**：校验专项 16/16、完整单元 3,174/39 skip、实际 Native 对照 50/1 长测 skip、类型/Web 门禁通过，原账目驱动误判已单独核验并保留。a6a37b00 新冻结包 75/78 件通过，但终局入口原 90 秒失败、正常关闭原 25 秒失败；两次隐藏启动，一次正常退出、一次所属进程树失败清理，无可见窗口或聚焦，原档不变。固定 9 秒同包 Host 诊断与已验证导出逐字节相同并正常退出，不能代替完整入口。4bc 浏览器仍 450 expected/33 skip/4 unexpected/1 flaky；a6a 云端未全终态，无发布资格，见[实包与诊断](./reviews/rust-rp1-a6a37b00-package-2026-09-09.md)和[校验记录](./reviews/rust-rp1-proof-buffer-reuse-2026-09-09.md)。
+> **2026-09-09 当前验证**：保存清理反例原代码 3 pass/1 fail，新专项最终 5/5、现有保存恢复浏览器 32/32；完整游戏单元 3,174/39 skip/0 fail、类型/Web 门禁通过。终局 cleanup 三对只节省约 283.4 ms，完整保存主档/旧备份/快照/元数据正确且写者正常关闭；单次 20.8 秒不是完整性能 A/B。a6 Windows 云端全量成功，Linux 构建/单元/Server/Ops/Native 成功，浏览器 413 expected/33 skip/28 unexpected/14 flaky；实际冻结包 v8/v9 均超原 90 秒，v9 两次正常关闭不覆盖 v8 关闭失败。新源码的云端与冻结包待验，Goal active、未发布，见[本批证据](./reviews/rust-rp1-empty-emergency-cleanup-2026-09-09.md)。
 
 > **2026-09-09 Windows Rust 证据基础与验证补修**：工具/ASAR/后台/身份/发布内容专项 104 通过 / 1 条件跳过 / 0 失败，ASAR 旧写入反例先失败后通过；跳过为缺跨平台符号链接权限，Windows 联接负例通过。Rust 建造候选的完整正常 release 核心 1,113/5 ignored/0 fail、fmt 与严格 workspace/all-targets Clippy 通过。重测 6/2 GiB 守护正常退出，零游戏启动；新 Host/性能 A/B/实包及新云端尚待验。见[本批证据](./reviews/rust-windows-qualification-foundation-2026-09-09.md)。
 

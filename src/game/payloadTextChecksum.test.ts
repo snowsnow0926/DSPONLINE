@@ -29,6 +29,16 @@ describe("UTF-8 payload text checksum", () => {
     expectEncodedChecksum(units.reverse().join(""));
   });
 
+  it("keeps exact bytes when ASCII runs meet Unicode, surrogates and short tails", () => {
+    for (let prefix = 0; prefix < 16; prefix += 1) {
+      for (let tail = 0; tail < 8; tail += 1) {
+        for (const boundary of ["", "\u0000\u007f\u0080", "界", "🙂", "\ud800", "\udfff", "\ud800\ud800\udc00"]) {
+          expectEncodedChecksum("a".repeat(prefix) + boundary + "z".repeat(tail));
+        }
+      }
+    }
+  });
+
   it("matches the byte-hash oracle for deterministic random Unicode and JSON text", () => {
     let seed = 0x127f0047;
     const next = () => {

@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-09 校验循环及解析参与候选**：六文件专项 42/42、完整终局保存六次主档/备份/快照一致、后台策略 6/6；配对保存中位 13.444→13.146 秒，原档不变，6/2 GiB 守护。完整本机游戏单元 3,173/39 skip/0 fail、类型/Web 构建及门禁通过；正常 release 完整核心 1,113/5 ignored/0 fail、fmt/严格 Clippy 通过。253 包 75/78 件冻结通过，但真实终局完成入口仍超原 90 秒；253 Linux 构建/单元/Server/Ops/Native 通过，浏览器 440/33 skip/11 unexpected/4 flaky，Windows 核心 1,112/5 ignored/1 实际解析参与断言失败，后续跳过。新源码待验范围见[准确证据](./reviews/rust-rp1-save-checksum-2026-09-09.md)。
+
 > **2026-09-09 Rust 导出写缓冲**：正常 release Host 252+3=255 pass/0 skip/0 fail、五个相关 Native Node 文件 89/89、fmt/严格 Clippy/build 通过；完整终局档三对请求与完整 JS 逐字段一致，六份实际导出字节相同、六次正常关闭、原档不变。请求中位 54.258→52.495 秒，仅为请求收益；另一次分段诊断单独保留。全程无游戏窗口、低优先级串行、6 GiB 启动/2 GiB 停止。新改动尚无云端或实际桌面资格，详见[准确范围](./reviews/rust-rp1-export-buffer-2026-09-09.md)。
 
 > **2026-09-09 电力扫描候选**：旧实现新增两项反例均失败，修复后四文件 243/243、项目类型检查、Web 生产构建及原三项构建门禁通过；完整本机单元 **3,172 pass / 39 skip / 0 fail**，矿脉原案例 2,246.685 ms。同公开大工厂六次完整状态及原输入一致。f427 云端构建、Linux 单元 3,170/41 skip、Server/Ops/Native，以及 Windows Rust 1,365/5 ignored、Native 674/1 skip、游戏单元 3,172/39 skip 均通过；完整浏览器 445 expected/33 skip/7 unexpected/3 flaky，仍失败。详见[结果及证据](./reviews/rust-rp1-power-lookup-2026-09-09.md)。

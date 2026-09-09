@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **Windows helper 实包验证（2026-09-09，未发布）**：c09cfdf2 冻结 beta 的 76 项制品/79 文件通过，包内助手身份及真实 Electron ASAR 调用通过，窗口/焦点/对话框为 0。相关回归 70/1 权限 skip/0 fail；cd515 云端 Host/main 实际签名生命周期另行通过。两种构建分开记录，尚未接完整资格和实际游戏接管，见[实包证据](./reviews/rust-windows-catalog-package-2026-09-09.md)。
+
 > **Windows main 验签助手初版（2026-09-09，未发布）**：独立只读 Rust 助手与 main 调用模块已实现；Rust 3/3、Node 10/10（含实际进程 2 项）、严格检查和构建通过。云端夹具拒绝预检 3/3。本机没有安装证书或启动游戏，355d 的 Host 真实签名/篡改/信任移除已通过；main 新增助手的签名集成、实际冻结包、资格正文/生产者/撤销及实时接管仍待完成。见[本批范围](./reviews/rust-windows-main-catalog-helper-2026-09-09.md)。
 
 > **Windows catalog 签名专用流程（2026-09-09）**：新增两个默认 ignored 的 Windows 测试入口，云端在合成签名材料准备完成后逐项 exact 执行；不把默认忽略计作通过。最终本机 release 专项 7 pass/2 专用场景 ignored、fmt/严格 Clippy、脚本语法/拒绝 2/2 和最终工作流结构检查通过；真实云端正例仍待执行终态。见[测试流程](./reviews/rust-windows-signed-catalog-ci-2026-09-09.md)。

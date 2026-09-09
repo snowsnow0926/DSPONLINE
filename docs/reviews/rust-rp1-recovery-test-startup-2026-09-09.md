@@ -24,7 +24,9 @@ Role: develop。本轮只修改测试：等待工厂运行时完成初始化后�
 
 ## 其他云端收尾与证据
 
-同一 c6 CI job `102290211979` 已终态成功：Server 390 pass / 2 skip，另站点专项 4/4；Ops **60 pass / 2 skip / 0 fail**；Linux Rust core 1,111 pass / 5 ignored、Host 245+3 pass；Native Node **670 pass / 5 skip / 0 fail**。这为上一轮 proxy generation/mode 测试同步修复补齐了 Linux 证据，生产 proxy 无修改。c6 的独立 Windows run `34295204069` 截至本记录仍在游戏单元步骤，不用其他平台结果代替它。
+同一 c6 CI job `102290211979` 已终态成功：Server 390 pass / 2 skip，另站点专项 4/4；Ops **60 pass / 2 skip / 0 fail**；Linux Rust core 1,111 pass / 5 ignored、Host 245+3 pass；Native Node **670 pass / 5 skip / 0 fail**。这为上一轮 proxy generation/mode 测试同步修复补齐了 Linux 证据，生产 proxy 无修改。
+
+c6 的独立 Windows run `34295204069` / job `102290211848` 随后于 2026-09-09 01:11:42 UTC 终态成功：正常优化核心 1,111 pass / 5 ignored、Host 249+3 pass、Native 674 pass / 1 skip、完整游戏单元 3,166 pass / 39 skip，均 0 fail；fmt、严格 Clippy、Host 构建和类型检查通过。测试 merge SHA 为 `571cada389341d132c414fee8172258476d177f3`；它尚不包含 a05 的新参与专项前提或本次恢复辅助函数，不能代替这两项修复的云端验收，也不覆盖早先发生的线程参与失败。所有原 c6 作业终态后才推送下一份候选，不为观察等待而取消或重启旧验证。
 
 云端制品保存在原工作区 `artifacts/rust-rp1-next/`；两份 JSON 均只含 `playwright-report.json`，先按 GitHub digest 校验 ZIP 再读取。第二组上下文与实际截图的只读摘录在开发 worktree 的 `artifacts/rust-rp1-loop/c6-shard2-context-audit-v1/`。
 

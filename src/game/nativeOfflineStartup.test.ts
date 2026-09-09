@@ -8,6 +8,7 @@ import type {
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
 import { createInitialState } from "./engine";
 import { tryNativeOfflineStartupSettlement } from "./nativeOfflineStartup";
+import { recoverOrphanedTimeWarpForOffline } from "./offlineTimeWarpRecovery";
 import { createNativeCoreRevisionProof } from "./nativeCoreProof";
 import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
 import type { DeferredLoadedGame } from "./storage";
@@ -194,6 +195,71 @@ describe("Windows native offline startup", () => {
       expectedCanonicalSha256: current.candidate.sourceSummary.canonicalSha256,
       expectedDomainSha256: current.candidate.sourceSummary.domainSha256,
     });
+  });
+
+  it("binds an orphan-recovered source to its earlier checkpoint and combined wall interval once", async () => {
+    const current = await sourceFixture();
+    const orphan: DeferredLoadedGame = {
+      ...current.loaded,
+      savedAt: SAVED_AT + 5_000,
+      offlineSeconds: SETTLED_SECONDS - 5,
+      state: {
+        ...current.state,
+        timeWarp: { ...current.state.timeWarp, enabled: true, pendingWallSeconds: 5, pendingSimulationSeconds: 40 },
+        idleSettlement: { ...current.state.idleSettlement, currentRunStartedAt: SAVED_AT },
+      },
+    };
+    const original = JSON.stringify(orphan);
+    // StartMenu performs this only after excluding a matching live journal.
+    const recovered = recoverOrphanedTimeWarpForOffline(orphan);
+    if (!recovered.ok) throw new Error("expected orphan recovery");
+    expect(recovered.loaded).toEqual(current.loaded);
+    expect(recovered.summary).toMatchObject({
+      recoveredPendingWallSeconds: 5,
+      discardedPendingSimulationSeconds: 40,
+      submittedOfflineSeconds: SETTLED_SECONDS,
+    });
+    const repeated = recoverOrphanedTimeWarpForOffline(recovered.loaded);
+    if (!repeated.ok) throw new Error("expected idempotent recovery");
+    expect(repeated.loaded).toBe(recovered.loaded);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: repeated.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    if (result.status !== "complete") throw new Error("expected recovered candidate");
+    expect(result.state).toEqual(JSON.parse(JSON.stringify(current.candidateState)));
+    expect(result.loaded.savedAt).toBe(SAVED_AT);
+    expect(result.loaded.offlineSeconds).toBe(SETTLED_SECONDS);
+    expect(current.start).toHaveBeenCalledOnce();
+    expect(current.start).toHaveBeenCalledWith(expect.objectContaining({ sourceSavedAtMs: SAVED_AT }));
+    const source = JSON.parse(new TextDecoder().decode(Buffer.concat(current.chunks)));
+    expect(source.savedAt).toBe(SAVED_AT);
+    expect(source.state).toEqual(JSON.parse(JSON.stringify(current.state)));
+    expect(current.finish).toHaveBeenCalledWith({
+      expectedCanonicalSha256: current.candidate.sourceSummary.canonicalSha256,
+      expectedDomainSha256: current.candidate.sourceSummary.domainSha256,
+    });
+    expect(JSON.stringify(orphan)).toBe(original);
+  });
+
+  it("retains the complete recovered interval when pending wall time crosses the native limit", async () => {
+    const current = await sourceFixture();
+    const orphan: DeferredLoadedGame = {
+      ...current.loaded,
+      savedAt: SAVED_AT + 6_000,
+      offlineSeconds: SETTLED_SECONDS - 5,
+      state: { ...current.state, timeWarp: { ...current.state.timeWarp, enabled: true, pendingWallSeconds: 6, pendingSimulationSeconds: 48 } },
+    };
+    const original = JSON.stringify(orphan);
+    const recovered = recoverOrphanedTimeWarpForOffline(orphan);
+    if (!recovered.ok) throw new Error("expected orphan recovery");
+    const prepared = JSON.stringify(recovered.loaded);
+    expect(recovered.loaded.offlineSeconds).toBe(31);
+    expect(recovered.loaded.savedAt).toBe(SAVED_AT);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: recovered.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("fallback");
+    expect(current.start).not.toHaveBeenCalled();
+    expect(current.prepareNativeOfflineStartup).not.toHaveBeenCalled();
+    expect(current.desktop.recoverNativeSave).not.toHaveBeenCalled();
+    expect(JSON.stringify(recovered.loaded)).toBe(prepared);
+    expect(JSON.stringify(orphan)).toBe(original);
   });
 
   it("cancels source upload without calculating or mutating the original loaded state", async () => {

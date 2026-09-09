@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-10 0657 云端终态**：Windows run 34379306025 全部 SUCCESS；核心 1,115/5 ignored、Host 库 260/3 ignored + 主程序/助手各 3、Native 766/1 skip、游戏 3,193/39 skip，均零失败。完整浏览器 462/33 skip/4 fail/1 flaky，原门槛保留。新正文绑定代码 b410 的最终轻量专项、Rust 编译/执行与真实签名另行待验；本机三分钟元数据预检因余量不足未启动 Node，最终文档/Skill 工具检查也未执行，见[完整边界](./reviews/rust-windows-validation-binding-2026-09-10.md)。
+
 > **2026-09-10 验证专用正文候选**：初版轻量 Node 专项 143 pass/0 skip/0 fail、Rust 格式通过，3/2 GiB 守护正常 exit 0；修正尾部换行后共 76 共享向量，最终复验因内存预检未启动。本机没有运行 Rust 编译、游戏或证书安装；最终源码和 Rust/真实签名 Host/main 绑定仍待验。新源码与 741 冻结包分开记录，详见[证据边界](./reviews/rust-windows-validation-binding-2026-09-10.md)。
 
 > **2026-09-10 菜单快照复用候选**：类型/专项 62/62、无头浏览器 28/28、完整本机游戏 3,193/39 skip/0 fail（实际 Native 50/1 长测 skip）、Web 门禁通过。741 同源包 76/79 件已验；终局 v18 内存守护中止，未取得完整持久对照/重开或末态正常关闭审计，源档全哈希未变。v19 测试工具改为退出后独立对照，但内存预检未启动进程，仍待实测。上一 9e 云端 Windows 全套成功，完整浏览器 460/33 skip/6 fail，发布门禁仍失败；新候选云端另验。见[验证边界](./reviews/rust-rp1-primary-snapshot-reuse-2026-09-10.md)。

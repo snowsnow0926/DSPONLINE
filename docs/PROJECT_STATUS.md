@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **0657 云端终态（2026-09-10）**：Windows run 34379306025 全部 SUCCESS：正常优化核心 1,115/5 ignored、Host 库 260/3 ignored、主程序/助手各 3、Native 工具 766/1 skip、游戏 3,193/39 skip，均零失败。完整浏览器 462 pass/33 skip/4 fail/1 flaky，发布门禁仍未通过；新绑定代码 b410 与该候选分开记录，见[本轮交接](./reviews/rust-windows-validation-binding-2026-09-10.md)。
+
 > **Windows Rust 资格正文绑定（2026-09-10，未发布）**：main/Host 候选与隔离会话绑定代码及 76 个共享正反例已加入。初版轻量 Node 专项 143/143 与 Rust 格式通过；随后修正尾部换行并增加 7 例，复验因内存预检未启动。最终源码复验、Rust 编译及新增真实签名仍待执行，未计为通过。生产者、可信时间/撤销提供者和实际实时准入仍待完成，Host 权威关闭，见[准确范围](./reviews/rust-windows-validation-binding-2026-09-10.md)。
 
 > **Windows Rust 入口后续（2026-09-10，未发布）**：`7419775d` 菜单快照压缩主档复用已提交，专项 62/62、无头浏览器 28/28、完整本机游戏 3,193/39 skip/0 fail（实际 Native 50/1 长测 skip）、Web 门禁通过；同源 Windows 包 76 项制品/79 文件已冻结。终局 v18 真实保存返回 0 bytes 运行态缓冲区，但后续触发内存保护，整例未通过；原档字节未变，v19 因预检余量不足未启动游戏。上一 9e 云端 Windows 全套成功，完整浏览器 460/33 skip/6 fail/0 flaky，未授予发布或实时资格。见[本轮证据](./reviews/rust-rp1-primary-snapshot-reuse-2026-09-10.md)及[易读报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)。

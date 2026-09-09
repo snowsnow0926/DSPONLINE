@@ -38,4 +38,4 @@
 
 ## 范围与后续
 
-源码对应 CI `34344967913` 已结束：单元、生产构建及 Server/Ops/Native 通过，两组浏览器合计 **417 pass/33 skip/29 fail/16 flaky**，整体仍失败。两项启动顺序与精确堆叠路由仍首次通过，不能由总数波动判断这些具体修复。独立 Windows `34344968101` 已通过 Rust/Native，正在完整游戏检查，见[Linux 终态与当时 Windows 进度](../../artifacts/rust-rp1-loop/cloud-863cf76e-linux-summary.json)。旧 c3 云端全量结果不能替代新源码结果。下一步依据实际诊断处理完整入口和保存，继续可信资格、实时单所有者、完整玩法、线程/内存/长测和安装升级回退。目标没有缩小为本批微优化。
+源码对应 CI `34344967913` 已结束：单元、生产构建及 Server/Ops/Native 通过，两组浏览器合计 **417 pass/33 skip/29 fail/16 flaky**，整体仍失败。两项启动顺序与精确堆叠路由仍首次通过，不能由总数波动判断这些具体修复。独立 Windows `34344968101` 的 Rust/Native 通过，完整游戏为 3,175 pass/39 skip/1 fail，唯一失败是内存采样 p95/max 101 ms、target 50 ms；见[完整云端终态](../../artifacts/rust-rp1-loop/cloud-863cf76e-terminal-summary.json)。采样调度已另行修复并本机验证，见[后续记录](./rust-windows-memory-sampler-cadence-2026-09-09.md)。旧 c3 云端全量结果不能替代新源码结果。下一步依据实际诊断处理完整入口和保存，继续可信资格、实时单所有者、完整玩法、线程/内存/长测和安装升级回退。目标没有缩小为本批微优化。

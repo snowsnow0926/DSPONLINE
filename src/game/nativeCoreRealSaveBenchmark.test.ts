@@ -381,6 +381,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class DspPrivatePeakNative {
+  public static int TestReadDelayMs = 0;
   [StructLayout(LayoutKind.Sequential)]
   private struct Counters {
     public uint Size, PageFaultCount;
@@ -395,7 +396,9 @@ public static class DspPrivatePeakNative {
     Counters counters;
     if (!K32GetProcessMemoryInfo(process, out counters, (uint)Marshal.SizeOf(typeof(Counters))))
       throw new Win32Exception(Marshal.GetLastWin32Error());
-    return checked((long)counters.PrivateUsage.ToUInt64());
+    var value = checked((long)counters.PrivateUsage.ToUInt64());
+    if (TestReadDelayMs > 0) System.Threading.Thread.Sleep(TestReadDelayMs);
+    return value;
   }
 }`;
 
@@ -403,7 +406,13 @@ async function startPrivatePeakSampler(
   pid: number | undefined,
   phase: PrivatePeakSample["phase"],
   intervalMs = 50,
+  testReadDelayMs = 0,
 ): Promise<{ stop: () => Promise<PrivatePeakSample> }> {
+  // Only the scheduling regression injects read overhead. Real benchmark
+  // callers retain the default zero delay and the original cadence gates.
+  if (!Number.isSafeInteger(testReadDelayMs) || testReadDelayMs < 0 || testReadDelayMs > 200) {
+    throw new RangeError("private peak test read delay is outside the bounded range");
+  }
   const baselineBytes = privateBytes(pid);
   if (process.platform !== "win32" || !Number.isSafeInteger(pid) || !pid) {
     return {
@@ -441,6 +450,7 @@ async function startPrivatePeakSampler(
     "$samplerProcess=[System.Diagnostics.Process]::GetCurrentProcess()",
     "try { $samplerProcess.PriorityClass=[System.Diagnostics.ProcessPriorityClass]::High } catch { }",
     `Add-Type -TypeDefinition '${privateMemoryCounterSource.replaceAll("'", "''")}'`,
+    `[DspPrivatePeakNative]::TestReadDelayMs=${testReadDelayMs}`,
     "$targetHandle=[DspPrivatePeakNative]::OpenProcess(0x1000,$false,$targetPid)",
     "if ($targetHandle.IsInvalid) { throw 'private peak sampler could not open target query handle' }",
     "$peak=0L",
@@ -449,13 +459,16 @@ async function startPrivatePeakSampler(
     "$lastReadSucceeded=$false",
     "$lastSampleAt=0L",
     "$clockFrequency=[double][System.Diagnostics.Stopwatch]::Frequency",
+    "$intervalTicks=[long][Math]::Ceiling(($intervalMs*$clockFrequency)/1000.0)",
     "$intervals=[System.Collections.Generic.List[long]]::new()",
     `$recordTimeline=$${recordTimeline ? "true" : "false"}`,
     "$sample={ param([bool]$recordInterval); $sampleAt=[System.Diagnostics.Stopwatch]::GetTimestamp(); if ($recordInterval -and $lastSampleAt -gt 0) { $elapsedMs=[long][Math]::Round((($sampleAt-$lastSampleAt)*1000.0)/$clockFrequency); [void]$intervals.Add($elapsedMs) }; $lastSampleAt=$sampleAt; try { $value=[DspPrivatePeakNative]::Read($targetHandle); if ($value -gt $peak) { $peak=$value }; $samples++; $lastReadSucceeded=$true; if ($recordTimeline -and $samples -le 4096) { [Console]::Out.WriteLine((\"SAMPLE`t{0}`t{1}\" -f [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(),$value)) } } catch { $readErrors++; $lastReadSucceeded=$false } }",
     "try { . $sample $false",
     "[Console]::Out.WriteLine('READY')",
     "[Console]::Out.Flush()",
-    "while (-not [System.IO.File]::Exists($stopPath)) { [System.Threading.Thread]::Sleep($intervalMs); . $sample $true }",
+    // Wait only for the remaining period. Actual timestamp gaps still include
+    // every read and scheduler delay; genuine cadence failures stay rejected.
+    "while (-not [System.IO.File]::Exists($stopPath)) { $remainingMs=(($lastSampleAt+$intervalTicks-[System.Diagnostics.Stopwatch]::GetTimestamp())*1000.0)/$clockFrequency; if ($remainingMs -gt 0) { [System.Threading.Thread]::Sleep([int][Math]::Ceiling($remainingMs)) }; . $sample $true }",
     ". $sample $false } finally { $targetHandle.Dispose() }",
     "$sorted=@($intervals | Sort-Object)",
     "$intervalCount=$sorted.Count",
@@ -676,6 +689,26 @@ describe("fixed-affinity benchmark process-policy contract", () => {
     expect(sample.peakBytes! - sample.baselineBytes!).toBeGreaterThan(48 * 1024 * 1024);
     expect(sample.finalBytes! - sample.baselineBytes!).toBeGreaterThan(48 * 1024 * 1024);
     expect(Math.abs(sample.peakBytes! - sample.finalBytes!)).toBeLessThan(16 * 1024 * 1024);
+  });
+
+  it.skipIf(process.platform !== "win32")("accounts for counter-read time without relaxing the original cadence gate", { timeout: 20_000 }, async () => {
+    // Each actual Win32 read costs an additional 60 ms in this contract test.
+    // Adding a fixed 50 ms sleep makes real sample gaps exceed the original
+    // 100 ms p95 limit; scheduling from the observed sample time does not.
+    const sampler = await startPrivatePeakSampler(process.pid, "open", 50, 60);
+    let sample: PrivatePeakSample;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } finally {
+      sample = await sampler.stop();
+    }
+    expect(sample.error).toBeNull();
+    expect(sample.sampleCount).toBeGreaterThan(3);
+    expect(sample.readErrors).toBe(0);
+    expect(sample.lastReadSucceeded).toBe(true);
+    expect(sample.intervalP95Ms).toBeLessThanOrEqual(100);
+    expect(sample.intervalMaxMs).toBeLessThanOrEqual(250);
+    expect(sample.peakBytes).toBeGreaterThan(0);
   });
 
   it("creates a fresh empty scratch child without reopening a prior killed sample", () => {

@@ -21,10 +21,57 @@ fn signed_fixture_inputs() -> (PathBuf, [u8; 32]) {
 #[ignore = "requires an explicitly prepared signed fixture on the isolated Windows CI runner"]
 fn signed_fixture_without_root_trust_is_rejected() {
     let (root, pin) = signed_fixture_inputs();
-    let result = verify_windows_catalog_member(&root.join("valid"), &[pin]);
-    assert!(
-        matches!(result, Err(CatalogVerificationError::TrustRejected(_))),
-        "signed but untrusted publisher must be rejected: {result:?}"
+    for name in ["valid", "binding"] {
+        let result = verify_windows_catalog_member(&root.join(name), &[pin]);
+        assert!(
+            matches!(result, Err(CatalogVerificationError::TrustRejected(_))),
+            "signed but untrusted publisher must be rejected: {result:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires temporary TEST_ONLY root trust on the isolated Windows CI runner"]
+fn signed_validation_body_binds_independent_program_and_session() {
+    use crate::qualification_binding::{
+        QualificationBindingError, ValidationBindingContext,
+        bind_authenticated_validation_qualification,
+    };
+    let (root, pin) = signed_fixture_inputs();
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../fixtures/qualification-binding-v1.json")).unwrap();
+    let mut context: ValidationBindingContext =
+        serde_json::from_value(vectors["context"].clone()).unwrap();
+    context.publisher_certificate_sha256 = hex::encode(pin);
+    let member = verify_windows_catalog_member(&root.join("binding"), &[pin]).unwrap();
+    assert_eq!(
+        member.member_bytes(),
+        vectors["body"].as_str().unwrap().as_bytes()
+    );
+    let bound = bind_authenticated_validation_qualification(&member, &context).unwrap();
+    assert_eq!(bound.candidate(), &context.candidate);
+    assert!(!bound.authority_eligible());
+    let mut wrong_program = context.clone();
+    wrong_program.candidate.host_sha256 = "f".repeat(64);
+    assert_eq!(
+        bind_authenticated_validation_qualification(&member, &wrong_program).unwrap_err(),
+        QualificationBindingError::Candidate
+    );
+    let mut wrong_session = context.clone();
+    wrong_session.session.profile_id = "f".repeat(32);
+    assert_eq!(
+        bind_authenticated_validation_qualification(&member, &wrong_session).unwrap_err(),
+        QualificationBindingError::Session
+    );
+    context
+        .revoked_qualification_ids
+        .push(bound.qualification_id().to_owned());
+    assert_eq!(
+        bind_authenticated_validation_qualification(&member, &context).unwrap_err(),
+        QualificationBindingError::Revoked
+    );
+    println!(
+        "DSP_CATALOG_BOUND_VALIDATION accepted=true program_mismatch=true session_mismatch=true revoked=true authority_eligible=false evidenceClass=TEST_ONLY"
     );
 }
 

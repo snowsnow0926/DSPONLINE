@@ -1,5 +1,7 @@
 # 系统架构
 
+> **验证专用资格正文（2026-09-10）**：main WeakMap 与 Host 私有类型只接受已认证 catalog 字节，再独立核验完整候选、发布者密钥版本、有限期隔离合成会话和撤销条件；16 KiB 固定字节合同与共享向量明确游戏内容 catalog 和外部签名 catalog 的区别。输出不是实时授权；可信上下文提供者、生产者认证和持久单写者接入待完成，见[正文合同](./rust/windows-validation-body-v1.md)。
+
 > **菜单快照来源复用（2026-09-10，开发候选）**：调用者保有完整状态的 proof 保存不再额外生成快照用运行态 transfer；到期快照转移已完成持久读回的压缩主档，仅重建外层封装及绑定摘要。独立持久验证、fencing/CAS、备份、主档身份与提交前让位保留；checkpoint/envelope 接管仍返回所需运行态。未改变持久版本或 Rust 实时资格，见[实现与验证](./reviews/rust-rp1-primary-snapshot-reuse-2026-09-10.md)。
 
 > **Windows helper 实包验证（2026-09-09，未发布）**：c09cfdf2 冻结 beta 的 76 项制品/79 文件通过，包内助手身份及真实 Electron ASAR 调用通过，窗口/焦点/对话框为 0。相关回归 70/1 权限 skip/0 fail；cd515 云端 Host/main 实际签名生命周期另行通过。两种构建分开记录，尚未接完整资格和实际游戏接管，见[实包证据](./reviews/rust-windows-catalog-package-2026-09-09.md)。

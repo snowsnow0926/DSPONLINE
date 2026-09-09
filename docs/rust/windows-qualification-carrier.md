@@ -1,5 +1,7 @@
 # Windows Rust 资格载体与双端验证实施方案
 
+2026-09-10 补充：[验证专用正文 v1](./windows-validation-body-v1.md)已实现 main/Host 候选与会话绑定，尚未接入实时准入。新真实签名场景和 Rust 执行状态见[本批证据](../reviews/rust-windows-validation-binding-2026-09-10.md)。
+
 2026-09-09，Role: develop。**Host catalog 成员验证已通过真实 Windows 签名、篡改及信任移除测试；main 独立助手也已通过云端真实签名；本机冻结包交付与实际 ASAR 调用通过，生产者认证、完整资格签发和实时授权仍待完成。** 见[实现与验证范围](../reviews/rust-windows-catalog-verifier-2026-09-09.md)。不改变普通 Host 的 `authority_eligible=false`，不将 TEST_ONLY 结果升级为玩家资格。对应 [ADR-009](../architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)及[完整目标](./windows-full-development.md)。
 
 ## 载体与冻结顺序

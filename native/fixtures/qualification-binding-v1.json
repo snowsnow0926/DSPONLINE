@@ -1,0 +1,745 @@
+{
+  "kind": "PUBLIC_SYNTHETIC_TEST_ONLY",
+  "context": {
+    "candidate": {
+      "version": "1.2.7",
+      "sourceSha": "1111111111111111111111111111111111111111",
+      "buildId": "1.2.7+111111111111",
+      "editionId": "windows-performance-development-v1",
+      "channel": "beta",
+      "platform": "win32",
+      "arch": "x64",
+      "hostSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "asarSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "catalogSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "rulesSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "matrixSha256": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    "session": {
+      "profileId": "77777777777777777777777777777777",
+      "fixtureSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "cloudWrites": false
+    },
+    "scope": "windows-normal-main-1x-builtin-v1",
+    "publisherCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "publisherKeyVersion": 7,
+    "nowMs": 1789000000000,
+    "revocationGeneration": 3,
+    "revokedQualificationIds": [],
+    "revokedProofSetSha256": []
+  },
+  "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+  "cases": [
+    {
+      "name": "valid",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "PASS"
+    },
+    {
+      "name": "valid-issue-boundary",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "nowMs"
+          ],
+          "value": 1788999999000
+        }
+      ],
+      "expected": "PASS"
+    },
+    {
+      "name": "valid-last-millisecond",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "nowMs"
+          ],
+          "value": 1789003599999
+        }
+      ],
+      "expected": "PASS"
+    },
+    {
+      "name": "valid-maximum-window",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789086399000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "PASS"
+    },
+    {
+      "name": "unknown-version",
+      "body": "{\"schemaVersion\":2,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-contract"
+    },
+    {
+      "name": "production-body-not-validation",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-player-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-contract"
+    },
+    {
+      "name": "other-mode",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-speedrun-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-contract"
+    },
+    {
+      "name": "other-rate",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-2x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-contract"
+    },
+    {
+      "name": "other-slot",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-secondary-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-contract"
+    },
+    {
+      "name": "content-pack-scope",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-extensions-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-contract"
+    },
+    {
+      "name": "wrong-key-version",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":8,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-publisher"
+    },
+    {
+      "name": "wrong-hostSha256",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-asarSha256",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-catalogSha256",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-rulesSha256",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-matrixSha256",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-source",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"9999999999999999999999999999999999999999\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-version",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.8\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-build",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+abcdefabcdef\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-edition",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"stable-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-channel",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"stable\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-platform",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"linux\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-arch",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"arm64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "uppercase-digest",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "non-ascii-candidate",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "wrong-profile",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"99999999999999999999999999999999\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-session"
+    },
+    {
+      "name": "wrong-fixture",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-session"
+    },
+    {
+      "name": "cloud-write-request",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":true},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-session"
+    },
+    {
+      "name": "future-issued",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1789000000001,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-time"
+    },
+    {
+      "name": "expired-boundary",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789000000000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-time"
+    },
+    {
+      "name": "reversed-validity",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1788999999000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-time"
+    },
+    {
+      "name": "window-too-long",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789086399001,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-time"
+    },
+    {
+      "name": "zero-issued",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":0,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-time"
+    },
+    {
+      "name": "unsafe-time",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":9007199254740992,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-time"
+    },
+    {
+      "name": "old-generation",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":2}\n",
+      "contextPatch": [],
+      "expected": "qualification-revoked"
+    },
+    {
+      "name": "unrecognized-future-generation",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":4}\n",
+      "contextPatch": [],
+      "expected": "qualification-revoked"
+    },
+    {
+      "name": "invalid-id",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"../profile\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-identity"
+    },
+    {
+      "name": "long-id",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-identity"
+    },
+    {
+      "name": "bad-producers",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"not-a-hash\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-identity"
+    },
+    {
+      "name": "bad-proofs",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-identity"
+    },
+    {
+      "name": "unexpected-authority",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3,\"authorityEligible\":true}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "nested-extra",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false,\"unbound\":true},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "numeric-string",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":\"1788999999000\",\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "wrong-cloud-type",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":0},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "wrong-actual-publisher",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "publisherCertificateSha256"
+          ],
+          "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "expected": "qualification-publisher"
+    },
+    {
+      "name": "revoked-qualification",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "revokedQualificationIds"
+          ],
+          "value": [
+            "public-synthetic-validation-1"
+          ]
+        }
+      ],
+      "expected": "qualification-revoked"
+    },
+    {
+      "name": "revoked-proofs",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "revokedProofSetSha256"
+          ],
+          "value": [
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          ]
+        }
+      ],
+      "expected": "qualification-revoked"
+    },
+    {
+      "name": "missing-field",
+      "body": "{\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "duplicate-top",
+      "body": "{\"schemaVersion\":1,\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "duplicate-nested",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false,\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "no-newline",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "crlf",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\r\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "bom",
+      "body": "﻿{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "whitespace",
+      "body": " {\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "second-document",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "exponent",
+      "body": "{\"schemaVersion\":1e0,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "escaped-string",
+      "body": "{\"\\u0073chemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "reordered-fields",
+      "body": "{\"kind\":\"dsp-windows-validation-qualification-v1\",\"schemaVersion\":1,\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "oversized",
+      "body": "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "deep-json",
+      "body": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "contextPatch": [],
+      "expected": "qualification-format"
+    },
+    {
+      "name": "missing-scope",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "scope"
+          ],
+          "value": "all"
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "invalid-clock",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "nowMs"
+          ],
+          "value": 0
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "unsafe-clock",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "nowMs"
+          ],
+          "value": 9007199254740992
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "zero-key",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "publisherKeyVersion"
+          ],
+          "value": 0
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "context-cloud",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "session",
+            "cloudWrites"
+          ],
+          "value": true
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "context-candidate",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "candidate",
+            "buildId"
+          ],
+          "value": "forged"
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "duplicate-revocations",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "revokedQualificationIds"
+          ],
+          "value": [
+            "id",
+            "id"
+          ]
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "bad-revocation-digest",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "revokedProofSetSha256"
+          ],
+          "value": [
+            "bad"
+          ]
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "too-many-revocations",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "revokedQualificationIds"
+          ],
+          "value": [
+            "id-0",
+            "id-1",
+            "id-2",
+            "id-3",
+            "id-4",
+            "id-5",
+            "id-6",
+            "id-7",
+            "id-8",
+            "id-9",
+            "id-10",
+            "id-11",
+            "id-12",
+            "id-13",
+            "id-14",
+            "id-15",
+            "id-16",
+            "id-17",
+            "id-18",
+            "id-19",
+            "id-20",
+            "id-21",
+            "id-22",
+            "id-23",
+            "id-24",
+            "id-25",
+            "id-26",
+            "id-27",
+            "id-28",
+            "id-29",
+            "id-30",
+            "id-31",
+            "id-32",
+            "id-33",
+            "id-34",
+            "id-35",
+            "id-36",
+            "id-37",
+            "id-38",
+            "id-39",
+            "id-40",
+            "id-41",
+            "id-42",
+            "id-43",
+            "id-44",
+            "id-45",
+            "id-46",
+            "id-47",
+            "id-48",
+            "id-49",
+            "id-50",
+            "id-51",
+            "id-52",
+            "id-53",
+            "id-54",
+            "id-55",
+            "id-56",
+            "id-57",
+            "id-58",
+            "id-59",
+            "id-60",
+            "id-61",
+            "id-62",
+            "id-63",
+            "id-64",
+            "id-65",
+            "id-66",
+            "id-67",
+            "id-68",
+            "id-69",
+            "id-70",
+            "id-71",
+            "id-72",
+            "id-73",
+            "id-74",
+            "id-75",
+            "id-76",
+            "id-77",
+            "id-78",
+            "id-79",
+            "id-80",
+            "id-81",
+            "id-82",
+            "id-83",
+            "id-84",
+            "id-85",
+            "id-86",
+            "id-87",
+            "id-88",
+            "id-89",
+            "id-90",
+            "id-91",
+            "id-92",
+            "id-93",
+            "id-94",
+            "id-95",
+            "id-96",
+            "id-97",
+            "id-98",
+            "id-99",
+            "id-100",
+            "id-101",
+            "id-102",
+            "id-103",
+            "id-104",
+            "id-105",
+            "id-106",
+            "id-107",
+            "id-108",
+            "id-109",
+            "id-110",
+            "id-111",
+            "id-112",
+            "id-113",
+            "id-114",
+            "id-115",
+            "id-116",
+            "id-117",
+            "id-118",
+            "id-119",
+            "id-120",
+            "id-121",
+            "id-122",
+            "id-123",
+            "id-124",
+            "id-125",
+            "id-126",
+            "id-127",
+            "id-128"
+          ]
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "newline-proof",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\n\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-identity"
+    },
+    {
+      "name": "newline-id",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\\n\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-identity"
+    },
+    {
+      "name": "newline-source",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\\n\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "newline-hash",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\\n\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-candidate"
+    },
+    {
+      "name": "newline-profile",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\\n\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [],
+      "expected": "qualification-session"
+    },
+    {
+      "name": "newline-context-pin",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "publisherCertificateSha256"
+          ],
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        }
+      ],
+      "expected": "qualification-context"
+    },
+    {
+      "name": "newline-revocation",
+      "body": "{\"schemaVersion\":1,\"kind\":\"dsp-windows-validation-qualification-v1\",\"qualificationId\":\"public-synthetic-validation-1\",\"publisherKeyVersion\":7,\"candidate\":{\"version\":\"1.2.7\",\"sourceSha\":\"1111111111111111111111111111111111111111\",\"buildId\":\"1.2.7+111111111111\",\"editionId\":\"windows-performance-development-v1\",\"channel\":\"beta\",\"platform\":\"win32\",\"arch\":\"x64\",\"hostSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"asarSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"catalogSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"rulesSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"matrixSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"},\"scope\":\"windows-normal-main-1x-builtin-v1\",\"session\":{\"profileId\":\"77777777777777777777777777777777\",\"fixtureSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"cloudWrites\":false},\"producerSetSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"proofSetSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"issuedAtMs\":1788999999000,\"expiresAtMs\":1789003600000,\"revocationGeneration\":3}\n",
+      "contextPatch": [
+        {
+          "path": [
+            "revokedQualificationIds"
+          ],
+          "value": [
+            "valid\n"
+          ]
+        }
+      ],
+      "expected": "qualification-context"
+    }
+  ]
+}

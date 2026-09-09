@@ -91,10 +91,11 @@ try {
     $taskReport.publisherCertificateSha256 = $taskPin
     $taskPublicCertificate = Join-Path $taskFixture 'publisher.cer'
     [IO.File]::WriteAllBytes($taskPublicCertificate, $taskCertificate.RawData)
-    foreach ($taskCase in @('valid', 'unrelated')) {
+    $taskBindingVectors = Get-Content -LiteralPath (Join-Path $taskRepo 'native/fixtures/qualification-binding-v1.json') -Raw | ConvertFrom-Json
+    foreach ($taskCase in @('valid', 'unrelated', 'binding')) {
         $taskCarrier = Join-Path $taskFixture ($taskCase + '/native-qualification')
         New-Item -ItemType Directory -Path $taskCarrier | Out-Null
-        $taskBody = if ($taskCase -eq 'valid') { '{"kind":"dsp-catalog-TEST_ONLY","version":1}' } else { '{"kind":"unrelated-TEST_ONLY","version":1}' }
+        $taskBody = if ($taskCase -eq 'valid') { '{"kind":"dsp-catalog-TEST_ONLY","version":1}' } elseif ($taskCase -eq 'binding') { $taskBindingVectors.body } else { '{"kind":"unrelated-TEST_ONLY","version":1}' }
         [IO.File]::WriteAllText((Join-Path $taskCarrier 'qualification.json'), $taskBody, [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText((Join-Path $taskCarrier 'fixture.cdf'), "[CatalogHeader]`nName=qualification.cat`nCatalogVersion=2`nHashAlgorithms=SHA256`n[CatalogFiles]`n<HASH>qualification.json=qualification.json`n", [Text.UTF8Encoding]::new($false))
         Invoke-CatalogTestProcess ('makecat-' + $taskCase) $taskMakeCat @('-r', 'fixture.cdf') $taskCarrier | Out-Null
@@ -107,7 +108,7 @@ try {
     $env:DSP_CATALOG_TEST_ROOT = $taskFixture
     $env:DSP_CATALOG_TEST_PUBLISHER_SHA256 = $taskPin
     Invoke-SignedCatalogRustCase 'rust-before-trust' 'signed_fixture_without_root_trust_is_rejected' | Out-Null
-    Invoke-CatalogMainCase 'before-trust' 2
+    Invoke-CatalogMainCase 'before-trust' 3
     # CurrentUser/Root may display an interactive protected-root confirmation.
     # Use only this disposable, already-admin runner's machine root store.
     # Never alter its policies, request elevation, or use this setup locally.
@@ -118,10 +119,12 @@ try {
     if (-not (Test-Path -Path $taskOwnedRootPath)) { throw 'Owned machine test root was not installed.' }
     $taskAccepted = Invoke-SignedCatalogRustCase 'rust-signed-member' 'signed_fixture_member_publisher_and_tamper_validation'
     if ($taskAccepted -notmatch 'DSP_CATALOG_SIGNED_FIXTURE accepted=true') { throw 'Missing actual signed fixture receipt.' }
-    Invoke-CatalogMainCase 'trusted' 8
+    $taskBound = Invoke-SignedCatalogRustCase 'rust-bound-validation' 'signed_validation_body_binds_independent_program_and_session'
+    if ($taskBound -notmatch 'DSP_CATALOG_BOUND_VALIDATION accepted=true') { throw 'Missing authenticated validation-body receipt.' }
+    Invoke-CatalogMainCase 'trusted' 12
     Remove-Item -Path $taskOwnedRootPath -Confirm:$false
     Invoke-SignedCatalogRustCase 'rust-after-trust-removal' 'signed_fixture_without_root_trust_is_rejected' | Out-Null
-    Invoke-CatalogMainCase 'after-trust-removal' 2
+    Invoke-CatalogMainCase 'after-trust-removal' 3
     $taskReport.status = 'PASS'
 } catch {
     $taskFailure = $_

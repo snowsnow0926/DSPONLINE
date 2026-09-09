@@ -7,6 +7,24 @@
 
 use std::path::Path;
 
+// Never compiled into the Host/helper executable; only pure binding vectors
+// need synthetic credentials. Windows integration obtains real credentials.
+#[cfg(test)]
+impl VerifiedCatalogMember {
+    pub(crate) fn test_only_member(
+        member_bytes: Vec<u8>,
+        publisher_certificate_sha256: [u8; 32],
+    ) -> Self {
+        use sha2::{Digest, Sha256};
+        Self {
+            member_sha256: Sha256::digest(&member_bytes).into(),
+            member_bytes,
+            catalog_sha256: [0xee; 32],
+            publisher_certificate_sha256,
+        }
+    }
+}
+
 pub const MAX_QUALIFICATION_BYTES: usize = 256 * 1024;
 pub const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 const MAX_PUBLISHERS: usize = 8;

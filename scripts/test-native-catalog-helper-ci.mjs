@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { createWindowsCatalogVerifier, readAuthenticatedCatalogMember } = require('../desktop/native-catalog-verifier.cjs');
+const { bindAuthenticatedValidationQualification, readBoundValidationQualification } = require('../desktop/native-qualification-binding.cjs');
 const phase = process.argv[2];
 const fixture = process.env.DSP_CATALOG_TEST_ROOT;
 const pin = process.env.DSP_CATALOG_TEST_PUBLISHER_SHA256;
@@ -24,7 +25,8 @@ const source = path.resolve('native/target/release/dsp-catalog-verifier.exe');
 const executableSha256 = hash(fs.readFileSync(source));
 const valid = path.join(fixture, 'valid');
 const unrelated = path.join(fixture, 'unrelated');
-for (const root of [valid, unrelated]) {
+const binding = path.join(fixture, 'binding');
+for (const root of [valid, unrelated, binding]) {
   const directory = path.join(root, 'native');
   const executable = path.join(directory, 'dsp-catalog-verifier.exe');
   if (phase === 'before-trust') {
@@ -38,7 +40,7 @@ const verifier = (root, pins = [pin]) => createWindowsCatalogVerifier({
 });
 let checks = 0;
 if (phase !== 'trusted') {
-  for (const root of [valid, unrelated]) {
+  for (const root of [valid, unrelated, binding]) {
     await assert.rejects(verifier(root).authenticate(), (error) => error.code === 'trust-rejected');
     checks++;
   }
@@ -81,6 +83,23 @@ if (phase !== 'trusted') {
   }
   assert.deepEqual(readAuthenticatedCatalogMember(await verifier(valid).authenticate()).memberBytes, originalMember);
   checks++;
+  const vectors = JSON.parse(fs.readFileSync('native/fixtures/qualification-binding-v1.json', 'utf8'));
+  const context = { ...vectors.context, publisherCertificateSha256: pin };
+  const authenticated = await verifier(binding).authenticate();
+  assert.deepEqual(readAuthenticatedCatalogMember(authenticated).memberBytes, Buffer.from(vectors.body));
+  const result = readBoundValidationQualification(bindAuthenticatedValidationQualification(authenticated, context));
+  assert.deepEqual(result.qualification.candidate, vectors.context.candidate);
+  assert.equal(result.authorityEligible, false);
+  assert.equal(result.producerAuthenticated, false);
+  checks++;
+  for (const [change, code] of [
+    [{ candidate: { ...context.candidate, hostSha256: 'f'.repeat(64) } }, 'qualification-candidate'],
+    [{ session: { ...context.session, profileId: 'f'.repeat(32) } }, 'qualification-session'],
+    [{ revokedQualificationIds: [result.qualification.qualificationId] }, 'qualification-revoked'],
+  ]) {
+    assert.throws(() => bindAuthenticatedValidationQualification(authenticated, { ...context, ...change }), (error) => error.code === code);
+    checks++;
+  }
 }
 console.log(JSON.stringify({ kind: 'DSP_CATALOG_MAIN_HELPER_TEST_ONLY', phase, checks,
   executableSha256, authorityEligible: false, status: 'PASS' }));

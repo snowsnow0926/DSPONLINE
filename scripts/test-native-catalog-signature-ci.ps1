@@ -8,6 +8,13 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONME
 if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -or -not (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
     throw 'CATALOG_TEST_CI_ONLY: existing runner-owned temporary root required.'
 }
+$taskIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+try {
+    $taskPrincipal = [Security.Principal.WindowsPrincipal]::new($taskIdentity)
+    if (-not $taskPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'CATALOG_TEST_CI_ONLY: disposable runner must already have administrator rights; never request elevation.'
+    }
+} finally { $taskIdentity.Dispose() }
 [Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'BelowNormal'
 $taskRepo = Split-Path -Parent $PSScriptRoot
 $taskEvidence = Join-Path $taskRepo 'artifacts/native-windows-validation/catalog-authentication'
@@ -22,11 +29,12 @@ $taskTempBase = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
 $taskFixture = Join-Path $taskTempBase ('dsp-catalog-test-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $taskEvidence | Out-Null
 New-Item -ItemType Directory -Path $taskFixture | Out-Null
-$taskReport = [ordered]@{ status = 'FAILED'; evidenceClass = 'TEST_ONLY'; authorityEligible = $false; sourceSha = (git -C $taskRepo rev-parse HEAD); sdkVersion = $taskSdk.Name; steps = @(); fixtures = @{}; cleanup = @{} }
+$taskReport = [ordered]@{ status = 'FAILED'; evidenceClass = 'TEST_ONLY'; authorityEligible = $false; sourceSha = (git -C $taskRepo rev-parse HEAD); sdkVersion = $taskSdk.Name; testRootStore = 'LocalMachine/Root'; steps = @(); fixtures = @{}; cleanup = @{} }
 $taskCertificate = $null
 $taskThumbprint = $null
 $taskKeyName = $null
 $taskKeyProvider = $null
+$taskOwnRoot = $false
 $taskFailure = $null
 $taskPriorRoot = $env:DSP_CATALOG_TEST_ROOT
 $taskPriorPin = $env:DSP_CATALOG_TEST_PUBLISHER_SHA256
@@ -45,10 +53,12 @@ function Invoke-CatalogTestProcess([string]$Name, [string]$Program, [string[]]$A
         $taskChild.PriorityClass = 'BelowNormal'
         $taskOut = $taskChild.StandardOutput.ReadToEndAsync()
         $taskErr = $taskChild.StandardError.ReadToEndAsync()
-        if (-not $taskChild.WaitForExit(180000)) { $taskChild.Kill($true); $taskChild.WaitForExit(); throw "Catalog subprocess deadline: $Name" }
+        $taskTimedOut = -not $taskChild.WaitForExit(180000)
+        if ($taskTimedOut) { $taskChild.Kill($true); $taskChild.WaitForExit() }
         $taskText = $taskOut.GetAwaiter().GetResult() + "`n" + $taskErr.GetAwaiter().GetResult()
         [IO.File]::WriteAllText((Join-Path $taskEvidence ($Name + '.log')), $taskText)
-        $taskReport.steps += @{ name = $Name; exitCode = $taskChild.ExitCode }
+        $taskReport.steps += @{ name = $Name; exitCode = $taskChild.ExitCode; timedOut = $taskTimedOut }
+        if ($taskTimedOut) { throw "Catalog subprocess deadline: $Name" }
         if ($taskChild.ExitCode -ne 0) { throw "Catalog subprocess failed: $Name" }
         if ($Name.StartsWith('rust-') -and $taskText -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') { throw "Exact Rust fixture did not execute: $Name" }
         return $taskText
@@ -89,10 +99,17 @@ try {
     $env:DSP_CATALOG_TEST_ROOT = $taskFixture
     $env:DSP_CATALOG_TEST_PUBLISHER_SHA256 = $taskPin
     Invoke-SignedCatalogRustCase 'rust-before-trust' 'signed_fixture_without_root_trust_is_rejected' | Out-Null
-    Invoke-CatalogTestProcess 'install-owned-test-root' $taskCertUtil @('-user', '-f', '-addstore', 'Root', $taskPublicCertificate) $taskRepo | Out-Null
+    # CurrentUser/Root may display an interactive protected-root confirmation.
+    # Use only this disposable, already-admin runner's machine root store.
+    # Never alter its policies, request elevation, or use this setup locally.
+    $taskOwnedRootPath = 'Cert:\LocalMachine\Root\' + $taskThumbprint
+    if (Test-Path -Path $taskOwnedRootPath) { throw 'Unexpected pre-existing test root certificate.' }
+    $taskOwnRoot = $true
+    Invoke-CatalogTestProcess 'install-owned-test-root' $taskCertUtil @('-f', '-addstore', 'Root', $taskPublicCertificate) $taskRepo | Out-Null
+    if (-not (Test-Path -Path $taskOwnedRootPath)) { throw 'Owned machine test root was not installed.' }
     $taskAccepted = Invoke-SignedCatalogRustCase 'rust-signed-member' 'signed_fixture_member_publisher_and_tamper_validation'
     if ($taskAccepted -notmatch 'DSP_CATALOG_SIGNED_FIXTURE accepted=true') { throw 'Missing actual signed fixture receipt.' }
-    Remove-Item -Path ('Cert:\CurrentUser\Root\' + $taskThumbprint) -Confirm:$false
+    Remove-Item -Path $taskOwnedRootPath -Confirm:$false
     Invoke-SignedCatalogRustCase 'rust-after-trust-removal' 'signed_fixture_without_root_trust_is_rejected' | Out-Null
     $taskReport.status = 'PASS'
 } catch {
@@ -104,9 +121,9 @@ try {
     $env:DSP_CATALOG_TEST_PUBLISHER_SHA256 = $taskPriorPin
     try {
         if ($taskThumbprint) {
-            $taskRootPath = 'Cert:\CurrentUser\Root\' + $taskThumbprint
+            $taskRootPath = 'Cert:\LocalMachine\Root\' + $taskThumbprint
             $taskMyPath = 'Cert:\CurrentUser\My\' + $taskThumbprint
-            if (Test-Path -Path $taskRootPath) { Remove-Item -Path $taskRootPath -Confirm:$false }
+            if ($taskOwnRoot -and (Test-Path -Path $taskRootPath)) { Remove-Item -Path $taskRootPath -Confirm:$false }
             if (Test-Path -Path $taskMyPath) { Remove-Item -Path $taskMyPath -DeleteKey -Confirm:$false }
             $taskReport.cleanup.rootCertificateAbsent = -not (Test-Path -Path $taskRootPath)
             $taskReport.cleanup.personalCertificateAbsent = -not (Test-Path -Path $taskMyPath)

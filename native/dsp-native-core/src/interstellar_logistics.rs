@@ -9316,7 +9316,9 @@ mod tests {
         let activity = prepare_route_activity(&entities);
         let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
         let scan = update_congestion_with_runtime(
-            &DeterministicRuntime::for_test(worker_count),
+            // Require an actual second mapper to enter before the short
+            // fixture can finish on the first available Rayon worker.
+            &DeterministicRuntime::for_test_with_indexed_worker_participation(worker_count),
             &state,
             base,
             &mut entities,

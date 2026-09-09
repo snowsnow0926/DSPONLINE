@@ -17,6 +17,54 @@ pub(crate) const NATIVE_THREAD_STACK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WORKERS: usize = 8;
 const JOINED_DROP_CHUNKS_PER_WORKER: usize = 4;
 
+/// A bounded scheduling precondition for the two production-updater tests
+/// that specifically need distinct workers to execute their mapping closure.
+/// A Rayon pool may otherwise complete a short map on only one worker.
+#[cfg(test)]
+#[derive(Default)]
+struct IndexedWorkerRendezvous {
+    state: Mutex<IndexedWorkerRendezvousState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct IndexedWorkerRendezvousState {
+    seen: u16,
+    expired: bool,
+}
+
+#[cfg(test)]
+impl IndexedWorkerRendezvous {
+    fn arrive(&self, worker_index: usize, timeout: std::time::Duration) -> bool {
+        assert!(worker_index < MAX_WORKERS);
+        let mut state = self.state.lock().expect("worker rendezvous poisoned");
+        if state.expired {
+            return false;
+        }
+        let previous = state.seen;
+        state.seen |= 1_u16 << worker_index;
+        if state.seen.count_ones() >= 2 {
+            if previous.count_ones() < 2 {
+                self.changed.notify_all();
+            }
+            return true;
+        }
+        let (mut state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| {
+                !state.expired && state.seen.count_ones() < 2
+            })
+            .expect("worker rendezvous poisoned while waiting");
+        if state.expired || state.seen.count_ones() < 2 {
+            state.expired = true;
+            self.changed.notify_all();
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct JoinedDropDiagnostics {
     pub worker_count: usize,
@@ -58,6 +106,8 @@ pub(crate) struct IndexedPrepareDiagnostics {
 pub(crate) struct DeterministicRuntime {
     worker_limit: usize,
     pool: Option<ThreadPool>,
+    #[cfg(test)]
+    require_indexed_worker_participation: bool,
 }
 
 pub(crate) fn resolve_worker_limit(requested: Option<&str>, available: usize) -> usize {
@@ -86,13 +136,20 @@ impl DeterministicRuntime {
                     .build()?,
             )
         };
-        Ok(Self { worker_limit, pool })
+        Ok(Self {
+            worker_limit,
+            pool,
+            #[cfg(test)]
+            require_indexed_worker_participation: false,
+        })
     }
 
     fn serial() -> Self {
         Self {
             worker_limit: 1,
             pool: None,
+            #[cfg(test)]
+            require_indexed_worker_participation: false,
         }
     }
 
@@ -100,6 +157,13 @@ impl DeterministicRuntime {
     pub(crate) fn for_test(worker_limit: usize) -> Self {
         assert!(matches!(worker_limit, 1 | 2 | 4 | 8));
         Self::build(worker_limit).expect("test deterministic runtime pool should build")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_indexed_worker_participation(worker_limit: usize) -> Self {
+        let mut runtime = Self::for_test(worker_limit);
+        runtime.require_indexed_worker_participation = worker_limit > 1;
+        runtime
     }
 
     pub(crate) fn worker_limit(&self) -> usize {
@@ -472,6 +536,10 @@ impl DeterministicRuntime {
         }
 
         let worker_mask = AtomicU16::new(0);
+        #[cfg(test)]
+        let rendezvous = self
+            .require_indexed_worker_participation
+            .then(IndexedWorkerRendezvous::default);
         let mapped = self
             .pool
             .as_ref()
@@ -483,6 +551,16 @@ impl DeterministicRuntime {
                     .map(|(index, value)| {
                         if let Some(worker_index) = rayon::current_thread_index() {
                             worker_mask.fetch_or(1_u16 << worker_index, Ordering::Relaxed);
+                            #[cfg(test)]
+                            if let Some(rendezvous) = &rendezvous {
+                                assert!(
+                                    rendezvous.arrive(
+                                        worker_index,
+                                        std::time::Duration::from_secs(2),
+                                    ),
+                                    "indexed mapping did not admit a second worker within the test rendezvous deadline"
+                                );
+                            }
                         }
                         map(index, value)
                     })
@@ -1020,6 +1098,57 @@ mod tests {
                     assert_eq!(name, &format!("dsp-native-core-{index}"));
                 });
             }
+        }
+    }
+
+    #[test]
+    fn indexed_rendezvous_counts_distinct_workers_and_has_a_bounded_failure() {
+        let rendezvous = IndexedWorkerRendezvous::default();
+        assert!(!rendezvous.arrive(0, std::time::Duration::ZERO));
+        assert!(!rendezvous.arrive(0, std::time::Duration::ZERO));
+        assert!(!rendezvous.arrive(1, std::time::Duration::ZERO));
+
+        for second_worker in [0, 1] {
+            let rendezvous = IndexedWorkerRendezvous::default();
+            rendezvous.state.lock().unwrap().seen = 1;
+            assert_eq!(
+                rendezvous.arrive(second_worker, std::time::Duration::ZERO),
+                second_worker != 0
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_participation_probe_keeps_order_errors_and_serial_thresholds() {
+        let values = (0..PARALLEL_MIN_ITEMS + 257).collect::<Vec<_>>();
+        for worker_limit in [1, 2, 4, 8] {
+            let runtime =
+                DeterministicRuntime::for_test_with_indexed_worker_participation(worker_limit);
+            let (result, diagnostics) =
+                runtime.indexed_try_map_with_diagnostics(&values, |index, value| Ok(index + value));
+            assert_eq!(
+                result.unwrap(),
+                values.iter().map(|value| value * 2).collect::<Vec<_>>()
+            );
+            assert_eq!(diagnostics.selected_worker_count, worker_limit);
+            assert!(
+                (if worker_limit == 1 { 1 } else { 2 }..=worker_limit)
+                    .contains(&diagnostics.observed_worker_count)
+            );
+
+            let (small, small_diagnostics) =
+                runtime.indexed_try_map_with_diagnostics(&values[..1], |_, value| Ok(*value));
+            assert_eq!(small.unwrap(), vec![0]);
+            assert_eq!(small_diagnostics.observed_worker_count, 1);
+            assert!(!small_diagnostics.parallel);
+
+            let (error, _) = runtime.indexed_try_map_with_diagnostics(&values, |index, _| {
+                if index == 0 || index == PARALLEL_MIN_ITEMS {
+                    anyhow::bail!("failure at {index}");
+                }
+                Ok(index)
+            });
+            assert_eq!(error.unwrap_err().to_string(), "failure at 0");
         }
     }
 

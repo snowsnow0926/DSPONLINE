@@ -3934,7 +3934,7 @@ mod tests {
             prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
         let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
         let scan = update_congestion_with_runtime(
-            &DeterministicRuntime::for_test(worker_count),
+            &DeterministicRuntime::for_test_with_indexed_worker_participation(worker_count),
             &state,
             &mut entities,
             &mut directory,

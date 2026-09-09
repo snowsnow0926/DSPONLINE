@@ -19,7 +19,9 @@
 
 全部八轮导出 **208,891,374 bytes** 与前六项完整 JS 对照已通过的参考字节相同，SHA-256 `15c91fa1509ad6949d22a2db6a257890992c1dfb9b3bcd635bd8d1ec9c1cb934`；本轮没有另外重跑一遍独立 JS。完整候选摘要 `6cf99f1d4d8bb0f172448c1c2e790b7cf5acd2cf47de9a6bede3e28a5ee8f96b`，八个 Host 正常 exit 0，无信号；每次启动空闲至少 6 GiB，原档和干净源码保持不变，临时文件已清理。外部守护正常 exit 0、无停止原因，414.3846669 秒，最低空闲 6,259,208 KiB。证据：`native-canonical-buffer-private-ab-v1/report.json` 及对应 guard。
 
-9e 云端当前生产构建、类型与 Linux 游戏单元已成功；其余仍运行。E2E 分片 2 在 stable Chrome 的原 30 秒启动预检失败，**零游戏测试执行**；一次指定 job 重试请求被 GitHub 以“整个 run 仍运行”拒绝，没有实际重跑。待 run 终态后仅重试这项初始化失败，原失败记录保留。9e 尚未形成新的冻结 Windows 包，1df 的完整浏览器失败仍单列如下。
+9e 云端已终态：Windows run `34401123960` / job `102632990386` 全部成功，正常优化核心 1,116/6 ignored、Host 库 263/4 ignored、主程序/助手各 3 通过，真实 TEST_ONLY 签名生命周期通过；Native 工具 **851 pass / 0 fail / 1 skip**，Windows 游戏 **3,201 pass / 39 skip / 0 fail**。CI run `34401123908` 的生产构建、Linux 类型/游戏 **3,198/42 skip**、Server/Ops/Native 均成功（Linux Native 工具 835/17 skip）。合并源码 `764ebbcbf5ef5a4cae8b96fa446ef90f77b28cda`，与新安装提供者提交分开记录。
+
+浏览器分片 1 **241 pass / 11 skip / 2 fail / 0 flaky**：v103 星图草稿场景先卡在辅助函数硬编码的附带离线报告“1 秒”，实际为“2 秒”，尚未进入草稿断言；v120 暂停画布峰值帧间隔 850/833.2 ms 超过原 800 ms。分片 2 在 stable Chrome 原 30 秒启动预检失败，**零游戏测试执行**。此前指定 job 重试请求被 GitHub 以“整个 run 仍运行”拒绝，没有实际重跑；此时后续安装身份候选已就绪，改由新提交的完整 CI 验证，不再重跑后立即被新推送取消旧作业。9e 浏览器结果不完整，失败记录保留；1df 的历史完整结果如下。
 
 ## 新冻结包与真实终局流程
 

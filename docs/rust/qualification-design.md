@@ -1,6 +1,6 @@
 # Windows Rust 资格证据与准入设计
 
-2026-09-09，Role: develop。当前只完成开发证据一致性检查器；生产准入、签名资格载体和证据生产流水线尚未实现。对应 [ADR-009](../architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)，完整范围见[执行计划](./windows-full-development.md)。
+2026-09-09，Role: develop。当前完成开发证据检查器，以及七项实际 Rust 库测试的 TEST_ONLY 采集；生产准入、签名资格载体和完整证据流水线尚未实现。对应 [ADR-009](../architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)，完整范围见[执行计划](./windows-full-development.md)。
 
 ## 1. 要解决的问题
 
@@ -61,6 +61,8 @@ node scripts/native-qualification-evidence.mjs <candidate.json> <evidence-direct
 
 ## 6. 当前增量与后续实现
 
-本批交付证据文件的有界读取、候选/报告绑定、时效/撤销检查、结果分类及负例测试。没有接到 main、preload 或 Host，不开放实时权威。
+前一批交付证据文件的有界读取、候选/报告绑定、时效/撤销检查、结果分类及负例测试。没有接到 main、preload 或 Host，不开放实时权威。
 
-接下来实现真实报告生产适配器，先从已存在的租约、命令、持久化和重开测试提取最小可信观察；记录断言版本、原始证据引用与数值阈值，再连接隐藏实包驱动。随后完善正式载体/验证设计、受限实际接管、完整玩法矩阵与发布验证。不能因为这个检查器通过就勾选这些后续项。
+当前新增 `native-realtime-foundation.mjs`：构建实际正常优化 Host 库测试程序，采集固定七项既有测试的准确执行/结果账目，记录源码/依赖、程序和原始日志摘要。Windows CI 在完整 Rust 测试后运行；`npm run native:realtime-foundation -- artifacts/<fresh-directory>` 必须使用新目录，不能覆盖旧证据。每项标为 `rust-host-library-test` / `registry-reopen-in-test-process`，报告类型与上述 12 项资格协议分开，scope/Host/ASAR 资格为空，始终不能授予权威或发布。
+
+七项 7/7 只证明合成夹具下的库行为；直接准备租约、进程内重开及合成命令不等于 public handoff、真正 Host 崩溃恢复、完整守恒或性能。见[运行证据](../reviews/rust-windows-realtime-foundation-2026-09-09.md)。下一步补独立子进程恢复和实际桌面交接，再完善正式载体/验证、受限接管、完整玩法和发布验证；不能将 TEST_ONLY 日志拼成完整全绿资格。

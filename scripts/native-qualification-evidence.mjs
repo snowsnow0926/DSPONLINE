@@ -144,7 +144,16 @@ export function auditNativeQualificationEvidence({ directory, candidate, nowMs, 
   };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectInvocation()) {
   try {
     if (process.argv.length !== 4) reject("usage-candidate-json-evidence-directory");
     const candidatePath = path.resolve(process.argv[2]);

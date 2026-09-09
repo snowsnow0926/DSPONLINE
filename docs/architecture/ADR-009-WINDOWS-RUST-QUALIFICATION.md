@@ -1,7 +1,7 @@
 # ADR-009: Separate development evidence from Windows Rust authority
 
 - Date: 2026-09-09
-- Status: development evidence contract implemented; production trust and activation design pending
+- Status: development evidence contract and fixed Rust library test collection implemented; production trust and activation design pending
 - Extends: [ADR-008](./ADR-008-WINDOWS-PERFORMANCE-EDITION.md)
 - Compatibility: no GameState, envelope, cloud, Host protocol or player-authority change
 
@@ -18,6 +18,8 @@ Reuse the existing desktop artifact path checks; hash bounded metadata from the 
 The initial roster covers only the normal-mode, 1x, built-in-content realtime foundation. Full game coverage, speedrun, content combinations, numerical acceptance thresholds, hardware and release qualification remain separate required work. A producer's self-reported Rust execution label is not independent proof of execution.
 
 ## Production decisions still required
+
+The first producer now runs seven fixed optimized Host library tests and binds their actual executable, input sources and raw logs. Its distinct TEST_ONLY report explicitly identifies registry reopening within a test process; direct fixture activation, synthetic command leaves and process-local recovery do not qualify desktop handoff, process-crash recovery, conservation or performance. It cannot populate a complete passing qualification bundle. See [the execution evidence](../reviews/rust-windows-realtime-foundation-2026-09-09.md).
 
 Before runtime integration, specify and implement authenticated producer provenance, the Windows publisher-bound qualification carrier, verifier placement in both main and Host, bounded validation-only execution, expiry/revocation freshness and anti-rollback, exact content/mode matching, and active-session failure handling. Preserve the existing Windows signing and artifact trust boundary; do not replace it with a self-authored JSON allowlist.
 

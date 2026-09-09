@@ -1,5 +1,7 @@
 # 系统架构
 
+> 开发证据生产器构建并运行固定七项正常 release Rust Host 库测试，绑定源码/依赖、测试程序和原始日志；结果明确进程内重开、独立 TEST_ONLY 类型，包/资格 scope 为空，不能输入运行时取得权威。Windows CI 按既有失败传播规则采集，详见[执行与范围](./reviews/rust-windows-realtime-foundation-2026-09-09.md)。
+
 > 开发侧新增 TEST_ONLY 资格证据一致性检查：有界读取同一份字节做摘要和解析，绑定独立冻结的 source/Host/ASAR/catalog/rules/matrix，区分实际执行方式和 passed/failed/skipped/flaky。它未接入 renderer/main/Host，始终不授予身份认证、实时权威或发布许可；正式信任链仍待实现，见[ADR-009](./architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)。
 
 > Rust 建造阶段 `run_centers()` 直接移动从候选基础状态移出的 automation/jobs/quantumMaterialBuffer 映射，避免先取得所有权又递归复制。必需字段错误、可选空缓冲、调度与写回规则不变；完整核心回归通过，完整用户等待收益待测。

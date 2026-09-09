@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-09 实时基础证据采集**：正常 release Host 库测试七项实际执行 7/7；工具/链接入口/后台专项 82/82，源码/程序/日志及 CI 步骤核验通过。恢复断言仍为进程内重开，未取得实包、完整守恒/性能或发布资格。重测 6/2 GiB、工具 3/2 GiB 守护正常退出，零游戏窗口。4c3 云端 Ops 新失败已修复且通过原检查，当前提交完整云端待验。见[证据](./reviews/rust-windows-realtime-foundation-2026-09-09.md)。
+
 > **2026-09-09 Windows Rust 证据基础与验证补修**：工具/ASAR/后台/身份/发布内容专项 104 通过 / 1 条件跳过 / 0 失败，ASAR 旧写入反例先失败后通过；跳过为缺跨平台符号链接权限，Windows 联接负例通过。Rust 建造候选的完整正常 release 核心 1,113/5 ignored/0 fail、fmt 与严格 workspace/all-targets Clippy 通过。重测 6/2 GiB 守护正常退出，零游戏启动；新 Host/性能 A/B/实包及新云端尚待验。见[本批证据](./reviews/rust-windows-qualification-foundation-2026-09-09.md)。
 
 > **2026-09-09 校验循环及解析参与候选**：六文件专项 42/42、完整终局保存六次主档/备份/快照一致、后台策略 6/6；配对保存中位 13.444→13.146 秒，原档不变，6/2 GiB 守护。完整本机游戏单元 3,173/39 skip/0 fail、类型/Web 构建及门禁通过；正常 release 完整核心 1,113/5 ignored/0 fail、fmt/严格 Clippy 通过。253 包 75/78 件冻结通过，但真实终局完成入口仍超原 90 秒；253 Linux 构建/单元/Server/Ops/Native 通过，浏览器 440/33 skip/11 unexpected/4 flaky，Windows 核心 1,112/5 ignored/1 实际解析参与断言失败，后续跳过。新源码待验范围见[准确证据](./reviews/rust-rp1-save-checksum-2026-09-09.md)。

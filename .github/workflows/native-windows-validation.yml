@@ -79,6 +79,10 @@ jobs:
         run: |
           cargo test --release --manifest-path native/Cargo.toml --workspace --locked -- --test-threads=2 2>&1 | Tee-Object artifacts/native-windows-validation/rust-release.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Collect TEST_ONLY realtime foundation receipts
+        run: |
+          node scripts/native-realtime-foundation.mjs artifacts/native-windows-validation/realtime-foundation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build optimized Windows Host
         run: |
           npm run native:build-host 2>&1 | Tee-Object artifacts/native-windows-validation/host-build.log

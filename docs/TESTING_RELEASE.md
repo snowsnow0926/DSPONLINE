@@ -1,5 +1,9 @@
 # 测试与发布基线
 
+> **22a Windows 最终验证（2026-09-10）**：最终正文绑定的 Windows run 34383362870 已全部 SUCCESS，核心 1,115/5 ignored、Host 库 263/4 ignored、主程序/助手各 3、Native 845/1 skip、游戏 3,193/39 skip。真实签名 14 步、main 受信 12 检查和四项清理回执已下载核验；两端 76 共享向量通过。下方初版待验项是历史记录，本批最终结果见[准确证据](./reviews/rust-windows-validation-binding-2026-09-10.md)。玩家权威仍关闭，当前 UI/启动修复仍待新源码执行。
+
+> **2026-09-10 保存/启动/UI 待验候选**：保留完整存档校验、施工反馈和 500 ms 冷菜单门槛，新增启动存档阻塞及统计控件横竖屏/80–200% 字号实际点击。22a 浏览器初次及失败作业复跑均在 Google apt 索引哈希不一致处停止，零测试执行；新的已有 Chrome 实际启动探针待验，不放宽安装校验。UI 类型/完整单元/构建/专项/全量 E2E/截图均尚待本批执行，见[记录](./reviews/rust-windows-save-ui-candidate-2026-09-10.md)。
+
 > **2026-09-10 0657 云端终态**：Windows run 34379306025 全部 SUCCESS；核心 1,115/5 ignored、Host 库 260/3 ignored + 主程序/助手各 3、Native 766/1 skip、游戏 3,193/39 skip，均零失败。完整浏览器 462/33 skip/4 fail/1 flaky，原门槛保留。新正文绑定代码 b410 的最终轻量专项、Rust 编译/执行与真实签名另行待验；本机三分钟元数据预检因余量不足未启动 Node，最终文档/Skill 工具检查也未执行，见[完整边界](./reviews/rust-windows-validation-binding-2026-09-10.md)。
 
 > **2026-09-10 验证专用正文候选**：初版轻量 Node 专项 143 pass/0 skip/0 fail、Rust 格式通过，3/2 GiB 守护正常 exit 0；修正尾部换行后共 76 共享向量，最终复验因内存预检未启动。本机没有运行 Rust 编译、游戏或证书安装；最终源码和 Rust/真实签名 Host/main 绑定仍待验。新源码与 741 冻结包分开记录，详见[证据边界](./reviews/rust-windows-validation-binding-2026-09-10.md)。

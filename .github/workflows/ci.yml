@@ -101,7 +101,12 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             playwright-${{ runner.os }}-
-      - run: npx playwright install --with-deps chrome
+      - name: Prepare and verify stable Chrome
+        run: |
+          if [ ! -x /opt/google/chrome/chrome ]; then
+            npx playwright install --with-deps chrome
+          fi
+          node scripts/verify-ci-chrome.mjs
       - run: npm run test:e2e -- --shard=1/2
       - name: Report slowest tests in this shard
         if: always()
@@ -146,7 +151,12 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             playwright-${{ runner.os }}-
-      - run: npx playwright install --with-deps chrome
+      - name: Prepare and verify stable Chrome
+        run: |
+          if [ ! -x /opt/google/chrome/chrome ]; then
+            npx playwright install --with-deps chrome
+          fi
+          node scripts/verify-ci-chrome.mjs
       - run: npm run test:e2e -- --shard=2/2
       - name: Report slowest tests in this shard
         if: always()

@@ -2,7 +2,7 @@
 
 2026-09-10，Role: develop，开发分支 `codex/rust-rp1-after-1.2.7`。完整 Windows Rust Goal 保持进行中；本批不发布、不启用玩家实时权威。
 
-运行代码已提交 `b410747601674907ad9914ca77a14ae881761968`；后续本批提交仅更新证据文档。最终源码待云端编译/执行，提交不表示资格通过。
+运行代码已提交 `b410747601674907ad9914ca77a14ae881761968`，证据提交 `22a80a00d2ab7a56f843493dbd2de0dfeaa8c7c5`。对应云端 Windows 完整检查已通过；这是验证专用正文绑定通过，仍不授予玩家实时资格。
 
 ## 改动及边界
 
@@ -13,6 +13,16 @@ main 与 Host 增加独立正文绑定器，消费既有不可伪造的验签凭
 当前合同只支持普通主槽、1×、内建内容、隔离合成存档、禁止云写入的验证专用范围。生产者摘要只是引用；可信时间与撤销的取得、防回退、发布者生产策略、完整资格、实际实时接管仍待完成。JS 回执明确 `producerAuthenticated=false / authorityEligible=false / releaseAllowed=false`；Host 绑定结果不授予权威，普通 Host `authority_eligible=false` 未改。没有 GameState、存档封装、云数据或玩法变化。
 
 ## 当前验证
+
+### 最终源码云端结果
+
+[Windows run 34383362870](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34383362870) / job `102573396629` 全部 SUCCESS，对应 PR merge `d28f48b43b1d96c0ac9f0384c9f20abf6008808c`。严格 Clippy、格式、实际签名、优化 Rust、Host 构建、Native 工具、类型和游戏单元全部通过：核心 **1,115 pass / 5 ignored**，Host 库 **263 pass / 4 ignored**、主程序及助手各 **3 pass**，Native 工具 **845 pass / 1 skip**，游戏 **3,193 pass / 39 skip**，均零失败。最终 76 个共享向量已在两端完整检查中执行；下面本机初版记录仅保留过程，不代表最终结果缺失。
+
+签名 artifact `10117124637` 已下载，ZIP SHA-256 `16933a1d6e498a2055a409e01dff686f8c955a856ca02470763f20647c84020f` 与 GitHub 摘要一致。回执 sourceSha 与 merge 一致，**14 步 exit 0、无超时**；Host 新增真实签名绑定正例及程序不符/会话不符/撤销拒绝均通过，main 受信阶段 12 检查通过。信任前及移除后拒绝均通过；个人证书、私钥、测试根与夹具清理四项均 true。结果保持 `TEST_ONLY / authorityEligible=false`。
+
+最终诊断 artifact `10117909600`、Host artifact `10117910938` 已上传，尚未下载/冻结为本机桌面包。22a 的 Linux CI 浏览器两次在 Chrome apt 索引哈希错误处中止，未执行游戏测试；环境准备与 UI 修复另见[下一批候选](./rust-windows-save-ui-candidate-2026-09-10.md)。
+
+### 本机初版与历史基线
 
 - 初版本机轻量专项：**143 pass / 0 skip / 0 fail**，包含初版 69 共享向量、损坏 UTF-8/伪造凭据/拷贝隔离、原 main 助手、开发证据审计、证书 CI 拒绝预检、入口语法与包卫生。
 - 复查后修正 JS 正则 `$` 可接受末尾 LF 的边界，追加 7 个公开负例，当前共 76 向量。`qualification-binding-focused-v2-wrapper.json` 记录预检内存不足，未启动 Node 或游戏；143 项初版结果不冒充最终源码通过，最终复验待执行。

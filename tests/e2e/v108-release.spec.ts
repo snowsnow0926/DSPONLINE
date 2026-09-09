@@ -116,8 +116,12 @@ test("structurally complete checksum failures show real progress and require two
   await result.getByRole("button", { name: "再次确认并救援" }).click();
   expect((await download).suggestedFilename()).toContain("rescue-backup");
   await expect(page.locator(".factory-canvas")).toBeVisible();
-  const integrity = await page.evaluate(() => {
-    const rawSave = window.localStorage.getItem("dsp-idle-network.save.v1")!;
+  const integrity = await page.evaluate(async () => {
+    const local = await import("/src/game/localSaveStore.ts");
+    // The verified Worker save releases the main-thread payload cache. Check
+    // the durable primary independently rather than that disposable mirror.
+    const rawSave = await local.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+    if (rawSave === null) throw new Error("rescued-primary-not-durable");
     const parsed = JSON.parse(rawSave);
     return { formatVersion: parsed.formatVersion, version: parsed.state.version, checksum: parsed.checksum, state: parsed.state };
   });

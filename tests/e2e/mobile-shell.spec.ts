@@ -376,6 +376,36 @@ test("next mobile manufacturing finds the install-only spray module by player al
   }
 });
 
+for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+  test(`mobile production filters and ranges fit at all font scales in ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed"));
+    await openNextMobile(page, viewport);
+    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await page.getByRole("button", { name: /生产统计/ }).click();
+    const statistics = page.getByRole("dialog", { name: "生产统计" });
+    await expect(statistics.locator(".statistics-production")).toBeVisible();
+    for (const scale of [0.8, 1, 1.25, 1.5, 2]) {
+      await page.evaluate(scale => {
+        document.documentElement.style.setProperty("--ui-font-scale", String(scale));
+        document.documentElement.dataset.uiFontScale = String(scale * 100);
+      }, scale);
+      await expect.poll(() => statistics.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      const ranges = statistics.getByRole("group", { name: "生产统计时间范围" }).getByRole("button");
+      await expect(ranges).toHaveCount(4);
+      for (let index = 0; index < 4; index++) {
+        const range = ranges.nth(index);
+        await range.click();
+        await expect(range).toHaveAttribute("aria-pressed", "true");
+        const size = await range.boundingBox();
+        expect(size?.width).toBeGreaterThanOrEqual(44);
+        expect(size?.height).toBeGreaterThanOrEqual(44);
+      }
+      await ranges.first().scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `artifacts/qa/rust-mobile-statistics-${viewport.width}x${viewport.height}-${scale * 100}.png`, fullPage: true });
+    }
+  });
+}
+
 test("technology, recipes and star map use route-backed mobile list and detail views", async ({ page }) => {
   await openNextMobile(page);
   await page.getByRole("button", { name: "科研", exact: true }).click();

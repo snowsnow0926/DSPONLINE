@@ -1,5 +1,9 @@
 # DSP极简网络项目现状
 
+> **22a Windows 最终验证（2026-09-10）**：最终正文绑定的 Windows run 34383362870 已全部 SUCCESS，核心 1,115/5 ignored、Host 库 263/4 ignored、主程序/助手各 3、Native 845/1 skip、游戏 3,193/39 skip。真实签名 14 步、main 受信 12 检查和四项清理回执已下载核验；两端 76 共享向量通过。下方初版待验项是历史记录，本批最终结果见[准确证据](./reviews/rust-windows-validation-binding-2026-09-10.md)。玩家权威仍关闭，当前 UI/启动修复仍待新源码执行。
+
+> **Windows Rust 保存与启动候选（2026-09-10，未发布）**：保存拒绝提示按操作 ID 保留，菜单模块与存档准备并行但挂载仍等待存档；手机统计布局与救援/施工验证同步调整，新增阻塞启动和字号/横竖屏检查。22a 浏览器两次在 Chrome 软件源更新失败，CI 候选改用已有 Stable Chrome 的实际无头探针，缺失时保留原安装。新 UI/启动/CI 准备尚待执行验证，见[本批范围](./reviews/rust-windows-save-ui-candidate-2026-09-10.md)。
+
 > **0657 云端终态（2026-09-10）**：Windows run 34379306025 全部 SUCCESS：正常优化核心 1,115/5 ignored、Host 库 260/3 ignored、主程序/助手各 3、Native 工具 766/1 skip、游戏 3,193/39 skip，均零失败。完整浏览器 462 pass/33 skip/4 fail/1 flaky，发布门禁仍未通过；新绑定代码 b410 与该候选分开记录，见[本轮交接](./reviews/rust-windows-validation-binding-2026-09-10.md)。
 
 > **Windows Rust 资格正文绑定（2026-09-10，未发布）**：main/Host 候选与隔离会话绑定代码及 76 个共享正反例已加入。初版轻量 Node 专项 143/143 与 Rust 格式通过；随后修正尾部换行并增加 7 例，复验因内存预检未启动。最终源码复验、Rust 编译及新增真实签名仍待执行，未计为通过。生产者、可信时间/撤销提供者和实际实时准入仍待完成，Host 权威关闭，见[准确范围](./reviews/rust-windows-validation-binding-2026-09-10.md)。

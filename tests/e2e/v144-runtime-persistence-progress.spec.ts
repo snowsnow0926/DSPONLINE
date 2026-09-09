@@ -80,6 +80,7 @@ test("default save protection rejects edits without pausing a running autosave",
   await expect(shell).toHaveAttribute("data-persistence-kind", "manual");
   await expect(shell).toHaveAttribute("data-persistence-phase", "complete", { timeout: 15_000 });
   await expect(shell).toHaveAttribute("data-primary-save-edit-lock", "false");
+  await expect(page.locator(".game-notice")).toContainText("本次操作未应用；现在可以重新操作");
 
   await page.getByLabel("暂停模拟").click();
   await expect(shell).toHaveAttribute("data-simulation-paused", "true");
@@ -94,6 +95,7 @@ test("default save protection rejects edits without pausing a running autosave",
     }
   });
   await expect(shell).toHaveAttribute("data-persistence-kind", "autosave", { timeout: 5_000 });
+  await expect(page.locator(".game-notice")).not.toContainText("本次操作未应用");
   await expect(shell).toHaveAttribute("data-simulation-paused", "false");
   await expect(shell).toHaveAttribute("data-persistence-phase", "complete", { timeout: 15_000 });
   await expect(shell).toHaveAttribute("data-primary-save-edit-lock", "false");

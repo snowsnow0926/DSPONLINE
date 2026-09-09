@@ -103,6 +103,12 @@ function packageIdentity(root, expected, identity, { requireOffline = false, req
   if (actual.editionId !== identity.editionId || metadata.version !== expected.version || metadata.releaseChannel !== expected.channel) {
     throw new Error("Packaged metadata differs from expected version, edition or channel");
   }
+  // Historical packages lack these fields and remain inspectable. If present,
+  // both must match the independently frozen build, including dirty status.
+  if ((metadata.nativeBuildSourceSha !== undefined || metadata.nativeBuildId !== undefined)
+      && (metadata.nativeBuildSourceSha !== expected.sourceSha || metadata.nativeBuildId !== expected.buildId)) {
+    throw new Error("Packaged native program metadata differs from expected source identity");
+  }
   const version = JSON.parse(extractFile(asar, "dist/version.json").toString("utf8"));
   if (version.version !== expected.version || version.buildId !== expected.buildId || version.platform !== "desktop") {
     throw new Error("Packaged dist differs from the expected source Build ID");

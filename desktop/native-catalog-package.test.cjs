@@ -32,6 +32,20 @@ test("new package evidence binds helper bytes to the identity embedded inside ap
   assert.throws(() => verifyDesktopBuildEvidence(f.directory, options), /digest or size mismatch/);
 });
 
+test("package evidence rejects source metadata inconsistent with the independently frozen candidate", async (t) => {
+  const f = await fixture(t);
+  const source = path.join(f.root, "asar-input-release");
+  for (const patch of [
+    { nativeBuildSourceSha: "f".repeat(40), nativeBuildId: f.expected.buildId },
+    { nativeBuildSourceSha: f.expected.sourceSha, nativeBuildId: f.expected.buildId + ".dirty" },
+    { nativeBuildSourceSha: f.expected.sourceSha },
+  ]) {
+    fs.writeFileSync(path.join(source, "package.json"), JSON.stringify({ ...f.metadata, ...patch }));
+    await createCompletedAsar(source, f.asar); uncache(f.asar);
+    assert.throws(() => writeDesktopBuildEvidence(f.directory, { expected: f.expected, identity: f.identity, release: true }), /source identity/);
+  }
+});
+
 test("new package writer refuses a missing helper or a helper from another build", async (t) => {
   const f = await fixture(t);
   const repository = path.join(f.root, "build-input");

@@ -157,7 +157,12 @@ async function main() {
   // Freeze the helper identity before either builder attempt. It is embedded
   // in app.asar, independently of the external qualification carrier.
   const helperMetadata = catalogVerifierBuildMetadata(repositoryRoot);
-  const helperArguments = [`--config.extraMetadata.nativeCatalogVerifierSha256=${helperMetadata.nativeCatalogVerifierSha256}`];
+  const buildIdentity = expectedDesktopBuild(repositoryRoot, desktopIdentity, releaseChannel, { requireClean: mode === "release" });
+  const helperArguments = [
+    `--config.extraMetadata.nativeCatalogVerifierSha256=${helperMetadata.nativeCatalogVerifierSha256}`,
+    `--config.extraMetadata.nativeBuildSourceSha=${buildIdentity.sourceSha}`,
+    `--config.extraMetadata.nativeBuildId=${buildIdentity.buildId}`,
+  ];
   const builderArgs = [
     ...(mode === "pack" ? ["--dir"] : []),
     ...identityBuilderArgs(desktopIdentity, outputDirectory),

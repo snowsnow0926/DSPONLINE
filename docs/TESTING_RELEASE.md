@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **Windows Rust 安装身份与终局测量（2026-09-10）**：安装身份/版别/制品专项 50 pass/1 权限 skip/0 fail，真实冻结包采集待执行；9e 正常 release 核心 1,116/6 ignored、实际 Host 集成 36/36、实际 Windows 启动器 16/16，终局三对完整导出一致、中位 49.90→49.02 秒但区间重叠。完整入口及发布门禁仍未过，见[身份测试范围](./reviews/rust-windows-installed-program-2026-09-10.md)和[完整数值证据](./reviews/rust-rp1-canonical-buffer-2026-09-10.md)。
+
 > **2026-09-10 Native 输入与最新完整结果**：原组件 8 个新增反例失败，修复组件/库存存储 24 pass、全项目类型通过，6/2 GiB 守护正常退出。50b Windows 全套成功；完整浏览器 467 pass/33 skip/2 fail/1 flaky，设置失败 trace 显示整例超时，未证明溢出。1cf 清单修复的云端生产构建已过，其余待验，发布仍未通过。见[源码绑定的证据与缺口](./reviews/rust-windows-native-limit-drafts-2026-09-10.md)。
 
 > **2026-09-10 清单最终轻量验收**：save-ui-metadata-v5 守护正常 exit 0，无停止原因；150 项绑定工具及 5 项清单测试通过，7 文件仅语法转译、格式/Skill 和 433 条有效链接检查通过，1 条基线缺失链接单列。清单测试已加入 test:native；不计为项目类型/浏览器/发布通过。50b Chrome 准备已过；清单修复后 npm run build 与全部原构建门禁通过，专项 7/8、原冷菜单批量失败保留，完整 E2E 待验，见[证据](./reviews/rust-windows-save-ui-candidate-2026-09-10.md)。

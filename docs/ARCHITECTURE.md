@@ -1,5 +1,7 @@
 # 系统架构
 
+> **Windows 安装程序身份（2026-09-10）**：packer 将源码 SHA/Build ID 嵌入自身 ASAR；main 提供者交叉核对 renderer 版本，以有界分块读取计算实际 Host/ASAR 摘要，拒绝 dirty、错包和检测到的文件替换。仅九字段文件事实，未连接资格准入；内容/规则/矩阵、Host 独立身份和其他可信上下文仍待实现，见[边界与验证](./reviews/rust-windows-installed-program-2026-09-10.md)。
+
 > **Native 输入草稿边界（2026-09-10）**：物资托盘和生产缓存上限分别绑定会话、运行、注册表、行星与本字段权威原值；普通投影 revision 不清理输入。布局提交前清理失效上下文，blur 再核验绑定及 pending，Escape 先撤销绑定；保持原生命令为唯一写入出口。没有开放玩家实时准入，见[实现及验证](./reviews/rust-windows-native-limit-drafts-2026-09-10.md)。
 
 > **Native 写入口清单（2026-09-10）**：使用 TS AST 枚举真实保护调用及静态条件分支，忽略注释/示例文本；动态标签使生成失败。清单保留分类、调用位置与原权威关闭边界，不以分类数替代完整游戏资格，见[实际范围](./reviews/rust-windows-save-ui-candidate-2026-09-10.md)。

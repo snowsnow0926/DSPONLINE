@@ -49,6 +49,8 @@ async function run() {
   const actualHelperSha256 = createHash("sha256").update(fs.readFileSync(helperFile)).digest("hex");
   if (actualHelperSha256 !== expectedHelperSha256) throw new Error("Frozen helper differs from parent identity");
   await app.whenReady();
+  const { collectPackagedWindowsProgramIdentity } = require(path.join(resources, "app.asar", "desktop", "native-installed-program.cjs"));
+  const programIdentity = await collectPackagedWindowsProgramIdentity({ resourcesPath: resources });
   // Electron's real ASAR loader supplies this module and its own package.json.
   const modulePath = path.join(resources, "app.asar", "desktop", "native-catalog-verifier.cjs");
   const { createPackagedWindowsCatalogVerifier } = require(modulePath);
@@ -59,7 +61,7 @@ async function run() {
   if (rejection !== "carrier-io") throw new Error("Actual packaged helper did not reject the missing carrier");
   if (audit.windowsCreated !== 0 || audit.initiallyVisible !== 0 || audit.showEvents !== 0 || audit.focusEvents !== 0
       || Object.keys(audit.dialogs).length) throw new Error("Package probe violated its no-window contract");
-  finish({ status: "PASS", kind: "CATALOG_PACKAGE_SMOKE", actualHelperSha256, rejection,
+  finish({ status: "PASS", kind: "CATALOG_PACKAGE_SMOKE", actualHelperSha256, rejection, programIdentity,
     authorityEligible: false, backgroundAudit: audit }, 0);
 }
 

@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **Windows catalog 签名专用流程（2026-09-09）**：新增两个默认 ignored 的 Windows 测试入口，云端在合成签名材料准备完成后逐项 exact 执行；不把默认忽略计作通过。最终本机 release 专项 7 pass/2 专用场景 ignored、fmt/严格 Clippy、脚本语法/拒绝 2/2 和最终工作流结构检查通过；真实云端正例仍待执行终态。见[测试流程](./reviews/rust-windows-signed-catalog-ci-2026-09-09.md)。
+
 > **Windows catalog 验证器初版（2026-09-09）**：专项 7/7，包含实际 Windows 拒绝伪造 catalog、锁与边界检查、载体/祖先目录联接拒绝；完整正常 release 核心 1,115/5 ignored、Host 263/1 ignored、Native Node 750/1 skip 均零失败，fmt/严格 Clippy/正常构建通过。最终独立 Electron 通信夹具增量 7/7，30 MiB 双向传输、显示/焦点均 0、静音/隔离通过。无可信签名正例或运行授权证据。ae1 云端 Windows 成功、完整浏览器 460/33 skip/5 fail/1 flaky；本批新源码云端待验。见[本批记录](./reviews/rust-windows-catalog-verifier-2026-09-09.md)。
 
 > **57ce 云端完整浏览器终态与复验配置（2026-09-09）**：414 pass / 33 skip / 28 unexpected / 24 flaky；四项新保存测试、两项启动顺序与精确 50 堆叠首轮通过。两分片仍在独立机器执行，每片下一轮设 `DSP_E2E_WORKERS=1`，减少同机争用；原时限、断言、范围和 CI 重试策略不变，新完整结果待验。57ce Windows 已完整 SUCCESS：Rust 核心 1,115/5 ignored、Host 256/1 ignored、完整游戏 3,180/39 skip，均零失败，采样器复验通过。两份 499 项清单一致只证明枚举范围未改，新的全套浏览器待验。见[阶段记录](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。

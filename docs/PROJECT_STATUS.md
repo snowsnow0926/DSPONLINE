@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows 签名场景执行准备（2026-09-09，未发布）**：真实签名专用 Rust 用例和一次性云端证书生命周期已加入验证流程；默认本机不执行签名场景，本机只编译并验证误调用拒绝。成功路径、篡改和信任移除的云端终态待验，生产 Host 验证逻辑及实时资格不变。见[准确范围](./reviews/rust-windows-signed-catalog-ci-2026-09-09.md)。
+
 > **Windows Rust 验签基础初版（2026-09-09，未发布）**：新增 Host 独立 catalog 成员验证器，固定有界文件、文件/目录锁、无 UI 的系统验签及独立发布者策略。专项 7/7，正常 release 核心 1,115/5 ignored、Host 263/1 ignored、Native 750/1 skip 均零失败，严格 Clippy/格式/构建通过。通信夹具后台审计另 7/7；实际 30 MiB 传输显示/焦点事件均 0。ae1 云端 Windows 全部成功，浏览器 460/33 skip/5 fail/1 flaky，仍非发布资格。签名正例、main 验证器、时效撤销及实时接管仍未完成。见[本批范围](./reviews/rust-windows-catalog-verifier-2026-09-09.md)。
 
 > **57ce 云端终态（2026-09-09，未发布）**：Windows 完整 SUCCESS，正常核心 1,115/5 ignored、Host 256/1 ignored、游戏 3,180/39 skip，均零失败，采样器复验通过。Linux 单元/构建/Server/Ops/Native 通过；完整浏览器 414/33 skip/28 unexpected/24 flaky，新四项保存用例均首轮通过。下一轮每片 browser worker 2→1，499 项枚举一致，原断言/时限/重试保留，新结果待验。终局实包 v15 读档 targetClosed 尚未解决，完整 Goal active。见[阶段记录](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。

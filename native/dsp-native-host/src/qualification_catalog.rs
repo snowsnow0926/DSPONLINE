@@ -485,6 +485,8 @@ mod windows {
     mod tests {
         use super::*;
 
+        include!("qualification_catalog_signed_tests.rs");
+
         fn fixture() -> tempfile::TempDir {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().join("native-qualification");

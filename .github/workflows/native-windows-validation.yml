@@ -16,6 +16,8 @@ on:
     paths:
       - "native/**"
       - "desktop/**"
+      - "scripts/test-native-catalog-signature-ci.ps1"
+      - "scripts/native-catalog-signature-ci.test.mjs"
       - ".github/workflows/native-windows-validation.yml"
 
 permissions:
@@ -75,6 +77,31 @@ jobs:
         run: |
           cargo clippy --release --manifest-path native/Cargo.toml --workspace --all-targets --locked -- -D warnings 2>&1 | Tee-Object artifacts/native-windows-validation/clippy.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify TEST_ONLY signed catalog members
+        # This step does not import a production publisher or grant gameplay authority.
+        # Its certificate is generated, trusted, tested and removed on this disposable VM.
+        # Local/self-hosted invocation is rejected before certificate operations.
+        # Compile the Host test executable before creating any temporary certificate.
+        timeout-minutes: 20
+        run: |
+          rustfmt --edition 2024 --check native/dsp-native-host/src/qualification_catalog_signed_tests.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test scripts/native-catalog-signature-ci.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --manifest-path native/Cargo.toml --locked -p dsp-native-host --lib --no-run 2>&1 | Tee-Object artifacts/native-windows-validation/catalog-test-build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/test-native-catalog-signature-ci.ps1
+      - name: Preserve early TEST_ONLY catalog authentication evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-catalog-authentication-${{ github.sha }}
+          path: |
+            artifacts/native-windows-validation/catalog-authentication/
+            artifacts/native-windows-validation/catalog-test-build.log
+            artifacts/native-windows-validation/source-sha.txt
+          if-no-files-found: error
+          retention-days: 14
       - name: Full optimized Rust workspace tests
         run: |
           cargo test --release --manifest-path native/Cargo.toml --workspace --locked -- --test-threads=2 2>&1 | Tee-Object artifacts/native-windows-validation/rust-release.log

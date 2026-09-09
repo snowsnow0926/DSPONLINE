@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AuthoritativeSaveSerializationClientError,
   serializeAuthoritativeSaveStateInWorker,
+  serializeAuthoritativePrimarySaveInWorker,
   serializeAuthoritativeSaveStateTransferInWorker,
 } from "./authoritativeSaveSerializationClient";
 import { createInitialState } from "./engine";
@@ -47,7 +48,8 @@ afterEach(() => {
 });
 
 describe("authoritative save serialization transfer ownership", () => {
-  it("retains the caller state when a cloned-state Worker crashes, then permits a fresh retry", async () => {
+  for (const serialize of [serializeAuthoritativeSaveStateInWorker, serializeAuthoritativePrimarySaveInWorker]) {
+  it(`retains the caller state on ${serialize.name} failure and permits a fresh retry`, async () => {
     const state = createInitialState(44_127);
     state.entities[0].inputs.iron_ore = 137;
     const original = structuredClone(state);
@@ -55,7 +57,7 @@ describe("authoritative save serialization transfer ownership", () => {
       const worker = new FakeWorker();
       installWorker(worker);
       const controller = new AbortController();
-      const pending = serializeAuthoritativeSaveStateInWorker(state, { signal: controller.signal });
+      const pending = serialize(state, { signal: controller.signal });
       expect(worker.request?.state).toEqual(original);
       expect(worker.request?.state).not.toBe(state);
       worker.request!.state!.entities[0].inputs.iron_ore = 999;
@@ -68,6 +70,7 @@ describe("authoritative save serialization transfer ownership", () => {
       expect(worker.terminateCount).toBe(1);
     }
   });
+  }
 
   it("marks a transferred source as lost when the Worker times out", async () => {
     vi.useFakeTimers();

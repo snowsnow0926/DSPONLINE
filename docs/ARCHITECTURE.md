@@ -1,5 +1,7 @@
 # 系统架构
 
+> **菜单快照来源复用（2026-09-10，开发候选）**：调用者保有完整状态的 proof 保存不再额外生成快照用运行态 transfer；到期快照转移已完成持久读回的压缩主档，仅重建外层封装及绑定摘要。独立持久验证、fencing/CAS、备份、主档身份与提交前让位保留；checkpoint/envelope 接管仍返回所需运行态。未改变持久版本或 Rust 实时资格，见[实现与验证](./reviews/rust-rp1-primary-snapshot-reuse-2026-09-10.md)。
+
 > **Windows helper 实包验证（2026-09-09，未发布）**：c09cfdf2 冻结 beta 的 76 项制品/79 文件通过，包内助手身份及真实 Electron ASAR 调用通过，窗口/焦点/对话框为 0。相关回归 70/1 权限 skip/0 fail；cd515 云端 Host/main 实际签名生命周期另行通过。两种构建分开记录，尚未接完整资格和实际游戏接管，见[实包证据](./reviews/rust-windows-catalog-package-2026-09-09.md)。
 
 > **Windows helper 制品绑定（2026-09-09，开发候选）**：packer 将独立 Rust 助手放到固定 native 资源目录，并把该次构建摘要嵌入 app.asar 元数据；包内 main factory 只读取自己的元数据。新内部制品清单 schema 2 强制核对该资源，schema 1 保留历史读取且不能满足显式的新助手要求。这些是制品身份检查，不授予运行资格，见[随包交付进度](./reviews/rust-windows-catalog-package-2026-09-09.md)。

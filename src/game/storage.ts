@@ -78,7 +78,8 @@ import {
 } from "./localSaveStore";
 import {
   serializeAuthoritativeSaveEnvelopeTransferInWorker,
-  serializeAuthoritativeSaveStateInWorker,
+  serializeAuthoritativePrimarySaveInWorker,
+  rewrapAuthoritativePrimaryAsSnapshotInWorker,
   serializeAuthoritativeSaveStateTransferInWorker,
   type AuthoritativeSerializedSavePayload,
   type AuthoritativeSaveSerializationProgress,
@@ -87,6 +88,7 @@ import type {
   AuthoritativeSaveCheckpointOverlay,
   AuthoritativeSaveEnvelopeTransfer,
   AuthoritativeSaveExpectedStateIdentity,
+  AuthoritativePrimarySnapshotSource,
 } from "./authoritativeSaveSerializationProtocol";
 import type { AuthoritativeSavePersistenceProgress } from "./authoritativeSavePersistenceProtocol";
 import {
@@ -3341,7 +3343,7 @@ async function saveGameVerifiedWithWorkerProof(
     };
     const serialized = stateTransfer
       ? await serializeAuthoritativeSaveStateTransferInWorker(stateTransfer, serializationOptions)
-      : await serializeAuthoritativeSaveStateInWorker(state, serializationOptions);
+      : await serializeAuthoritativePrimarySaveInWorker(state, serializationOptions);
     const snapshotScanStartedAt = monotonicNow();
     removedAutomaticSnapshots += prepareAutomaticSnapshotsForPrimarySave(mode);
     const snapshotScanMs = Math.max(0, monotonicNow() - snapshotScanStartedAt);
@@ -3387,17 +3389,19 @@ async function saveGameVerifiedWithWorkerProof(
     clearLocalSaveRawPayloadCache();
     const automaticSnapshotStartedAt = monotonicNow();
     try {
-      scheduleAutomaticSnapshotFromStateTransfer(
-        expectedStateIdentity,
-        stateTransfer ?? {
-          protocolVersion: SIMULATION_RUNTIME_PROTOCOL_VERSION,
-          buffer: serialized.sourceStateTransfer,
-          byteLength: serialized.sourceStateTransfer.byteLength,
-        },
-        mode,
-        options.checkpointOverlay,
-        getVerifiedPrimaryLocalSaveIdentity(mode),
-      );
+      const primaryIdentity = getVerifiedPrimaryLocalSaveIdentity(mode);
+      if (stateTransfer) {
+        scheduleAutomaticSnapshotFromStateTransfer(expectedStateIdentity, stateTransfer, mode, options.checkpointOverlay, primaryIdentity);
+      } else if (primaryIdentity && automaticSnapshotIsDue(expectedStateIdentity, mode)) {
+        // Persistence restored ownership to commitInput. serialized.bytes is
+        // detached; use only the exact payload that completed durable readback.
+        const payload = structuredClone({
+          bytes: commitInput.bytes, proof: serialized.proof,
+          catalogSeed: serialized.catalogSeed, summary: serialized.summary,
+        }, { transfer: [commitInput.bytes] });
+        deferredAutomaticSnapshots.set(mode, { mode, primaryIdentity, expectedStateIdentity, source: { kind: "primary", payload } });
+        scheduleDeferredAutomaticSnapshotProcessor();
+      }
     } catch {
       // A recovery point may fail independently without downgrading a primary
       // whose proof-bound write and read-back already succeeded.
@@ -4514,14 +4518,14 @@ async function maybeSaveAutomaticSnapshotVerified(
 }
 
 /**
- * Create a due automatic recovery point from the restored checkpoint buffer.
- * The payload remains in Workers: the UI only selects a snapshot key and
- * supplies the already-verified state identity for the proof binding.
+ * Create a due automatic recovery point from an owned checkpoint buffer or
+ * the exact compressed primary that completed readback. The UI never decodes
+ * either source; both use the same identity checks and persistence admission.
  */
 interface DeferredAutomaticSnapshotJob {
   mode: SaveMode;
-  stateTransfer: SimulationStateTransfer;
-  checkpointOverlay: AuthoritativeSaveCheckpointOverlay | undefined;
+  source: { kind: "state"; stateTransfer: SimulationStateTransfer; checkpointOverlay: AuthoritativeSaveCheckpointOverlay | undefined }
+    | { kind: "primary"; payload: AuthoritativePrimarySnapshotSource };
   primaryIdentity: VerifiedPrimaryLocalSaveIdentity;
   expectedStateIdentity: AuthoritativeSaveExpectedStateIdentity;
 }
@@ -4529,6 +4533,11 @@ interface DeferredAutomaticSnapshotJob {
 const deferredAutomaticSnapshots = new Map<SaveMode, DeferredAutomaticSnapshotJob>();
 let deferredAutomaticSnapshotTimer: ReturnType<typeof setTimeout> | null = null;
 let activeAutomaticSnapshotMode: SaveMode | null = null;
+
+function automaticSnapshotIsDue(identity: AuthoritativeSaveExpectedStateIdentity, mode: SaveMode): boolean {
+  const latest = latestAutomaticSnapshotSummary(mode);
+  return !latest || identity.elapsedSeconds < latest.elapsedSeconds || identity.elapsedSeconds - latest.elapsedSeconds >= AUTO_SNAPSHOT_MIN_SECONDS;
+}
 
 function scheduleDeferredAutomaticSnapshotProcessor(delayMs = 0): void {
   if (deferredAutomaticSnapshotTimer !== null || activeAutomaticSnapshotMode !== null || deferredAutomaticSnapshots.size === 0) return;
@@ -4545,15 +4554,12 @@ function scheduleAutomaticSnapshotFromStateTransfer(
   checkpointOverlay: AuthoritativeSaveCheckpointOverlay | undefined,
   primaryIdentity: VerifiedPrimaryLocalSaveIdentity | null,
 ): void {
-  const latest = latestAutomaticSnapshotSummary(mode);
-  if (latest && expectedStateIdentity.elapsedSeconds >= latest.elapsedSeconds &&
-    expectedStateIdentity.elapsedSeconds - latest.elapsedSeconds < AUTO_SNAPSHOT_MIN_SECONDS) return;
+  if (!automaticSnapshotIsDue(expectedStateIdentity, mode)) return;
   if (!primaryIdentity || !(stateTransfer.buffer instanceof ArrayBuffer) || stateTransfer.buffer.byteLength === 0) return;
   const snapshotTransfer = structuredClone(stateTransfer, { transfer: [stateTransfer.buffer] });
   deferredAutomaticSnapshots.set(mode, {
     mode,
-    stateTransfer: snapshotTransfer,
-    checkpointOverlay,
+    source: { kind: "state", stateTransfer: snapshotTransfer, checkpointOverlay },
     primaryIdentity,
     expectedStateIdentity,
   });
@@ -4574,18 +4580,18 @@ async function processDeferredAutomaticSnapshot(): Promise<void> {
   try {
     const currentIdentity = getVerifiedPrimaryLocalSaveIdentity(mode);
     if (!currentIdentity || !sameVerifiedPrimaryIdentity(currentIdentity, job.primaryIdentity)) return;
-    const latest = latestAutomaticSnapshotSummary(mode);
-    if (latest && job.expectedStateIdentity.elapsedSeconds >= latest.elapsedSeconds &&
-      job.expectedStateIdentity.elapsedSeconds - latest.elapsedSeconds < AUTO_SNAPSHOT_MIN_SECONDS) return;
+    if (!automaticSnapshotIsDue(job.expectedStateIdentity, mode)) return;
     const savedAt = Date.now();
-    const serialized = await serializeAuthoritativeSaveStateTransferInWorker(job.stateTransfer, {
-      savedAt,
-      kind: "snapshot",
-      slot: "main",
-      reason: "自动快照",
-      expectedStateIdentity: job.expectedStateIdentity,
-      ...(job.checkpointOverlay ? { checkpointOverlay: job.checkpointOverlay } : {}),
-    });
+    const serialized = job.source.kind === "primary"
+      ? await rewrapAuthoritativePrimaryAsSnapshotInWorker(job.source.payload, savedAt)
+      : await serializeAuthoritativeSaveStateTransferInWorker(job.source.stateTransfer, {
+        savedAt,
+        kind: "snapshot",
+        slot: "main",
+        reason: "自动快照",
+        expectedStateIdentity: job.expectedStateIdentity,
+        ...(job.source.checkpointOverlay ? { checkpointOverlay: job.source.checkpointOverlay } : {}),
+      });
     // A new primary request wins while the snapshot has not been dispatched.
     // The proof queue repeats this admission check at its final synchronous
     // boundary; an IDB transaction already in progress remains atomic.

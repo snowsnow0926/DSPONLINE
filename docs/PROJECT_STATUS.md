@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 入口后续（2026-09-10，未发布）**：c09 冻结包终局实际 10 秒 Native 结算完成，但保存与普通模拟启动后续仍超原 90 秒等待，整例失败，原档未改。新增菜单快照压缩主档复用，类型/专项 62/62、无头浏览器 28/28、完整本机游戏 3,193/39 skip/0 fail（实际 Native 50/1 长测 skip）、Web 构建与门禁通过；同源新包及终局重开继续验证，未授予实时资格。见[本轮证据](./reviews/rust-rp1-primary-snapshot-reuse-2026-09-10.md)。
+
 > **Windows helper 实包验证（2026-09-09，未发布）**：c09cfdf2 冻结 beta 的 76 项制品/79 文件通过，包内助手身份及真实 Electron ASAR 调用通过，窗口/焦点/对话框为 0。相关回归 70/1 权限 skip/0 fail；cd515 云端 Host/main 实际签名生命周期另行通过。两种构建分开记录，尚未接完整资格和实际游戏接管，见[实包证据](./reviews/rust-windows-catalog-package-2026-09-09.md)。
 
 > **Windows helper 打包候选（2026-09-09，未发布）**：固定资源、ASAR 内助手摘要和 schema 2 制品校验已接入，相关回归 69/1 权限 skip/0 fail；实际冻结包和仅 Electron main 的包探针待执行。运行资格仍未开放，见[本批范围](./reviews/rust-windows-catalog-package-2026-09-09.md)。

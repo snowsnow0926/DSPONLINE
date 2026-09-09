@@ -29,9 +29,9 @@
 
 菜单与失败后的两次关闭均正常 exit 0，无强制清理，隐藏/静音/不聚焦审计通过，原始玩家文件完整哈希/大小/mtime 未变。测试守护正常管理到进程 exit 1，状态 FAILED、无内存/时限中止原因，136.411 秒，最低空闲 2,936,356 KiB。
 
-v16 只调整 ignored 诊断驱动：独立只读 Worker 读取 IDB，并增加受控的 renderer 退出原因记录，游戏源码与原时限不变。首次 wrapper 在创建守护目录前异常退出，仅记 RuntimeException；随后明确预检为 5,573,336 KiB，低于原 6,291,456 KiB 门槛，未启动重试进程或游戏。没有 v16 游戏结果，不能描述为测试运行中或已通过；见 `private-packaged-complete-v16-prestart.json`。保留守护，不关闭用户应用腾内存。
+v16 只调整 ignored 诊断驱动：独立只读 Worker 读取 IDB，并增加受控的 renderer 退出原因记录，游戏源码与原时限不变。首次 wrapper 在创建守护目录前异常退出，仅记 RuntimeException；随后明确预检为 5,573,336 KiB，低于原 6,291,456 KiB 门槛，未启动重试进程或游戏。后续 retry1 的外部守护启动了 Node，但 Node 自身的 6 GiB 二次预检拒绝，未生成游戏 profile 或启动游戏；守护 FAILED/exit 1、无中途停止原因、2.978 秒，最低空闲 6,371,524 KiB。仍没有 v16 游戏结果，不能描述为测试运行中或已通过；见 `private-packaged-complete-v16-prestart.json`。保留守护，不关闭用户应用腾内存。
 
-前一 1b 云端现已终态：Linux 单元、生产构建、Server/Ops/Native 成功；浏览器 shard 2 为 209 pass / 22 skip / 5 fail / 7 flaky，shard 1 和 Windows 在新提交后取消，Windows 未执行采样器复验。两项启动顺序和精确 50 堆叠首轮通过；没有完整浏览器/Windows 通过结果。新 57ce 的 CI `34352846044` 与 Windows `34352846058` 已触发，仍待验。
+前一 1b 云端现已终态：Linux 单元、生产构建、Server/Ops/Native 成功；浏览器 shard 2 为 209 pass / 22 skip / 5 fail / 7 flaky，shard 1 和 Windows 在新提交后取消，Windows 未执行采样器复验。两项启动顺序和精确 50 堆叠首轮通过；没有完整浏览器/Windows 通过结果。新 57ce 的 CI `34352846044` 已完成：单元/构建/Server/Ops/Native 成功，浏览器 **414 pass / 33 skip / 28 fail / 24 flaky**，新增四项保存/迁移/快照及两项启动顺序、精确 50 堆叠均首轮通过。Windows `34352846058` / job `102470133825` **最终 SUCCESS**：正常优化核心 1,115/5 ignored/0 fail，Host 库 253/1 ignored/0 fail 和主程序 3/0 fail，完整游戏 3,180/39 skip/0 fail；采样文件 8/1 opt-in skip，本轮云端复验通过。完整 Native 工具步骤也成功，TEST_ONLY 采集仍不授予玩家资格。完整浏览器下一轮保留两分片，但每台 runner 的 browser worker 从 2 降为 1，原测试范围、时限、断言及一次 CI 重试均不变；此为隔离争用的验证配置，不能计作失败已修复或玩家性能收益。`ci-single-browser-list-v1.json` 的两份真实 Playwright 清单均为 499 项且清单摘要相同，结构化比较确认工作流除两个 worker 环境值外不变；只枚举，未执行浏览器。轻量 3/2 GiB 守护正常退出 0，5.549 秒，最低空闲 6,136,900 KiB。
 
 ## 后续验收
 

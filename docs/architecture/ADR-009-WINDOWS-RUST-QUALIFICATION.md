@@ -5,6 +5,8 @@
 - Extends: [ADR-008](./ADR-008-WINDOWS-PERFORMANCE-EDITION.md)
 - Compatibility: no GameState, envelope, cloud, Host protocol or player-authority change
 
+The next implementation route is now specified in [the catalog carrier plan](../rust/windows-qualification-carrier.md): external catalog/member binding, independent main platform helper and Host Windows API verification, explicit no-UI/offline policy, and a separate recovery capability after gameplay qualification expires. This is a selected development design, not an implemented verifier or authorization. Publisher credentials, authenticated producers, revocation/clock anti-rollback and actual activation remain open.
+
 ## Context
 
 The user expanded the development objective to a complete Windows Rust edition. Existing domain coverage and player-authority brokers are implementation evidence, while the production Host still reports `authority_eligible=false`. Historical test results are bound to different source and package identities. Neither a green implementation inventory nor successful fallback to JavaScript qualifies a new native player session.

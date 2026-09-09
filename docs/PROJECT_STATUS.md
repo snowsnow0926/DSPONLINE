@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **57ce 云端终态（2026-09-09，未发布）**：Windows 完整 SUCCESS，正常核心 1,115/5 ignored、Host 256/1 ignored、游戏 3,180/39 skip，均零失败，采样器复验通过。Linux 单元/构建/Server/Ops/Native 通过；完整浏览器 414/33 skip/28 unexpected/24 flaky，新四项保存用例均首轮通过。下一轮每片 browser worker 2→1，499 项枚举一致，原断言/时限/重试保留，新结果待验。终局实包 v15 读档 targetClosed 尚未解决，完整 Goal active。见[阶段记录](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。
+
 > **2026-09-09 菜单后台保存候选（未发布）**：菜单进入/恢复提交复用既有 Worker proof、fencing、CAS、旧档备份及精确读回，主线程不再接回整份正文来构建目录。调用者状态保留，旧模式迁移走兼容路径。类型、专项 133/133、真实浏览器 25/25、完整本机游戏 3,180/39 skip/0 fail（实际 Native 50/1 长测 skip）及 Web 三项门禁通过；旧档/快照及启动/目录补验 5/5；57ce 新包 75/78 件已验；终局 9 秒进入运营中心约 90.49 秒，后续独立读档 targetClosed，整例失败，两次关闭正常且原档未改。完整浏览器仍待验。尚无新增终局完整等待收益，629 原 90 秒失败保留，完整 Goal active。见 [后台保存接入](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。
 
 > **2026-09-09 当前 Windows Rust 进展（未发布）**：量子物流优化 `863cf76e` 的终局 9 秒 Native 请求中位少约 4.99%（2.58 秒）；独立 JS 证明缓冲 `629accab` 中位少 9.34%（0.512 秒），两项均已提交推送，完整状态/摘要一致，不相加计算整款游戏提速。629 冻结包 75/78 件通过，v14 的 9 秒入口仍超原 90 秒、两次正常关闭、原档未变。完整游戏 3,178/39 skip、实际 Native 50/1 skip、类型/Web 已通过；其后仅测试采样器改动，旧调度反例 p95 137 ms，修复后三轮 6/6、完整文件 8/1 opt-in skip、策略工具和类型通过，原门槛未改。863 云端浏览器仍 29 unexpected/16 flaky，Windows 游戏有 1 项采样失败；新源码云端待验。完整 Goal active，实时资格仍关闭。见[采样修复](./reviews/rust-windows-memory-sampler-cadence-2026-09-09.md)、[629 实包](./reviews/rust-rp1-629accab-package-2026-09-09.md)与[完整报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。

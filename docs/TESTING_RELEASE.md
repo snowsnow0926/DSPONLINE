@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-09 新包终局取消复验**：`37630d05` 干净 Windows beta（运行代码与 7fd 相同）75/78 件制品校验通过。完整终局 9 秒 JS 对照、取消保档及取消后两次重开通过；完成场景仍超过原 90 秒，不授予持久采用/重进资格。10 次隐藏、不可聚焦、静音正常退出。7fd Linux 单元 3,168/41 skip、Server 390/2 + station 4、Ops 60/2、Rust core 1,113/5 ignored + Host 245+3、Native 670/5 均零失败；浏览器完整 **403 expected / 33 skip / 29 unexpected / 23 flaky**，独立 Windows Rust/Native 通过，游戏单元 3,169/39 skip/1 项矿脉长挂机超时。见[新包与准确范围](./reviews/rust-rp1-private-cancel-2026-09-09.md)。
+
 > **2026-09-09 保存字节数复用候选**：`7fd6d521` 定向 130/130、实际 typecheck、完整本机单元 **3,170 pass / 39 skip / 0 fail** 通过；完整私人终局保存的主档/备份/快照和三条 record/catalog 长度一致，大型重复编码 6→0。新 CI 的生产构建及 startup/thin-UI/coverage 门禁通过，完整浏览器及 Windows 回归仍运行，没有新 Windows 包资格，见[当前保存证据](./reviews/rust-rp1-save-byte-length-2026-09-09.md)。
 
 > **2026-09-09 新源码云端完整结果**：0ce 主 CI 两组浏览器合计 **401 expected / 33 skipped / 34 unexpected / 20 flaky**，恢复两文件 13 项全部首次通过，整体失败。独立 Windows PR 正常 release Rust **1,365/5 ignored**、Native **674/1 skip**、游戏单元 **3,166/39 skip** 均零失败；对应 push 也成功。ZIP、完整失败上下文和精确 Git tree 已验证，见[云端终态证据](./reviews/rust-rp1-recovery-test-startup-2026-09-09.md)。

@@ -13,7 +13,9 @@ use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::canonical::{fnv1a_utf8, update_canonical, update_canonical_object};
+use crate::canonical::{
+    fnv1a_utf8, update_canonical, update_canonical_object, update_canonical_pair,
+};
 use crate::catalog::RuntimeCatalog;
 use crate::deterministic_runtime::{
     DeterministicRuntime, IndexedPrepareDiagnostics, runtime as deterministic_runtime,
@@ -6707,8 +6709,7 @@ impl CoreState {
                                 .context("decode native canonical entity")?;
                             &decoded
                         };
-                        update_canonical(&mut canonical, value);
-                        update_canonical(&mut entities, value);
+                        update_canonical_pair(&mut canonical, &mut entities, value);
                         self.update_domain_entity(&mut domain, &mut domain_symbols, index, value)?;
                     }
                     canonical.update(b"]");
@@ -6728,8 +6729,7 @@ impl CoreState {
                                 .context("decode native canonical belt")?;
                             &decoded
                         };
-                        update_canonical(&mut canonical, value);
-                        update_canonical(&mut belts, value);
+                        update_canonical_pair(&mut canonical, &mut belts, value);
                         let belt = value
                             .as_object()
                             .ok_or_else(|| anyhow!("native domain belt is not an object"))?;

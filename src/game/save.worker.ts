@@ -105,11 +105,11 @@ self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
     const state = authoritativeProof
       ? applyCheckpointOverlay(sourceState, request.checkpointOverlay)
       : sourceState;
-    // Envelope sources are converted to the runtime transfer used to rebase
-    // the normal simulation Worker after the proof-bound primary commit. It is
+    // Envelope and cloned authoritative sources also return a runtime transfer
+    // for rebase or a due recovery snapshot after the primary commit. It is
     // serialized from the exact post-overlay state that produces the save
     // proof, so persistence and runtime authority cannot diverge.
-    const returnedStateTransfer = envelopeTransfer
+    const returnedStateTransfer = envelopeTransfer || authoritativeProof && request.state
       ? serializeSimulationStateForTransfer(state)
       : sourceTransfer;
     const binaryTransport = envelopeTransfer?.buffer instanceof Blob ? "blob" : "array-buffer";

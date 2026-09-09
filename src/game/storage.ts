@@ -78,6 +78,7 @@ import {
 } from "./localSaveStore";
 import {
   serializeAuthoritativeSaveEnvelopeTransferInWorker,
+  serializeAuthoritativeSaveStateInWorker,
   serializeAuthoritativeSaveStateTransferInWorker,
   type AuthoritativeSerializedSavePayload,
   type AuthoritativeSaveSerializationProgress,
@@ -3290,6 +3291,18 @@ export async function saveGameVerifiedFromStateTransfer(
     expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   } = {},
 ): Promise<SaveGameResult> {
+  return saveGameVerifiedWithWorkerProof(state, stateTransfer, options);
+}
+
+async function saveGameVerifiedWithWorkerProof(
+  state: GameState,
+  stateTransfer?: SimulationStateTransfer,
+  options: {
+    onProgress?: (progress: AuthoritativeSaveSerializationProgress | { stage: string; bytes?: number }) => void;
+    checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
+    expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
+  } = {},
+): Promise<SaveGameResult> {
   try {
     await initializeLocalSaveStore();
   } catch (error) {
@@ -3320,12 +3333,15 @@ export async function saveGameVerifiedFromStateTransfer(
   const primaryKey = primarySaveKey(mode);
   let removedAutomaticSnapshots = 0;
   try {
-    const serialized = await serializeAuthoritativeSaveStateTransferInWorker(stateTransfer, {
+    const serializationOptions = {
       savedAt,
       expectedStateIdentity,
       onProgress: options.onProgress,
       ...(options.checkpointOverlay ? { checkpointOverlay: options.checkpointOverlay } : {}),
-    });
+    };
+    const serialized = stateTransfer
+      ? await serializeAuthoritativeSaveStateTransferInWorker(stateTransfer, serializationOptions)
+      : await serializeAuthoritativeSaveStateInWorker(state, serializationOptions);
     const snapshotScanStartedAt = monotonicNow();
     removedAutomaticSnapshots += prepareAutomaticSnapshotsForPrimarySave(mode);
     const snapshotScanMs = Math.max(0, monotonicNow() - snapshotScanStartedAt);
@@ -3373,7 +3389,11 @@ export async function saveGameVerifiedFromStateTransfer(
     try {
       scheduleAutomaticSnapshotFromStateTransfer(
         expectedStateIdentity,
-        stateTransfer,
+        stateTransfer ?? {
+          protocolVersion: SIMULATION_RUNTIME_PROTOCOL_VERSION,
+          buffer: serialized.sourceStateTransfer,
+          byteLength: serialized.sourceStateTransfer.byteLength,
+        },
         mode,
         options.checkpointOverlay,
         getVerifiedPrimaryLocalSaveIdentity(mode),
@@ -3666,9 +3686,15 @@ async function recoverLocalSaveCache(): Promise<void> {
 async function saveGameVerifiedOnce(
   state: GameState,
   stateTransfer?: SimulationStateTransfer,
-  options: { deferBackup?: boolean } = {},
+  options: { deferBackup?: boolean; preferWorkerProof?: boolean } = {},
 ): Promise<SaveGameResult> {
   if (stateTransfer) return saveGameVerifiedFromStateTransfer(state, stateTransfer);
+  // Startup already owns a full state, but does not need a second UI-thread
+  // envelope/catalog graph. Keep legacy/localStorage migration on its exact
+  // compatibility path; Worker failures return a failed save for a safe retry.
+  if (options.preferWorkerProof && typeof Worker !== "undefined" && getLocalSaveBackend() === "indexeddb") {
+    return saveGameVerifiedWithWorkerProof(state);
+  }
   const totalStartedAt = monotonicNow();
   const serializeStartedAt = totalStartedAt;
   const savedAt = Date.now();
@@ -3824,6 +3850,7 @@ interface PendingPrimarySave {
   checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
   expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   deferBackup?: boolean;
+  preferWorkerProof?: boolean;
   waiters: Array<(result: SaveGameResult) => void>;
 }
 
@@ -3952,7 +3979,10 @@ function ensurePrimarySaveProcessor(): void {
             ...(request.checkpointOverlay ? { checkpointOverlay: request.checkpointOverlay } : {}),
             ...(request.expectedStateIdentity ? { expectedStateIdentity: request.expectedStateIdentity } : {}),
           })
-          : await saveGameVerifiedOnce(request.state, undefined, { deferBackup: request.deferBackup === true });
+          : await saveGameVerifiedOnce(request.state, undefined, {
+            deferBackup: request.deferBackup === true,
+            preferWorkerProof: request.preferWorkerProof === true,
+          });
       } catch {
         result = failedSave("unavailable", "本地主存档写入失败，请立即导出当前进度");
       }
@@ -3993,6 +4023,7 @@ export function saveGameVerified(
   checkpointOverlay?: AuthoritativeSaveCheckpointOverlay,
   options: {
     deferBackup?: boolean;
+    preferWorkerProof?: boolean;
     force?: boolean;
     expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   } = {},
@@ -4033,6 +4064,7 @@ export function saveGameVerified(
       if (pending.state !== state) {
         pending.state = state;
         pending.deferBackup = options.deferBackup === true;
+        pending.preferWorkerProof = options.preferWorkerProof === true;
         if (ownedStateTransfer) {
           pending.stateTransfer = ownedStateTransfer;
           if (checkpointOverlay) pending.checkpointOverlay = checkpointOverlay;
@@ -4050,6 +4082,7 @@ export function saveGameVerified(
         if (options.expectedStateIdentity) pending.expectedStateIdentity = options.expectedStateIdentity;
       }
       if (options.deferBackup !== true) pending.deferBackup = false;
+      if (options.preferWorkerProof) pending.preferWorkerProof = true;
       pending.waiters.push(resolve);
     } else {
       const unchanged = options.force === true ? null : unchangedPrimarySaveResult(mode, state);
@@ -4064,6 +4097,7 @@ export function saveGameVerified(
         ...(checkpointOverlay ? { checkpointOverlay } : {}),
         ...(options.expectedStateIdentity ? { expectedStateIdentity: options.expectedStateIdentity } : {}),
         ...(options.deferBackup === true ? { deferBackup: true } : {}),
+        ...(options.preferWorkerProof === true ? { preferWorkerProof: true } : {}),
         waiters: [resolve],
       });
     }

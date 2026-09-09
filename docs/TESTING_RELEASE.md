@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-09 菜单 Worker 保存候选门禁**：保存专项 133/133、类型、后台 Chromium 25/25、完整游戏 3,180/39 skip/0 fail、实际 Native 50/1 长测 skip、Web 构建三项门禁通过。旧档/快照与启动/目录专项另 5/5；新 Windows 包与完整浏览器尚待验。正常 Host 未改，未将旧 Rust 结果计为重跑。见 [后台保存接入](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。
+
 > **2026-09-09 当前验证**：629 运行代码的定向 68/1 长测 skip、完整游戏 3,178/39 skip（实际 Native 50/1 skip）、类型及 Web 全门禁通过，Host 未改。新冻结包 75/78 件校验通过，v14 真实 9 秒入口仍超原 90 秒、两次正常关闭、原档未变，没有完整保存/重开资格。后续仅采样器/测试改动：旧调度反例 0 pass/1 fail（p95 137 ms），修复后完整文件 8 pass/1 opt-in benchmark skip；普通与注入开销两项三轮 6/6，三项策略工具和类型通过。实际时间戳、50 ms 目标、p95/max 门槛与原超时不变。863 云端 Linux 非浏览器及 Windows Rust/Native 通过，但浏览器 417/33 skip/29 fail/16 flaky，Windows 游戏 3,175/39 skip/1 fail（cadence p95 101 ms）。新源码云端待验。见[采样器证据](./reviews/rust-windows-memory-sampler-cadence-2026-09-09.md)和[实包证据](./reviews/rust-rp1-629accab-package-2026-09-09.md)。
 
 > **2026-09-09 Windows Rust 证据基础与验证补修**：工具/ASAR/后台/身份/发布内容专项 104 通过 / 1 条件跳过 / 0 失败，ASAR 旧写入反例先失败后通过；跳过为缺跨平台符号链接权限，Windows 联接负例通过。Rust 建造候选的完整正常 release 核心 1,113/5 ignored/0 fail、fmt 与严格 workspace/all-targets Clippy 通过。重测 6/2 GiB 守护正常退出，零游戏启动；新 Host/性能 A/B/实包及新云端尚待验。见[本批证据](./reviews/rust-windows-qualification-foundation-2026-09-09.md)。

@@ -573,11 +573,11 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         candidate: loaded.runtimeRecoveryCandidate,
         mode: state.mode === "speedrun" ? "speedrun" : "normal",
         registry,
-        saveGameVerified: (nextState) => activeStorage.saveGameVerified(nextState),
+        saveGameVerified: (nextState) => activeStorage.saveGameVerified(nextState, undefined, undefined, { preferWorkerProof: true }),
         onProgress: onRecoveryProgress,
       });
     } else {
-      const saveResult = await activeStorage.saveGameVerified(state);
+      const saveResult = await activeStorage.saveGameVerified(state, undefined, undefined, { preferWorkerProof: true });
       if (!saveResult.success) throw new Error(saveResult.message);
       if (durableRuntimeEnabled) {
         const registry = startupModules.contentPacks.createContentPackRuntimeSnapshot(

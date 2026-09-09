@@ -24,7 +24,9 @@ v9 补齐主档、备份、快照三条真实 IndexedDB record 的 bytes 和对�
 
 ## 验证与证据
 
-新增容量边界测试使用多字节文本，验证恰好不足/足够、已有占用扣减、不重新编码和非法长度拒绝。四文件专项 **130 pass / 0 skip / 0 fail**，实际项目类型检查通过；完整回归、构建与新 Windows 包尚待完成。
+新增容量边界测试使用多字节文本，验证恰好不足/足够、已有占用扣减、不重新编码和非法长度拒绝。四文件专项 **130 pass / 0 skip / 0 fail**，实际项目类型检查通过；随后完整本机单元 **3,170 pass / 39 skip / 0 fail**，单 worker、无重试。外部守护 372.579 秒、最低可用 6,815,372 KiB、正常退出 0。完整 JSON 为 `save-byte-length-unit-full-v1.json`，SHA-256 `66301366058415b4a68b2d31366572e41b4dc471e0b8463eb4f7ed27ad82a5c2`。
+
+源码及证据文档已提交并推送为 `7fd6d52188c7229138aa534255acc48ea7dcafe9`。新 [CI run 34304517707](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34304517707) 的 Production build job `102318306688` 成功：正常 `npm run build`、startup budget、thin-UI boundary 和 native coverage 均通过，startup 总 gzip **181,961 bytes**。实际 merge `cb1f530b60ab088d9f724a7683f2880dffff44ea` 与 7fd Git tree 均为 `6f0ea81a07cd8e0b09537c917dfe7a3d60915c82`，已 fetch 并本地核对。日志保存为 `cloud-7fd-build-v1.log`。完整浏览器、云端单元/Server/Ops/Native 与独立 Windows run `34304517681` 仍运行，不能记为完整通过；新 Windows 包尚未构建或验收。
 
 所有证据在开发 worktree `artifacts/rust-rp1-loop/`：`private-save-stages-vN/report.json`、`probe-private-save-stages-vN.mjs` 和对应 `private-save-stages-vN-guard/guard.json`。完整来源仅留在内存和隔离 profile，不进入日志、Git 或云端；所有运行由外部 6 GiB 启动 / 2 GiB 停止守护，低优先级且串行。
 

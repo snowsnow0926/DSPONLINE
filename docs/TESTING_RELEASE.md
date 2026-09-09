@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-09 保存字节数复用候选**：`7fd6d521` 定向 130/130、实际 typecheck、完整本机单元 **3,170 pass / 39 skip / 0 fail** 通过；完整私人终局保存的主档/备份/快照和三条 record/catalog 长度一致，大型重复编码 6→0。新 CI 的生产构建及 startup/thin-UI/coverage 门禁通过，完整浏览器及 Windows 回归仍运行，没有新 Windows 包资格，见[当前保存证据](./reviews/rust-rp1-save-byte-length-2026-09-09.md)。
+
 > **2026-09-09 新源码云端完整结果**：0ce 主 CI 两组浏览器合计 **401 expected / 33 skipped / 34 unexpected / 20 flaky**，恢复两文件 13 项全部首次通过，整体失败。独立 Windows PR 正常 release Rust **1,365/5 ignored**、Native **674/1 skip**、游戏单元 **3,166/39 skip** 均零失败；对应 push 也成功。ZIP、完整失败上下文和精确 Git tree 已验证，见[云端终态证据](./reviews/rust-rp1-recovery-test-startup-2026-09-09.md)。
 
 > **2026-09-09 终局实际菜单失败证据**：冻结 2bb 隐藏包两次完成 9 秒 Rust 候选返回，均未在原 90 秒内进入可操作工厂；保存序列化和快照 Worker 已观察到。四次正常关闭 0、原档不变，但不算持久状态/重开/取消或整体性能通过。先前两次驱动漏重载造成的正常关闭拒绝单独保留，见[实际入口记录](./reviews/rust-rp1-endgame-entry-wait-2026-09-09.md)。

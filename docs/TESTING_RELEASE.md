@@ -1,6 +1,8 @@
 # 测试与发布基线
 
-> **2026-09-09 电力扫描候选**：旧实现新增两项反例均失败，修复后四文件 243/243、项目类型检查、Web 生产构建及原三项构建门禁通过；完整本机单元 **3,172 pass / 39 skip / 0 fail**，矿脉原案例 2,246.685 ms。同公开大工厂六次完整状态及原输入一致。全部为无窗口低优先级串行 Node，未新开桌面游戏；新源码云端与浏览器资格待验，详见[结果及证据](./reviews/rust-rp1-power-lookup-2026-09-09.md)。
+> **2026-09-09 Rust 导出写缓冲**：正常 release Host 252+3=255 pass/0 skip/0 fail、五个相关 Native Node 文件 89/89、fmt/严格 Clippy/build 通过；完整终局档三对请求与完整 JS 逐字段一致，六份实际导出字节相同、六次正常关闭、原档不变。请求中位 54.258→52.495 秒，仅为请求收益；另一次分段诊断单独保留。全程无游戏窗口、低优先级串行、6 GiB 启动/2 GiB 停止。新改动尚无云端或实际桌面资格，详见[准确范围](./reviews/rust-rp1-export-buffer-2026-09-09.md)。
+
+> **2026-09-09 电力扫描候选**：旧实现新增两项反例均失败，修复后四文件 243/243、项目类型检查、Web 生产构建及原三项构建门禁通过；完整本机单元 **3,172 pass / 39 skip / 0 fail**，矿脉原案例 2,246.685 ms。同公开大工厂六次完整状态及原输入一致。f427 云端构建、Linux 单元 3,170/41 skip、Server/Ops/Native，以及 Windows Rust 1,365/5 ignored、Native 674/1 skip、游戏单元 3,172/39 skip 均通过；完整浏览器 445 expected/33 skip/7 unexpected/3 flaky，仍失败。详见[结果及证据](./reviews/rust-rp1-power-lookup-2026-09-09.md)。
 
 > **2026-09-09 新包终局取消复验**：`37630d05` 干净 Windows beta（运行代码与 7fd 相同）75/78 件制品校验通过。完整终局 9 秒 JS 对照、取消保档及取消后两次重开通过；完成场景仍超过原 90 秒，不授予持久采用/重进资格。10 次隐藏、不可聚焦、静音正常退出。7fd Linux 单元 3,168/41 skip、Server 390/2 + station 4、Ops 60/2、Rust core 1,113/5 ignored + Host 245+3、Native 670/5 均零失败；浏览器完整 **403 expected / 33 skip / 29 unexpected / 23 flaky**，独立 Windows Rust/Native 通过，游戏单元 3,169/39 skip/1 项矿脉长挂机超时。见[新包与准确范围](./reviews/rust-rp1-private-cancel-2026-09-09.md)。
 

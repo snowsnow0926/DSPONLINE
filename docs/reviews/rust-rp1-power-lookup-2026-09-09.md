@@ -23,7 +23,7 @@ Role: develop。此轮继续处理短离线校验成本和 Windows 单元超时�
 | 冻结公开大工厂完整对照 | 同一 27,107 实体、60,000 传送带工厂，推进 5 秒；六次完整状态逐字段相同，每次输入均未改动 |
 | 完整本机单元（单 worker，无重试） | 3,172 pass / 39 skip / 0 fail；原有限矿脉案例 2,246.685 ms 通过 |
 | 本工作树 Web 生产构建 | tsc、Vite、startup budget、thin-UI 和 native coverage 五步均退出 0；不是新桌面制品 |
-| 新源码云端 | 待完成；不继承 7fd 的通过结果 |
+| f427 新源码云端 | 生产构建、Linux 单元 3,170/41 skip/0 fail 及 Server/Ops/Native 通过；独立 Windows Rust 1,365/5 ignored、Native 674/1 skip、游戏单元 3,172/39 skip，均零失败。浏览器完整 445 expected / 33 skip / 7 unexpected / 3 flaky，仍失败 |
 
 公开对照按旧/新、新/旧、旧/新顺序在同一个 Node 进程运行，三对毫秒观测为 `2031.023 / 1356.569`、`1550.219 / 1385.557`、`1344.746 / 1282.731`。存在冷启动和预热影响，只作为子步骤诊断，不作为新的 Windows 完整等待收益。六次完整结果 SHA-256 均为 `028ed0d9031691acb4a984e55f7eb4aa07bc0a9f40aa44b71f4b8a754584de21`，冻结来源为 `dc44de7555c0343b2c6be15776e257e1eeb8f79300c89b233741d9a72de6b0de`。
 
@@ -33,4 +33,8 @@ Role: develop。此轮继续处理短离线校验成本和 Windows 单元超时�
 
 开发 worktree 的 `artifacts/rust-rp1-loop/` 中保留：`game-timing-profile-v4*`、`power-lookup-before-v1.json`、`power-lookup-focused-v1.json`、`power-lookup-typecheck-v1-guard/`、`probe-power-lookup-v{1,2}.mjs`、`power-lookup-public-v{1,2}-guard/`、`power-lookup-public-v2/report.json`、`power-lookup-full-unit-v1.json` 和 `power-lookup-build-v1.json`。定向守护 13.212 秒，最低 8,129,172 KiB；公开对照守护 13.596 秒，最低 7,020,500 KiB；完整单元守护 358.032 秒，最低 6,756,580 KiB；构建守护 44.445 秒，最低 6,032,472 KiB，均 6/2 GiB、正常退出 0。
 
-新源码仍需完整回归；终局成功结算的持久提交/重进、浏览器失败及历史堆损坏根因缺口继续保留，见[上一轮准确范围](./rust-rp1-private-cancel-2026-09-09.md)。后台约束已复核，未发现遗留测试游戏进程；仅使用符合[后台测试策略](./rust-rp1-background-testing-2026-09-09.md)的入口，不能调用旧 show/focus 驱动。
+f427 已收齐完整回归结果，整体仍未通过；终局成功结算的持久提交/重进、浏览器失败及历史堆损坏根因缺口继续保留，见[上一轮准确范围](./rust-rp1-private-cancel-2026-09-09.md)。后台约束已复核，未发现遗留测试游戏进程；仅使用符合[后台测试策略](./rust-rp1-background-testing-2026-09-09.md)的入口，不能调用旧 show/focus 驱动。
+
+f427 主 CI 为 `34308685637`。两组 JSON 分别经 GitHub SHA-256 `86103c6ffad83ee8c788861dc0a53e5a48697321bccb6d1c445ce8c6ae1f1673` / `dc2ddb8f9627081f0e84a639efd245347e2271f7ecc3cf1f4e93081b079d36da` 核对；审计 `cloud-f427-browser-audit-v1.json`，第一组 231/11 skip/3 unexpected/2 flaky，第二组 214/22 skip/4 unexpected/1 flaky。七项涉及连续建设、奖励动画、移动统计宽度、两项堆叠交互/坐标、冷菜单 p95 1,099 ms 超出 500 ms，以及缓冲设置总超时。失败不能统一归因于机器慢；新 7 项也不能与 7fd 29 项简单相减视为已修复数量。
+
+该主 CI 的 Server/Ops/Native 终态成功：Server 390/2 skip 加 station 4/4、Ops 60/2 skip、Rust core 1,113/5 ignored 加 Host 245+3、Native 670/5 skip。独立 Windows `34308685622` 成功，正常优化 Rust core 1,113/5 ignored 加 Host 249+3、Native 674/1 skip、游戏单元 3,172/39 skip；原时限未改，本次有限矿脉案例通过。原始日志 `cloud-f427-server-native-v1.log`、`cloud-f427-windows-v1.log` 保留；不能从一次通过推定历史堆损坏根因已解决。

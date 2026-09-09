@@ -16,10 +16,20 @@ Host 从自己的 OS 可执行文件路径定位安装资源，锁定祖先与 H
 
 最终实际进程及相关 Node 回归 `host-installed-process-final-v2-guard` **63 pass / 0 fail / 0 skip**：24 项 main 安装身份、3 项独立 ASAR/实际安装 Host/开发目录拒绝、34 项原 Host 进程及 2 项助手进程。无效 UTF-8 实际进程反例已转绿，原 serve 流程正常。守护正常 exit 0，无停止原因，47.2773933 秒，最低空闲 6,407,080 KiB，6/2 GiB。
 
-本次正常构建 Host SHA-256 `3e68e32e959aee7c6d7cf053c52dfccfd43592279a0a0d25de8f1d5d461f4c77`，助手 `645249e89e56fdb1966ddff5bfc4a21db89c43154de561ba87d5892642bd5b5e`。新冻结包及包内 main/Host 独立身份对照待执行，旧 c9aa 包不含本次 Host 实现，不能继承成新实现实包通过。
+本次正常构建 Host SHA-256 `3e68e32e959aee7c6d7cf053c52dfccfd43592279a0a0d25de8f1d5d461f4c77`，助手 `645249e89e56fdb1966ddff5bfc4a21db89c43154de561ba87d5892642bd5b5e`。旧 c9aa 包不含本次 Host 实现，不继承成新实现实包通过。
+
+## 新冻结包：双端与实际进程已通过
+
+源码 `d97c77321e6e7d8fc19a39dd502438abb10eb347`，Build ID `1.2.7+d97c77321e6e`；`package-d97c7732-frozen` 的 76 项制品/79 文件验证通过。该次重新运行正常 locked release 构建，Host/助手字节与上方最终 Rust 验证一致；实际身份/Host/助手 63/63，项目类型、桌面构建、启动体积、thin UI、coverage、平台和 pack 门禁通过。守护正常 exit 0，112.8098391 秒，最低空闲 6,183,592 KiB，6/2 GiB。
+
+ASAR SHA-256 `b74e433ee703d42e8304ce6ad61cb2b4e10d9016072b49f91626712d31947b6b`。`package-d97c7732-catalog-smoke-v1` 在真实 Electron 中载入冻结 ASAR 内的 main 提供者，调用该包真实 Host 的无参数 `inspect-program`，再执行真实验签助手的缺失 carrier 拒绝。两端九字段与父进程分别计算的包身份完全一致，`authorityEligible=false`、`carrier-io`；窗口/初始显示/show/focus/paint/对话框全部为 0。进程正常 exit 0、无强制清理、独立 profile 已移除，冻结文件前后不变。守护 3.1304376 秒，最低空闲 8,484,352 KiB，6/2 GiB。
+
+提交前元数据检查 `host-installed-metadata-v1` 的语法、Skill、375 条有效链接及 whitespace 通过；新增失效链接 0，PROJECT_STATUS 的 1.0.46 旧缺失链接单列保留。守护 3/2 GiB，正常 exit 0。后续证据文档更新另行检查。
+
+该包随后取得[终局成功结算与重开验证](./rust-rp1-endgame-completion-2026-09-10.md)，实际游戏证据与本节零窗口身份探针分开记录。
 
 ## 剩余范围
 
-本批仅取得九个程序文件字段，游戏 catalog/rules/matrix、profile 与夹具绑定、可信时间与签名撤销/防回退、生产者认证及实际准入仍缺。下一步把这些独立上下文接入既有已验签正文绑定和持久单写者交接，不能让只读 inspect 命令授予运行资格。普通/竞速、完整玩法/命令/投影、保存云兼容、终局成功入口、长离线、性能/内存、长测/硬件、签名安装升级回退均仍在完整 Goal 内。
+本批身份能力仅取得九个程序文件字段，游戏 catalog/rules/matrix、profile 与夹具绑定、可信时间与签名撤销/防回退、生产者认证及实际准入仍缺。下一步把这些独立上下文接入既有已验签正文绑定和持久单写者交接，不能让只读 inspect 命令授予运行资格。普通/竞速、完整玩法/命令/投影、保存云兼容、终局完整等待收益与有界长离线、性能/内存、长测/硬件、签名安装升级回退均仍在完整 Goal 内。
 
 测试保持后台、静音、无可见窗口、BelowNormal、单个重任务及 6/2 GiB 守护。没有修改原用户工作区、玩家原档或生产环境。

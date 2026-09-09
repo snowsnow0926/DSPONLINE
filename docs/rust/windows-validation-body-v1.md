@@ -6,7 +6,7 @@
 
 Electron main 的 `bindAuthenticatedValidationQualification` 只接收既有 Windows 助手验证器生成的 WeakMap 内部 token。Rust 的 `bind_authenticated_validation_qualification` 只接收系统验签模块构造的 `VerifiedCatalogMember`。两者解析的都是验签时取得的同一份不可变字节，不重新打开资格文件。输出仍是私有构造的绑定凭据；JSON 回执不能恢复该凭据。
 
-调用者须另外提供完整候选身份、隔离 profile ID、合成夹具摘要、请求范围、获准发布者证书 SHA-256 与密钥版本、当前时间、撤销代次及已撤销资格/证明集合。不能从待验正文、renderer、玩家存档或报告反填这些预期值。安装资源身份获取、profile 路径与 ID 的映射、可信时钟、签名撤销材料及防回退持久水位仍需实现；这组参数并不证明它们已经可信。
+调用者须另外提供完整候选身份、隔离 profile ID、合成夹具摘要、请求范围、获准发布者证书 SHA-256 与密钥版本、当前时间、撤销代次及已撤销资格/证明集合。不能从待验正文、renderer、玩家存档或报告反填这些预期值。程序文件身份已有独立提供者，但游戏内容/规则/矩阵身份、profile 路径与 ID 的映射、可信时钟、签名撤销材料及防回退持久水位仍需实现；这组参数并不证明它们已经可信。
 
 main 和 Host 分别调用 Windows 验签并分别做正文绑定。签名者、候选及会话不匹配时拒绝；即便全部匹配，也必须再完成生产者认证、完整矩阵、会话准入和持久单写者交接才可能启动模拟。本模块没有 renderer IPC、环境开关、运行资格授予或模拟调用。
 
@@ -40,6 +40,6 @@ candidate 字段顺序复用现有证据身份：`version`, `sourceSha`, `buildI
 
 真实 Windows 签名集成在既有一次性云端证书生命周期中增加 `binding` 成员：独立 Host 和真实 main 助手各自验签，再验证绑定正例与程序/会话/撤销负例；未信任及移除信任后仍拒绝。合成候选和固定测试时钟不代表当前发布包资格。本机禁止运行该证书安装流程。实际执行状态见[本批记录](../reviews/rust-windows-validation-binding-2026-09-10.md)。
 
-安装上下文已增加 [main 程序身份提供者](../reviews/rust-windows-installed-program-2026-09-10.md)：从自己的 ASAR 元数据及实际 Host/ASAR 文件提取九字段程序事实；游戏 catalog/rules/matrix、Host 独立身份提供者、profile、时钟与撤销仍待完成。这不是完整资格上下文或签名信任。
+安装上下文已具备 [main 与 Host 独立程序身份提供者](./windows-installed-program-identity.md)：分别从自己的安装位置读取 ASAR 元数据及实际 Host/ASAR 文件，提取九字段程序事实。d97 冻结包内两端与父进程独立核对相同，实际助手拒绝缺失 carrier；游戏 catalog/rules/matrix、profile、时钟与撤销仍待完成。这不是完整资格上下文或签名信任。
 
 下一步仍是完整可信上下文提供者、生产者认证、验证专用会话准入与冻结程序内实际单写者交接；扩展玩家、竞速和内容范围须新增对应资格矩阵与合同，不能仅增加允许字符串。

@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **Windows Rust 双端身份（2026-09-10）**：最终 Host 正常优化库 272 pass/4 专用 ignored，格式/严格 Clippy/构建通过；main 身份、独立 ASAR、实际 Host 与助手进程 63/63。无效 UTF-8 实际反例先失败后修复，未跳过；新冻结包双端对照待执行，旧 c9aa 仅为 main/助手证据。全部本机进程保持隐藏、静音、BelowNormal 和 6/2 GiB 守护。完整终局成功保存、游戏回归及发布门禁尚未收口，见[本批准确证据](./reviews/rust-windows-host-installed-program-2026-09-10.md)及[历史性能测量](./reviews/rust-rp1-canonical-buffer-2026-09-10.md)。
+> **Windows Rust 当前验收（2026-09-10）**：d97 冻结包双端程序身份和实际助手通过；Host 正常优化库 272/4 专用 ignored、严格检查、进程相关 63/63、项目类型/构建/门禁通过。终局 9 秒 Native/完整 JS、成功持久保存与两次重开、取消保档均过，八次隐藏静音正常 exit 0；原时限与 6/2 GiB 守护保持。上一 4b74 云端 Windows 全套成功，Native 876/1 skip、游戏 3,201/39 skip；完整浏览器 466/33 skip/3 fail/1 flaky，仍未满足发布门禁，新源码云端另验。见[完整终局与回归证据](./reviews/rust-rp1-endgame-completion-2026-09-10.md)和[双端身份验证](./reviews/rust-windows-host-installed-program-2026-09-10.md)。
 
 > **2026-09-10 Native 输入与最新完整结果**：原组件 8 个新增反例失败，修复组件/库存存储 24 pass、全项目类型通过，6/2 GiB 守护正常退出。50b Windows 全套成功；完整浏览器 467 pass/33 skip/2 fail/1 flaky，设置失败 trace 显示整例超时，未证明溢出。1cf 清单修复的云端生产构建已过，其余待验，发布仍未通过。见[源码绑定的证据与缺口](./reviews/rust-windows-native-limit-drafts-2026-09-10.md)。
 

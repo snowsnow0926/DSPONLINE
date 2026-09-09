@@ -1,6 +1,6 @@
 # DSP极简网络项目现状
 
-> **2026-09-09 大档校验优化（未发布）**：复用数值缓冲/哈希视图，原始终局档三对校验合计中位 3.871→3.098 秒，约 19.98%，摘要与原档不变；不是完整菜单提速。完整单元 3,174/39 skip、实际 Native 对照 50/1 skip、类型/Web 构建门禁通过。前批独立进程恢复 Host 256/1 驱动 ignored、采集 8/8、工具 82/82 保持 TEST_ONLY。4bc Windows/Linux 非浏览器检查通过，浏览器仍 4 unexpected/1 flaky；新实包与发布资格待验，见[证据](./reviews/rust-rp1-proof-buffer-reuse-2026-09-09.md)和[进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
+> **2026-09-09 当前大档进展（未发布）**：校验缓冲优化已提交 a6a37b00，原始终局档三对校验合计中位 3.871→3.098 秒，约 19.98%；完整单元 3,174/39 skip、实际 Native 对照 50/1 skip、类型/Web 门禁通过。新冻结包 75/78 文件校验通过，但终局实际入口仍超原 90 秒，正常关闭也失败；独立固定 9 秒 Host 导出与已验证参考逐字节相同。原档不变、零可见游戏窗口。4bc 浏览器仍 4 unexpected/1 flaky，实时与发布资格未开放，见[实包结果](./reviews/rust-rp1-a6a37b00-package-2026-09-09.md)、[局部收益](./reviews/rust-rp1-proof-buffer-reuse-2026-09-09.md)和[进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 
 > **2026-09-09 完整 Windows Rust Goal 已启用（未发布）**：范围包括离线收口、实时单所有者、完整玩法/兼容/性能及可交付候选。TEST_ONLY 证据检查器和 ASAR 测试写入完成修复已验证，工具/后台/打包专项 104 通过 / 1 条件跳过 / 0 失败。Rust 建造的三个已拥有映射直接移动，完整正常 release 核心 1,113/5 ignored/0 fail，fmt 与严格 Clippy 通过。实时资格仍未开放，新增性能和实包资格待验；见[最新报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 

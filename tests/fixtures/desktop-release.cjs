@@ -2,7 +2,8 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
-const { createPackage, uncache } = require("@electron/asar");
+const { uncache } = require("@electron/asar");
+const { createCompletedAsar } = require("./complete-asar.cjs");
 const { execFileSync } = require("node:child_process");
 const { writeDesktopBuildEvidence } = require("../../desktop/desktop-artifact-evidence.cjs");
 const { STABLE_IDENTITY, PERFORMANCE_EDITION_IDENTITY } = require("../../desktop/performance-edition-identity.cjs");
@@ -21,7 +22,7 @@ async function writeFixture(root, relative = "release", channel = "stable", opti
   fs.writeFileSync(path.join(source, "dist/version.json"), JSON.stringify({ version: expected.version, buildId: expected.buildId, platform: "desktop" }));
   fs.writeFileSync(path.join(source, "dist/index.html"), "<!doctype html><title>Synthetic fixture; not a runnable installer</title>");
   fs.mkdirSync(path.join(directory, "win-unpacked/resources/native"), { recursive: true });
-  await createPackage(source, path.join(directory, "win-unpacked/resources/app.asar"));
+  await createCompletedAsar(source, path.join(directory, "win-unpacked/resources/app.asar"));
   uncache(path.join(directory, "win-unpacked/resources/app.asar"));
   fs.writeFileSync(path.join(directory, `win-unpacked/${identity.executableName}.exe`), "synthetic electron executable");
   fs.writeFileSync(path.join(directory, "win-unpacked/resources/native/dsp-native-host.exe"), "synthetic native host");

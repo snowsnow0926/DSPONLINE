@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createPackage } = require("@electron/asar");
+const { createCompletedAsar } = require("../tests/fixtures/complete-asar.cjs");
 
 const {
   isForbiddenDesktopPackageEntry,
@@ -24,7 +24,7 @@ test("accepts a clean asar and rejects residue in packed or unpacked dependency 
   fs.mkdirSync(cleanSource, { recursive: true });
   fs.writeFileSync(path.join(cleanSource, "package.json"), "{}");
   const cleanAsar = path.join(root, "clean.asar");
-  await createPackage(cleanSource, cleanAsar);
+  await createCompletedAsar(cleanSource, cleanAsar);
   assert.deepEqual(verifyDesktopPackageHygiene(cleanAsar), { asarEntries: 1, forbiddenEntries: 0 });
 
   const dirtySource = path.join(root, "dirty");
@@ -32,7 +32,7 @@ test("accepts a clean asar and rejects residue in packed or unpacked dependency 
   fs.mkdirSync(path.dirname(dirtyPath), { recursive: true });
   fs.writeFileSync(dirtyPath, "generated");
   const dirtyAsar = path.join(root, "dirty.asar");
-  await createPackage(dirtySource, dirtyAsar);
+  await createCompletedAsar(dirtySource, dirtyAsar);
   assert.throws(() => verifyDesktopPackageHygiene(dirtyAsar), /Android 构建残留/);
 
   const unpackedPath = path.join(cleanAsar + ".unpacked", "node_modules", "@capacitor", "core", "android", "build", "tmp.bin");

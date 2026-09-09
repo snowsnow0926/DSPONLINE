@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-09 Windows Rust 证据基础与验证补修**：工具/ASAR/后台/身份/发布内容专项 104 通过 / 1 条件跳过 / 0 失败，ASAR 旧写入反例先失败后通过；跳过为缺跨平台符号链接权限，Windows 联接负例通过。Rust 建造候选的完整正常 release 核心 1,113/5 ignored/0 fail、fmt 与严格 workspace/all-targets Clippy 通过。重测 6/2 GiB 守护正常退出，零游戏启动；新 Host/性能 A/B/实包及新云端尚待验。见[本批证据](./reviews/rust-windows-qualification-foundation-2026-09-09.md)。
+
 > **2026-09-09 校验循环及解析参与候选**：六文件专项 42/42、完整终局保存六次主档/备份/快照一致、后台策略 6/6；配对保存中位 13.444→13.146 秒，原档不变，6/2 GiB 守护。完整本机游戏单元 3,173/39 skip/0 fail、类型/Web 构建及门禁通过；正常 release 完整核心 1,113/5 ignored/0 fail、fmt/严格 Clippy 通过。253 包 75/78 件冻结通过，但真实终局完成入口仍超原 90 秒；253 Linux 构建/单元/Server/Ops/Native 通过，浏览器 440/33 skip/11 unexpected/4 flaky，Windows 核心 1,112/5 ignored/1 实际解析参与断言失败，后续跳过。新源码待验范围见[准确证据](./reviews/rust-rp1-save-checksum-2026-09-09.md)。
 
 > **2026-09-09 Rust 导出写缓冲**：正常 release Host 252+3=255 pass/0 skip/0 fail、五个相关 Native Node 文件 89/89、fmt/严格 Clippy/build 通过；完整终局档三对请求与完整 JS 逐字段一致，六份实际导出字节相同、六次正常关闭、原档不变。请求中位 54.258→52.495 秒，仅为请求收益；另一次分段诊断单独保留。全程无游戏窗口、低优先级串行、6 GiB 启动/2 GiB 停止。新改动尚无云端或实际桌面资格，详见[准确范围](./reviews/rust-rp1-export-buffer-2026-09-09.md)。

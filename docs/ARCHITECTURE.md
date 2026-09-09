@@ -1,5 +1,9 @@
 # 系统架构
 
+> 开发侧新增 TEST_ONLY 资格证据一致性检查：有界读取同一份字节做摘要和解析，绑定独立冻结的 source/Host/ASAR/catalog/rules/matrix，区分实际执行方式和 passed/failed/skipped/flaky。它未接入 renderer/main/Host，始终不授予身份认证、实时权威或发布许可；正式信任链仍待实现，见[ADR-009](./architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)。
+
+> Rust 建造阶段 `run_centers()` 直接移动从候选基础状态移出的 automation/jobs/quantumMaterialBuffer 映射，避免先取得所有权又递归复制。必需字段错误、可选空缓冲、调度与写回规则不变；完整核心回归通过，完整用户等待收益待测。
+
 > 存档文本 checksum 对连续四个 ASCII 字符按原次序执行四次 FNV-1a 更新；Unicode、代理对、无效代理替换与短尾部仍按原 UTF-8 规则处理，checksum/字节数及全部保存保护保持。该循环主要服务 ASCII 占多数的 JSON，密集 Unicode 子样本存在反向耗时变化；完整保存步骤当前仅约 2.2% 收益，不推导完整菜单速度。详见[测量与边界](./reviews/rust-rp1-save-checksum-2026-09-09.md)。
 
 > 原生兼容存档导出在精确长度限制内使用固定 64 KiB `BufWriter`，合并逐实体、逐传送带与 JSON 分隔符写入；结束后必须核对完整长度、显式 flush、同步文件，再按原路径保护原子发布并同步目录。回调、长度或写入失败仍清理临时文件，原有导出保持不变。存档格式、校验、磁盘预算和离线准入不变，见[实现及完整状态验证](./reviews/rust-rp1-export-buffer-2026-09-09.md)。

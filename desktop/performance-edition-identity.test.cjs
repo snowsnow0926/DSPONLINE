@@ -5,7 +5,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createPackage, extractFile } = require("@electron/asar");
+const { extractFile } = require("@electron/asar");
+const { createCompletedAsar } = require("../tests/fixtures/complete-asar.cjs");
 const { writeFixture, context } = require("../tests/fixtures/desktop-release.cjs");
 const { validateConfiguration } = require("app-builder-lib/out/util/config/config.js");
 const { DebugLogger } = require("builder-util");
@@ -453,7 +454,7 @@ test("packaged identity verifier accepts only the dedicated executable and rejec
     productName: PERFORMANCE_EDITION_IDENTITY.productName,
   }));
   const asarPath = path.join(resourcesDirectory, "app.asar");
-  await createPackage(source, asarPath);
+  await createCompletedAsar(source, asarPath);
   const expectedExecutable = path.join(unpackedDirectory, `${PERFORMANCE_EDITION_IDENTITY.executableName}.exe`);
   fs.writeFileSync(expectedExecutable, "fixture");
 

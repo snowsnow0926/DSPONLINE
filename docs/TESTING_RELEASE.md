@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **Windows catalog 验证器初版（2026-09-09）**：专项 7/7，包含实际 Windows 拒绝伪造 catalog、锁与边界检查、载体/祖先目录联接拒绝；完整正常 release 核心 1,115/5 ignored、Host 263/1 ignored、Native Node 750/1 skip 均零失败，fmt/严格 Clippy/正常构建通过。最终独立 Electron 通信夹具增量 7/7，30 MiB 双向传输、显示/焦点均 0、静音/隔离通过。无可信签名正例或运行授权证据。ae1 云端 Windows 成功、完整浏览器 460/33 skip/5 fail/1 flaky；本批新源码云端待验。见[本批记录](./reviews/rust-windows-catalog-verifier-2026-09-09.md)。
+
 > **57ce 云端完整浏览器终态与复验配置（2026-09-09）**：414 pass / 33 skip / 28 unexpected / 24 flaky；四项新保存测试、两项启动顺序与精确 50 堆叠首轮通过。两分片仍在独立机器执行，每片下一轮设 `DSP_E2E_WORKERS=1`，减少同机争用；原时限、断言、范围和 CI 重试策略不变，新完整结果待验。57ce Windows 已完整 SUCCESS：Rust 核心 1,115/5 ignored、Host 256/1 ignored、完整游戏 3,180/39 skip，均零失败，采样器复验通过。两份 499 项清单一致只证明枚举范围未改，新的全套浏览器待验。见[阶段记录](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。
 
 > **2026-09-09 菜单 Worker 保存候选门禁**：保存专项 133/133、类型、后台 Chromium 25/25、完整游戏 3,180/39 skip/0 fail、实际 Native 50/1 长测 skip、Web 构建三项门禁通过。旧档/快照与启动/目录专项另 5/5；57ce 新包 75/78 件通过；终局 v15 在独立读档环节 targetClosed，整例失败，完整浏览器待验。正常 Host 未改，未将旧 Rust 结果计为重跑。见 [后台保存接入](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。

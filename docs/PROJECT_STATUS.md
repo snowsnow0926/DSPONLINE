@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 验签基础初版（2026-09-09，未发布）**：新增 Host 独立 catalog 成员验证器，固定有界文件、文件/目录锁、无 UI 的系统验签及独立发布者策略。专项 7/7，正常 release 核心 1,115/5 ignored、Host 263/1 ignored、Native 750/1 skip 均零失败，严格 Clippy/格式/构建通过。通信夹具后台审计另 7/7；实际 30 MiB 传输显示/焦点事件均 0。ae1 云端 Windows 全部成功，浏览器 460/33 skip/5 fail/1 flaky，仍非发布资格。签名正例、main 验证器、时效撤销及实时接管仍未完成。见[本批范围](./reviews/rust-windows-catalog-verifier-2026-09-09.md)。
+
 > **57ce 云端终态（2026-09-09，未发布）**：Windows 完整 SUCCESS，正常核心 1,115/5 ignored、Host 256/1 ignored、游戏 3,180/39 skip，均零失败，采样器复验通过。Linux 单元/构建/Server/Ops/Native 通过；完整浏览器 414/33 skip/28 unexpected/24 flaky，新四项保存用例均首轮通过。下一轮每片 browser worker 2→1，499 项枚举一致，原断言/时限/重试保留，新结果待验。终局实包 v15 读档 targetClosed 尚未解决，完整 Goal active。见[阶段记录](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。
 
 > **2026-09-09 菜单后台保存候选（未发布）**：菜单进入/恢复提交复用既有 Worker proof、fencing、CAS、旧档备份及精确读回，主线程不再接回整份正文来构建目录。调用者状态保留，旧模式迁移走兼容路径。类型、专项 133/133、真实浏览器 25/25、完整本机游戏 3,180/39 skip/0 fail（实际 Native 50/1 长测 skip）及 Web 三项门禁通过；旧档/快照及启动/目录补验 5/5；57ce 新包 75/78 件已验；终局 9 秒进入运营中心约 90.49 秒，后续独立读档 targetClosed，整例失败，两次关闭正常且原档未改。完整浏览器仍待验。尚无新增终局完整等待收益，629 原 90 秒失败保留，完整 Goal active。见 [后台保存接入](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。

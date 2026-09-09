@@ -46,7 +46,7 @@ node scripts/native-qualification-evidence.mjs <candidate.json> <evidence-direct
 
 ## 4. 正式信任与失效设计（尚未实现）
 
-已补[签名 catalog 与双端验证实施方案](./windows-qualification-carrier.md)，选定外部 catalog/member 载体、main 平台助手与 Host 独立 Windows API 路径，并明确失效后的只读恢复边界。平台验证器、实际发布者、生产者认证、撤销/时钟防回退和生效接入仍待实现；下述原有门槛保持。
+已补[签名 catalog 与双端验证实施方案](./windows-qualification-carrier.md)，选定外部 catalog/member 载体、main 平台助手与 Host 独立 Windows API 路径，并明确失效后的只读恢复边界。Host 已有独立有界验签模块及负例测试，详见[实现范围](../reviews/rust-windows-catalog-verifier-2026-09-09.md)；签名正例、main 验证器、实际发布者、生产者认证、撤销/时钟防回退和生效接入仍待完成，下述原有门槛保持。
 
 正式信任沿用 Windows 发布者和现有签名/制品校验边界。后续资格载体须能由 Windows 签名链认证，并绑定获准发布者、精确 Host/ASAR/规则/矩阵摘要、范围、有效期与撤销代次；普通 JSON 加 SHA-256 不够。具体载体、发布者固定方式、Windows 离线证书策略和 Host 原生验证接口须在实现前补入 ADR；目前没有可用生产凭据或已批准的载体实现。
 

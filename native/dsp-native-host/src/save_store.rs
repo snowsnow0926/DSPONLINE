@@ -3844,7 +3844,10 @@ mod tests {
 
     #[cfg(windows)]
     fn create_directory_redirect(link: &Path, target: &Path) {
+        use std::os::windows::process::CommandExt;
         let output = std::process::Command::new("cmd.exe")
+            // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS for background tests.
+            .creation_flags(0x0800_0000 | 0x0000_4000)
             .args(["/d", "/c", "mklink", "/J"])
             .arg(link)
             .arg(target)

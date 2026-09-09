@@ -5,7 +5,7 @@
 - Extends: [ADR-008](./ADR-008-WINDOWS-PERFORMANCE-EDITION.md)
 - Compatibility: no GameState, envelope, cloud, Host protocol or player-authority change
 
-The next implementation route is now specified in [the catalog carrier plan](../rust/windows-qualification-carrier.md): external catalog/member binding, independent main platform helper and Host Windows API verification, explicit no-UI/offline policy, and a separate recovery capability after gameplay qualification expires. This is a selected development design, not an implemented verifier or authorization. Publisher credentials, authenticated producers, revocation/clock anti-rollback and actual activation remain open.
+The implementation route is specified in [the catalog carrier plan](../rust/windows-qualification-carrier.md): external catalog/member binding, independent main platform helper and Host Windows API verification, explicit no-UI/offline policy, and a separate recovery capability after gameplay qualification expires. The Host has an initial standalone catalog member verifier with bounded locked inputs and negative Windows tests; it is not connected to activation and lacks a trusted signed positive fixture. See [its evidence and remaining work](../reviews/rust-windows-catalog-verifier-2026-09-09.md). The main verifier, publisher credentials, authenticated producers, revocation/clock anti-rollback and actual activation remain open.
 
 ## Context
 

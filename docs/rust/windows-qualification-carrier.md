@@ -1,6 +1,6 @@
 # Windows Rust 资格载体与双端验证实施方案
 
-2026-09-09，Role: develop。**本页选择下一步实现方案；验证器、生产者认证、正式资格签发和实时授权尚未实现。** 不改变普通 Host 的 `authority_eligible=false`，不将 TEST_ONLY 结果升级为玩家资格。对应 [ADR-009](../architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)及[完整目标](./windows-full-development.md)。
+2026-09-09，Role: develop。**Host 独立 catalog 成员验证器已有初版代码及定向负例证据；真实签名正例、main 验证器、生产者认证、正式资格签发和实时授权尚未完成。** 见[实现与验证范围](../reviews/rust-windows-catalog-verifier-2026-09-09.md)。不改变普通 Host 的 `authority_eligible=false`，不将 TEST_ONLY 结果升级为玩家资格。对应 [ADR-009](../architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)及[完整目标](./windows-full-development.md)。
 
 ## 载体与冻结顺序
 
@@ -15,7 +15,7 @@
 | 验证端 | 下一步实现位置 | 信任输入与结果 |
 | --- | --- | --- |
 | Electron main | 固定、随程序交付的 Windows 平台验证助手；由 main 以结构化参数、隐藏进程调用，禁止 renderer 选择程序、脚本、资格路径或发布者 | main 自己确定安装资源与预期候选；助手经 Windows API 验证后返回小型结果，main 再校验正文、时效、范围及会话条件 |
-| Rust Host | Host 内部 Windows API 验证模块，通过 `windows-sys` 或经明确 ABI 审核的系统绑定实现 | 独立打开固定资格文件并验证，重新计算实际 Host/规则/内容身份；不接受 main/renderer 的 `eligible=true` 替代验证 |
+| Rust Host | 已有内部 Windows API catalog 成员验证模块，尚未接入 RPC/运行资格 | 独立打开固定资格文件并验证；实际 Host/规则/内容身份校验仍需接入，不接受 main/renderer 的 `eligible=true` 替代验证 |
 
 main 助手先采用系统 PowerShell 加固定 C# P/Invoke 的实现路线，避免把生产验证依赖于玩家安装 Windows SDK/SignTool。助手是受信任安装程序的一部分，不能从用户目录或远程下载脚本执行，不能接受任意代码；真实打包、启动时间、企业禁用 PowerShell 的行为仍需验证。平台能力不可用时拒绝新 Rust 接管，保留完整进度恢复；不能动态改用未经验证的 JS 信任判断。此路线尚未实现或纳入制品。
 
@@ -23,7 +23,7 @@ main 助手先采用系统 PowerShell 加固定 C# P/Invoke 的实现路线，�
 
 ## Windows API 与文件快照合同
 
-1. 对安装根、每级目录和两个文件做重解析点/类型检查；打开并持有目录与文件 handle，禁止共享删除，文件还禁止共享写。验证期间任何锁定或路径身份检查失败均拒绝。目录锁定策略须在 Windows 的 rename/junction/hardlink 负例中实际证明，不能仅靠验证前后两次字符串路径相同。
+1. 对安装根、每级目录和两个文件做重解析点/类型检查；打开并持有目录与文件 handle，目录和文件都禁止共享删除及写入。验证期间任何锁定或路径身份检查失败均拒绝。目录锁定策略须在 Windows 的 rename/junction/hardlink 负例中实际证明，不能仅靠验证前后两次字符串路径相同。
 2. 成员使用同一个打开的文件 handle 读取有界正文并计算 catalog 所需哈希；使用匹配 SHA-256 算法的 HCATADMIN 上下文。普通 `SHA256(file)` 不替代 Windows 的成员验证。catalog 最大 1 MiB、正文最大 256 KiB；不把完整玩家存档放进资格载体。[CryptCATAdminCalcHashFromFileHandle2](https://learn.microsoft.com/en-us/windows/win32/api/mscat/nf-mscat-cryptcatadmincalchashfromfilehandle2)、[WINTRUST_CATALOG_INFO](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/ns-wintrust-wintrust_catalog_info)
 3. 使用 `WINTRUST_ACTION_GENERIC_VERIFY_V2`、catalog 成员类型；只接受 WinVerifyTrust 返回 **0**。它不是 HRESULT，不能使用 `SUCCEEDED` 判断。`hwnd=INVALID_HANDLE_VALUE`，UI 设为 `WTD_UI_NONE`，不得弹验证或证书对话框。[WinVerifyTrust](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-winverifytrust)
 4. 启用明确的证书链撤销策略和 `WTD_CACHE_ONLY_URL_RETRIEVAL`，前台验证不产生隐式网络等待；缓存不足不能变成允许。独立的应用资格撤销和新鲜度检查仍然执行。每次 VERIFY 必须在所有返回路径执行 CLOSE，释放信任状态与文件/目录/HCATADMIN 资源。[WINTRUST_DATA](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/ns-wintrust-wintrust_data)

@@ -1,6 +1,6 @@
 # 公开测试版后续路线图
 
-> **实时资格下一实施项（2026-09-09）**：选定外部签名 catalog/member 与 main、Host 独立 Windows API 验证路线，明确过期后只读恢复边界；具体实现、正式发布者、认证生产者、撤销/时钟防回退仍未完成。见[实施方案](./rust/windows-qualification-carrier.md)。
+> **实时资格当前实施项（2026-09-09）**：Host 已有独立 Windows catalog 成员验证器，定向负例通过；尚未接入运行授权。下一步补真实签名正例、main 独立验证器、正式发布者与认证生产者、撤销/时钟防回退，再执行实际实时接管。见[实现范围](./reviews/rust-windows-catalog-verifier-2026-09-09.md)与[实施方案](./rust/windows-qualification-carrier.md)。
 
 > **当前 Windows Rust 下一步（2026-09-09）**：菜单后台保存接入已通过完整本机单元与 25 项浏览器专项；旧档/快照等追加 5/5 已通过，57ce 新包 75/78 件已验；终局 v15 在持久数据读取时 targetClosed，下一步定位读取/进程边界并完成完整状态与两次重开。完整 Goal 仍包括可信资格、实际 Rust 实时单所有者、复杂长离线、全部受支持玩法和 Windows 可交付候选。见 [后台保存接入](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。
 

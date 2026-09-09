@@ -1,6 +1,6 @@
 # DSP极简网络项目现状
 
-> **2026-09-09 当前 Rust 与画布增量（未发布）**：同一规范编码流更新两个独立摘要，终局实际 Native 固定 9 秒请求三对中位 53.55→51.80 秒，少约 1.75 秒（3.3%）；完整导出一致，原档不变，只计该请求收益。修复堆叠隐藏端导致可见端口测量丢失，三类浏览器检查各三轮 9/9；完整 Rust 核心 1,114/5 ignored、Host 256/1 ignored、Native 接口 750/1 skip、游戏 3,176/39 skip，均 0 fail，实际 Native 对照 50/1 长测 skip，类型/Web 门禁通过。前批 e517 Windows 及 Linux 非浏览器检查通过，浏览器仍 27 unexpected/10 flaky；本批云端和冻结包待验，旧 a6 终局原 90 秒入口及一次正常关闭仍失败。见[Rust 证据](./reviews/rust-rp1-native-canonical-pair-2026-09-09.md)、[画布修复](./reviews/rust-rp1-partial-canvas-endpoints-2026-09-09.md)和[完整进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
+> **2026-09-09 当前启动顺序修复（未发布）**：实际 84 冻结包两次仍超原 90 秒终局入口；追到启动恢复挑战停掉并重建刚创建的 Worker，重复传输约 196 MiB。现已等待持久 handoff 检查完成后再启动普通 Worker；旧代码 2/2 失败，修复后三轮 6/6 通过（真实界面、协议替身，不计 Native 资格）。完整 Native 750/1 skip、游戏 3,176/39 skip、实际 Native 50/1 长测 skip、类型通过；原构建因覆盖行号过期失败，按语义不变重新生成后 Web 全门禁与画布 9/9 通过。84 Linux 非浏览器检查通过，浏览器仍 31 unexpected/22 flaky，Windows 云端全量通过；新冻结包待验。前批 Rust 请求中位少 3.3% 只计该请求收益。见[启动修复与失败证据](./reviews/rust-rp1-startup-reconcile-order-2026-09-09.md)和[完整进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 
 > **2026-09-09 完整 Windows Rust Goal 已启用（未发布）**：范围包括离线收口、实时单所有者、完整玩法/兼容/性能及可交付候选。TEST_ONLY 证据检查器和 ASAR 测试写入完成修复已验证，工具/后台/打包专项 104 通过 / 1 条件跳过 / 0 失败。Rust 建造的三个已拥有映射直接移动，完整正常 release 核心 1,113/5 ignored/0 fail，fmt 与严格 Clippy 通过。实时资格仍未开放，新增性能和实包资格待验；见[最新报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 

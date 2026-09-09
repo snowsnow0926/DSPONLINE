@@ -1,5 +1,7 @@
 # 系统架构
 
+> Windows 普通模拟启动先等待两项独立检查：main 时钟可读，以及 main 发起的启动 handoff 挑战完成。idle 时钟不能证明浏览器持久锁已清除；无锁、持久归还完成或匹配 Rust 会话并完成绑定才结束等待。同步保存和异步 JS 租约入口共用该等待状态，unknown/失败继续受保护；不支持 handoff 接口的环境保留原启动路径。该顺序避免先创建并传输整厂、随即停止重建 Worker。见[实包定位与回归](./reviews/rust-rp1-startup-reconcile-order-2026-09-09.md)。
+
 > 跨语言状态校验的流式 SHA-256 复用固定块 DataView，ProofWriter 复用 8 字节数值缓冲；同步消费后再覆写，原字节序、字段顺序、Unicode、数值和 revision 规则保持。完整摘要与实际 Rust 对照通过，详见[校验优化](./reviews/rust-rp1-proof-buffer-reuse-2026-09-09.md)。开发证据生产器仍有八项 TEST_ONLY 库测试，七项进程内重开、一项独立子进程持久边界恢复；没有改变生产准入或接入正式资格，见[恢复范围](./reviews/rust-windows-process-recovery-2026-09-09.md)。
 
 > 开发侧新增 TEST_ONLY 资格证据一致性检查：有界读取同一份字节做摘要和解析，绑定独立冻结的 source/Host/ASAR/catalog/rules/matrix，区分实际执行方式和 passed/failed/skipped/flaky。它未接入 renderer/main/Host，始终不授予身份认证、实时权威或发布许可；正式信任链仍待实现，见[ADR-009](./architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)。

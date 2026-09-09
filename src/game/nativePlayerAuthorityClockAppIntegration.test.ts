@@ -19,7 +19,7 @@ describe("main-owned authority clock App wiring", () => {
 
   it("fails closed before the first main-owned authority pull", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
-    expect(app).toMatch(/nativePlayerAuthorityBootstrapPending = nativePlayerAuthorityClockSupported &&[\s\S]*?availability !== "ready"/);
+    expect(app).toMatch(/nativePlayerAuthorityBootstrapPending = nativeAuthorityStartupReconcilePending \|\|[\s\S]*?nativePlayerAuthorityClockSupported &&[\s\S]*?availability !== "ready"/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime = nativePlayerAuthorityBootstrapPending \|\|/);
 
     const workerComment = app.indexOf("Main/Rust is now the only mutable runtime");

@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **2026-09-09 当前验证**：正常 release Rust 核心 1,114 pass/5 ignored、Host 256 pass/1 驱动 ignored；fmt/严格 Clippy/build 通过。完整 Native 接口 750/1 skip、游戏 3,176/39 skip，实际 Native 对照 50/1 长测 skip，均 0 fail；类型/Web 门禁通过。终局请求三对实际 Host A/B 中位少 3.3%，8 份完整导出字节一致且正常关闭；堆叠/多端口/平移缩放最终三轮 9/9，旧失败证据保留。前批 e517 Windows 全量与 Linux 构建/单元/Server/Ops/Native 通过，浏览器 423 expected/33 skip/27 unexpected/10 flaky；新源码云端及冻结包尚待验。原 a6 包 v8/v9 均超 90 秒，v9 正常关闭不覆盖 v8 关闭失败，Goal active、未发布。见[Rust 集成证据](./reviews/rust-rp1-native-canonical-pair-2026-09-09.md)和[实际画布缺陷](./reviews/rust-rp1-partial-canvas-endpoints-2026-09-09.md)。
+> **2026-09-09 当前验证**：启动恢复等待修复有旧代码 0/2、修复三轮 6/6 的实际界面协议回归，不能代替 Native 实包。完整 Native 接口 750/1 skip、游戏 3,176/39 skip、实际 Native 对照 50/1 长测 skip、类型通过；原集成保留覆盖清单行号过期的 FAILED，行号定向更新后 Web 全门禁与画布三轮 9/9 通过。正常 release Rust 核心 1,114/5 ignored、Host 256/1 ignored 及严格检查已有同 Host 证据。84 冻结包 v10/v11 均超原 90 秒，v10 正常关闭失败、v11 正常关闭成功，成功持久保存/重开仍待新包。84 Linux 非浏览器检查通过，浏览器 407 expected/33 skip/31 unexpected/22 flaky，Windows 云端全量通过。Goal active、未发布；见[完整证据与限制](./reviews/rust-rp1-startup-reconcile-order-2026-09-09.md)。
 
 > **2026-09-09 Windows Rust 证据基础与验证补修**：工具/ASAR/后台/身份/发布内容专项 104 通过 / 1 条件跳过 / 0 失败，ASAR 旧写入反例先失败后通过；跳过为缺跨平台符号链接权限，Windows 联接负例通过。Rust 建造候选的完整正常 release 核心 1,113/5 ignored/0 fail、fmt 与严格 workspace/all-targets Clippy 通过。重测 6/2 GiB 守护正常退出，零游戏启动；新 Host/性能 A/B/实包及新云端尚待验。见[本批证据](./reviews/rust-windows-qualification-foundation-2026-09-09.md)。
 

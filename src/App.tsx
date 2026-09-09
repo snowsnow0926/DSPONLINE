@@ -2741,12 +2741,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     typeof desktopBridge.getNativePlayerAuthorityState === "function" &&
     typeof desktopBridge.onNativePlayerAuthorityState === "function",
   );
+  const [nativeAuthorityStartupReconcilePending, setNativeAuthorityStartupReconcilePending] = useState(() =>
+    typeof desktopBridge?.onNativePlayerAuthorityHandoffRequest === "function");
+  const nativeAuthorityStartupReconcilePendingRef = useRef(nativeAuthorityStartupReconcilePending);
+  // An idle clock does not prove the browser's durable handoff journal is
+  // clear. Await main's startup challenge before constructing the JS Worker;
+  // otherwise reconciliation immediately discards its full-state transfer.
   // The main process may have recovered a Rust-owned lease before React ever
   // mounts. Fail closed until the first trusted broker pull says whether that
   // lease exists; otherwise the renderer could briefly start a second Worker
   // and enqueue an old JavaScript save during startup.
-  const nativePlayerAuthorityBootstrapPending = nativePlayerAuthorityClockSupported &&
-    nativePlayerAuthorityClockSnapshot.availability !== "ready";
+  const nativePlayerAuthorityBootstrapPending = nativeAuthorityStartupReconcilePending ||
+    nativePlayerAuthorityClockSupported && nativePlayerAuthorityClockSnapshot.availability !== "ready";
   useEffect(() => {
     const current = nativePlayerAuthorityClock.getSnapshot();
     if (current.currentFrame === null) {
@@ -2840,7 +2846,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       };
     }
     const clockSnapshot = nativePlayerAuthorityClock.getSnapshot();
-    if (nativePlayerAuthorityClockSupported && clockSnapshot.availability !== "ready") {
+    if (nativeAuthorityStartupReconcilePendingRef.current ||
+        nativePlayerAuthorityClockSupported && clockSnapshot.availability !== "ready") {
       return {
         protected: true,
         runtimeKind: "bootstrap-pending",
@@ -9204,6 +9211,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   useEffect(() => {
     if (!desktopBridge?.onNativePlayerAuthorityHandoffRequest) return;
+    const completeStartupReconciliation = () => {
+      nativeAuthorityStartupReconcilePendingRef.current = false;
+      setNativeAuthorityStartupReconcilePending(false);
+    };
     const sameIdentity = (
       request: DesktopNativePlayerAuthorityHandoffRequest,
       current: NonNullable<typeof nativeAuthorityHandoffRef.current>,
@@ -9335,7 +9346,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             inspection.storage === "indexeddb" &&
             !isLocalSaveNativeAuthorityLease(inspection.writerLease) &&
             (inspection.journalState === "missing" || journal?.phase === "handed-back");
-          if (noBrowserFence) resumeJavaScriptAfterPreTransferBlock();
+          if (noBrowserFence) {
+            completeStartupReconciliation();
+            resumeJavaScriptAfterPreTransferBlock();
+          }
           return {
             kind: "native-player-authority-startup-reconciled-v1",
             action: noBrowserFence ? "no-browser-fence" : "fail-closed",
@@ -9369,6 +9383,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             },
             decision,
           });
+          completeStartupReconciliation();
           resumeJavaScriptAfterPreTransferBlock();
           return {
             kind: "native-player-authority-startup-reconciled-v1",
@@ -9442,6 +9457,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         };
         nativeAuthorityPersistenceProtectedRef.current = true;
         simulationWorkerDisabledRef.current = true;
+        completeStartupReconciliation();
         setNativeAuthorityHandoffQuiescing(false);
         return {
           kind: "native-player-authority-startup-reconciled-v1",

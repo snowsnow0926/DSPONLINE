@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **2026-09-09 当前验证**：启动恢复等待修复有旧代码 0/2、修复三轮 6/6 的实际界面协议回归，不能代替 Native 实包。完整 Native 接口 750/1 skip、游戏 3,176/39 skip、实际 Native 对照 50/1 长测 skip、类型通过；原集成保留覆盖清单行号过期的 FAILED，行号定向更新后 Web 全门禁与画布三轮 9/9 通过。正常 release Rust 核心 1,114/5 ignored、Host 256/1 ignored 及严格检查已有同 Host 证据。84 冻结包 v10/v11 均超原 90 秒，v10 正常关闭失败、v11 正常关闭成功，成功持久保存/重开仍待新包。84 Linux 非浏览器检查通过，浏览器 407 expected/33 skip/31 unexpected/22 flaky，Windows 云端全量通过。Goal active、未发布；见[完整证据与限制](./reviews/rust-rp1-startup-reconcile-order-2026-09-09.md)。
+> **2026-09-09 当前验证**：量子物流借用解析记录的 12 类正常/异常对照、正常 release 核心 **1,115/5 ignored**、Host **256/1 ignored**、fmt/严格 Clippy/build 通过；终局固定 9 秒、双线程、无近似的 8 次实际 Host 全状态一致、正常退出且原档未变，请求中位少 4.99%。新完整 Native 750/1 skip、游戏 3,176/39 skip（实际 Native 50/1 长测 skip）、类型/Web 全门禁通过，新冻结包待验。前一 c3 冻结包 v12 原 90 秒入口仍失败，截止前一个 Worker、两次正常关闭；完整保存/重开未执行。c3 Windows 云端全量及 Linux 非浏览器通过，浏览器 **422 expected/33 skip/23 unexpected/17 flaky**；精确堆叠路由与两项启动顺序均首轮通过。Goal active、未发布，不能计为新 Rust 实包或实时资格。见[当前证据](./reviews/rust-rp1-quantum-borrowed-admission-2026-09-09.md)、[c3 实包](./reviews/rust-rp1-c3c85cf1-package-2026-09-09.md)及[云端终态](../artifacts/rust-rp1-loop/cloud-c3c85cf1-terminal-summary.json)。
 
 > **2026-09-09 Windows Rust 证据基础与验证补修**：工具/ASAR/后台/身份/发布内容专项 104 通过 / 1 条件跳过 / 0 失败，ASAR 旧写入反例先失败后通过；跳过为缺跨平台符号链接权限，Windows 联接负例通过。Rust 建造候选的完整正常 release 核心 1,113/5 ignored/0 fail、fmt 与严格 workspace/all-targets Clippy 通过。重测 6/2 GiB 守护正常退出，零游戏启动；新 Host/性能 A/B/实包及新云端尚待验。见[本批证据](./reviews/rust-windows-qualification-foundation-2026-09-09.md)。
 

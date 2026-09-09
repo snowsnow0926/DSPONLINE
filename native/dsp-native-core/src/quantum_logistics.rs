@@ -5639,10 +5639,33 @@ pub(crate) fn settle_transitions_indexed(
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
+    admission_reason_with_records(state, None)
+}
+
+pub(crate) fn admission_reason_with_entities(
+    state: &CoreState,
+    entities: &[Value],
+) -> anyhow::Result<Option<&'static str>> {
+    if entities.len() != state.entity_index.len() {
+        bail!("native quantum admission entity topology changed");
+    }
+    admission_reason_with_records(state, Some(entities))
+}
+
+fn admission_reason_with_records(
+    state: &CoreState,
+    parsed_entities: Option<&[Value]>,
+) -> anyhow::Result<Option<&'static str>> {
     let base = state.base_value();
     let network = parse_network(base)?;
     for index in 0..state.entity_index.len() {
-        let entity = state.parse_entity(index)?;
+        let decoded;
+        let entity = if let Some(entities) = parsed_entities {
+            &entities[index]
+        } else {
+            decoded = state.parse_entity(index)?;
+            &decoded
+        };
         let entity = entity
             .as_object()
             .ok_or_else(|| anyhow!("native quantum admission entity is invalid"))?;
@@ -5858,6 +5881,97 @@ mod tests {
             "utilization": 0,
             "routingCursor": 0
         })
+    }
+
+    #[test]
+    fn borrowed_admission_preserves_quantum_rejections_and_source() {
+        for case in 0..12 {
+            let mut entities = vec![
+                quantum_station("station/Ω", "iron_ore", "supply", 0.0, 0.0, vec![]),
+                quantum_collector("collector/Ω", "iron_ore", 1.0, 0.0),
+            ];
+            let mut network = active_quantum_base(0)["quantumLogisticsNetwork"].clone();
+            let expected = match case {
+                1 => {
+                    entities[0]["quantumTarget"] = json!("true");
+                    Some("quantum-target-invalid")
+                }
+                2 => {
+                    entities[1]["quantumTarget"] = json!(true);
+                    Some("quantum-target-invalid")
+                }
+                3 => {
+                    entities[0]["quantumTransition"] = json!([]);
+                    Some("quantum-transition-invalid")
+                }
+                4 => {
+                    entities[0]["quantumMode"] = json!("transitioning");
+                    Some("quantum-transition-invalid")
+                }
+                5 => {
+                    entities[0]["stationTier"] = json!(1);
+                    Some("quantum-station-invalid")
+                }
+                6 => {
+                    entities[0]["stationRoutes"] = json!([{"scope":"remote"}]);
+                    Some("quantum-station-invalid")
+                }
+                7 => {
+                    network["enabled"] = json!(false);
+                    Some("quantum-station-invalid")
+                }
+                8 => {
+                    network["enabled"] = json!(false);
+                    entities[0]["quantumMode"] = json!("legacy");
+                    Some("quantum-collector-invalid")
+                }
+                9 => {
+                    entities[0]["quantumMode"] = json!("invalid");
+                    Some("quantum-mode-invalid")
+                }
+                10 | 11 => {
+                    entities[0]["quantumMode"] = json!("transitioning");
+                    entities[0]["quantumTransition"] = json!({
+                        "targetMode":"quantum", "startedAtSecond":0,
+                        "boundarySecond":5, "bridges":[{
+                            "id":"bridge/Ω", "itemId":"iron_ore", "cargo":"10",
+                            "remainingCargo":"7", "sourceStationId":"source/Ω",
+                            "targetStationId":"target/Ω", "arriveAtSecond":5
+                        }]
+                    });
+                    if case == 11 {
+                        entities[0]["quantumTransition"]["bridges"][0]["remainingCargo"] = json!(7);
+                        Some("quantum-transition-invalid")
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let mut state = crate::simple_factory::tests::fixture_state(&entities);
+            state
+                .base_value_mut()
+                .insert("quantumLogisticsNetwork".to_owned(), network);
+            let before = state.summary().unwrap();
+            let bytes = serde_json::to_vec(&entities).unwrap();
+            assert_eq!(
+                admission_reason(&state).unwrap(),
+                expected,
+                "raw case {case}"
+            );
+            assert_eq!(
+                admission_reason_with_entities(&state, &entities).unwrap(),
+                expected,
+                "borrowed case {case}"
+            );
+            assert!(admission_reason_with_entities(&state, &entities[..1]).is_err());
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), bytes);
+            assert_eq!(
+                state.summary().unwrap().canonical_sha256,
+                before.canonical_sha256
+            );
+            assert_eq!(state.revision, before.revision);
+        }
     }
 
     fn construction_quantum_fixture(

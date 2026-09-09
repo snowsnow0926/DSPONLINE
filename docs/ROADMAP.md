@@ -1,6 +1,6 @@
 # 公开测试版后续路线图
 
-> **2026-09-09 当前增量与下一步**：实际冻结包定位启动恢复挑战重复停止、重建 Worker，已增加持久启动检查等待；反例 2/2 失败、修复三轮 6/6 通过，完整 Native/游戏/类型及覆盖行号补验后的 Web、画布 9/9 通过。下一步提交并冻结新包，沿用原 90 秒入口、完整持久状态、正常关闭与两次重开验收；此前 84 的 v10/v11 失败仍保留。继续正式可信资格、实际实时单所有者及完整发布矩阵。84 云端浏览器仍 31 unexpected/22 flaky，Windows 云端全量通过；不以数量波动认定修复。见[启动顺序修复](./reviews/rust-rp1-startup-reconcile-order-2026-09-09.md)和[前批 Rust 收益](./reviews/rust-rp1-native-canonical-pair-2026-09-09.md)。
+> **2026-09-09 当前增量与下一步**：量子物流复用开档设备解析，终局档三对实际 Native 请求中位少 **4.99%（2.58 秒）**，8 份导出完全一致；正常 release Rust/严格检查通过，完整 Native/游戏/类型/Web 集成通过。随后提交、冻结新包，沿用原 90 秒入口、完整持久状态、正常关闭与两次重开验收。前一 c3 包消除了截止前观测到的重复 Worker，正常关闭均成功，但入口仍失败；c3 云端 Windows 全量及 Linux 非浏览器通过，浏览器仍 23 unexpected/17 flaky。继续可信资格、实际实时单所有者及完整发布矩阵，不累加不同基线的优化百分比。见[本批 Rust 收益](./reviews/rust-rp1-quantum-borrowed-admission-2026-09-09.md)和[c3 实包证据](./reviews/rust-rp1-c3c85cf1-package-2026-09-09.md)。
 
 > **2026-09-09 当前范围扩大为完整 Windows Rust**：新 Goal 已启用。交错推进 RP1 大档/回归、RP2 可信资格和实时单所有者、RP3 完整兼容及 RP4 可交付候选；独立开发不再等待 RP1 全部收尾，接管与发布仍须验收。下一步连接真实证据生产者，验证建造候选状态与成本。见[执行目标](./rust/windows-full-development.md)和[最新报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 

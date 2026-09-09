@@ -2604,7 +2604,13 @@ fn static_admission_reason_with_records(
     if let Some(reason) = local_reason {
         return Ok(Some(reason));
     }
-    if let Some(reason) = crate::quantum_logistics::admission_reason(state)? {
+    let quantum_reason = match parsed_entities {
+        Some(entities) => {
+            crate::quantum_logistics::admission_reason_with_entities(state, entities)?
+        }
+        None => crate::quantum_logistics::admission_reason(state)?,
+    };
+    if let Some(reason) = quantum_reason {
         return Ok(Some(reason));
     }
     let interstellar_reason = match parsed_entities {

@@ -1,6 +1,6 @@
 # DSP极简网络项目现状
 
-> **2026-09-09 当前启动顺序修复（未发布）**：实际 84 冻结包两次仍超原 90 秒终局入口；追到启动恢复挑战停掉并重建刚创建的 Worker，重复传输约 196 MiB。现已等待持久 handoff 检查完成后再启动普通 Worker；旧代码 2/2 失败，修复后三轮 6/6 通过（真实界面、协议替身，不计 Native 资格）。完整 Native 750/1 skip、游戏 3,176/39 skip、实际 Native 50/1 长测 skip、类型通过；原构建因覆盖行号过期失败，按语义不变重新生成后 Web 全门禁与画布 9/9 通过。84 Linux 非浏览器检查通过，浏览器仍 31 unexpected/22 flaky，Windows 云端全量通过；新冻结包待验。前批 Rust 请求中位少 3.3% 只计该请求收益。见[启动修复与失败证据](./reviews/rust-rp1-startup-reconcile-order-2026-09-09.md)和[完整进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
+> **2026-09-09 当前 Rust 进展（未发布）**：量子物流开档复用已解析设备，终局档三对正常 Host 请求中位 **51.77→49.19 秒，少约 4.99%（2.58 秒）**；8 份完整导出相同、正常退出、原档未变，只计请求收益。新正常 release 核心 1,115/5 ignored、Host 256/1 ignored、严格检查通过，完整 Native 750/1 skip、游戏 3,176/39 skip（实际 Native 50/1 长测 skip）、类型及 Web 全门禁通过。前一 c3 冻结包在原 90 秒内仅观察到一个模拟 Worker、两次正常关闭，但入口仍失败，成功保存/两次重开未验收。c3 Windows 云端全量及 Linux 非浏览器通过；两项启动顺序和精确堆叠路由首轮通过，完整浏览器仍 23 unexpected/17 flaky。新 Rust 还需冻结实包和独立云端验证。见[本批证据](./reviews/rust-rp1-quantum-borrowed-admission-2026-09-09.md)、[c3 实包](./reviews/rust-rp1-c3c85cf1-package-2026-09-09.md)和[完整进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 
 > **2026-09-09 完整 Windows Rust Goal 已启用（未发布）**：范围包括离线收口、实时单所有者、完整玩法/兼容/性能及可交付候选。TEST_ONLY 证据检查器和 ASAR 测试写入完成修复已验证，工具/后台/打包专项 104 通过 / 1 条件跳过 / 0 失败。Rust 建造的三个已拥有映射直接移动，完整正常 release 核心 1,113/5 ignored/0 fail，fmt 与严格 Clippy 通过。实时资格仍未开放，新增性能和实包资格待验；见[最新报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 

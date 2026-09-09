@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-10 Native 输入与最新完整结果**：原组件 8 个新增反例失败，修复组件/库存存储 24 pass、全项目类型通过，6/2 GiB 守护正常退出。50b Windows 全套成功；完整浏览器 467 pass/33 skip/2 fail/1 flaky，设置失败 trace 显示整例超时，未证明溢出。1cf 清单修复的云端生产构建已过，其余待验，发布仍未通过。见[源码绑定的证据与缺口](./reviews/rust-windows-native-limit-drafts-2026-09-10.md)。
+
 > **2026-09-10 清单最终轻量验收**：save-ui-metadata-v5 守护正常 exit 0，无停止原因；150 项绑定工具及 5 项清单测试通过，7 文件仅语法转译、格式/Skill 和 433 条有效链接检查通过，1 条基线缺失链接单列。清单测试已加入 test:native；不计为项目类型/浏览器/发布通过。50b Chrome 准备已过；清单修复后 npm run build 与全部原构建门禁通过，专项 7/8、原冷菜单批量失败保留，完整 E2E 待验，见[证据](./reviews/rust-windows-save-ui-candidate-2026-09-10.md)。
 
 > **22a Windows 最终验证（2026-09-10）**：最终正文绑定的 Windows run 34383362870 已全部 SUCCESS，核心 1,115/5 ignored、Host 库 263/4 ignored、主程序/助手各 3、Native 845/1 skip、游戏 3,193/39 skip。真实签名 14 步、main 受信 12 检查和四项清理回执已下载核验；两端 76 共享向量通过。下方初版待验项是历史记录，本批最终结果见[准确证据](./reviews/rust-windows-validation-binding-2026-09-10.md)。玩家权威仍关闭，当前 UI/启动修复仍待新源码执行。

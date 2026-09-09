@@ -2,6 +2,8 @@
 
 2026-09-10，Role: develop。完整 Windows Rust Goal 保持 active；本批修复候选未发布，Rust 玩家实时资格仍关闭。
 
+最终进展：清单修复已提交推送 `1cf84cc8`，新云端生产构建成功。50b Windows 已全部成功，完整浏览器为 467 pass / 33 skip / 2 fail / 1 flaky；准确作业、剩余失败与 trace 分析见[接续记录](./rust-windows-native-limit-drafts-2026-09-10.md)。下述运行中/待验描述保留为该批最初取证历史。
+
 UI/启动/Chrome 候选已提交并推送 `50b7af10bcf66ed08f4bc8fa6f99afaeafe563ac`。该候选 CI run `34387948109` 的两个浏览器分片均已成功通过 Chrome 准备并实际开始 E2E；生产构建在旧 Native 覆盖清单的位置过期检查处失败。下述清单修复单独验收，尚不宣称新完整构建通过。
 
 ## Native 覆盖清单收口

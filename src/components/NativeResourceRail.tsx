@@ -1,10 +1,19 @@
 import { Box, PackageOpen, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ITEMS, PLANETS } from "../game/content";
 import type { NativeFactoryInventoryFrame } from "../game/nativeFactoryInventoryStore";
 import type { DraggedItemSourceKind, ItemDefinition, ItemId, PlanetDefinition } from "../game/types";
 import { getAccessibleItemGlyphTextColor, ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { QuantityValue } from "./QuantityValue";
+
+function limitDraftScope(frame: NativeFactoryInventoryFrame | null): string {
+  return JSON.stringify(frame && [frame.sessionId, frame.runId, frame.registryFingerprint, frame.activePlanetId]);
+}
+
+interface LimitDraftBinding {
+  scope: string;
+  sourceValue: number;
+}
 
 interface NativeResourceRailProps {
   frame: NativeFactoryInventoryFrame | null;
@@ -67,20 +76,37 @@ export function NativeResourceRail({
   const [productionBufferLimitError, setProductionBufferLimitError] = useState<string | null>(null);
   const frameRef = useRef(frame);
   frameRef.current = frame;
-  useEffect(() => {
-    if (!frame) return;
-    setTrayLimitDraft(String(frame.trayItemLimit));
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  const trayDraftBinding = useRef<LimitDraftBinding | null>(null);
+  const productionDraftBinding = useRef<LimitDraftBinding | null>(null);
+  const draftScope = limitDraftScope(frame);
+  // A new simulation revision can arrive while the player types. Reset only
+  // when this value or its owner changes, before an old draft can be painted
+  // in the new context. Each field has its own authoritative baseline.
+  useLayoutEffect(() => {
+    trayDraftBinding.current = null;
+    setTrayLimitDraft(String(frame?.trayItemLimit ?? 1_000_000));
     setTrayLimitError(null);
-    setProductionBufferLimitDraft(String(frame.productionBufferLimit));
+  }, [draftScope, frame?.trayItemLimit]);
+  useLayoutEffect(() => {
+    productionDraftBinding.current = null;
+    setProductionBufferLimitDraft(String(frame?.productionBufferLimit ?? 1_000_000));
     setProductionBufferLimitError(null);
-  }, [frame?.activePlanetId, frame?.productionBufferLimit, frame?.revision, frame?.trayItemLimit]);
+  }, [draftScope, frame?.productionBufferLimit]);
   const planet = frame ? PLANET_DIRECTORY[frame.activePlanetId] : null;
   const cargoIsPortable = frame?.cargo && ["logistics_drone", "logistics_vessel"].includes(frame.cargo.itemId);
   const disabled = pending || !frame;
-  const commitTrayLimit = () => {
+  const commitTrayLimit = (input: HTMLInputElement) => {
     const current = frameRef.current;
-    if (!current || pending) return;
-    const normalized = trayLimitDraft.trim().replaceAll(",", "");
+    const binding = trayDraftBinding.current;
+    if (!current || !binding || binding.scope !== limitDraftScope(current)
+      || binding.sourceValue !== current.trayItemLimit) {
+      trayDraftBinding.current = null;
+      return;
+    }
+    if (pendingRef.current) return;
+    const normalized = input.value.trim().replaceAll(",", "");
     if (!/^[0-9]+$/.test(normalized)) {
       setTrayLimitError("请输入十进制正整数，不支持小数、负数或指数格式");
       return;
@@ -92,12 +118,19 @@ export function NativeResourceRail({
       return;
     }
     setTrayLimitError(null);
-    onSetTrayItemLimit(next);
+    trayDraftBinding.current = null;
+    if (next !== current.trayItemLimit) onSetTrayItemLimit(next);
   };
-  const commitProductionBufferLimit = () => {
+  const commitProductionBufferLimit = (input: HTMLInputElement) => {
     const current = frameRef.current;
-    if (!current || pending) return;
-    const normalized = productionBufferLimitDraft.trim().replaceAll(",", "");
+    const binding = productionDraftBinding.current;
+    if (!current || !binding || binding.scope !== limitDraftScope(current)
+      || binding.sourceValue !== current.productionBufferLimit) {
+      productionDraftBinding.current = null;
+      return;
+    }
+    if (pendingRef.current) return;
+    const normalized = input.value.trim().replaceAll(",", "");
     if (!/^[0-9]+$/.test(normalized)) {
       setProductionBufferLimitError("请输入十进制正整数，不支持小数、负数或指数格式");
       return;
@@ -108,7 +141,8 @@ export function NativeResourceRail({
       return;
     }
     setProductionBufferLimitError(null);
-    onSetProductionBufferLimit(next);
+    productionDraftBinding.current = null;
+    if (next !== current.productionBufferLimit) onSetProductionBufferLimit(next);
   };
   const rows = useMemo(() => frame?.rows ?? [], [frame?.rows]);
 
@@ -174,12 +208,19 @@ export function NativeResourceRail({
             value={trayLimitDraft}
             disabled={disabled}
             aria-label={`${planet?.name ?? frame.activePlanetId}单种物资上限`}
-            onChange={(event) => setTrayLimitDraft(event.target.value)}
-            onBlur={commitTrayLimit}
+            onChange={(event) => {
+              const current = frameRef.current;
+              if (!current || pendingRef.current) return;
+              trayDraftBinding.current = { scope: limitDraftScope(current), sourceValue: current.trayItemLimit };
+              setTrayLimitDraft(event.target.value);
+            }}
+            onBlur={(event) => commitTrayLimit(event.currentTarget)}
             onKeyDown={(event) => {
               if (event.key === "Enter") event.currentTarget.blur();
               if (event.key === "Escape") {
+                trayDraftBinding.current = null;
                 setTrayLimitDraft(String(frame.trayItemLimit));
+                setTrayLimitError(null);
                 event.currentTarget.blur();
               }
             }}
@@ -193,6 +234,7 @@ export function NativeResourceRail({
             className={frame.trayItemLimit === value ? "active" : ""}
             key={value}
             onClick={() => {
+              trayDraftBinding.current = null;
               setTrayLimitDraft(String(value));
               setTrayLimitError(null);
               onSetTrayItemLimit(value);
@@ -211,12 +253,19 @@ export function NativeResourceRail({
             value={productionBufferLimitDraft}
             disabled={disabled}
             aria-label="生产建筑缓存上限"
-            onChange={(event) => setProductionBufferLimitDraft(event.target.value)}
-            onBlur={commitProductionBufferLimit}
+            onChange={(event) => {
+              const current = frameRef.current;
+              if (!current || pendingRef.current) return;
+              productionDraftBinding.current = { scope: limitDraftScope(current), sourceValue: current.productionBufferLimit };
+              setProductionBufferLimitDraft(event.target.value);
+            }}
+            onBlur={(event) => commitProductionBufferLimit(event.currentTarget)}
             onKeyDown={(event) => {
               if (event.key === "Enter") event.currentTarget.blur();
               if (event.key === "Escape") {
+                productionDraftBinding.current = null;
                 setProductionBufferLimitDraft(String(frame.productionBufferLimit));
+                setProductionBufferLimitError(null);
                 event.currentTarget.blur();
               }
             }}
@@ -230,6 +279,7 @@ export function NativeResourceRail({
             className={frame.productionBufferLimit === value ? "active" : ""}
             key={value}
             onClick={() => {
+              productionDraftBinding.current = null;
               setProductionBufferLimitDraft(String(value));
               setProductionBufferLimitError(null);
               onSetProductionBufferLimit(value);

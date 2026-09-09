@@ -167,8 +167,8 @@ test("catalog-backed current and 2x cold menus never hydrate or parse payload st
   }
   const sorted = reports.flatMap((report) => report.samples).sort((left, right) => left - right);
   const p95 = sorted[Math.ceil(sorted.length * 0.95) - 1];
-  expect(p95).toBeLessThanOrEqual(500);
   console.log(`V144_COLD_CATALOG ${JSON.stringify({ p95, reports })}`);
+  expect(p95).toBeLessThanOrEqual(500);
 });
 
 test("legacy 35 MiB indexing parses one payload off-main and writes a bound small catalog", async ({ page }) => {

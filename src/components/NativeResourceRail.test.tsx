@@ -46,6 +46,101 @@ describe("NativeResourceRail", () => {
     host.remove();
   });
 
+  function renderLimits(value: NativeFactoryInventoryFrame | null, callbacks: {
+    onSetTrayItemLimit: (value: number) => void;
+    onSetProductionBufferLimit: (value: number) => void;
+  }, pending = false) {
+    act(() => root.render(<NativeResourceRail frame={value} pending={pending}
+      entityDepositEnabled={false} onPickTray={vi.fn()} onDropCargo={vi.fn()}
+      onStowEntityInventory={vi.fn()} {...callbacks} />));
+  }
+
+  function typeLimit(input: HTMLInputElement, value: string) {
+    act(() => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  const editableLimits = [
+    { selector: ".tray-limit-control input", callback: "onSetTrayItemLimit", field: "trayItemLimit", otherField: "productionBufferLimit" },
+    { selector: ".production-buffer-limit-control input", callback: "onSetProductionBufferLimit", field: "productionBufferLimit", otherField: "trayItemLimit" },
+  ] as const;
+
+  it.each(editableLimits)("preserves $field drafts and errors while unrelated Rust projections advance", ({ selector, callback, otherField }) => {
+    const callbacks = { onSetTrayItemLimit: vi.fn(), onSetProductionBufferLimit: vi.fn() };
+    const initial = frame();
+    renderLimits(initial, callbacks);
+    const input = host.querySelector<HTMLInputElement>(selector)!;
+    typeLimit(input, "2500");
+    renderLimits({ ...initial, revision: 10 }, callbacks);
+    expect(input.value).toBe("2500");
+    renderLimits({ ...initial, revision: 11, [otherField]: 5000 }, callbacks);
+    expect(input.value).toBe("2500");
+    act(() => input.blur());
+    expect(callbacks[callback]).toHaveBeenCalledExactlyOnceWith(2500);
+
+    typeLimit(input, "1e3");
+    act(() => input.blur());
+    expect(host.textContent).toContain("不支持小数、负数或指数格式");
+    renderLimits({ ...initial, revision: 12, [otherField]: 5000 }, callbacks);
+    expect(input.value).toBe("1e3");
+    expect(host.textContent).toContain("不支持小数、负数或指数格式");
+    expect(callbacks[callback]).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(editableLimits)("Escape cancels the $field draft without submitting a native command", ({ selector, field, callback }) => {
+    const callbacks = { onSetTrayItemLimit: vi.fn(), onSetProductionBufferLimit: vi.fn() };
+    const initial = frame();
+    renderLimits(initial, callbacks);
+    const input = host.querySelector<HTMLInputElement>(selector)!;
+    typeLimit(input, "2500");
+    act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(input.value).toBe(String(initial[field]));
+    expect(callbacks[callback]).not.toHaveBeenCalled();
+  });
+
+  it.each(editableLimits)("invalidates $field drafts when the native owner or authoritative value changes", ({ selector, field, callback }) => {
+    const callbacks = { onSetTrayItemLimit: vi.fn(), onSetProductionBufferLimit: vi.fn() };
+    const initial = frame();
+    const replacements: Array<NativeFactoryInventoryFrame | null> = [
+      { ...initial, sessionId: "session-b" },
+      { ...initial, runId: "run-b" },
+      { ...initial, registryFingerprint: "builtin:other" },
+      { ...initial, activePlanetId: "ashen" },
+      { ...initial, [field]: 7000 },
+      null,
+    ];
+    for (const replacement of replacements) {
+      renderLimits(initial, callbacks);
+      const input = host.querySelector<HTMLInputElement>(selector)!;
+      typeLimit(input, "2500");
+      renderLimits(replacement, callbacks);
+      act(() => input.blur());
+      expect(callbacks[callback]).not.toHaveBeenCalled();
+      const visible = host.querySelector<HTMLInputElement>(selector);
+      if (replacement) expect(visible?.value).toBe(String(replacement[field]));
+      else expect(visible).toBeNull();
+    }
+  });
+
+  it.each(editableLimits)("retains an unsubmitted $field draft while another native command is pending", ({ selector, callback }) => {
+    const callbacks = { onSetTrayItemLimit: vi.fn(), onSetProductionBufferLimit: vi.fn() };
+    const initial = frame();
+    renderLimits(initial, callbacks);
+    const input = host.querySelector<HTMLInputElement>(selector)!;
+    typeLimit(input, "2500");
+    renderLimits({ ...initial, revision: 10 }, callbacks, true);
+    expect(input.disabled).toBe(true);
+    act(() => input.blur());
+    expect(callbacks[callback]).not.toHaveBeenCalled();
+    renderLimits({ ...initial, revision: 11 }, callbacks);
+    expect(input.value).toBe("2500");
+    act(() => { input.focus(); input.blur(); });
+    expect(callbacks[callback]).toHaveBeenCalledExactlyOnceWith(2500);
+  });
+
   it("fails closed without a same-revision frame", () => {
     act(() => root.render(<NativeResourceRail
       frame={null}

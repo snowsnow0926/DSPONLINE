@@ -20,7 +20,15 @@ Role: develop。本轮只修改测试：等待工厂运行时完成初始化后�
 
 来源为 `a05d1d18` 加三份明确记录的测试变更，运行元数据如实标记 dirty=1；`recovery-startup-readiness-v1/process.json` 记录 Git 身份及逐文件摘要。`report.json`、`stdout.log`、`exit.json` 和外部 `recovery-startup-readiness-v1-guard/` 保留原始结果。全程 headless、静音、低优先级，仅 loopback API；守护正常退出 0、97.447 秒，最低可用 7,102,172 KiB，6 GiB 启动 / 2 GiB 停止线。项目实际 `tsc -b --pretty false` 通过，守护正常退出 0、40.762 秒、最低可用 7,292,120 KiB（轻量检查 3 GiB 启动 / 2 GiB 停止）。
 
-本轮本机通过不覆盖原云端失败，新测试的完整云端结果仍待取得。没有因此重新运行或改写已冻结 2bb Windows 包的性能数字，没有声明 greatstar 的个人现场在本轮重新复验。
+本轮本机通过不覆盖原云端失败。后续 0ce 的专项云端结果见下节；没有因此重新运行或改写已冻结 2bb Windows 包的性能数字，没有声明 greatstar 的个人现场在本轮重新复验。
+
+## 新源码的云端恢复检查
+
+`0ce55ff4bdb080ff7ff7f6574680c9a0e15b49e0` 的 CI run `34298454294`，第二分片 job `102300056903` 于 2026-09-09 01:36 UTC 结束：**208 expected / 22 skipped / 6 unexpected / 5 flaky**，241 个场景，约 20.4 分钟。完整 JSON 逐例确认上述恢复两文件共 **13 项均首次通过，无重试**，本机的启动前提修复取得云端证据；该分片整体仍失败。
+
+六个剩余失败涉及画布矩阵帧数、重叠卡片带端点 96 对 96.5、隐藏警报成员的选择、冷菜单耗时 1,020/1,082 ms 超过原 500 ms 门槛、手机设置整体 30 秒超时、刷新配置应为 200 实为 500。原始和重试均保留；部分重试另有启动未完成，不能将全部失败统一解释为初始化等待。未改变这些性能或数据门槛。
+
+开发 worktree `artifacts/rust-rp1-loop/` 新增下载并逐件完整验证的 `cloud-pr31-0ce-shard2-json-v1.zip`（SHA-256 `6b1d436b29f84ffee0a7765eae9db5321c1011522658ec21f072ceb5adf14204`）与 `cloud-pr31-0ce-shard2-failure-v1.zip`（`51f6570d78fc3800476d27f80180a930db974ecccd6339d8be5342cbc963bd51`），原失败上下文、PNG、trace 保留；白名单统计为 `cloud-0ce-shard2-audit-v1.json`。第一分片和完整 Windows 检查在此记录时仍运行，不能把第二分片计数当作一次完整全量结果。
 
 ## 其他云端收尾与证据
 
@@ -37,4 +45,4 @@ c6 的独立 Windows run `34295204069` / job `102290211848` 随后于 2026-09-09
 | `cloud-pr31-c6-shard1-failure-v1.zip` | `1e352291a654e35fa3cd4be940eb54c13cee51d6883f46946941cb508b913c41` |
 | `cloud-pr31-c6-shard2-failure-v1.zip` | `f02b20418efe82dc11f6d856bf5acc5843e49dc02267e51ecc46aeb2e9317f76` |
 
-后续继续取得新测试云端结果、逐类定位剩余浏览器失败，再处理原始终局 timeWarp 兼容。Rust 完整目标、长离线/实时资格和发布边界不变；[当前完整报告](../RUST_BATCH_REPORT_2026-09-09_CURRENT.md)与[并行参与验证记录](./rust-rp1-worker-participation-2026-09-09.md)分别保留范围。
+后续继续取得其他新源码云端结果、逐类定位剩余浏览器失败，并验证终局档现有恢复路径的完整菜单流程。此前 raw timeWarp 直接拒绝的诊断前提已由[终局来源复核](./rust-rp1-recovered-endgame-source-2026-09-09.md)纠正。Rust 完整目标、长离线/实时资格和发布边界不变；[当前完整报告](../RUST_BATCH_REPORT_2026-09-09_CURRENT.md)与[并行参与验证记录](./rust-rp1-worker-participation-2026-09-09.md)分别保留范围。

@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-09 新源码云端局部结果**：0ce run `34298454294` 第二分组 208 expected / 22 skipped / 6 unexpected / 5 flaky，恢复两文件 13 项全部首次通过。JSON 和失败上下文 / PNG / trace 已下载并与 GitHub 完整 SHA-256 一致；第一分组及完整 Windows 仍待终态，不记全量通过。详见[云端证据](./reviews/rust-rp1-recovery-test-startup-2026-09-09.md)。
+
 > **2026-09-09 终局来源恢复复核**：实际生产恢复函数的只读预算审计 4 分支通过；恢复后完整终局工厂一秒 Broker / Host 候选与 JS 全状态一致、原档不变、正常退出和清理通过。新增两项时间绑定回归，三文件 21/21、实际类型检查通过。此前 raw timeWarp 拒绝未经过菜单前置恢复，不能代表真实菜单不兼容；本轮也不代表终局完整 UI、保存重开或长离线通过。完整身份、资源守护及旧证据区别见[验证记录](./reviews/rust-rp1-recovered-endgame-source-2026-09-09.md)。
 
 > **2026-09-09 恢复检查启动前提**：实际云端 15 份挂机失败现场全部仍在工厂加载/运行时验证阶段；新增明确 ready 前提，沿用已有 15 秒工厂启动预算，后续原断言、操作与整体时限保持。两文件真实 Chrome 单 worker、无重试 **13/0/0/0 flaky**，项目类型检查通过，云端待验。c6 完整 CI 的 Ops 已 60/2 平台跳过/0 失败；浏览器仍 401 expected/33 skip/37 unexpected/17 flaky，原结果保留，见[本轮记录](./reviews/rust-rp1-recovery-test-startup-2026-09-09.md)。

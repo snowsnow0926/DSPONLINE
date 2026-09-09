@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { waitForFactoryRuntimeReady } from "./runtime-helpers";
 
 for (const advanced of [false, true]) {
  for (const entry of ["menu", "bypass"] as const) {
@@ -47,6 +48,7 @@ for (const advanced of [false, true]) {
     await page.addLocatorHandler(guide, locator => locator.click());
     if (entry === "menu") await page.getByRole("button", { name: /^恢复最近工厂\s*继续游戏$/ }).click();
     else await page.goto("/?factory=1&storageMigration=production");
+    await waitForFactoryRuntimeReady(page);
     await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-paused", "true");
     // Save the actual loaded runtime through the UI, including the bypass
     // which intentionally does not commit on entry.

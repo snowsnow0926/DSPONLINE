@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-09-09 恢复检查启动前提**：实际云端 15 份挂机失败现场全部仍在工厂加载/运行时验证阶段；新增明确 ready 前提，沿用已有 15 秒工厂启动预算，后续原断言、操作与整体时限保持。两文件真实 Chrome 单 worker、无重试 **13/0/0/0 flaky**，项目类型检查通过，云端待验。c6 完整 CI 的 Ops 已 60/2 平台跳过/0 失败；浏览器仍 401 expected/33 skip/37 unexpected/17 flaky，原结果保留，见[本轮记录](./reviews/rust-rp1-recovery-test-startup-2026-09-09.md)。
+
 > **2026-09-09 线程参与测试补修**：原运行时占用线程反例 1/1、新模块与实际拒绝负例 21/21；正常 release 完整核心 **1,113/5 ignored/0 失败/0 过滤**，两项物流原并行与 authority 断言通过。workspace/all-targets 严格 release Clippy、fmt 通过；生产调度和原数据断言不变。独立守护均 6 GiB 启动 / 2 GiB 停止、正常退出，云端待验，详见[完整证据](./reviews/rust-rp1-worker-participation-2026-09-09.md)。
 
 > **2026-09-09 当前批次结论**：`2bb10b43` 新冻结实包八例通过，完整等待三对中位缩短 71.3383%，32 次隐藏静音正常退出；本机完整单元 3,166/39 跳过/0 失败，push Windows 正常优化 Rust 1,363/5 ignored、Native 674/1 跳过、单元 3,166/39 跳过均零失败。但 PR 同源码 Windows 核心 **1,110/5 ignored/1 失败**（requested=2 observed=1）、本机 Chromium **428/33 跳过/27 失败**、PR Chromium **403 expected/33 skip/33 unexpected/19 flaky**，完整发布门禁未通过。Ops 测试等待准确 generation/mode 后，本机专项 4/4、完整 56/6 平台跳过通过，云端待验；未提高原超时。新增 CI 失败附件保留 7 天，执行待验。详见[当前完整证据](./reviews/rust-rp1-current-batch-validation-2026-09-09.md)，下方成功和失败保留各次独立范围。

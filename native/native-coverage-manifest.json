@@ -139,7 +139,7 @@
       "label": "轨道货运接口清空",
       "occurrences": 1,
       "lines": [
-        14945
+        14947
       ],
       "kind": "durable",
       "owner": "rust",
@@ -150,7 +150,7 @@
       "label": "轨道空间站操作",
       "occurrences": 1,
       "lines": [
-        24158
+        24160
       ],
       "kind": "durable",
       "owner": "rust",
@@ -161,8 +161,8 @@
       "label": "基础制造",
       "occurrences": 2,
       "lines": [
-        21298,
-        21368
+        21300,
+        21370
       ],
       "kind": "durable",
       "owner": "rust",
@@ -171,12 +171,13 @@
     },
     {
       "label": "建筑放置与扩建",
-      "occurrences": 4,
+      "occurrences": 5,
       "lines": [
-        13490,
-        18566,
-        22270,
-        23470
+        13492,
+        18568,
+        18892,
+        22272,
+        23472
       ],
       "kind": "durable",
       "owner": "rust",
@@ -187,7 +188,7 @@
       "label": "建筑回收",
       "occurrences": 1,
       "lines": [
-        13551
+        13553
       ],
       "kind": "durable",
       "owner": "rust",
@@ -198,7 +199,7 @@
       "label": "建筑升级",
       "occurrences": 1,
       "lines": [
-        24418
+        24420
       ],
       "kind": "durable",
       "owner": "rust",
@@ -209,7 +210,7 @@
       "label": "建筑拖放",
       "occurrences": 1,
       "lines": [
-        19062
+        19064
       ],
       "kind": "durable",
       "owner": "rust",
@@ -220,7 +221,7 @@
       "label": "建筑位置编辑",
       "occurrences": 1,
       "lines": [
-        22230
+        22232
       ],
       "kind": "durable",
       "owner": "rust",
@@ -231,10 +232,10 @@
       "label": "建筑物资交互",
       "occurrences": 4,
       "lines": [
-        13391,
-        13407,
-        13423,
-        13445
+        13393,
+        13409,
+        13425,
+        13447
       ],
       "kind": "durable",
       "owner": "rust",
@@ -245,7 +246,7 @@
       "label": "建筑与线路回收",
       "occurrences": 1,
       "lines": [
-        13294
+        13296
       ],
       "kind": "durable",
       "owner": "rust",
@@ -256,9 +257,9 @@
       "label": "建筑制造中心",
       "occurrences": 3,
       "lines": [
-        21467,
-        22004,
-        23236
+        21469,
+        22006,
+        23238
       ],
       "kind": "durable",
       "owner": "rust",
@@ -269,7 +270,7 @@
       "label": "旧版游戏规则设置",
       "occurrences": 1,
       "lines": [
-        14279
+        14281
       ],
       "kind": "deliberately-unsupported",
       "owner": "web",
@@ -278,9 +279,10 @@
     },
     {
       "label": "蓝图部署",
-      "occurrences": 1,
+      "occurrences": 2,
       "lines": [
-        21285
+        18892,
+        21287
       ],
       "kind": "durable",
       "owner": "rust",
@@ -291,7 +293,7 @@
       "label": "蓝图复制",
       "occurrences": 1,
       "lines": [
-        21069
+        21071
       ],
       "kind": "durable",
       "owner": "rust",
@@ -302,7 +304,7 @@
       "label": "蓝图施工订单取消",
       "occurrences": 1,
       "lines": [
-        23595
+        23597
       ],
       "kind": "durable",
       "owner": "rust",
@@ -313,7 +315,7 @@
       "label": "批量回收",
       "occurrences": 1,
       "lines": [
-        20867
+        20869
       ],
       "kind": "durable",
       "owner": "rust",
@@ -324,7 +326,7 @@
       "label": "批量接入量子物流",
       "occurrences": 1,
       "lines": [
-        14546
+        14548
       ],
       "kind": "durable",
       "owner": "rust",
@@ -335,7 +337,7 @@
       "label": "批量切换轨道采集器量子模式",
       "occurrences": 1,
       "lines": [
-        14575
+        14577
       ],
       "kind": "durable",
       "owner": "rust",
@@ -346,7 +348,7 @@
       "label": "批量升级星际物流站",
       "occurrences": 1,
       "lines": [
-        14516
+        14518
       ],
       "kind": "durable",
       "owner": "rust",
@@ -357,7 +359,7 @@
       "label": "批量增加建筑与线路",
       "occurrences": 1,
       "lines": [
-        20948
+        20950
       ],
       "kind": "durable",
       "owner": "rust",
@@ -368,7 +370,7 @@
       "label": "生产区域编辑",
       "occurrences": 1,
       "lines": [
-        22217
+        22219
       ],
       "kind": "durable",
       "owner": "rust",
@@ -379,7 +381,7 @@
       "label": "手动采矿",
       "occurrences": 1,
       "lines": [
-        13360
+        13362
       ],
       "kind": "durable",
       "owner": "rust",
@@ -390,14 +392,14 @@
       "label": "托盘与手持物",
       "occurrences": 8,
       "lines": [
-        13283,
-        13454,
-        13479,
-        14394,
-        22042,
-        22293,
-        22298,
-        22302
+        13285,
+        13456,
+        13481,
+        14396,
+        22044,
+        22295,
+        22300,
+        22304
       ],
       "kind": "durable",
       "owner": "rust",
@@ -408,7 +410,7 @@
       "label": "微型黑洞启停",
       "occurrences": 1,
       "lines": [
-        23298
+        23300
       ],
       "kind": "durable",
       "owner": "rust",
@@ -419,7 +421,7 @@
       "label": "物料配送接口设置",
       "occurrences": 1,
       "lines": [
-        14927
+        14929
       ],
       "kind": "durable",
       "owner": "rust",
@@ -430,7 +432,7 @@
       "label": "系统空间站输出口设置",
       "occurrences": 1,
       "lines": [
-        24135
+        24137
       ],
       "kind": "durable",
       "owner": "rust",
@@ -441,7 +443,7 @@
       "label": "远程轨道采集物设置",
       "occurrences": 1,
       "lines": [
-        21013
+        21015
       ],
       "kind": "durable",
       "owner": "rust",
@@ -452,7 +454,7 @@
       "label": "远程物流槽位设置",
       "occurrences": 1,
       "lines": [
-        20988
+        20990
       ],
       "kind": "durable",
       "owner": "rust",
@@ -463,7 +465,7 @@
       "label": "运输线创建",
       "occurrences": 1,
       "lines": [
-        18317
+        18319
       ],
       "kind": "durable",
       "owner": "rust",

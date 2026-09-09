@@ -46,6 +46,20 @@ test("new package writer refuses a missing helper or a helper from another build
   assert.throws(() => verifyPackagedCatalogVerifier(f.directory, f.metadata), /ENOENT/);
 });
 
+test("Cargo hardlinked build output is accepted while an installed hardlink remains rejected", async (t) => {
+  const f = await fixture(t);
+  const repository = path.join(f.root, "cargo-build");
+  const native = path.join(repository, "native/target/release");
+  fs.mkdirSync(path.join(native, "deps"), { recursive: true });
+  const source = path.join(native, "dsp-catalog-verifier.exe");
+  fs.copyFileSync(path.join(f.directory, CATALOG_VERIFIER), source);
+  fs.linkSync(source, path.join(native, "deps/helper.exe"));
+  assert.equal(fs.statSync(source).nlink, 2);
+  assert.equal(catalogVerifierBuildMetadata(repository).nativeCatalogVerifierSha256, f.metadata.nativeCatalogVerifierSha256);
+  fs.linkSync(path.join(f.directory, CATALOG_VERIFIER), path.join(f.root, "unexpected-installed-alias.exe"));
+  assert.throws(() => verifyPackagedCatalogVerifier(f.directory, f.metadata), /single-link/);
+});
+
 test("legacy V1 artifacts remain readable but cannot satisfy a current helper requirement", async (t) => {
   const f = await fixture(t);
   const source = path.join(f.root, "asar-input-release");

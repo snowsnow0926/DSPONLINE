@@ -26,6 +26,12 @@ CDF 使用 version 2、SHA256 和 HASH 成员标记，签名使用固定 SDK Sig
 
 ## 仍待证明
 
+### cd515022 的 main 独立助手签名专项通过
+
+Windows run `34370552520` 早期制品 `10112314492` 已取得，绑定 merge SHA `d55fc6b7776434b6de1baf397389c4f1ed955522`，ZIP SHA-256 `a63a9837db9dce9fc45b963f0c87b4e57a1a82bc29172d95108a12a427a86528` 与元数据相符。11 个步骤全部退出 0、无超时；Host 三次 exact 调用与 main 独立助手的信任前 2 项、有效信任 8 项、移除信任后 2 项全部通过，测试 Root/My 证书、私钥和临时目录清理全为 true。
+
+main 云端助手 SHA-256 为 `9294c30eea203810f77311f65305f1735bd5b3fbf68b5929aa366442756d6e98`，三阶段一致。它是云端独立构建，不与本机助手摘要混用。该结果验证实际独立进程的签名路径，仍属 TEST_ONLY/authorityEligible=false；实际冻结包的 ASAR 加载、完整资格及玩法授权仍须另行验证。
+
 ### 355d4d5e 云端签名专项通过
 
 Windows run `34368661022` 的早期专项制品 `10111487479` 已取得，源码为 PR merge `4980065a5d5ea017d76fb5286a80640dd5b97548`，ZIP SHA-256 `d59315df7eb82b1333f190168775287b9b22905d5edb8d49c10b6434a6363b8f` 与 GitHub 元数据相符。`result.json` 为 PASS/TEST_ONLY/authorityEligible=false；两份生成/签名、信任前拒绝、机器测试根安装、实际签名成员/发布者/轮换/篡改与锁释放、移除信任后拒绝全部退出 0，均无超时。三个 exact Rust 调用各实际执行 1 项、0 失败、0 ignored；测试 Root/My 证书、私钥和临时目录清理全部 true。

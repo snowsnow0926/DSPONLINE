@@ -72,13 +72,15 @@ function validateExpected(expected, identity, channel) {
 
 function catalogVerifierBuildMetadata(repositoryRoot) {
   const file = requireDirect(repositoryRoot, "native/target/release/dsp-catalog-verifier.exe");
-  requireCatalogVerifierFile(file);
+  // Cargo may hardlink its release output to target/release/deps. The trusted
+  // build input may have those aliases; an installed helper must not.
+  requireCatalogVerifierFile(file, { requireSingleLink: false });
   return { nativeCatalogVerifierSha256: digestFile(file) };
 }
 
-function requireCatalogVerifierFile(file) {
+function requireCatalogVerifierFile(file, { requireSingleLink = true } = {}) {
   const stat = fs.lstatSync(file);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size < 1 || stat.size > 32 * 1024 * 1024) {
+  if (!stat.isFile() || stat.isSymbolicLink() || (requireSingleLink && stat.nlink !== 1) || stat.size < 1 || stat.size > 32 * 1024 * 1024) {
     throw new Error("Catalog verifier must be a bounded direct single-link executable");
   }
 }

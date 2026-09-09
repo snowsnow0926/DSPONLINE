@@ -1,5 +1,7 @@
 # 系统架构
 
+> **Windows 有界长离线候选（2026-09-10，待完整验收）**：Host 只把私有物理状态/历史证明均成功并通过最终结算证明的尾段标为 `offline-state-proven`；容量/矿量从真实前缀逐秒推进的尾段保留 `offline-boundary-exact`。main/renderer 同时核对 v3 算法、完整时间账本、源和候选摘要，长候选还需新 capability 与 8 小时/2,000 记录预算。成本准入不授予状态资格；通用宏观或冻结尾段不采用。源会话、检查点、WAL、存档版本和实时权威保持原合同，见[完整边界](./reviews/rust-windows-complete-long-offline-2026-09-10.md)。
+
 > **Windows 安装程序身份（2026-09-10）**：packer 将源码 SHA/Build ID 嵌入自身 ASAR；main 使用 `original-fs` 读取容器、ASAR 接口读取成员，交叉核对 renderer 版本并分块计算 Host/ASAR 摘要。Host 从自己的 OS 可执行路径独立定位资源，锁定祖先和文件，从同一组句柄验证有界 ASAR 元数据、完整 UTF-8 与摘要；只读 `inspect-program` 不创建存档或模拟。两端输出九字段文件事实，未连接准入；内容/规则/矩阵、时效/撤销、生产者和其他可信上下文仍待实现，见[双端合同](./rust/windows-installed-program-identity.md)及[实际验证](./reviews/rust-windows-host-installed-program-2026-09-10.md)。
 
 > **Native 输入草稿边界（2026-09-10）**：物资托盘和生产缓存上限分别绑定会话、运行、注册表、行星与本字段权威原值；普通投影 revision 不清理输入。布局提交前清理失效上下文，blur 再核验绑定及 pending，Escape 先撤销绑定；保持原生命令为唯一写入出口。没有开放玩家实时准入，见[实现及验证](./reviews/rust-windows-native-limit-drafts-2026-09-10.md)。

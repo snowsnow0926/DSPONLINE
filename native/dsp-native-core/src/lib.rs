@@ -81,6 +81,12 @@ pub fn offline_macro_algorithm_version() -> &'static str {
     pure_idle::OFFLINE_MACRO_V1_ALGORITHM_VERSION
 }
 
+/// Cheap cost preflight for disposable long-offline candidates. Passing this
+/// budget never establishes complete settlement or player authority.
+pub fn fits_long_offline_candidate_budget(state: &CoreState, seconds: u64) -> bool {
+    pure_idle::fits_long_offline_candidate_budget(state, seconds)
+}
+
 pub use catalog::{
     BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,
     ItemDefinition, PlanetDefinition, ProliferatorDefinition, RecipeDefinition,

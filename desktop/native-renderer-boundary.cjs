@@ -8774,7 +8774,7 @@ function normalizeCoreAdvance(value) {
   const source = objectWithKeys(value, ["supported", "exactScope", "changed", "previousRevision", "revision"], ["reason", "algorithmVersion", "exactCalibrationSeconds", "approximatedSeconds", "beltScheduler", "summary"], "native core advance result");
   const result = {
     supported: boolean(source.supported, "native advance supported flag"),
-    exactScope: oneOf(source.exactScope, ["no-change", "clock-only", "simple-factory-v1", "pure-idle-bounded-exact", "pure-idle-conservative-v2", "pure-idle-macro-v10", "offline-macro-v1", "unsupported-domain"], "native advance exact scope"),
+    exactScope: oneOf(source.exactScope, ["no-change", "clock-only", "simple-factory-v1", "pure-idle-bounded-exact", "pure-idle-conservative-v2", "pure-idle-macro-v10", "offline-macro-v1", "offline-state-proven", "offline-boundary-exact", "unsupported-domain"], "native advance exact scope"),
     changed: boolean(source.changed, "native advance changed flag"),
     previousRevision: safeInteger(source.previousRevision, "native advance previous revision"),
     revision: safeInteger(source.revision, "native advance revision"),
@@ -8913,9 +8913,16 @@ function normalizeCoreOfflineCandidateExport(value) {
       result.settledSeconds >= 1 && result.settledSeconds <= 30 &&
       result.advance.exactCalibrationSeconds === result.settledSeconds &&
       result.advance.approximatedSeconds === 0;
+    const longVersion = result.settledSeconds > 30 && result.settledSeconds <= 28_800 &&
+      result.advance?.algorithmVersion === "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity";
+    const completeTail = longVersion && (
+      result.advance.exactScope === "offline-state-proven" &&
+        result.advance.exactCalibrationSeconds === 30 && result.advance.approximatedSeconds === result.settledSeconds - 30 ||
+      result.advance.exactScope === "offline-boundary-exact" &&
+        result.advance.exactCalibrationSeconds === result.settledSeconds && result.advance.approximatedSeconds === 0);
     if (result.settledSeconds < 1 || result.reason !== undefined || !result.advance || !result.export ||
         !result.candidateSummary || !result.advance.supported ||
-        (result.advance.exactScope !== "offline-macro-v1" && !boundedExact) ||
+        (!boundedExact && !completeTail) ||
         result.advance.previousRevision !== result.sourceSummary.revision ||
         result.advance.revision !== result.candidateSummary.revision ||
         result.export.mode !== "normal" ||

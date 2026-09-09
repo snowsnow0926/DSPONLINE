@@ -1352,6 +1352,7 @@ test("real Rust host prepares a read-only offline candidate export without advan
   });
   const hello = await client.start("offline-candidate-host-contract");
   assert.ok(hello.capabilities.includes("native-core-offline-candidate-export-v1"));
+  assert.ok(hello.capabilities.includes("native-core-offline-complete-candidate-v1"));
   const checkpoint = await seedSyntheticCheckpoint(new NativeSaveSessionRegistry(client), fixture);
   const registry = new NativeCoreSessionRegistry(client);
   const opened = await registry.open(17, {
@@ -1431,8 +1432,9 @@ test("real Rust host prepares a read-only offline candidate export without advan
       assert.equal(rejected.sourceSavedAtMs, 1);
       assert.equal(rejected.settledAtMs, 1 + seconds * 1_000);
       assert.equal(rejected.settledSeconds, seconds);
-      assert.match(rejected.reason, /requires an exact interval of 1 to 30 seconds/);
-      assert.equal(Object.hasOwn(rejected, "advance"), false);
+      assert.ok(rejected.reason.length > 0);
+      assert.ok(rejected.advance, "an in-budget source must be examined for complete tail evidence");
+      assert.equal(["offline-state-proven", "offline-boundary-exact"].includes(rejected.advance.exactScope), false);
       assert.equal(Object.hasOwn(rejected, "export"), false);
       assert.equal(Object.hasOwn(rejected, "candidateSummary"), false);
       assert.deepEqual(rejected.sourceSummary, sourceBefore);
@@ -1497,6 +1499,7 @@ test("real Rust host computes a temporary runtime source without native checkpoi
   ]);
   const hello = await client.start("temporary-runtime-source-contract");
   assert.ok(hello.capabilities.includes("native-core-offline-runtime-source-export-v1"));
+  assert.ok(hello.capabilities.includes("native-core-offline-complete-candidate-v1"));
   const snapshot = (relative = "") => fs.readdirSync(path.join(nativeRoot, relative), { withFileTypes: true })
     .sort((left, right) => left.name.localeCompare(right.name)).flatMap((entry) => {
       const entryPath = path.join(relative, entry.name);
@@ -1537,12 +1540,35 @@ test("real Rust host computes a temporary runtime source without native checkpoi
   };
   for (const variant of ["infinite", "finite-reserve", "quantum-capacity"]) {
     const state = fixture.createPublicCatalogOfflineQualificationFixture(variant);
-    for (const seconds of [1, 5, 30]) {
-      await t.test(`${variant} ${seconds}s matches the complete JavaScript state`, async () => {
+    for (const seconds of [1, 5, 30, 31, 600]) {
+      // At 31s this almost-full quantum chain changes physical phase inside
+      // the 30-step proof probe. It has no steady-tail receipt; the existing
+      // JS path must remain responsible until that transient is qualified.
+      const unprovedTransient = variant === "quantum-capacity" && seconds === 31;
+      await t.test(unprovedTransient ? "quantum-capacity 31s rejects its unproved transient without publishing" :
+        `${variant} ${seconds}s matches the complete JavaScript state`, async () => {
         const request = createRequest(state, seconds);
-        const result = normalizeRendererNativeResult("coreOfflineCandidateExport", await client.request(request));
-        assert.equal(result.prepared, true);
+        const response = await client.request(request);
+        const result = normalizeRendererNativeResult("coreOfflineCandidateExport", response);
+        if (unprovedTransient) {
+          assert.equal(result.prepared, false);
+          assert.equal(result.settledSeconds, seconds);
+          assert.equal(result.advance.supported, false);
+          assert.match(response.reason, /offline-state-proof-rejected: offline flow has no one-second physical steady state/);
+          assert.equal(result.reason, "native-domain-unavailable");
+          assert.equal(Object.hasOwn(result, "export"), false);
+          assert.equal(Object.hasOwn(result, "candidateSummary"), false);
+          assert.equal(fs.existsSync(path.join(nativeRoot, "exports", `${request.request.exportId}.json`)), false);
+          await unchanged(request.request.sourceSha256);
+          return;
+        }
+        assert.equal(result.prepared, true, response.reason);
         assert.equal(result.settledSeconds, seconds);
+        if (seconds > 30) {
+          assert.equal(result.advance.algorithmVersion, "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity");
+          assert.ok(["offline-state-proven", "offline-boundary-exact"].includes(result.advance.exactScope));
+          assert.equal(result.advance.exactCalibrationSeconds + result.advance.approximatedSeconds, seconds);
+        }
         assert.equal(result.sourceSummary.revision, 0);
         assert.equal(result.sourceSummary.canonicalSha256, request.request.expectedCanonicalSha256);
         assert.equal(result.sourceSummary.domainSha256, request.request.expectedDomainSha256);
@@ -1569,7 +1595,7 @@ test("real Rust host computes a temporary runtime source without native checkpoi
     }
   }
   const state = fixture.createPublicCatalogOfflineQualificationFixture("infinite");
-  for (const seconds of [0, 31, 600]) {
+  for (const seconds of [0, 28_801]) {
     await t.test(`refuses ${seconds}s without publishing a candidate`, async () => {
       const request = createRequest(state, seconds);
       const result = normalizeRendererNativeResult("coreOfflineCandidateExport", await client.request(request));
@@ -1579,6 +1605,22 @@ test("real Rust host computes a temporary runtime source without native checkpoi
       await unchanged(request.request.sourceSha256);
     });
   }
+  await t.test("rejects an over-record-budget long source before calibration or publication", async () => {
+    const oversized = structuredClone(state);
+    while (oversized.entities.length + oversized.belts.length <= 2_000) {
+      oversized.entities.push({ ...structuredClone(state.entities[0]), id: `budget-entity-${oversized.entities.length}` });
+    }
+    const request = createRequest(oversized, 600);
+    const response = await client.request(request);
+    const result = normalizeRendererNativeResult("coreOfflineCandidateExport", response);
+    assert.equal(result.prepared, false);
+    assert.match(response.reason, /bounded time, record or memory budget/);
+    assert.equal(result.reason, "native-domain-unavailable");
+    assert.equal(Object.hasOwn(result, "advance"), false);
+    assert.equal(Object.hasOwn(result, "export"), false);
+    assert.equal(fs.existsSync(path.join(nativeRoot, "exports", `${request.request.exportId}.json`)), false);
+    await unchanged(request.request.sourceSha256);
+  });
   for (const field of ["sourceSha256", "expectedCanonicalSha256", "expectedDomainSha256",
     "sourceByteLength", "sourceSavedAtMs", "observedNowMs", "strategy", "expectedRevision"]) {
     await t.test(`rejects changed ${field} before publishing`, async () => {

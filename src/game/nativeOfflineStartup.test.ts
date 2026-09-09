@@ -52,23 +52,23 @@ function summary(
   };
 }
 
-function fixture() {
+function fixture(settledSeconds = SETTLED_SECONDS) {
   const runtime = createContentPackRuntimeSnapshot(createContentPackRegistry());
   const state = { ...createInitialState(), elapsedSeconds: 2, paused: false };
-  const candidateState = { ...state, elapsedSeconds: state.elapsedSeconds + SETTLED_SECONDS };
+  const candidateState = { ...state, elapsedSeconds: state.elapsedSeconds + settledSeconds };
   const sourceSummary = summary(state, REVISION, runtime.fingerprint);
   const candidateSummary = summary(candidateState, REVISION + 1, runtime.fingerprint);
   const transfer = serializeSaveEnvelopeToTransfer(candidateState, {
     formatVersion: 2,
     kind: "primary",
-    savedAt: SAVED_AT + SETTLED_SECONDS * 1_000,
+    savedAt: SAVED_AT + settledSeconds * 1_000,
     mode: "normal",
     slot: "main",
   });
   const loaded: DeferredLoadedGame = {
     state,
     savedAt: SAVED_AT,
-    offlineSeconds: SETTLED_SECONDS,
+    offlineSeconds: settledSeconds,
     offlineReport: null,
   };
   const closeNativeCore = vi.fn(async () => ({ closed: true }));
@@ -78,13 +78,13 @@ function fixture() {
     prepared: true,
     strategy: "macro-v1",
     sourceSavedAtMs: SAVED_AT,
-    settledAtMs: SAVED_AT + SETTLED_SECONDS * 1_000,
-    settledSeconds: SETTLED_SECONDS,
+    settledAtMs: SAVED_AT + settledSeconds * 1_000,
+    settledSeconds,
     sourceSummary,
     candidateSummary,
     advance: {
       supported: true,
-      exactScope: "offline-macro-v1",
+      exactScope: "pure-idle-bounded-exact",
       changed: true,
       previousRevision: REVISION,
       revision: REVISION + 1,
@@ -98,7 +98,7 @@ function fixture() {
       mode: "normal",
       result: {
         revision: REVISION + 1,
-        savedAtMs: SAVED_AT + SETTLED_SECONDS * 1_000,
+        savedAtMs: SAVED_AT + settledSeconds * 1_000,
         byteLength: transfer.byteLength,
         envelopeSha256: "b".repeat(64),
         stateChecksum: transfer.stateChecksum,
@@ -150,8 +150,8 @@ function fixture() {
 }
 
 describe("Windows native offline startup", () => {
-  async function sourceFixture() {
-    const current = fixture();
+  async function sourceFixture(settledSeconds = SETTLED_SECONDS) {
+    const current = fixture(settledSeconds);
     const status = await current.desktop.getNativePerformanceStatus();
     current.desktop.getNativePerformanceStatus = vi.fn(async () => ({ ...status,
       capabilities: [...status.capabilities, "native-core-offline-runtime-source-export-v1"],
@@ -173,6 +173,60 @@ describe("Windows native offline startup", () => {
     current.desktop.startNativeOfflineSourceStartup = start;
     return { ...current, chunks, write, finish, cancel, start, candidate };
   }
+
+  async function longSourceFixture(seconds = 600, boundary = false) {
+    const current = await sourceFixture(seconds);
+    const status = await current.desktop.getNativePerformanceStatus();
+    current.desktop.getNativePerformanceStatus = vi.fn(async () => ({ ...status,
+      capabilities: [...status.capabilities, "native-core-offline-complete-candidate-v1"] }));
+    Object.assign(current.candidate.advance, {
+      exactScope: boundary ? "offline-boundary-exact" : "offline-state-proven",
+      algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity",
+      exactCalibrationSeconds: boundary ? seconds : 30,
+      approximatedSeconds: boundary ? 0 : seconds - 30,
+    });
+    return current;
+  }
+
+  it.each([false, true])("adopts a complete long source with a bound time ledger (boundary=%s)", async boundary => {
+    const current = await longSourceFixture(600, boundary);
+    const original = JSON.stringify(current.loaded);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") throw new Error("expected complete long candidate");
+    expect(result.state).toEqual(current.candidateState);
+    expect(result.loaded.offlineSeconds).toBe(600);
+    expect(result.approximation).toMatchObject({ mode: boundary ? "exact" : "approximate",
+      calibrationWindowSeconds: boundary ? 600 : 30, approximatedSeconds: boundary ? 0 : 570,
+      maxEstimatedError: 0, maxNonCriticalError: 0, validationScope: boundary ? "leaderboard-critical" : "all-state" });
+    expect(JSON.stringify(current.loaded)).toBe(original);
+    expect(current.desktop.recoverNativeSave).not.toHaveBeenCalled();
+    expect(current.cancel).toHaveBeenCalled();
+  });
+
+  it.each([
+    { exactScope: "offline-macro-v1" as const },
+    { algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1" },
+    { exactCalibrationSeconds: 29, approximatedSeconds: 571 },
+    { approximatedSeconds: 569 },
+    { exactScope: "offline-boundary-exact" as const },
+  ])("rejects an incomplete long candidate without altering its source: %j", async change => {
+    const current = await longSourceFixture();
+    const original = JSON.stringify(current.loaded);
+    Object.assign(current.candidate.advance, change);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("fallback");
+    expect(JSON.stringify(current.loaded)).toBe(original);
+    expect(current.cancel).toHaveBeenCalled();
+  });
+
+  it.each(["time", "records"])("refuses long candidates outside the existing %s budget before transferring", async budget => {
+    const current = await longSourceFixture();
+    if (budget === "time") current.loaded.offlineSeconds = 28_801;
+    else current.loaded.state.entities = Array.from({ length: 2_001 }, () => current.loaded.state.entities[0]);
+    expect((await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop })).status).toBe("fallback");
+    expect(current.start).not.toHaveBeenCalled();
+  });
 
   it("uses the verified loaded runtime without reading or adopting any native checkpoint", async () => {
     const current = await sourceFixture();

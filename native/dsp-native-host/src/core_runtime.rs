@@ -4968,11 +4968,15 @@ impl CoreRegistry {
             )
             .filter(|value| *value <= MAX_SAFE_INTEGER)
             .ok_or_else(|| anyhow!("native offline candidate clock overflowed"))?;
-        // OfflineMacroV1 may truthfully report support while freezing an
-        // unproven productive tail. Such a candidate must never bypass the
-        // browser's conservative-settlement decision. Qualify longer intervals
-        // separately; the first 30 seconds use the exact calibration path.
-        if settled_seconds == 0 || settled_seconds > 30 {
+        // Long candidates retain the existing 8-hour and flow-probe budgets.
+        // Passing cost admission is not evidence that every tail writer closed.
+        if settled_seconds == 0
+            || (settled_seconds > 30
+                && !dsp_native_core::fits_long_offline_candidate_budget(
+                    &source_state,
+                    settled_seconds,
+                ))
+        {
             return Ok(CorePrepareOfflineSettlementExportResult {
                 prepared: false,
                 strategy: "macro-v1",
@@ -4980,7 +4984,8 @@ impl CoreRegistry {
                 settled_at_ms,
                 settled_seconds,
                 reason: Some(
-                    "native offline automatic adoption requires an exact interval of 1 to 30 seconds".to_owned(),
+                    "native offline candidate exceeds its bounded time, record or memory budget"
+                        .to_owned(),
                 ),
                 advance: None,
                 export: None,
@@ -4996,14 +5001,34 @@ impl CoreRegistry {
             advance_mode: CoreAdvanceMode::OfflineMacroV1,
             include_diagnostics: true,
         })?;
-        if !advance.supported {
+        let complete_time_ledger = if settled_seconds <= 30 {
+            advance.exact_scope == "pure-idle-bounded-exact"
+                && advance.exact_calibration_seconds == Some(settled_seconds as f64)
+                && advance.approximated_seconds == Some(0.0)
+        } else {
+            advance.algorithm_version == Some(dsp_native_core::offline_macro_algorithm_version())
+                && match advance.exact_scope {
+                    "offline-state-proven" => {
+                        advance.exact_calibration_seconds == Some(30.0)
+                            && advance.approximated_seconds == Some((settled_seconds - 30) as f64)
+                    }
+                    "offline-boundary-exact" => {
+                        advance.exact_calibration_seconds == Some(settled_seconds as f64)
+                            && advance.approximated_seconds == Some(0.0)
+                    }
+                    _ => false,
+                }
+        };
+        if !advance.supported || !complete_time_ledger {
             return Ok(CorePrepareOfflineSettlementExportResult {
                 prepared: false,
                 strategy: "macro-v1",
                 source_saved_at_ms,
                 settled_at_ms,
                 settled_seconds,
-                reason: advance.reason.clone(),
+                reason: Some(advance.reason.clone().unwrap_or_else(|| {
+                    "native offline candidate lacks complete state and time evidence".to_owned()
+                })),
                 advance: Some(advance),
                 export: None,
                 source_summary,
@@ -9366,7 +9391,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_source_candidate_does_not_qualify_zero_or_long_intervals() {
+    fn offline_source_candidate_rejects_zero_or_uncertified_long_intervals() {
         let root = tempdir().unwrap();
         let store = SaveStore::open(root.path()).unwrap();
         let registry = CoreRegistry::default();
@@ -9383,7 +9408,16 @@ mod tests {
                 .unwrap();
             assert!(!result.prepared);
             assert_eq!(result.settled_seconds, milliseconds / 1_000);
-            assert!(result.advance.is_none());
+            if milliseconds < 1_000 {
+                assert!(result.advance.is_none());
+            } else {
+                assert!(
+                    result
+                        .advance
+                        .as_ref()
+                        .is_some_and(|advance| !advance.supported)
+                );
+            }
             assert!(result.export.is_none());
             assert!(result.candidate_summary.is_none());
         }
@@ -9477,9 +9511,19 @@ mod tests {
                 )
                 .unwrap();
             assert!(!result.prepared);
-            assert!(result.advance.is_none());
+            assert!(
+                result
+                    .advance
+                    .as_ref()
+                    .is_some_and(|advance| !advance.supported)
+            );
             assert!(result.export.is_none());
-            assert!(result.reason.unwrap().contains("1 to 30 seconds"));
+            assert!(
+                result
+                    .reason
+                    .as_ref()
+                    .is_some_and(|reason| !reason.is_empty())
+            );
             assert_eq!(
                 registry
                     .status(&imported.session_id)

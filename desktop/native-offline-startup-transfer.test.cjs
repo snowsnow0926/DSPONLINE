@@ -78,7 +78,10 @@ function preparedResult(exportId, payload, overrides = {}) {
     sourceSummary: { revision: 9 },
     advance: {
       supported: true,
-      exactScope: "offline-macro-v1",
+      exactScope: "offline-state-proven",
+      algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity",
+      exactCalibrationSeconds: 30,
+      approximatedSeconds: 30,
       previousRevision: 9,
       revision: 10,
     },

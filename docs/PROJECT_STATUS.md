@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 长离线候选（2026-09-10，开发中）**：Host、main 边界和 renderer 已接入完整状态长离线候选；只接受完整 v3 时间账本和状态证明，沿用 8 小时/2,000 记录及内存预算，旧 Host、未证明瞬态和超预算仍走原流程。正常优化核心 1,116/6 ignored、Host 272/4 ignored、Native 工具 885/1 skip、长差分 14/2 benchmark skip、全量游戏 3,210/39 skip、类型全部通过，均 0 fail；实际新 Host 的 12 个公共完整状态候选一致。新冻结包的长离线入口/保存重开另验，玩家实时权威仍关闭。上一 3f1 云端 Windows 全套成功，完整浏览器 466/33 skip/4 fail；新源码云端另验。详见[本批范围和实际证据](./reviews/rust-windows-complete-long-offline-2026-09-10.md)。下方为此前时点记录。
+
 > **Windows Rust 当前批次（2026-09-10，未发布）**：d97 新冻结包已通过终局完整成功结算、保存、重进及两次重开，取消保档也通过；实际 9 秒 Native/JS 完整状态一致，八次隐藏静音正常退出、原档不变。成功流程进入设置约 87.3 秒，仅一轮正确性证据，不宣称稳定提速。包内 main/Host 独立身份与实际助手通过；Host 库 272 pass/4 ignored、实际进程相关 63/63、类型/构建门禁通过。上一 4b74 Windows 全套成功，完整浏览器 466/33 skip/3 fail/1 flaky；新源码云端另验。玩家实时权威仍关闭，完整 Goal 持续。见[终局与云端准确证据](./reviews/rust-rp1-endgame-completion-2026-09-10.md)和[Host 实包证据](./reviews/rust-windows-host-installed-program-2026-09-10.md)。下方各段为此前时点记录。
 
 > **Rust 输入修复与完整回归（2026-09-10）**：原生托盘/生产缓存草稿按会话与权威原值绑定，模拟刷新保留输入，Escape 取消不再误提交；旧实现 8 个新反例失败，修复后相关 24 项与类型检查通过。50b Windows 全部成功，完整浏览器 467 pass/33 skip/2 fail/1 flaky；冷菜单和设置整例超时仍未过。1cf 清单修复已推送，新的云端生产构建通过。玩家实时权威关闭，完整 Goal 继续，见[本批准确证据](./reviews/rust-windows-native-limit-drafts-2026-09-10.md)。下方早期待验描述为历史记录。

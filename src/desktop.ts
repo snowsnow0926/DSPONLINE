@@ -3614,7 +3614,7 @@ export interface DesktopNativeCoreAdvanceRequest extends DesktopNativeCoreSessio
 
 export interface DesktopNativeCoreAdvanceResult {
   supported: boolean;
-  exactScope: "no-change" | "clock-only" | "simple-factory-v1" | "pure-idle-bounded-exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "offline-macro-v1" | "unsupported-domain";
+  exactScope: "no-change" | "clock-only" | "simple-factory-v1" | "pure-idle-bounded-exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "offline-macro-v1" | "offline-state-proven" | "offline-boundary-exact" | "unsupported-domain";
   changed: boolean;
   previousRevision: number;
   revision: number;

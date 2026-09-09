@@ -935,11 +935,11 @@ test("offline candidate export binds source, one-shot advance, and envelope proo
     settledSeconds: 600,
     advance: {
       supported: true,
-      exactScope: "offline-macro-v1",
+      exactScope: "offline-state-proven",
       changed: true,
       previousRevision: 2,
       revision: 3,
-      algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1",
+      algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity",
       exactCalibrationSeconds: 30,
       approximatedSeconds: 570,
       summary: candidateSummary,
@@ -961,6 +961,22 @@ test("offline candidate export binds source, one-shot advance, and envelope proo
   const normalized = normalizeRendererNativeResult("coreOfflineCandidateExport", value);
   assert.equal(normalized.prepared, true);
   assert.equal(normalized.export.result.byteLength, 2048);
+  for (const advance of [
+    { ...value.advance, exactScope: "offline-macro-v1" },
+    { ...value.advance, algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1" },
+    { ...value.advance, exactCalibrationSeconds: 29, approximatedSeconds: 571 },
+    { ...value.advance, approximatedSeconds: 569 },
+    { ...value.advance, exactScope: "offline-boundary-exact" },
+  ]) {
+    assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", { ...value, advance }), /prepared binding is invalid/);
+  }
+  const boundary = { ...value, advance: { ...value.advance, exactScope: "offline-boundary-exact", exactCalibrationSeconds: 600, approximatedSeconds: 0 } };
+  assert.equal(normalizeRendererNativeResult("coreOfflineCandidateExport", boundary).prepared, true);
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...value, settledSeconds: 28_801, settledAtMs: 28_802_000,
+    advance: { ...value.advance, approximatedSeconds: 28_771 },
+    export: { ...value.export, result: { ...value.export.result, savedAtMs: 28_802_000 } },
+  }), /prepared binding is invalid/);
   const bounded = {
     ...value,
     settledSeconds: 5,

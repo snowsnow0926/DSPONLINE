@@ -8881,6 +8881,14 @@ fn offline_boundary_exact_budget(seconds: f64, entity_count: usize, belt_count: 
             <= OFFLINE_BOUNDARY_EXACT_MAX_WORK
 }
 
+/// Admission cost only, never a production or full-state certificate. Keep the
+/// existing flow probe's memory/record budget even for an exact boundary tail.
+pub(crate) fn fits_long_offline_candidate_budget(state: &CoreState, seconds: u64) -> bool {
+    seconds > 30
+        && seconds <= OFFLINE_BOUNDARY_EXACT_MAX_SECONDS as u64
+        && offline_flow::check_memory_and_work(state).is_ok()
+}
+
 /// New wire-distinct macro mode. It retains the deterministic 3x10-second
 /// calibration boundary and settles only independently certified domains:
 /// source/closed-recipe ordinary flow and its research/Dyson sinks, bounded
@@ -9178,6 +9186,7 @@ fn advance_bounded_with_runtime(
 
     let tail_seconds = budget.frozen_tail_seconds;
     let mut boundary_exact_seconds = 0.0;
+    let mut offline_state_proven = false;
     let mut tail_reason = None;
     if tail_seconds > EPSILON {
         let current_elapsed = candidate
@@ -9613,6 +9622,9 @@ fn advance_bounded_with_runtime(
                     format!("offline-history-apply-rejected: {reason}"),
                 );
             }
+            // Both private receipts bind the physical prefix and the entire
+            // tail. A material-only or frozen tail must never receive this tag.
+            offline_state_proven = true;
         }
         if let Some(progress) = offline_export_progress {
             match crate::simulation::advance_offline_no_export_progress(
@@ -9718,6 +9730,8 @@ fn advance_bounded_with_runtime(
         supported: true,
         exact_scope: if boundary_exact_seconds > EPSILON {
             "offline-boundary-exact"
+        } else if offline_state_proven {
+            "offline-state-proven"
         } else if tail_seconds > EPSILON && offline_macro {
             "offline-macro-v1"
         } else if tail_seconds > EPSILON && macro_v10 {
@@ -11347,7 +11361,7 @@ mod tests {
         let result =
             advance_macro_v10(&mut macro_state, &offline_macro_request(revision, 600.0)).unwrap();
         assert!(result.supported, "{:?}", result.reason);
-        assert_eq!(result.exact_scope, "offline-macro-v1");
+        assert_eq!(result.exact_scope, "offline-state-proven");
         assert_eq!(result.exact_calibration_seconds, Some(30.0));
         assert_eq!(result.approximated_seconds, Some(570.0));
         let mut exact = initial;
@@ -14229,7 +14243,7 @@ mod tests {
                 advance_offline_macro_v1(&mut long, &offline_macro_request(revision, 600.0))
                     .unwrap();
             assert!(result.supported, "reason={:?}", result.reason);
-            assert_eq!(result.exact_scope, "offline-macro-v1");
+            assert_eq!(result.exact_scope, "offline-state-proven");
             assert_eq!(result.exact_calibration_seconds, Some(30.0));
             assert_eq!(result.approximated_seconds, Some(570.0));
             assert!(

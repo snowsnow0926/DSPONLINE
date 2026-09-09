@@ -100,6 +100,7 @@
     "native-core-factory-read-model-v1",
     "native-core-galaxy-account-workspace-projection-v1",
     "native-core-offline-candidate-export-v1",
+    "native-core-offline-complete-candidate-v1",
     "native-core-offline-macro-v1",
     "native-core-offline-runtime-source-export-v1",
     "native-core-operations-workspace-projection-v1",

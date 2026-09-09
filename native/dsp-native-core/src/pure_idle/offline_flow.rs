@@ -63,7 +63,7 @@ fn checked_tail(seconds: f64) -> Result<usize, String> {
     Ok(seconds as usize)
 }
 
-fn check_memory_and_work(state: &CoreState) -> Result<(), String> {
+pub(super) fn check_memory_and_work(state: &CoreState) -> Result<(), String> {
     let records = state
         .entity_index
         .len()

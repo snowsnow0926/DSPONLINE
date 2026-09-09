@@ -19,6 +19,10 @@ import type { GameState } from "./types";
 
 const NATIVE_OFFLINE_CANDIDATE_CAPABILITY =
   "native-core-offline-candidate-export-v1";
+const COMPLETE_CANDIDATE_CAPABILITY = "native-core-offline-complete-candidate-v1";
+const COMPLETE_OFFLINE_ALGORITHM = "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity";
+const MAX_LONG_OFFLINE_SECONDS = 8 * 60 * 60;
+const MAX_LONG_OFFLINE_RECORDS = 2_000;
 
 type NativeOfflineDesktopBridge = Pick<DesktopBridge,
   | "getNativePerformanceStatus"
@@ -86,6 +90,7 @@ function nativeOfflineApproximationReport(
   approximatedSeconds: number | undefined,
   algorithmVersion: string | undefined,
   wallClockMs: number,
+  fullStateProven: boolean,
 ): OfflineApproximationReport {
   const calibration = Math.max(
     0,
@@ -100,14 +105,13 @@ function nativeOfflineApproximationReport(
     mode: exact ? "exact" : "approximate",
     calibrationWindowSeconds: calibration,
     approximatedSeconds: approximated,
-    // The closed material ledger prevents invented consumption, but a frozen
-    // tail may under-produce all of an unproven subsystem. Report that honest
-    // conservative bound instead of manufacturing a precision percentage.
-    maxEstimatedError: exact ? 0 : 1,
-    maxNonCriticalError: exact ? 0 : 1,
+    // Macro time remains distinct from one-second calibration. Only the
+    // complete physical/history proof closes every state field in this tail.
+    maxEstimatedError: exact || fullStateProven ? 0 : 1,
+    maxNonCriticalError: exact || fullStateProven ? 0 : 1,
     fellBack: false,
     ...(algorithmVersion ? { algorithmVersion } : {}),
-    validationScope: "leaderboard-critical",
+    validationScope: fullStateProven ? "all-state" : "leaderboard-critical",
     settlementStatus: exact ? "bounded-exact" : "approximate",
     wallClockMs,
   };
@@ -125,11 +129,11 @@ export async function tryNativeOfflineStartupSettlement(input: {
   onProgress?: (phase: NativeOfflineStartupProgressPhase) => void;
 }, dependencies: NativeOfflineStartupDependencies = {}): Promise<NativeOfflineStartupAttempt> {
   const { loaded, runtime } = input;
-  // The macro can report `supported` after freezing an unproven productive
-  // tail. Until long-interval parity is qualified, only its exact prefix may
-  // be adopted automatically. Keep the original state for the JS decision path.
-  if (loaded.offlineSeconds > 30) {
-    return fallback("长时原生离线结算尚未通过产出一致性验收，使用现有结算流程");
+  // Match the existing 30-step/60,000-record-step probe admission. Host also
+  // independently checks raw/runtime memory before any long calibration.
+  if (loaded.offlineSeconds > 30 && (loaded.offlineSeconds > MAX_LONG_OFFLINE_SECONDS ||
+      loaded.state.entities.length + loaded.state.belts.length > MAX_LONG_OFFLINE_RECORDS)) {
+    return fallback("当前长时存档超出原生完整结算预算，使用现有结算流程");
   }
   if (loaded.offlineSeconds < 1 || loaded.state.version !== 47 ||
       loaded.state.mode !== "normal" || loaded.state.speedrun?.enabled ||
@@ -153,6 +157,10 @@ export async function tryNativeOfflineStartupSettlement(input: {
       status.capabilities.includes("native-core-offline-runtime-source-export-v1");
     if (!status.available || (!useRuntimeSource && !status.capabilities.includes(NATIVE_OFFLINE_CANDIDATE_CAPABILITY))) {
       return fallback("Windows 原生 Host 不支持本次离线候选");
+    }
+    const hasCompleteCandidate = status.capabilities.includes(COMPLETE_CANDIDATE_CAPABILITY);
+    if (loaded.offlineSeconds > 30 && !hasCompleteCandidate) {
+      return fallback("当前原生 Host 未提供长时产出一致性证明，使用现有结算流程");
     }
     input.signal?.throwIfAborted();
     let sourceRevision = 0;
@@ -243,8 +251,16 @@ export async function tryNativeOfflineStartupSettlement(input: {
     } else {
       input.onProgress?.("verifying");
       const maximumOfflineSeconds = getOfflineSimulationLimitSeconds(loaded.state);
-      if (!result.advance.supported || result.advance.approximatedSeconds !== 0 ||
-          result.advance.exactCalibrationSeconds !== result.settledSeconds || result.settledSeconds > 30 ||
+      const boundedExact = result.settledSeconds <= 30 && result.advance.exactScope === "pure-idle-bounded-exact" &&
+        result.advance.approximatedSeconds === 0 && result.advance.exactCalibrationSeconds === result.settledSeconds;
+      const longVersion = hasCompleteCandidate && result.settledSeconds > 30 && result.settledSeconds <= MAX_LONG_OFFLINE_SECONDS &&
+        result.advance.algorithmVersion === COMPLETE_OFFLINE_ALGORITHM;
+      const completeTail = longVersion && (
+        result.advance.exactScope === "offline-state-proven" && result.advance.exactCalibrationSeconds === 30 &&
+          result.advance.approximatedSeconds === result.settledSeconds - 30 ||
+        result.advance.exactScope === "offline-boundary-exact" && result.advance.exactCalibrationSeconds === result.settledSeconds &&
+          result.advance.approximatedSeconds === 0);
+      if (!result.advance.supported || (!boundedExact && !completeTail) ||
           result.sourceSavedAtMs !== loaded.savedAt || result.settledSeconds < 1 ||
           result.settledSeconds > maximumOfflineSeconds ||
           result.settledAtMs !== result.sourceSavedAtMs + result.settledSeconds * 1_000 ||
@@ -302,6 +318,7 @@ export async function tryNativeOfflineStartupSettlement(input: {
           result.advance.approximatedSeconds,
           result.advance.algorithmVersion,
           Math.max(0, endedAt - startedAt),
+          result.advance.exactScope === "offline-state-proven",
         ),
       };
     }

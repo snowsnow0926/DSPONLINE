@@ -98,7 +98,7 @@ function differingProgressionValues(native: unknown, javascript: unknown, field:
   return [{ field, native: native ?? null, javascript: javascript ?? null }];
 }
 
-describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline qualification (shadow only)", () => {
+describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline state and read-only candidate qualification", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-public-offline-"));
   const client = new NativeHostClient({ binaryPath, rootPath: root,
     requestTimeoutMs: longTests || benchmarkTests ? 300_000 : 60_000 });
@@ -260,6 +260,35 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     for (let second = 0; second < seconds; second += 1) expected = advanceSimulationBudget(expected, 1, 1);
     const javascriptExactAdvanceMs = performance.now() - jsStarted;
     const expectedHash = canonicalNativeCoreSha256(expected);
+    // Exercise the actual automatic-candidate RPC as well as raw coreAdvance.
+    // The read-only preparation must export the same complete JS state without
+    // spending the source session, checkpoint, or WAL.
+    const candidateSource = await client.request({ operation: "coreOpen", slot: "normal-main",
+      generation: checkpoint.generation, rootHash: checkpoint.rootHash, revision: 1,
+      registryFingerprint: runtime.fingerprint, catalog });
+    let adoptedCandidate;
+    try {
+      const recoveryBefore = await client.request({ operation: "saveRecover", slot: "normal-main" });
+      const exportId = `complete-public-${++exportSequence}`;
+      adoptedCandidate = await client.request({ operation: "corePrepareOfflineSettlementExport", sessionId: candidateSource.sessionId,
+        request: { expectedGeneration: checkpoint.generation, expectedRootHash: checkpoint.rootHash,
+          expectedRevision: 1, expectedRegistryFingerprint: runtime.fingerprint,
+          expectedCanonicalSha256: candidateSource.summary.canonicalSha256, expectedDomainSha256: candidateSource.summary.domainSha256,
+          observedNowMs: 1 + seconds * 1000, strategy: "macro-v1", exportId } });
+      expect(adoptedCandidate.prepared, adoptedCandidate.reason).toBe(true);
+      expect(["offline-state-proven", "offline-boundary-exact"]).toContain(adoptedCandidate.advance.exactScope);
+      expect(adoptedCandidate.settledSeconds).toBe(seconds);
+      const bytes = readBytes(path.join(root, "exports", `${exportId}.json`));
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(adoptedCandidate.export.result.envelopeSha256);
+      const envelope = JSON.parse(new TextDecoder().decode(bytes));
+      expect(envelope.savedAt).toBe(1 + seconds * 1000);
+      expect(canonicalNativeCoreSha256(envelope.state)).toBe(expectedHash);
+      expect(adoptedCandidate.candidateSummary.canonicalSha256).toBe(expectedHash);
+      expect((await client.request({ operation: "coreStatus", sessionId: candidateSource.sessionId })).canonicalSha256).toBe(initialHash);
+      expect(await client.request({ operation: "saveRecover", slot: "normal-main" })).toEqual(recoveryBefore);
+    } finally {
+      await client.request({ operation: "coreClose", sessionId: candidateSource.sessionId });
+    }
     const expectedLedger = materialLedger(expected);
     const macroLedger = materialLedger(macro.state);
     expectClosedIronChain(before, expectedLedger);
@@ -303,7 +332,8 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
       progressionDifferences: progressionFields
         .flatMap(field => differingProgressionValues(
           (macro.state as unknown as Record<string, unknown>)[field], publicExpected[field], field)),
-      automaticAdoption: "NOT_QUALIFIED_30_SECOND_GUARD_UNCHANGED",
+      automaticCandidateRpc: { prepared: adoptedCandidate.prepared, fullStateParity: "PASS", scope: adoptedCandidate.advance.exactScope },
+      automaticAdoption: "HOST_CANDIDATE_VERIFIED_DESKTOP_ENTRY_SEPARATE",
     };
     if (reportDirectory) {
       fs.mkdirSync(reportDirectory, { recursive: true });
@@ -419,7 +449,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
       macroVersusJavascriptWithProofPercent: (1 - macroMedianMs / javascriptWithProofMedianMs) * 100,
       ratio: exactMedianMs / macroMedianMs, samples,
       javascriptScope: "one-second JS oracle loop with optional canonical proof; not the app's current offline strategy or full UI wait",
-      automaticAdoption: "NOT_QUALIFIED_30_SECOND_GUARD_UNCHANGED",
+      automaticAdoption: "BENCHMARK_ONLY_NO_DESKTOP_ENTRY_OR_SAVE_MEASUREMENT",
     };
     if (reportDirectory) {
       fs.mkdirSync(reportDirectory, { recursive: true });
@@ -447,7 +477,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
     }
   });
 
-  it("keeps automatic adoption closed beyond 30 seconds despite shadow macro support", async () => {
+  it("prepares complete long candidates without spending the opened public source", async () => {
     const initial = createPublicCatalogOfflineQualificationFixture("infinite");
     const checkpoint = await seed(initial);
     const opened = await client.request({
@@ -461,10 +491,12 @@ describe.skipIf(!fs.existsSync(binaryPath))("public-catalog native offline quali
             expectedRevision: 1, expectedRegistryFingerprint: runtime.fingerprint,
             expectedCanonicalSha256: opened.summary.canonicalSha256, expectedDomainSha256: opened.summary.domainSha256,
             observedNowMs: 1 + seconds * 1000, strategy: "macro-v1", exportId: `public-qualification-${seconds}` } });
-        expect(candidate.prepared).toBe(false);
-        expect(candidate.reason).toContain("exact interval of 1 to 30 seconds");
+        expect(candidate.prepared, candidate.reason).toBe(true);
+        expect(candidate.advance.exactScope).toBe("offline-state-proven");
+        expect(candidate.advance.exactCalibrationSeconds).toBe(30);
+        expect(candidate.advance.approximatedSeconds).toBe(seconds - 30);
         expect(candidate.sourceSummary.canonicalSha256).toBe(opened.summary.canonicalSha256);
-        expect(candidate.candidateSummary).toBeUndefined();
+        expect((await client.request({ operation: "coreStatus", sessionId: opened.sessionId })).canonicalSha256).toBe(opened.summary.canonicalSha256);
       }
     } finally {
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });

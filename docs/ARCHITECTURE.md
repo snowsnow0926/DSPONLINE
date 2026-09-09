@@ -1,6 +1,6 @@
 # 系统架构
 
-> **Windows 安装程序身份（2026-09-10）**：packer 将源码 SHA/Build ID 嵌入自身 ASAR；main 交叉核对 renderer 版本，以有界分块读取计算实际 Host/ASAR 摘要，拒绝 dirty、错包和检测到的文件替换。实际 Electron 容器用 `original-fs`，包内成员用 ASAR 接口，避免把容器的虚拟目录属性误作磁盘身份。仅九字段文件事实，未连接准入；内容/规则/矩阵、Host 独立身份和其他可信上下文仍待实现，见[边界与验证](./reviews/rust-windows-installed-program-2026-09-10.md)。
+> **Windows 安装程序身份（2026-09-10）**：packer 将源码 SHA/Build ID 嵌入自身 ASAR；main 使用 `original-fs` 读取容器、ASAR 接口读取成员，交叉核对 renderer 版本并分块计算 Host/ASAR 摘要。Host 从自己的 OS 可执行路径独立定位资源，锁定祖先和文件，从同一组句柄验证有界 ASAR 元数据、完整 UTF-8 与摘要；只读 `inspect-program` 不创建存档或模拟。两端输出九字段文件事实，未连接准入；内容/规则/矩阵、时效/撤销、生产者和其他可信上下文仍待实现，见[双端合同](./rust/windows-installed-program-identity.md)及[实际验证](./reviews/rust-windows-host-installed-program-2026-09-10.md)。
 
 > **Native 输入草稿边界（2026-09-10）**：物资托盘和生产缓存上限分别绑定会话、运行、注册表、行星与本字段权威原值；普通投影 revision 不清理输入。布局提交前清理失效上下文，blur 再核验绑定及 pending，Escape 先撤销绑定；保持原生命令为唯一写入出口。没有开放玩家实时准入，见[实现及验证](./reviews/rust-windows-native-limit-drafts-2026-09-10.md)。
 

@@ -111,7 +111,7 @@ pub fn verify_windows_catalog_member(
 }
 
 #[cfg(windows)]
-mod windows {
+pub(crate) mod windows {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::ffi::{CStr, OsStr, c_void};
@@ -264,7 +264,7 @@ mod windows {
 
     // Keep every ancestor open without FILE_SHARE_DELETE, so the catalog's
     // path-only Windows API cannot observe a renamed directory or junction.
-    fn lock_directories(root: &Path) -> Result<Vec<File>, CatalogVerificationError> {
+    pub(crate) fn lock_directories(root: &Path) -> Result<Vec<File>, CatalogVerificationError> {
         if !root.is_absolute() {
             return Err(CatalogVerificationError::UnsafePath);
         }
@@ -313,11 +313,11 @@ mod windows {
         Ok(locks)
     }
 
-    fn locked_file(
+    pub(crate) fn open_bounded_file(
         path: &Path,
         max_bytes: usize,
-    ) -> Result<(File, Vec<u8>), CatalogVerificationError> {
-        let mut file = OpenOptions::new()
+    ) -> Result<File, CatalogVerificationError> {
+        let file = OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -337,6 +337,15 @@ mod windows {
         if metadata.len() == 0 || metadata.len() > max_bytes as u64 {
             return Err(CatalogVerificationError::InvalidFileSize);
         }
+        Ok(file)
+    }
+
+    fn locked_file(
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<(File, Vec<u8>), CatalogVerificationError> {
+        let mut file = open_bounded_file(path, max_bytes)?;
+        let metadata = file.metadata()?;
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         Read::by_ref(&mut file)
             .take(max_bytes as u64 + 1)

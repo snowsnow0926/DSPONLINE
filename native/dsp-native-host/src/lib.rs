@@ -2,6 +2,7 @@ pub mod core_runtime;
 mod disk_budget;
 pub mod exact_realtime_lease;
 pub mod frame;
+pub mod installed_program;
 pub mod protocol;
 pub mod qualification_binding;
 pub mod qualification_catalog;

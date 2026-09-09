@@ -1043,6 +1043,28 @@ fn serve(root: PathBuf) -> anyhow::Result<()> {
 }
 
 fn main() {
+    // Readonly inspection starts from this executable's OS path. It opens no
+    // SaveStore or simulation registry and accepts no caller installation root.
+    let arguments: Vec<_> = env::args_os().skip(1).collect();
+    if arguments.first().is_some_and(|a| a == "inspect-program") {
+        let identity = if arguments.len() == 1 {
+            dsp_native_host::installed_program::collect_installed_windows_program_identity()
+        } else {
+            Err(dsp_native_host::installed_program::InstalledProgramError)
+        };
+        match identity {
+            Ok(program) => println!(
+                "{}",
+                json!({"schemaVersion": 1, "kind": "installed-program-identity-v1",
+                "program": program, "authorityEligible": false})
+            ),
+            Err(_) => {
+                eprintln!("dsp-native-host: installed-program-rejected");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if let Err(error) = parse_serve_root().and_then(serve) {
         eprintln!("dsp-native-host: {error:#}");
         std::process::exit(1);

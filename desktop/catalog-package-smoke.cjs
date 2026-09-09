@@ -8,6 +8,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { createHash } = require("node:crypto");
+const { spawn } = require("node:child_process");
+const { isDeepStrictEqual } = require("node:util");
 const { initializePerformanceEditionIdentity } = require("./performance-edition-identity.cjs");
 const { installBackgroundSmokePolicy } = require("./background-smoke-policy.cjs");
 
@@ -23,6 +25,39 @@ function fail(error) {
 process.on("uncaughtException", fail);
 process.on("unhandledRejection", fail);
 dialog.showErrorBox = () => fail(new Error("Unexpected native error dialog"));
+
+async function inspectInstalledHost(resources, expected) {
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(path.join(resources, "native", "dsp-native-host.exe"), ["inspect-program"], {
+      cwd: resources, windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"],
+      env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR },
+    });
+    let failed = false, length = 0;
+    const chunks = [];
+    const stop = () => { failed = true; child.kill(); };
+    const timer = setTimeout(stop, 15_000);
+    child.once("spawn", () => {
+      try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
+      catch { stop(); }
+    });
+    child.once("error", () => { failed = true; });
+    child.stdout.on("data", (chunk) => {
+      length += chunk.length;
+      if (length > 16 * 1024) stop(); else chunks.push(chunk);
+    });
+    child.stderr.on("data", stop);
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      if (failed || code !== 0 || signal) reject(new Error("Installed Host inspection failed"));
+      else resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+  });
+  const receipt = JSON.parse(result);
+  if (JSON.stringify(receipt) + "\n" !== result || !isDeepStrictEqual(receipt, {
+    schemaVersion: 1, kind: "installed-program-identity-v1", program: expected, authorityEligible: false,
+  })) throw new Error("Independent installed Host identity differs from main");
+  return receipt;
+}
 
 async function run() {
   os.setPriority(0, os.constants.priority.PRIORITY_BELOW_NORMAL);
@@ -51,6 +86,7 @@ async function run() {
   await app.whenReady();
   const { collectPackagedWindowsProgramIdentity } = require(path.join(resources, "app.asar", "desktop", "native-installed-program.cjs"));
   const programIdentity = await collectPackagedWindowsProgramIdentity({ resourcesPath: resources });
+  const hostProgramIdentity = await inspectInstalledHost(resources, programIdentity);
   // Electron's real ASAR loader supplies this module and its own package.json.
   const modulePath = path.join(resources, "app.asar", "desktop", "native-catalog-verifier.cjs");
   const { createPackagedWindowsCatalogVerifier } = require(modulePath);
@@ -61,7 +97,7 @@ async function run() {
   if (rejection !== "carrier-io") throw new Error("Actual packaged helper did not reject the missing carrier");
   if (audit.windowsCreated !== 0 || audit.initiallyVisible !== 0 || audit.showEvents !== 0 || audit.focusEvents !== 0
       || Object.keys(audit.dialogs).length) throw new Error("Package probe violated its no-window contract");
-  finish({ status: "PASS", kind: "CATALOG_PACKAGE_SMOKE", actualHelperSha256, rejection, programIdentity,
+  finish({ status: "PASS", kind: "CATALOG_PACKAGE_SMOKE", actualHelperSha256, rejection, programIdentity, hostProgramIdentity,
     authorityEligible: false, backgroundAudit: audit }, 0);
 }
 

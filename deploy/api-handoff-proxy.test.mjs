@@ -148,6 +148,9 @@ test("holds requests during writer handoff and switches upstream without 502 or 
       upstream: { host: "127.0.0.1", port: oldPort, slot: "blue", releaseId: "old" },
     });
     await proxy.applyState();
+    // A periodic state read may already be in flight, in which case the
+    // explicit applyState call returns before the new generation is visible.
+    await waitUntil(() => proxy.status().generation === 2 && proxy.status().mode === "drain");
     const queuedWrite = getText(`${baseUrl}/api/cloud-save`, { method: "PUT", body: "queued" });
     const read = await getText(`${baseUrl}/api/health`);
     assert.deepEqual(read, { status: 200, body: "old" });
@@ -163,6 +166,7 @@ test("holds requests during writer handoff and switches upstream without 502 or 
       upstream: { host: "127.0.0.1", port: oldPort, slot: "blue", releaseId: "old" },
     });
     await proxy.applyState();
+    await waitUntil(() => proxy.status().generation === 3 && proxy.status().mode === "hold");
     const heldRead = getText(`${baseUrl}/api/health`);
     await waitUntil(() => proxy.status().queuedRequests === 2);
     await writeApiProxyState(stateFile, {
@@ -173,6 +177,7 @@ test("holds requests during writer handoff and switches upstream without 502 or 
       upstream: { host: "127.0.0.1", port: newPort, slot: "green", releaseId: "new" },
     });
     await proxy.applyState();
+    await waitUntil(() => proxy.status().generation === 4 && proxy.status().mode === "forward");
     assert.deepEqual(await queuedWrite, { status: 200, body: "new" });
     assert.deepEqual(await heldRead, { status: 200, body: "new" });
     assert.equal(proxy.status().failedRequests, 0);

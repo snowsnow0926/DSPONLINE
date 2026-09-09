@@ -109,6 +109,17 @@ jobs:
           name: playwright-json-shard-1
           path: test-results/playwright-report.json
           if-no-files-found: ignore
+      - name: Preserve failed browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: playwright-failures-shard-1
+          path: |
+            test-results/**/error-context.md
+            test-results/**/test-failed-*.png
+            test-results/**/trace.zip
+          if-no-files-found: ignore
+          retention-days: 7
 
   e2e-shard-2:
     name: E2E shard 2/2
@@ -141,6 +152,17 @@ jobs:
           name: playwright-json-shard-2
           path: test-results/playwright-report.json
           if-no-files-found: ignore
+      - name: Preserve failed browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: playwright-failures-shard-2
+          path: |
+            test-results/**/error-context.md
+            test-results/**/test-failed-*.png
+            test-results/**/trace.zip
+          if-no-files-found: ignore
+          retention-days: 7
 
   e2e-report:
     name: E2E slowest-tests summary

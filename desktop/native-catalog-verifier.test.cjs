@@ -12,7 +12,7 @@ const digest = (value) => createHash("sha256").update(value).digest("hex");
 const pin = "cd".repeat(32);
 const body = Buffer.from('{"kind":"TEST_ONLY"}');
 
-function harness(t, behavior, { neverClose = false } = {}) {
+function harness(t, behavior, { neverClose = false, packaged = false, embeddedDigest } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-catalog-main-test-"));
   t.after(() => {
     assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
@@ -46,8 +46,10 @@ function harness(t, behavior, { neverClose = false } = {}) {
     return child;
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "native-catalog-verifier.cjs"), "utf8"), {
-    module, Buffer, process, setTimeout: (fn, delay) => setTimeout(fn, Math.min(delay, 40)), clearTimeout,
+    module, Buffer, process, __dirname: packaged ? path.join(root, "app.asar", "desktop") : __dirname,
+    setTimeout: (fn, delay) => setTimeout(fn, Math.min(delay, 40)), clearTimeout,
     require(name) {
+      if (name === "../package.json") return { nativeCatalogVerifierSha256: embeddedDigest ?? digest(fs.readFileSync(executable)) };
       if (name === "node:child_process") return { spawn };
       if (name === "node:os") return { ...os, setPriority: (...args) => trace.priorities.push(args) };
       return require(name);
@@ -73,6 +75,23 @@ test("main requires independent policy and verifies fixed helper identity before
   }
   const verifier = h.createWindowsCatalogVerifier(h.policy);
   fs.appendFileSync(h.executable, "changed");
+  await assert.rejects(verifier.authenticate(), /helper-identity-rejected/);
+  assert.equal(h.trace.spawns, 0);
+});
+
+test("packaged factory obtains executable identity from its own package and rejects another resource root", windows, async (t) => {
+  const h = harness(t, ({ child, request, close }) => { write(child, response(request)); close(); }, { packaged: true });
+  assert.throws(() => h.createPackagedWindowsCatalogVerifier({ resourcesPath: path.dirname(h.root),
+    publisherCertificateSha256: [pin] }), /catalog-verifier-requires-package/);
+  const token = await h.createPackagedWindowsCatalogVerifier({ resourcesPath: h.root,
+    publisherCertificateSha256: [pin] }).authenticate();
+  assert.deepEqual(h.readAuthenticatedCatalogMember(token).memberBytes, body);
+});
+
+test("external program digest cannot replace the embedded packaged helper identity", windows, async (t) => {
+  const h = harness(t, () => assert.fail("wrong packaged helper must not launch"), { packaged: true, embeddedDigest: "ab".repeat(32) });
+  const verifier = h.createPackagedWindowsCatalogVerifier({ resourcesPath: h.root,
+    executableSha256: h.policy.executableSha256, publisherCertificateSha256: [pin] });
   await assert.rejects(verifier.authenticate(), /helper-identity-rejected/);
   assert.equal(h.trace.spawns, 0);
 });

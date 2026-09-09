@@ -177,4 +177,16 @@ function createWindowsCatalogVerifier({ installationRoot, executableSha256, publ
   });
 }
 
-module.exports = { createWindowsCatalogVerifier, readAuthenticatedCatalogMember };
+function createPackagedWindowsCatalogVerifier({ resourcesPath = process.resourcesPath, publisherCertificateSha256 } = {}) {
+  // Only trusted main code calls this factory. The executable identity comes
+  // from this module's own app.asar, never an external manifest or renderer.
+  if (typeof resourcesPath !== "string" || !path.isAbsolute(resourcesPath)
+      || path.resolve(__dirname, "..") !== path.join(resourcesPath, "app.asar")) {
+    throw fail("catalog-verifier-requires-package");
+  }
+  const metadata = require("../package.json");
+  return createWindowsCatalogVerifier({ installationRoot: resourcesPath,
+    executableSha256: metadata.nativeCatalogVerifierSha256, publisherCertificateSha256 });
+}
+
+module.exports = { createWindowsCatalogVerifier, createPackagedWindowsCatalogVerifier, readAuthenticatedCatalogMember };

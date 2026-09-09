@@ -1,5 +1,7 @@
 # 系统架构
 
+> **Windows helper 制品绑定（2026-09-09，开发候选）**：packer 将独立 Rust 助手放到固定 native 资源目录，并把该次构建摘要嵌入 app.asar 元数据；包内 main factory 只读取自己的元数据。新内部制品清单 schema 2 强制核对该资源，schema 1 保留历史读取且不能满足显式的新助手要求。这些是制品身份检查，不授予运行资格，见[随包交付进度](./reviews/rust-windows-catalog-package-2026-09-09.md)。
+
 > **Windows catalog 验证边界（2026-09-09，开发候选）**：Host 的 Windows 成员验证模块与独立只读 Rust 助手复用验证代码，各自在自己的进程重新打开文件并调用 WinTrust；main 固定助手路径及独立程序/发布者摘要，检查有界响应和 nonce 后保存内部不可伪造的正文凭据。该调用模块尚未连接游戏启动或纳入冻结安装包，正文认证不授予实时权威。后续 schema、候选/生产者、时效撤销及单写者交接独立执行，见[实现与限制](./reviews/rust-windows-main-catalog-helper-2026-09-09.md)。
 
 > **菜单保存所有权（2026-09-09，开发候选）**：菜单完整状态通过原保存队列请求 Worker proof；已协调的当前 IndexedDB 主档由 save Worker 生成信封/绑定凭据和快照 transfer，persistence Worker 负责原 fencing/CAS、备份与精确读回。主线程保留调用者状态，仅处理小型回执；成功后才进入工厂。旧模式迁移、未知目录与无 Worker/IndexedDB 环境保留兼容保存路径。协议与持久版本不变，详见 [后台保存接入](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。

@@ -18,7 +18,8 @@ async function writeFixture(root, relative = "release", channel = "stable", opti
   const directory = path.join(root, relative);
   const source = path.join(root, `asar-input-${relative}`);
   fs.mkdirSync(path.join(source, "dist"), { recursive: true });
-  fs.writeFileSync(path.join(source, "package.json"), JSON.stringify({ version: expected.version, desktopEditionId: identity.editionId, productName: identity.productName, releaseChannel: channel, cloudApiBaseUrl: "", updateBaseUrl: "" }));
+  const helper = Buffer.from("synthetic catalog verifier; never executed");
+  fs.writeFileSync(path.join(source, "package.json"), JSON.stringify({ version: expected.version, desktopEditionId: identity.editionId, productName: identity.productName, releaseChannel: channel, cloudApiBaseUrl: "", updateBaseUrl: "", nativeCatalogVerifierSha256: createHash("sha256").update(helper).digest("hex") }));
   fs.writeFileSync(path.join(source, "dist/version.json"), JSON.stringify({ version: expected.version, buildId: expected.buildId, platform: "desktop" }));
   fs.writeFileSync(path.join(source, "dist/index.html"), "<!doctype html><title>Synthetic fixture; not a runnable installer</title>");
   fs.mkdirSync(path.join(directory, "win-unpacked/resources/native"), { recursive: true });
@@ -26,6 +27,7 @@ async function writeFixture(root, relative = "release", channel = "stable", opti
   uncache(path.join(directory, "win-unpacked/resources/app.asar"));
   fs.writeFileSync(path.join(directory, `win-unpacked/${identity.executableName}.exe`), "synthetic electron executable");
   fs.writeFileSync(path.join(directory, "win-unpacked/resources/native/dsp-native-host.exe"), "synthetic native host");
+  fs.writeFileSync(path.join(directory, "win-unpacked/resources/native/dsp-catalog-verifier.exe"), helper);
   const name = identity.installerArtifactName.replace("${version}", expected.version).replace("${arch}", "x64").replace("${ext}", "exe");
   const contents = Buffer.from("Synthetic installer bytes; no signing claims.");
   const digest = createHash("sha512").update(contents).digest("base64");

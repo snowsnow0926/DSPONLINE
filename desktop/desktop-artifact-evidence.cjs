@@ -12,6 +12,7 @@ const { validateDesktopPackageIdentity } = require("./performance-edition-identi
 const EVIDENCE_FILE = "desktop-build-evidence.json";
 const ASAR = "win-unpacked/resources/app.asar";
 const HOST = "win-unpacked/resources/native/dsp-native-host.exe";
+const CATALOG_VERIFIER = "win-unpacked/resources/native/dsp-catalog-verifier.exe";
 const CONTEXT_FIELDS = ["version", "sourceSha", "buildId", "editionId", "channel"];
 
 function requireDirect(root, relative, directory = false) {
@@ -69,7 +70,30 @@ function validateExpected(expected, identity, channel) {
   }
 }
 
-function packageIdentity(root, expected, identity, { requireOffline = false } = {}) {
+function catalogVerifierBuildMetadata(repositoryRoot) {
+  const file = requireDirect(repositoryRoot, "native/target/release/dsp-catalog-verifier.exe");
+  requireCatalogVerifierFile(file);
+  return { nativeCatalogVerifierSha256: digestFile(file) };
+}
+
+function requireCatalogVerifierFile(file) {
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size < 1 || stat.size > 32 * 1024 * 1024) {
+    throw new Error("Catalog verifier must be a bounded direct single-link executable");
+  }
+}
+
+function verifyPackagedCatalogVerifier(root, metadata, { required = true } = {}) {
+  const expected = metadata.nativeCatalogVerifierSha256;
+  if (expected === undefined && !required) return false;
+  if (typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)) throw new Error("Missing packaged catalog verifier identity");
+  const file = requireDirect(root, CATALOG_VERIFIER);
+  requireCatalogVerifierFile(file);
+  if (digestFile(file) !== expected) throw new Error("Packaged catalog verifier does not match embedded identity");
+  return true;
+}
+
+function packageIdentity(root, expected, identity, { requireOffline = false, requireCatalogVerifier = false } = {}) {
   const asar = requireDirect(root, ASAR);
   uncache(asar);
   const metadata = JSON.parse(extractFile(asar, "package.json").toString("utf8"));
@@ -83,6 +107,7 @@ function packageIdentity(root, expected, identity, { requireOffline = false } = 
   }
   requireDirect(root, `win-unpacked/${identity.executableName}.exe`);
   requireDirect(root, HOST);
+  verifyPackagedCatalogVerifier(root, metadata, { required: requireCatalogVerifier });
   // A real packaged renderer entry must be present as well as its version label.
   if (!extractFile(asar, "dist/index.html").length) throw new Error("Packaged renderer entry is empty");
   return metadata;
@@ -146,13 +171,15 @@ function releaseFiles(root, expected, identity) {
 
 function writeDesktopBuildEvidence(root, { expected, identity, release = false, repositoryRoot } = {}) {
   validateExpected(expected, identity, expected?.channel);
-  packageIdentity(root, expected, identity);
+  packageIdentity(root, expected, identity, { requireCatalogVerifier: true });
   if (repositoryRoot) {
     const builtHost = path.join(repositoryRoot, "native/target/release/dsp-native-host.exe");
     if (digestFile(builtHost) !== digestFile(requireDirect(root, HOST))) throw new Error("Packaged Host does not match this build's Host");
+    const helper = catalogVerifierBuildMetadata(repositoryRoot);
+    if (helper.nativeCatalogVerifierSha256 !== digestFile(requireDirect(root, CATALOG_VERIFIER))) throw new Error("Packaged catalog verifier does not match this build's helper");
   }
   const paths = [...listFiles(root, "win-unpacked"), ...(release ? releaseFiles(root, expected, identity) : [])].sort();
-  const manifest = { schemaVersion: 1, ...expected, kind: release ? "release" : "directory", files: paths.map((relative) => fileRecord(root, relative)) };
+  const manifest = { schemaVersion: 2, ...expected, kind: release ? "release" : "directory", files: paths.map((relative) => fileRecord(root, relative)) };
   // Only the verified packer writes this internal file, after all build steps.
   try {
     fs.lstatSync(path.join(root, EVIDENCE_FILE));
@@ -162,18 +189,22 @@ function writeDesktopBuildEvidence(root, { expected, identity, release = false, 
   return manifest;
 }
 
-function verifyDesktopBuildEvidence(root, { expected, identity, release = false, requireOffline = false } = {}) {
+function verifyDesktopBuildEvidence(root, { expected, identity, release = false, requireOffline = false, requireCatalogVerifier = false } = {}) {
   validateExpected(expected, identity, expected?.channel);
   const evidence = readJson(root, EVIDENCE_FILE);
-  if (evidence.schemaVersion !== 1 || evidence.kind !== (release ? "release" : "directory")
+  if (![1, 2].includes(evidence.schemaVersion) || evidence.kind !== (release ? "release" : "directory")
     || CONTEXT_FIELDS.some((key) => evidence[key] !== expected[key]) || !Array.isArray(evidence.files)) throw new Error("Desktop build evidence differs from trusted build context");
   const paths = evidence.files.map((entry) => entry.path);
   if (new Set(paths).size !== paths.length) throw new Error("Duplicate desktop evidence path");
   const required = [...listFiles(root, "win-unpacked"), ...(release ? releaseFiles(root, expected, identity) : [])].sort();
   if (JSON.stringify([...paths].sort()) !== JSON.stringify(required)) throw new Error("Desktop evidence file inventory mismatch");
   for (const record of evidence.files) verifyRecord(root, record);
-  const metadata = packageIdentity(root, expected, identity, { requireOffline });
+  // V1 remains readable for historical A/B evidence. New writes are V2 and
+  // always require the helper; callers demanding a current candidate can also
+  // explicitly reject old manifests. This is artifact identity, not authority.
+  if (requireCatalogVerifier && evidence.schemaVersion !== 2) throw new Error("Current desktop evidence requires the catalog verifier");
+  const metadata = packageIdentity(root, expected, identity, { requireOffline, requireCatalogVerifier: evidence.schemaVersion === 2 || requireCatalogVerifier });
   return { evidence, metadata };
 }
 
-module.exports = { EVIDENCE_FILE, ASAR, HOST, digestFile, requireDirect, expectedDesktopBuild, writeDesktopBuildEvidence, verifyDesktopBuildEvidence };
+module.exports = { EVIDENCE_FILE, ASAR, HOST, CATALOG_VERIFIER, digestFile, requireDirect, expectedDesktopBuild, writeDesktopBuildEvidence, verifyDesktopBuildEvidence, catalogVerifierBuildMetadata, verifyPackagedCatalogVerifier };

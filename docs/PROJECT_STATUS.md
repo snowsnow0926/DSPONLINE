@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows helper 打包候选（2026-09-09，未发布）**：固定资源、ASAR 内助手摘要和 schema 2 制品校验已接入，相关回归 69/1 权限 skip/0 fail；实际冻结包和仅 Electron main 的包探针待执行。运行资格仍未开放，见[本批范围](./reviews/rust-windows-catalog-package-2026-09-09.md)。
+
 > **Windows main 验签助手初版（2026-09-09，未发布）**：独立只读 Rust 助手与 main 调用模块已实现；Rust 3/3、Node 10/10（含实际进程 2 项）、严格检查和构建通过。云端夹具拒绝预检 3/3。本机没有安装证书或启动游戏，355d 的 Host 真实签名/篡改/信任移除已通过；main 新增助手的签名集成、实际冻结包、资格正文/生产者/撤销及实时接管仍待完成。见[本批范围](./reviews/rust-windows-main-catalog-helper-2026-09-09.md)。
 
 > **Windows 签名场景执行准备（2026-09-09，未发布）**：真实签名专用 Rust 用例和一次性云端证书生命周期已加入验证流程；默认本机不执行签名场景，本机只编译并验证误调用拒绝。成功路径、篡改和信任移除的云端终态待验，生产 Host 验证逻辑及实时资格不变。见[准确范围](./reviews/rust-windows-signed-catalog-ci-2026-09-09.md)。

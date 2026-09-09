@@ -1,5 +1,9 @@
 # Rust RP1 并行参与验证的调度前提｜2026-09-09
 
+> **解析专项后续复核**：253 Windows run `34311716902` 的完整核心 1,112 pass / 1 fail / 5 ignored，`construction_entity_parse_is_owned_by_injected_one_two_four_eight_worker_runtime` 配置 2、实际参与 1；后续步骤跳过，原失败保留。该解析专项及共用参与断言的 `macro_v10_large_certificate_directory_records_real_bounded_pool_diagnostics` 现复用已有的测试专用有界同步。实际参与断言、2 秒同步期限、串行阈值和生产调度不变。新正常 release 完整核心 **1,113 pass / 5 ignored / 0 fail / 0 过滤**，两项原专项及同步边界检查均通过；fmt、严格 release workspace/all-targets Clippy 通过。尚无新源码云端结果，不覆盖历史堆异常根因。
+
+本次证据为开发目录 `artifacts/rust-rp1-loop/certificate-participation-validate-v1.json` 及同名守护目录。正常 release 编译约 8 分 48 秒，完整核心运行 152.46 秒，严格 Clippy 约 66.95 秒；总守护 751.668 秒、最低 4,384,212 KiB、退出 0。`pure_idle.rs` SHA-256 `b97c27693cfd53edbfc775bcc4e64a77b34756835f47fc330bd0dc43fd6d8fee`、`deterministic_runtime.rs` SHA-256 `2e7315f2cf4a99f00cf1f914efddb695e683f7310448d19a469c33eee3a8b300`。全部低优先级串行，6 GiB 启动/2 GiB 停止，无游戏窗口。以下记录为更早物流专项的实现与验证，不当作此次解析专项的新结果。
+
 Role: develop。承接 [当前批次回归记录](./rust-rp1-current-batch-validation-2026-09-09.md)，只修复测试对实际线程参与的调度前提，不修改生产调度、游戏规则、存档或 Rust 准入。正常优化完整核心及严格 Clippy 已通过，新源码云端待验，本记录不授予发布资格。
 
 ## 失败和可重复隔离

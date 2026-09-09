@@ -19348,7 +19348,7 @@ mod tests {
             let prepared = prepare_construction_tail_certificate_with_runtime(
                 &state,
                 &snapshots,
-                &DeterministicRuntime::for_test(worker_count),
+                &DeterministicRuntime::for_test_with_indexed_worker_participation(worker_count),
             );
             assert!(
                 prepared.result.is_ok(),
@@ -19370,7 +19370,7 @@ mod tests {
         let ordinary_snapshots =
             exact_three_window_probe_isolating_construction(&state, &request).unwrap();
         let construction_snapshots = exact_three_window_probe(&state, &request).unwrap();
-        let runtime = DeterministicRuntime::for_test(8);
+        let runtime = DeterministicRuntime::for_test_with_indexed_worker_participation(8);
 
         let ordinary =
             prepare_ordinary_flow_certificate_with_runtime(&state, &ordinary_snapshots, &runtime);

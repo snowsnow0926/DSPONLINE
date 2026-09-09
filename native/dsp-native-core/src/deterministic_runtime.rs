@@ -17,7 +17,7 @@ pub(crate) const NATIVE_THREAD_STACK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WORKERS: usize = 8;
 const JOINED_DROP_CHUNKS_PER_WORKER: usize = 4;
 
-/// A bounded scheduling precondition for the two production-updater tests
+/// A bounded scheduling precondition for production-updater and parser tests
 /// that specifically need distinct workers to execute their mapping closure.
 /// A Rayon pool may otherwise complete a short map on only one worker.
 #[cfg(test)]

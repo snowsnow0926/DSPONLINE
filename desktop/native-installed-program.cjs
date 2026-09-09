@@ -3,6 +3,9 @@
 // Main-only installed program facts. These identify bytes, not publisher trust,
 // qualification, producer provenance, or permission to own a player's state.
 const fs = require("node:fs");
+// Electron's fs presents app.asar itself as a directory. Use the original
+// disk API for container/Host bytes, and its ASAR-aware fs only for members.
+const diskFs = process.versions?.electron ? require("original-fs") : fs;
 const path = require("node:path");
 const { createHash } = require("node:crypto");
 const { setImmediate: yieldToMain } = require("node:timers/promises");
@@ -17,7 +20,7 @@ function directDirectories(root) {
   const result = [];
   for (const part of root.slice(current.length).split(path.sep).filter(Boolean)) {
     current = path.join(current, part);
-    const stat = fs.lstatSync(current);
+    const stat = diskFs.lstatSync(current);
     if (!stat.isDirectory() || stat.isSymbolicLink()) reject();
     result.push([current, stat]);
   }
@@ -25,10 +28,10 @@ function directDirectories(root) {
 }
 
 async function fingerprint(file, maxBytes) {
-  const before = await fs.promises.lstat(file);
+  const before = await diskFs.promises.lstat(file);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1
       || before.size < 1 || before.size > maxBytes) reject();
-  const handle = await fs.promises.open(file, "r");
+  const handle = await diskFs.promises.open(file, "r");
   try {
     const opened = await handle.stat();
     if (!same(before, opened)) reject();
@@ -43,7 +46,7 @@ async function fingerprint(file, maxBytes) {
       // Bound individual main-thread work even for a large installed ASAR.
       if (total % (1024 * 1024) === 0) await yieldToMain();
     }
-    if (!same(opened, await handle.stat()) || !same(opened, await fs.promises.lstat(file))) reject();
+    if (!same(opened, await handle.stat()) || !same(opened, await diskFs.promises.lstat(file))) reject();
     return { sha256: hash.digest("hex"), stat: opened };
   } finally { await handle.close(); }
 }
@@ -80,9 +83,9 @@ async function collectPackagedWindowsProgramIdentity({ resourcesPath = process.r
         || renderer.platform !== "desktop" || packageInfo.desktopEditionId !== "windows-performance-development-v1"
         || packageInfo.releaseChannel !== "beta") reject();
     const hostIdentity = await fingerprint(host, 128 * 1024 * 1024);
-    if (!same(asarIdentity.stat, await fs.promises.lstat(asar))) reject();
+    if (!same(asarIdentity.stat, await diskFs.promises.lstat(asar))) reject();
     for (const [directory, before] of directories) {
-      const after = await fs.promises.lstat(directory);
+      const after = await diskFs.promises.lstat(directory);
       if (!after.isDirectory() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino) reject();
     }
     return Object.freeze({ version, sourceSha, buildId: packageInfo.nativeBuildId,

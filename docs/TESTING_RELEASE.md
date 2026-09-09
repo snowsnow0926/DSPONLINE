@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **Windows Rust 安装身份与终局测量（2026-09-10）**：安装身份/版别/制品专项 50 pass/1 权限 skip/0 fail，真实冻结包采集待执行；9e 正常 release 核心 1,116/6 ignored、实际 Host 集成 36/36、实际 Windows 启动器 16/16，终局三对完整导出一致、中位 49.90→49.02 秒但区间重叠。完整入口及发布门禁仍未过，见[身份测试范围](./reviews/rust-windows-installed-program-2026-09-10.md)和[完整数值证据](./reviews/rust-rp1-canonical-buffer-2026-09-10.md)。
+> **Windows Rust 安装身份与终局测量（2026-09-10）**：安装身份/版别/制品专项 51 pass/1 权限 skip/0 fail，5901 实包采集发现 Electron ASAR 语义差异，修正后待新包复验；9e 正常 release 核心 1,116/6 ignored、实际 Host 集成 36/36、实际 Windows 启动器 16/16，终局三对完整导出一致、中位 49.90→49.02 秒但区间重叠。完整入口及发布门禁仍未过，见[身份测试范围](./reviews/rust-windows-installed-program-2026-09-10.md)和[完整数值证据](./reviews/rust-rp1-canonical-buffer-2026-09-10.md)。
 
 > **2026-09-10 Native 输入与最新完整结果**：原组件 8 个新增反例失败，修复组件/库存存储 24 pass、全项目类型通过，6/2 GiB 守护正常退出。50b Windows 全套成功；完整浏览器 467 pass/33 skip/2 fail/1 flaky，设置失败 trace 显示整例超时，未证明溢出。1cf 清单修复的云端生产构建已过，其余待验，发布仍未通过。见[源码绑定的证据与缺口](./reviews/rust-windows-native-limit-drafts-2026-09-10.md)。
 

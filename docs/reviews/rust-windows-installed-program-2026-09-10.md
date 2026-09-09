@@ -10,13 +10,21 @@
 
 读取拒绝非固定目录、链接及祖先重定向、安装文件多硬链接、缺失/空/越界文件、错版本/通道/平台及读取过程中检测到的替换。Host 上限 128 MiB，ASAR 256 MiB，元数据 64 KiB；哈希按 64 KiB 分块，每 1 MiB 向 main 事件循环让位，不把整个安装包读入内存。提供的是采集时安装文件事实，**不证明已经载入的代码连续性、发布者信任、Host 编译来源或对特权 OS 攻击者的防护，也不是可长期复用的运行租约**。
 
-只读 `catalog-package-smoke.cjs` 已接入真实 ASAR 模块采集，供下一个冻结包核对父进程独立算出的身份；没有 BrowserWindow、游戏模拟或证书安装。本批尚未完成该新冻结包的实际执行。
+只读 `catalog-package-smoke.cjs` 已接入真实 ASAR 模块采集，核对父进程独立算出的身份；没有 BrowserWindow、游戏模拟或证书安装。`5901ddd8` 冻结包的首次实际执行拒绝，修复与重新冻结的验收继续进行。
 
 ## 已执行验证
 
 后台串行专项 `installed-program-unit-v1`：安装身份、包证据、packer 和版别隔离合计 **50 pass / 0 fail / 1 skip**。唯一 skip 是本机无创建跨平台符号链接权限；Windows 目录联接负例通过。新身份提供者的正例是明确 TEST_ONLY 的 VM 文件系统，不能称为新实包通过。
 
 负例覆盖开发目录、其他系统/架构、错 renderer、dirty/missing/source 换行、其他版别/通道、不同安装根、UNC/流路径、硬链接/祖先重定向、超长/空输入、两次读取之间替换；所有已打开描述符都关闭。包内源码字段不符独立候选时拒绝。守护正常 exit 0、无停止原因，6.1600316 秒，最低空闲 9,141,052 KiB，6/2 GiB 门槛未变；没有窗口启动。
+
+## 首次实包发现的问题与修正
+
+`5901ddd87dbbbd9a6cd606f836d5ce65b8285706` 正常构建并冻结，Build ID `1.2.7+5901ddd87dbb`；实际 Host/助手集成 36/36、类型、桌面构建及门禁通过，76 项制品/79 文件一致。Host 摘要保持 9e 的 `ece575f11977396f8e9687a91045fda8e52a0ddbc0e16876f85c5fe2485443a5`，新助手为 `2d373bdef5ac353b3b78eb6c1ca05337464f76a467dfb0d81bc5b145bbd62523`。构建守护正常 exit 0，113.9715016 秒，最低空闲 6,149,276 KiB。
+
+实际 Electron 探针正常 exit 1，错误 `installed-program-rejected`，没有通过。只读诊断确认：Electron `fs.lstat(app.asar)` 返回虚拟目录、size 0；`original-fs` 返回真实普通文件、46,250,971 bytes。故原实现拒绝真实 ASAR 容器，而 VM 普通文件正例没有覆盖 Electron 这一语义。两次探针均正常结束、无强制终止、隔离 profile 已移除；保留首次失败和诊断记录。
+
+新增对应回归在原实现上 **0 pass / 1 fail**。修正后只用 `original-fs` 读取容器、Host 和磁盘祖先，ASAR 成员仍用 Electron `fs`；不放宽普通文件/大小/链接/替换检查。完整同组回归 `installed-program-unit-v2` **51 pass / 0 fail / 1 原权限 skip**，守护正常 exit 0，6.2520042 秒，最低空闲 8,999,768 KiB。新源码尚待重新冻结后的实际 Electron 验收，不能拿 VM 修复通过代替。
 
 ## 还需接通
 

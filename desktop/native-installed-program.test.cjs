@@ -14,7 +14,7 @@ const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 // TEST_ONLY filesystem and ASAR loader. Actual installed Electron execution
 // belongs to the separately frozen package smoke, never to this VM fixture.
-function fixture() {
+function fixture({ electronAsar = false } = {}) {
   const packageInfo = { version: "1.2.7", nativeBuildSourceSha: "a".repeat(40), nativeBuildId: "1.2.7+aaaaaaaaaaaa",
     desktopEditionId: "windows-performance-development-v1", releaseChannel: "beta" };
   const renderer = { version: packageInfo.version, buildId: packageInfo.nativeBuildId, platform: "desktop" };
@@ -23,7 +23,7 @@ function fixture() {
   const reads = [];
   let opened = 0; let closed = 0; let yields = 0;
   let onRead = () => {};
-  const process = { platform: "win32", arch: "x64", resourcesPath: root,
+  const process = { platform: "win32", arch: "x64", resourcesPath: root, versions: electronAsar ? { electron: "43.1.1" } : {},
     env: { DSP_NATIVE_HOST_PATH: "forged.exe", DSP_NATIVE_SOURCE_SHA: "f".repeat(40) } };
   const encode = (file) => file === `${asar}\\package.json` ? Buffer.from(JSON.stringify(packageInfo))
     : file === `${asar}\\dist\\version.json` ? Buffer.from(JSON.stringify(renderer)) : files.get(file);
@@ -47,9 +47,16 @@ function fixture() {
     } },
   };
   const module = { exports: {} };
+  // Electron exposes the ASAR container as a virtual directory through fs;
+  // original-fs is required to inspect/hash its actual disk bytes.
+  const virtualStat = (file) => file === asar ? { ...stat(file), size: 0,
+    isFile: () => false, isDirectory: () => true } : stat(file);
+  const electronFs = { ...fakeFs, lstatSync: virtualStat,
+    promises: { ...fakeFs.promises, lstat: async (file) => virtualStat(file) } };
   const context = { module, Buffer, TextDecoder, process, __dirname: `${asar}\\desktop`,
     require(name) {
-      if (name === "node:fs") return fakeFs;
+      if (name === "node:fs") return electronAsar ? electronFs : fakeFs;
+      if (name === "original-fs") { assert.equal(electronAsar, true); return fakeFs; }
       if (name === "node:path") return path.win32;
       if (name === "node:timers/promises") return { setImmediate: async () => { yields++; } };
       return require(name);
@@ -71,6 +78,15 @@ test("installed facts bind own ASAR metadata and bounded streamed Host/ASAR byte
   assert.ok(f.reads.every((file) => file.startsWith(root)));
   assert.equal(Object.hasOwn(facts, "authorityEligible"), false);
   assert.equal(Object.hasOwn(facts, "catalogSha256"), false);
+});
+
+test("Electron virtual ASAR directory uses original-fs for the real container identity", async () => {
+  const f = fixture({ electronAsar: true });
+  const facts = await f.collectPackagedWindowsProgramIdentity();
+  assert.equal(facts.asarSha256, hash(f.files.get(asar)));
+  assert.equal(facts.hostSha256, hash(f.files.get(host)));
+  assert.equal(facts.sourceSha, f.packageInfo.nativeBuildSourceSha);
+  assert.equal(f.counters().opened, f.counters().closed);
 });
 
 for (const [name, mutate] of [

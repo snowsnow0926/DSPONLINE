@@ -58,6 +58,7 @@ import {
   getLocalSaveStorageEstimate,
   getLocalSaveValue,
   hasLocalSaveCapacity,
+  hasLocalSaveCapacityForBytes,
   listLocalSaveKeys,
   readLocalSavePayload,
   readPersistedLocalSaveValue,
@@ -3691,7 +3692,7 @@ async function saveGameVerifiedOnce(
   }
   const serializeMs = Math.max(0, monotonicNow() - serializeStartedAt);
 
-  const bytes = utf8ByteLength(raw);
+  const bytes = workerVerification.byteLength;
   const previous = await readPersistedLocalSaveValue(primaryKey);
   const snapshotScanStartedAt = monotonicNow();
   let removedAutomaticSnapshots = prepareAutomaticSnapshotsForPrimarySave(mode);
@@ -3704,7 +3705,7 @@ async function saveGameVerifiedOnce(
   }
 
   const capacityStartedAt = monotonicNow();
-  const capacity = await hasLocalSaveCapacity(primaryKey, raw);
+  const capacity = await hasLocalSaveCapacityForBytes(primaryKey, bytes);
   let capacityMs = Math.max(0, monotonicNow() - capacityStartedAt);
   if (!capacity.ok) {
     removedAutomaticSnapshots += removeAutomaticSnapshotsForQuotaRetry(mode);
@@ -4685,7 +4686,7 @@ async function saveGameSnapshotVerifiedInternal(
       ? { ...reframed, summary: primary?.summary ? { ...primary.summary, savedAt } : undefined }
       : await serializeEnvelopeInWorker(state, savedAt, "snapshot", reason);
     const raw = serialized.raw;
-    const capacity = await hasLocalSaveCapacity(key, raw);
+    const capacity = await hasLocalSaveCapacityForBytes(key, serialized.verification.byteLength);
     if (!capacity.ok) return null;
     invalidateSaveSummaryCache(key);
     snapshotMetadataCache.delete(key);

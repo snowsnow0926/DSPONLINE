@@ -1,6 +1,8 @@
 # 测试与发布基线
 
-> **2026-09-09 新源码云端局部结果**：0ce run `34298454294` 第二分组 208 expected / 22 skipped / 6 unexpected / 5 flaky，恢复两文件 13 项全部首次通过。JSON 和失败上下文 / PNG / trace 已下载并与 GitHub 完整 SHA-256 一致；第一分组及完整 Windows 仍待终态，不记全量通过。详见[云端证据](./reviews/rust-rp1-recovery-test-startup-2026-09-09.md)。
+> **2026-09-09 新源码云端完整结果**：0ce 主 CI 两组浏览器合计 **401 expected / 33 skipped / 34 unexpected / 20 flaky**，恢复两文件 13 项全部首次通过，整体失败。独立 Windows PR 正常 release Rust **1,365/5 ignored**、Native **674/1 skip**、游戏单元 **3,166/39 skip** 均零失败；对应 push 也成功。ZIP、完整失败上下文和精确 Git tree 已验证，见[云端终态证据](./reviews/rust-rp1-recovery-test-startup-2026-09-09.md)。
+
+> **2026-09-09 终局实际菜单失败证据**：冻结 2bb 隐藏包两次完成 9 秒 Rust 候选返回，均未在原 90 秒内进入可操作工厂；保存序列化和快照 Worker 已观察到。四次正常关闭 0、原档不变，但不算持久状态/重开/取消或整体性能通过。先前两次驱动漏重载造成的正常关闭拒绝单独保留，见[实际入口记录](./reviews/rust-rp1-endgame-entry-wait-2026-09-09.md)。
 
 > **2026-09-09 终局来源恢复复核**：实际生产恢复函数的只读预算审计 4 分支通过；恢复后完整终局工厂一秒 Broker / Host 候选与 JS 全状态一致、原档不变、正常退出和清理通过。新增两项时间绑定回归，三文件 21/21、实际类型检查通过。此前 raw timeWarp 拒绝未经过菜单前置恢复，不能代表真实菜单不兼容；本轮也不代表终局完整 UI、保存重开或长离线通过。完整身份、资源守护及旧证据区别见[验证记录](./reviews/rust-rp1-recovered-endgame-source-2026-09-09.md)。
 

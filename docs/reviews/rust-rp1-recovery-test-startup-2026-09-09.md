@@ -32,6 +32,26 @@ Role: develop。本轮只修改测试：等待工厂运行时完成初始化后�
 
 ## 其他云端收尾与证据
 
+### 0ce 完整终态补记
+
+0ce 的两组浏览器均已结束：第一组 **193 expected / 11 skipped / 28 unexpected / 15 flaky**，第二组 **208 / 22 / 6 / 5**，完整合计 **401 直接通过 / 33 跳过 / 34 失败 / 20 重试通过**。恢复两文件 13 项仍全部首次通过；整个 CI 未通过。第一组失败也已保留，尚未逐项完成诊断。
+
+独立 Windows PR run [34298454318](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34298454318)，job `102300056889` 成功：正常 release 核心 **1,113 pass / 5 ignored**、Host **249+3 pass**，合计 Rust **1,365 pass / 5 ignored**；Native **674 pass / 1 skip**、游戏单元 **3,166 pass / 39 skip**，均零失败，fmt、严格 release Clippy、Host build、typecheck 通过。push run `34298449941` / job `102300044453` 也终态成功；这里的详细计数来自 PR 日志。实际测试 merge `eae3f08a66c2efb57991904a172c3840cb91cc12` 与 0ce 的 Git tree 均为 `fb0c127133e3bb001adfa2b0c1743deacf3e47f7`，已用本地 Git 对象核对。
+
+同一主 CI 的 Server/Ops/Native job `102300057072` 成功：Server **390/2 skip**、站点 **4/4**，Ops **60/2 skip**；Linux core **1,113/5 ignored**、Host **245+3**、Native **670/5 skip**。Linux 此命令不作为 Windows 正常优化性能证据。
+
+新制品下载后已对完整 ZIP 校验，位于开发 worktree `artifacts/rust-rp1-loop/`：
+
+| 制品 | SHA-256 |
+| --- | --- |
+| `cloud-pr31-0ce-shard1-json-v1.zip` | `661f9cba58cbef3e522841eaf19e1c07acd12e6daa2018ac26fe8b75e142e077` |
+| `cloud-pr31-0ce-shard1-failure-v1.zip` | `52fc11319ff416f0a0c887818e952c1dbe79c222375b7da0757bcfaa79b2203f` |
+| `cloud-pr31-0ce-native-diagnostics-v1.zip` | `c9d6cfb91304053f8c267342751c2e3ea4f44ee3a5179ad6b3d8b16886001522` |
+
+Windows receipt 记录新 Host **17,885,696 bytes**、SHA-256 `56e7be70969181210e06e663e7064813dd23cad72ea4660166108ed14234dd13`，rustc 1.96.1、release 无优化覆盖。此为云端自动检查制品身份，没有用它替换本机已冻结的玩家开发包，不继承旧包性能数字，也不取得签名、UI 或发布资格。白名单审计 `cloud-0ce-validation-audit-v1.json` 汇总 tree、结果和 receipt。
+
+以下 c6 记录为上一轮历史结果。
+
 同一 c6 CI job `102290211979` 已终态成功：Server 390 pass / 2 skip，另站点专项 4/4；Ops **60 pass / 2 skip / 0 fail**；Linux Rust core 1,111 pass / 5 ignored、Host 245+3 pass；Native Node **670 pass / 5 skip / 0 fail**。这为上一轮 proxy generation/mode 测试同步修复补齐了 Linux 证据，生产 proxy 无修改。
 
 c6 的独立 Windows run `34295204069` / job `102290211848` 随后于 2026-09-09 01:11:42 UTC 终态成功：正常优化核心 1,111 pass / 5 ignored、Host 249+3 pass、Native 674 pass / 1 skip、完整游戏单元 3,166 pass / 39 skip，均 0 fail；fmt、严格 Clippy、Host 构建和类型检查通过。测试 merge SHA 为 `571cada389341d132c414fee8172258476d177f3`；它尚不包含 a05 的新参与专项前提或本次恢复辅助函数，不能代替这两项修复的云端验收，也不覆盖早先发生的线程参与失败。所有原 c6 作业终态后才推送下一份候选，不为观察等待而取消或重启旧验证。

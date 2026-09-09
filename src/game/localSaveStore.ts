@@ -800,8 +800,10 @@ async function readCoordinationValue(db: IDBDatabase, key: string): Promise<stri
   return (await readRecord(db, key))?.value ?? null;
 }
 
-function putStoredValue(store: IDBObjectStore, key: string, value: string, now = Date.now()): void {
-  store.put({ key, value, updatedAt: now, bytes: byteLength(value), ...(isSaveKey(key) ? { summary: classifySaveRecord(key, value) } : {}) } satisfies StoredSaveRecord);
+function putStoredValue(store: IDBObjectStore, key: string, value: string, now = Date.now(), measuredBytes?: number): void {
+  // The freshly built catalog has already measured these exact payload bytes.
+  // Re-encoding a large save just for its length allocates another full copy.
+  store.put({ key, value, updatedAt: now, bytes: measuredBytes ?? byteLength(value), ...(isSaveKey(key) ? { summary: classifySaveRecord(key, value) } : {}) } satisfies StoredSaveRecord);
 }
 
 function putCatalogRecord(store: IDBObjectStore, catalog: LocalSaveCatalog, now = Date.now()): void {
@@ -817,7 +819,7 @@ function putSaveValueAndCatalog(
   now = Date.now(),
   preparedCatalog?: LocalSaveCatalog,
 ): LocalSaveCatalog | null {
-  putStoredValue(store, key, value, now);
+  putStoredValue(store, key, value, now, preparedCatalog?.key === key ? preparedCatalog.byteLength : undefined);
   if (!isCatalogedSaveKey(key)) return null;
   if (!preparedCatalog || preparedCatalog.key !== key) throw new Error("Catalog is required for save payload writes");
   const catalog = { ...preparedCatalog, revision };
@@ -833,7 +835,7 @@ async function writeRecord(db: IDBDatabase, key: string, value: string): Promise
   const done = transactionDone(transaction);
   const now = Date.now();
   const store = transaction.objectStore(RECORD_STORE);
-  putStoredValue(store, key, value, now);
+  putStoredValue(store, key, value, now, catalog?.byteLength);
   if (catalog) putCatalogRecord(store, catalog, now);
   await done;
   const stored = await readRecord(db, key);
@@ -3028,7 +3030,13 @@ export async function getLocalSaveStorageEstimate(): Promise<LocalSaveStorageEst
 }
 
 export async function hasLocalSaveCapacity(key: string, nextValue: string): Promise<{ ok: boolean; requiredBytes: number; availableBytes: number | null }> {
-  const requiredBytes = Math.max(0, byteLength(nextValue) - (storageEntryCache.get(key)?.bytes ?? 0));
+  return hasLocalSaveCapacityForBytes(key, byteLength(nextValue));
+}
+
+/** Capacity estimate for callers already holding the exact UTF-8 byte length. */
+export async function hasLocalSaveCapacityForBytes(key: string, nextBytes: number): Promise<{ ok: boolean; requiredBytes: number; availableBytes: number | null }> {
+  if (!Number.isSafeInteger(nextBytes) || nextBytes < 0) throw new TypeError("Invalid measured save byte length");
+  const requiredBytes = Math.max(0, nextBytes - (storageEntryCache.get(key)?.bytes ?? 0));
   try {
     const estimate = await navigator.storage?.estimate?.();
     if (typeof estimate?.quota !== "number" || typeof estimate.usage !== "number") return { ok: true, requiredBytes, availableBytes: null };

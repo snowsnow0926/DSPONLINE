@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createInitialState, createSimulationLookupContext, prepareSimulationStep, runPlanetSimulationPhase } from "./engine";
+import { createInitialState, createSimulationLookupContext, isEntityInPowerCoverage, prepareSimulationStep, runPlanetSimulationPhase } from "./engine";
 
 function emptyMachinePlanet() {
   const state = createInitialState(12_345, false);
@@ -11,6 +11,33 @@ function emptyMachinePlanet() {
 }
 
 describe("planet simulation with no machines or construction centers", () => {
+  it("uses the complete power-source index for a disconnected grid", () => {
+    const { state, lookup } = emptyMachinePlanet();
+    const vein = state.entities.find((entity) => entity.id === "vein_iron")!;
+    expect(isEntityInPowerCoverage(state, vein)).toBe(false);
+    const scan = vi.spyOn(state.entities, "filter");
+    try {
+      expect(isEntityInPowerCoverage(state, vein, lookup)).toBe(false);
+      expect(scan).not.toHaveBeenCalled();
+    } finally {
+      scan.mockRestore();
+    }
+  });
+
+  it("keeps planet power metrics local when a complete entity index exists", () => {
+    const { state, lookup, prepared } = emptyMachinePlanet();
+    const beforeEntities = structuredClone(state.entities);
+    const scan = vi.spyOn(state.entities, Symbol.iterator);
+    try {
+      const result = runPlanetSimulationPhase(state, 1, "home", prepared.reception, prepared.beltStepReservation, lookup);
+      expect(result.planetMetrics).toMatchObject({ generationKw: 0, demandKw: 0, fuelReserveSeconds: 0, powerFactor: 1 });
+      expect(scan).not.toHaveBeenCalled();
+    } finally {
+      scan.mockRestore();
+    }
+    expect(state.entities).toEqual(beforeEntities);
+  });
+
   it("uses a known-empty machine index without rescanning every planet's entities", () => {
     const { state, lookup, prepared } = emptyMachinePlanet();
     expect(lookup.machineRuntimesByPlanet.has("home")).toBe(false);

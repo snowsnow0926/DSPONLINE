@@ -3960,7 +3960,10 @@ export function getEntityPowerGridId(entity: FactoryEntity): PowerGridId {
 }
 
 function gridPowerSources(state: GameState, planetId: PlanetId, gridId: PowerGridId, lookup?: SimulationLookupContext): FactoryEntity[] {
-  return lookup?.powerSourcesByPlanetGrid.get(`${planetId}|${gridId}`) ?? state.entities.filter((entity) => entity.planetId === planetId && getEntityPowerGridId(entity) === gridId &&
+  // The simulation index is complete: an absent key means this grid has no
+  // source, rather than requiring another scan of every planet's entities.
+  if (lookup) return lookup.powerSourcesByPlanetGrid.get(`${planetId}|${gridId}`) ?? [];
+  return state.entities.filter((entity) => entity.planetId === planetId && getEntityPowerGridId(entity) === gridId &&
     (entity.kind === "power" || (entity.buildingId === "ray_receiver" && entity.recipeId === "ray_power")));
 }
 
@@ -7094,7 +7097,7 @@ export function runPlanetSimulationPhase(
       storageDischargeKw: gridPlan.storageDischargeKw,
       storageChargeKw: gridPlan.storageChargeKw,
     });
-    const storage = gridStoredEnergy(state, planetId, gridId, lookup);
+    const storage = gridStoredEnergy(state, planetId, gridId, phaseLookup);
     state.powerGridMetrics[planetId][gridId] = {
       gridId,
       generationKw: round(gridPlan.generationKw, 2),
@@ -7111,7 +7114,7 @@ export function runPlanetSimulationPhase(
       storageChargeKw: round(gridPlan.storageChargeKw, 2),
       storedEnergyMj: round(storage.stored, 3),
       storageCapacityMj: round(storage.capacity, 3),
-      fuelReserveSeconds: fuelReserveSeconds(state, planetId, gridId, lookup),
+      fuelReserveSeconds: fuelReserveSeconds(state, planetId, gridId, phaseLookup),
       totalItemsPerMinute: 0,
       connectedEntities: gridPlan.connectedEntities,
       disconnectedEntities: gridPlan.disconnectedEntities,
@@ -7169,7 +7172,7 @@ export function runPlanetSimulationPhase(
     storageChargeKw: round(power.storageChargeKw, 2),
     storedEnergyMj: round(storage.stored, 3),
     storageCapacityMj: round(storage.capacity, 3),
-    fuelReserveSeconds: fuelReserveSeconds(state, planetId),
+    fuelReserveSeconds: fuelReserveSeconds(state, planetId, undefined, phaseLookup),
     totalItemsPerMinute: round((phaseLookup.entitiesByPlanet.get(planetId) ?? []).reduce((sum, entity) =>
       entity.planetId === planetId ? sum + entity.productionRate : sum, 0), 2),
   };

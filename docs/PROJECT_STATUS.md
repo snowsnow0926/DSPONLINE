@@ -1,6 +1,6 @@
 # DSP极简网络项目现状
 
-> **2026-09-09 当前 Rust 进展（未发布）**：量子物流开档复用已解析设备，终局档三对正常 Host 请求中位 **51.77→49.19 秒，少约 4.99%（2.58 秒）**；8 份完整导出相同、正常退出、原档未变，只计请求收益。新正常 release 核心 1,115/5 ignored、Host 256/1 ignored、严格检查通过，完整 Native 750/1 skip、游戏 3,176/39 skip（实际 Native 50/1 长测 skip）、类型及 Web 全门禁通过。前一 c3 冻结包在原 90 秒内仅观察到一个模拟 Worker、两次正常关闭，但入口仍失败，成功保存/两次重开未验收。c3 Windows 云端全量及 Linux 非浏览器通过；两项启动顺序和精确堆叠路由首轮通过，完整浏览器仍 23 unexpected/17 flaky。新 Rust 还需冻结实包和独立云端验证。见[本批证据](./reviews/rust-rp1-quantum-borrowed-admission-2026-09-09.md)、[c3 实包](./reviews/rust-rp1-c3c85cf1-package-2026-09-09.md)和[完整进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
+> **2026-09-09 当前 Windows Rust 进展（未发布）**：已提交的量子物流优化让终局固定 9 秒 Native 请求中位少约 4.99%（2.58 秒），8 份导出一致。实际 863 冻结包 v13 仍超原 90 秒，只有一个模拟 Worker、两次正常关闭；8 秒诊断的持久读取失败与 13 秒采样另外记录。新 JS 证明缓冲候选让独立校验中位少约 9.34%（0.512 秒），8 次摘要一致，定向 68/1 长测 skip、完整游戏 3,178/39 skip（实际 Native 50/1 skip）、类型/Web 全门禁通过，待新冻结包。两种比例不能相加。863 Linux 非浏览器通过，浏览器 29 unexpected/16 flaky，Windows 最后游戏检查运行中。完整 Goal active，实时资格仍关闭。见[当前证明优化](./reviews/rust-rp1-js-proof-buffer-2026-09-09.md)、[863 实包与诊断](./reviews/rust-rp1-863cf76e-package-2026-09-09.md)和[完整进度](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 
 > **2026-09-09 完整 Windows Rust Goal 已启用（未发布）**：范围包括离线收口、实时单所有者、完整玩法/兼容/性能及可交付候选。TEST_ONLY 证据检查器和 ASAR 测试写入完成修复已验证，工具/后台/打包专项 104 通过 / 1 条件跳过 / 0 失败。Rust 建造的三个已拥有映射直接移动，完整正常 release 核心 1,113/5 ignored/0 fail，fmt 与严格 Clippy 通过。实时资格仍未开放，新增性能和实包资格待验；见[最新报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-09.md)。
 

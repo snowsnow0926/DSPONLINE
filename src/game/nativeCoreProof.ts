@@ -119,17 +119,26 @@ class ProofWriter {
   private readonly hash = new IncrementalSha256();
   private readonly numericBytes = new Uint8Array(8);
   private readonly numericView = new DataView(this.numericBytes.buffer);
+  private readonly buffer = new Uint8Array(64 * 1024);
+  private bufferedBytes = 0;
   private pendingText = "";
 
   text(value: string): void {
     if (this.pendingText.length + value.length > 64 * 1024) this.flushText();
-    if (value.length > 64 * 1024) this.hash.update(encoder.encode(value));
+    if (value.length > 64 * 1024) this.appendText(value);
     else this.pendingText += value;
   }
 
   bytes(value: Uint8Array): void {
     this.flushText();
-    this.hash.update(value);
+    let offset = 0;
+    while (offset < value.byteLength) {
+      if (this.bufferedBytes === this.buffer.byteLength) this.flushBytes();
+      const copied = Math.min(value.byteLength - offset, this.buffer.byteLength - this.bufferedBytes);
+      this.buffer.set(value.subarray(offset, offset + copied), this.bufferedBytes);
+      this.bufferedBytes += copied;
+      offset += copied;
+    }
   }
 
   uint64LittleEndian(value: number): void {
@@ -142,19 +151,38 @@ class ProofWriter {
   float64LittleEndian(value: unknown): void {
     const numeric = typeof value === "number" && Number.isFinite(value) ? value : 0;
     this.numericView.setFloat64(0, numeric, true);
-    // update() consumes these bytes synchronously before this writer reuses them.
+    // bytes() copies the number before this writer reuses its scratch space.
     this.bytes(this.numericBytes);
   }
 
   finish(): string {
     this.flushText();
+    this.flushBytes();
     return this.hash.digestHex();
   }
 
   private flushText(): void {
     if (!this.pendingText) return;
-    this.hash.update(encoder.encode(this.pendingText));
+    this.appendText(this.pendingText);
     this.pendingText = "";
+  }
+
+  private appendText(value: string): void {
+    let offset = 0;
+    while (offset < value.length) {
+      const { read, written } = encoder.encodeInto(value.slice(offset), this.buffer.subarray(this.bufferedBytes));
+      offset += read;
+      this.bufferedBytes += written;
+      // encodeInto never splits a UTF-8 sequence. Zero progress means the
+      // remaining buffer cannot hold the next complete code point.
+      if (written === 0 || this.bufferedBytes === this.buffer.byteLength) this.flushBytes();
+    }
+  }
+
+  private flushBytes(): void {
+    if (this.bufferedBytes === 0) return;
+    this.hash.update(this.buffer.subarray(0, this.bufferedBytes));
+    this.bufferedBytes = 0;
   }
 }
 

@@ -75,6 +75,34 @@ describe("native core JavaScript checkpoint proofs", () => {
     expect(state).toEqual(before);
   });
 
+  it("matches independent UTF-8 hashing when long strings cross buffered proof boundaries", () => {
+    for (const length of [65_530, 65_535, 65_536, 65_537, 131_071]) {
+      const value = { a: "x".repeat(length) + "中🙂\ud800", b: [0, -0, 1e-7, "尾部🙂"], z: "界".repeat(30_000) };
+      expect(canonicalNativeCoreSha256(value)).toBe(canonicalReference(value));
+    }
+  });
+
+  it("preserves interleaved UTF-8 and little-endian bytes across full buffers", () => {
+    for (const length of [65_531, 65_533, 65_536, 131_071]) {
+      const id = "x".repeat(length) + "中🙂\ud800";
+      const state = {
+        version: 47, mode: "normal", activePlanetId: "home", elapsedSeconds: 0, paused: false,
+        entities: [{ id, inputs: {}, outputs: {}, progress: 0.25, utilization: -0, productionRate: NaN }], belts: [],
+      } as unknown as GameState;
+      const revision = Buffer.alloc(8);
+      revision.writeBigUInt64LE(7n);
+      const numbers = Buffer.alloc(24);
+      numbers.writeDoubleLE(0.25, 0);
+      numbers.writeDoubleLE(-0, 8);
+      numbers.writeDoubleLE(0, 16);
+      const expected = createHash("sha256").update("dsp-native-domain-v1\0").update(revision)
+        .update('47\0"normal"\0"home"\0' + "0\0false\0").update(id).update("\0|").update(numbers).digest("hex");
+      expect(nativeCoreDomainSha256(state, 7)).toBe(expected);
+      expect(Number.isNaN(state.entities[0].productionRate)).toBe(true);
+      expect(Object.is(state.entities[0].utilization, -0)).toBe(true);
+    }
+  });
+
   it("matches an explicit binary domain vector across revision and float boundaries", () => {
     const state = {
       version: 47, mode: "normal", activePlanetId: "星球🙂", elapsedSeconds: 123.25, paused: false,

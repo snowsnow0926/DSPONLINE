@@ -12,16 +12,63 @@ pub fn canonical_sha256(value: &Value) -> String {
 }
 
 pub fn update_canonical(hasher: &mut Sha256, value: &Value) {
-    visit_canonical(value, &mut |bytes| hasher.update(bytes));
+    let mut buffered = CanonicalBuffer::new(|bytes: &[u8]| hasher.update(bytes));
+    visit_canonical(value, &mut |bytes| buffered.write(bytes));
+    buffered.finish();
 }
 
 /// Feed the same canonical bytes to independent digest streams without
 /// sorting keys, formatting numbers or escaping strings a second time.
 pub(crate) fn update_canonical_pair(first: &mut Sha256, second: &mut Sha256, value: &Value) {
-    visit_canonical(value, &mut |bytes| {
+    let mut buffered = CanonicalBuffer::new(|bytes: &[u8]| {
         first.update(bytes);
         second.update(bytes);
     });
+    visit_canonical(value, &mut |bytes| buffered.write(bytes));
+    buffered.finish();
+}
+
+// Canonical JSON contains many single-byte punctuation fragments. Batch those
+// fragments before entering SHA-256 while retaining the exact byte order. The
+// scratch space is fixed per top-level visit, not per recursive JSON value or
+// factory record retained in memory; large string fragments pass through.
+struct CanonicalBuffer<F> {
+    emit: F,
+    bytes: [u8; 1024],
+    len: usize,
+}
+
+impl<F: FnMut(&[u8])> CanonicalBuffer<F> {
+    fn new(emit: F) -> Self {
+        Self {
+            emit,
+            bytes: [0; 1024],
+            len: 0,
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.len > 0 {
+            (self.emit)(&self.bytes[..self.len]);
+            self.len = 0;
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        if bytes.len() > self.bytes.len() - self.len {
+            self.flush();
+        }
+        if bytes.len() >= self.bytes.len() {
+            (self.emit)(bytes);
+        } else {
+            self.bytes[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+            self.len += bytes.len();
+        }
+    }
+
+    fn finish(mut self) {
+        self.flush();
+    }
 }
 
 fn visit_canonical(value: &Value, emit: &mut impl FnMut(&[u8])) {
@@ -62,7 +109,9 @@ fn visit_canonical(value: &Value, emit: &mut impl FnMut(&[u8])) {
 }
 
 pub fn update_canonical_object(hasher: &mut Sha256, object: &Map<String, Value>) {
-    visit_canonical_object(object, &mut |bytes| hasher.update(bytes));
+    let mut buffered = CanonicalBuffer::new(|bytes: &[u8]| hasher.update(bytes));
+    visit_canonical_object(object, &mut |bytes| buffered.write(bytes));
+    buffered.finish();
 }
 
 fn visit_canonical_object(object: &Map<String, Value>, emit: &mut impl FnMut(&[u8])) {
@@ -128,6 +177,92 @@ mod tests {
             canonical_sha256(&value),
             hex::encode(Sha256::digest(expected))
         );
+    }
+
+    #[test]
+    fn bounded_streams_preserve_large_unicode_records_and_surrounding_hash_bytes() {
+        for length in [0, 1, 63, 64, 511, 512, 1023, 1024, 1025, 2048, 65_537] {
+            let text = "中🙂a".repeat(length);
+            let value = json!({
+                "z": {"nested": [true, false, null, -0.0, 1e-7, 1e21]},
+                "a": [text, "\"\\\n\t\u{0000}"],
+            });
+            // This byte oracle does not use the visitor or serde_json's output
+            // formatting; in particular it keeps JS number spellings explicit.
+            let expected = format!(
+                "{{\"a\":[\"{text}\",\"\\\"\\\\\\n\\t\\u0000\"],\"z\":{{\"nested\":[true,false,null,0,1e-7,1e+21]}}}}"
+            );
+            let mut full = Sha256::new();
+            let mut component = Sha256::new();
+            full.update(b"prefix[");
+            component.update(b"other[");
+            update_canonical_pair(&mut full, &mut component, &value);
+            full.update(b"]suffix");
+            component.update(b"]end");
+            assert_eq!(
+                full.finalize(),
+                Sha256::digest(format!("prefix[{expected}]suffix"))
+            );
+            assert_eq!(
+                component.finalize(),
+                Sha256::digest(format!("other[{expected}]end"))
+            );
+            assert_eq!(
+                canonical_sha256(&value),
+                hex::encode(Sha256::digest(&expected))
+            );
+            let mut object = Sha256::new();
+            update_canonical_object(&mut object, value.as_object().unwrap());
+            assert_eq!(object.finalize(), Sha256::digest(&expected));
+        }
+    }
+
+    #[test]
+    #[ignore = "opt-in canonical byte-stream microbenchmark; not gameplay performance qualification"]
+    fn benchmark_bounded_canonical_stream_against_unbuffered_visitor() {
+        let value = json!({
+            "id": "public-canonical-fixture",
+            "kind": "storage",
+            "inventory": {"iron": 123456, "copper": 789, "silicon": 12},
+            "rows": (0..12).map(|i| json!({
+                "progress": 0.9297819999999999,
+                "index": i,
+                "position": {"x": i * 100, "y": i * 20},
+                "name": "中文🙂\"\\\n",
+            })).collect::<Vec<_>>(),
+        });
+        let run = |buffered: bool| {
+            let started = std::time::Instant::now();
+            let mut result = None;
+            for _ in 0..10_000 {
+                let mut first = Sha256::new();
+                let mut second = Sha256::new();
+                first.update(b"first:");
+                second.update(b"second:");
+                if buffered {
+                    update_canonical_pair(&mut first, &mut second, std::hint::black_box(&value));
+                } else {
+                    visit_canonical(std::hint::black_box(&value), &mut |bytes| {
+                        first.update(bytes);
+                        second.update(bytes);
+                    });
+                }
+                result = Some(std::hint::black_box((first.finalize(), second.finalize())));
+            }
+            (started.elapsed().as_secs_f64() * 1000.0, result.unwrap())
+        };
+        let (_, expected) = run(false);
+        assert_eq!(run(true).1, expected);
+        for (sequence, buffered) in [false, true, true, false, false, true]
+            .into_iter()
+            .enumerate()
+        {
+            let (milliseconds, digest) = run(buffered);
+            assert_eq!(digest, expected);
+            eprintln!(
+                "canonical-buffer-sample sequence={sequence} buffered={buffered} milliseconds={milliseconds:.3}"
+            );
+        }
     }
 
     #[test]

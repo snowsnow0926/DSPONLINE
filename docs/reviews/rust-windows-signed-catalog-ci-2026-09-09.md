@@ -1,6 +1,6 @@
 # Windows catalog 真实签名测试流程
 
-2026-09-09，Role: develop，基于 `7541ace2`。本批为[Host 验签初版](./rust-windows-catalog-verifier-2026-09-09.md)补充可执行的签名正例与拒绝用例。**云端实际签名结果取得前，不宣称成功路径已验证；本批不开放实时资格。**
+2026-09-09，Role: develop，基于 `7541ace2`。本批为[Host 验签初版](./rust-windows-catalog-verifier-2026-09-09.md)补充可执行的签名正例与拒绝用例。**355d4d5e 的云端实际签名、篡改和移除后拒绝已通过；本批不开放实时资格。**
 
 ## 执行内容
 
@@ -25,6 +25,12 @@ CDF 使用 version 2、SHA256 和 HASH 成员标记，签名使用固定 SDK Sig
 `windows-catalog-ci-preflight-v2.json`：最终 PowerShell 脚本解析及五类拒绝调用检查 2/2，零跳过失败；仅轻量元数据预检使用 3/2 GiB 守护，正常退出 0，2.878 秒，最低空闲 7,463,224 KiB。最终工作流结构单独记录为 `windows-catalog-workflow-shape-v3.json`：先编译 Host 测试程序再创建证书、提前上传专项证据、两个助手文件变更触发 PR 检查；除新增专项、证据上传和触发路径外，所有既有工作流门禁保持不变。新用例不修改模拟、存档或普通 Host 的验证实现，没有把前批完整 Rust/Native 结果计作本轮重跑。
 
 ## 仍待证明
+
+### 355d4d5e 云端签名专项通过
+
+Windows run `34368661022` 的早期专项制品 `10111487479` 已取得，源码为 PR merge `4980065a5d5ea017d76fb5286a80640dd5b97548`，ZIP SHA-256 `d59315df7eb82b1333f190168775287b9b22905d5edb8d49c10b6434a6363b8f` 与 GitHub 元数据相符。`result.json` 为 PASS/TEST_ONLY/authorityEligible=false；两份生成/签名、信任前拒绝、机器测试根安装、实际签名成员/发布者/轮换/篡改与锁释放、移除信任后拒绝全部退出 0，均无超时。三个 exact Rust 调用各实际执行 1 项、0 失败、0 ignored；测试 Root/My 证书、私钥和临时目录清理全部 true。
+
+这证明现有 Host 模块的真实 Windows 签名路径，不等于新 main 助手已在云端验签，也不等于完整 Windows 工作流或发布门禁通过。后者按后续独立结果更新，不能由早期制品推断。
 
 ### 首次云端结果与测试机信任库修复
 

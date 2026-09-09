@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **Windows main 验签助手初版（2026-09-09，未发布）**：独立只读 Rust 助手与 main 调用模块已实现；Rust 3/3、Node 10/10（含实际进程 2 项）、严格检查和构建通过。云端夹具拒绝预检 3/3。本机没有安装证书或启动游戏，355d 的 Host 真实签名/篡改/信任移除已通过；main 新增助手的签名集成、实际冻结包、资格正文/生产者/撤销及实时接管仍待完成。见[本批范围](./reviews/rust-windows-main-catalog-helper-2026-09-09.md)。
+
 > **Windows catalog 签名专用流程（2026-09-09）**：新增两个默认 ignored 的 Windows 测试入口，云端在合成签名材料准备完成后逐项 exact 执行；不把默认忽略计作通过。最终本机 release 专项 7 pass/2 专用场景 ignored、fmt/严格 Clippy、脚本语法/拒绝 2/2 和最终工作流结构检查通过；真实云端正例仍待执行终态。见[测试流程](./reviews/rust-windows-signed-catalog-ci-2026-09-09.md)。
 
 > **Windows catalog 验证器初版（2026-09-09）**：专项 7/7，包含实际 Windows 拒绝伪造 catalog、锁与边界检查、载体/祖先目录联接拒绝；完整正常 release 核心 1,115/5 ignored、Host 263/1 ignored、Native Node 750/1 skip 均零失败，fmt/严格 Clippy/正常构建通过。最终独立 Electron 通信夹具增量 7/7，30 MiB 双向传输、显示/焦点均 0、静音/隔离通过。无可信签名正例或运行授权证据。ae1 云端 Windows 成功、完整浏览器 460/33 skip/5 fail/1 flaky；本批新源码云端待验。见[本批记录](./reviews/rust-windows-catalog-verifier-2026-09-09.md)。

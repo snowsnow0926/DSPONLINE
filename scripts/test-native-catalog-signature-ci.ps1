@@ -73,6 +73,14 @@ function Invoke-SignedCatalogRustCase([string]$Name, [string]$Test) {
     return Invoke-CatalogTestProcess $Name (Get-Command cargo.exe -ErrorAction Stop).Source $taskArgs $taskRepo
 }
 
+function Invoke-CatalogMainCase([string]$Phase, [int]$ExpectedChecks) {
+    $taskText = Invoke-CatalogTestProcess ('main-helper-' + $Phase) (Get-Command node.exe -ErrorAction Stop).Source @('scripts/test-native-catalog-helper-ci.mjs', $Phase) $taskRepo
+    $taskReceipt = $taskText.Trim() | ConvertFrom-Json
+    if ($taskReceipt.kind -ne 'DSP_CATALOG_MAIN_HELPER_TEST_ONLY' -or $taskReceipt.phase -ne $Phase -or $taskReceipt.status -ne 'PASS' -or $taskReceipt.checks -ne $ExpectedChecks -or $taskReceipt.authorityEligible -ne $false -or $taskReceipt.executableSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Missing actual main helper fixture receipt.' }
+    if ($taskReport.Contains('mainHelperSha256') -and $taskReport.mainHelperSha256 -ne $taskReceipt.executableSha256) { throw 'Main helper changed during certificate lifecycle.' }
+    $taskReport.mainHelperSha256 = $taskReceipt.executableSha256
+}
+
 try {
     $taskCertificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject ('CN=DSP-Catalog-TEST-ONLY-' + [Guid]::NewGuid().ToString('N')) -CertStoreLocation 'Cert:\CurrentUser\My' -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -KeyExportPolicy NonExportable -Provider 'Microsoft Software Key Storage Provider' -NotBefore (Get-Date).AddMinutes(-5) -NotAfter (Get-Date).AddDays(1)
     $taskThumbprint = $taskCertificate.Thumbprint
@@ -99,6 +107,7 @@ try {
     $env:DSP_CATALOG_TEST_ROOT = $taskFixture
     $env:DSP_CATALOG_TEST_PUBLISHER_SHA256 = $taskPin
     Invoke-SignedCatalogRustCase 'rust-before-trust' 'signed_fixture_without_root_trust_is_rejected' | Out-Null
+    Invoke-CatalogMainCase 'before-trust' 2
     # CurrentUser/Root may display an interactive protected-root confirmation.
     # Use only this disposable, already-admin runner's machine root store.
     # Never alter its policies, request elevation, or use this setup locally.
@@ -109,8 +118,10 @@ try {
     if (-not (Test-Path -Path $taskOwnedRootPath)) { throw 'Owned machine test root was not installed.' }
     $taskAccepted = Invoke-SignedCatalogRustCase 'rust-signed-member' 'signed_fixture_member_publisher_and_tamper_validation'
     if ($taskAccepted -notmatch 'DSP_CATALOG_SIGNED_FIXTURE accepted=true') { throw 'Missing actual signed fixture receipt.' }
+    Invoke-CatalogMainCase 'trusted' 8
     Remove-Item -Path $taskOwnedRootPath -Confirm:$false
     Invoke-SignedCatalogRustCase 'rust-after-trust-removal' 'signed_fixture_without_root_trust_is_rejected' | Out-Null
+    Invoke-CatalogMainCase 'after-trust-removal' 2
     $taskReport.status = 'PASS'
 } catch {
     $taskFailure = $_

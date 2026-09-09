@@ -40,3 +40,15 @@ test('catalog certificate setup rejects local, self-hosted and unowned execution
     assert.match(result.stderr + result.stdout, /CATALOG_TEST_CI_ONLY/);
   }
 });
+
+test('main helper signed fixture refuses local execution before fixture reads or writes', () => {
+  const env = { ...process.env, GITHUB_ACTIONS: 'false' };
+  delete env.RUNNER_TEMP;
+  for (const phase of ['before-trust', 'trusted', 'after-trust-removal']) {
+    const result = spawnSync(process.execPath, ['scripts/test-native-catalog-helper-ci.mjs', phase], {
+      windowsHide: true, encoding: 'utf8', timeout: 10_000, env,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /CATALOG_HELPER_TEST_CI_ONLY/);
+  }
+});

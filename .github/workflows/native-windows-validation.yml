@@ -18,6 +18,7 @@ on:
       - "desktop/**"
       - "scripts/test-native-catalog-signature-ci.ps1"
       - "scripts/native-catalog-signature-ci.test.mjs"
+      - "scripts/test-native-catalog-helper-ci.mjs"
       - ".github/workflows/native-windows-validation.yml"
 
 permissions:
@@ -90,6 +91,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --release --manifest-path native/Cargo.toml --locked -p dsp-native-host --lib --no-run 2>&1 | Tee-Object artifacts/native-windows-validation/catalog-test-build.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --manifest-path native/Cargo.toml --locked -p dsp-native-host --bin dsp-catalog-verifier 2>&1 | Tee-Object artifacts/native-windows-validation/catalog-helper-build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./scripts/test-native-catalog-signature-ci.ps1
       - name: Preserve early TEST_ONLY catalog authentication evidence
         if: always()
@@ -99,6 +102,7 @@ jobs:
           path: |
             artifacts/native-windows-validation/catalog-authentication/
             artifacts/native-windows-validation/catalog-test-build.log
+            artifacts/native-windows-validation/catalog-helper-build.log
             artifacts/native-windows-validation/source-sha.txt
           if-no-files-found: error
           retention-days: 14

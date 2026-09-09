@@ -1,6 +1,6 @@
 # Windows Rust 资格载体与双端验证实施方案
 
-2026-09-09，Role: develop。**Host 独立 catalog 成员验证器已有初版代码及定向负例证据；真实签名正例、main 验证器、生产者认证、正式资格签发和实时授权尚未完成。** 见[实现与验证范围](../reviews/rust-windows-catalog-verifier-2026-09-09.md)。不改变普通 Host 的 `authority_eligible=false`，不将 TEST_ONLY 结果升级为玩家资格。对应 [ADR-009](../architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)及[完整目标](./windows-full-development.md)。
+2026-09-09，Role: develop。**Host catalog 成员验证已通过真实 Windows 签名、篡改及信任移除测试；main 独立只读助手已有初版及实际拒绝证据，成功签名集成、生产者认证、正式资格签发和实时授权仍待完成。** 见[实现与验证范围](../reviews/rust-windows-catalog-verifier-2026-09-09.md)。不改变普通 Host 的 `authority_eligible=false`，不将 TEST_ONLY 结果升级为玩家资格。对应 [ADR-009](../architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)及[完整目标](./windows-full-development.md)。
 
 ## 载体与冻结顺序
 
@@ -17,7 +17,7 @@
 | Electron main | 固定、随程序交付的 Windows 平台验证助手；由 main 以结构化参数、隐藏进程调用，禁止 renderer 选择程序、脚本、资格路径或发布者 | main 自己确定安装资源与预期候选；助手经 Windows API 验证后返回小型结果，main 再校验正文、时效、范围及会话条件 |
 | Rust Host | 已有内部 Windows API catalog 成员验证模块，尚未接入 RPC/运行资格 | 独立打开固定资格文件并验证；实际 Host/规则/内容身份校验仍需接入，不接受 main/renderer 的 `eligible=true` 替代验证 |
 
-main 助手先采用系统 PowerShell 加固定 C# P/Invoke 的实现路线，避免把生产验证依赖于玩家安装 Windows SDK/SignTool。助手是受信任安装程序的一部分，不能从用户目录或远程下载脚本执行，不能接受任意代码；真实打包、启动时间、企业禁用 PowerShell 的行为仍需验证。平台能力不可用时拒绝新 Rust 接管，保留完整进度恢复；不能动态改用未经验证的 JS 信任判断。此路线尚未实现或纳入制品。
+main 助手初版现采用独立 Rust 程序，替代此前拟定的 PowerShell/C# 路线，复用已实现的文件保护与 Windows API 代码，减少重复 FFI 及玩家运行时脚本依赖。它在自己的进程重新打开文件并验签，不读取模拟 Host 的认证回执；这是独立调用，不是不同语言实现的冗余。助手必须属于受信任安装程序，main 固定路径和独立程序摘要，不能由 renderer 选取执行程序。当前调用模块/实际拒绝路径已验证，实际冻结包交付和签名成功路径仍待验，见[main 助手实现](../reviews/rust-windows-main-catalog-helper-2026-09-09.md)。平台能力不可用时拒绝新 Rust 接管，保留完整进度恢复。
 
 两端共享公开 schema 和测试向量，但独立调用 Windows 的信任验证，不把 Host 的回执当作 main 的签名证据。发布者预期值来自经过审查的程序发布策略，不能来自待验证的 JSON、环境变量、renderer 或玩家存档。签名者必须是获准的代码签名发布者；时间戳签名者不能被当作程序发布者。发布者固定、证书轮换及实际生产签名凭据仍需完成，不预填一个合成的获准发布者。
 
@@ -41,11 +41,11 @@ main 助手先采用系统 PowerShell 加固定 C# P/Invoke 的实现路线，�
 
 ## 按顺序实施与证明
 
-已新增[真实签名测试流程](../reviews/rust-windows-signed-catalog-ci-2026-09-09.md)：只在临时云端 Windows 机上生成测试证书，验证信任前拒绝、签名成员/发布者/篡改、移除信任后拒绝和清理。本机仅编译及执行拒绝预检；云端实际终态未取得前，成功路径仍属待验。
+已新增[真实签名测试流程](../reviews/rust-windows-signed-catalog-ci-2026-09-09.md)：只在临时云端 Windows 机上生成测试证书，验证信任前拒绝、签名成员/发布者/篡改、移除信任后拒绝和清理。本机仅编译及执行拒绝预检；355d4d5e 的 Host 实际签名专项已通过；main 新增助手的签名成功路径仍待后续云端验证。
 
 1. 实现并交叉验证两个平台验证器：无签名、签名错误、成员不在 catalog、成员被改、发布者错误、重解析点/替换、文件超限、资源释放、无 UI、离线撤销失败；真实签名正例须使用明确的测试证书材料，与生产发布者分离。
 2. 完成实际生产者认证、发布者轮换、时效/撤销防回退和验证专用资格签发；建立独立的候选输入，禁止从报告倒填预期身份。
 3. 以可信验证资格在同一冻结程序中实际执行 Rust 接管、命令、暂停、保存、退出、重开和故障恢复；公开合成输入与实际 Native 结果、完整 JS 对照分开记录。
 4. 按完整目标覆盖普通/竞速、内容、长离线、性能/内存、多线程、长测、Windows 安装升级回退，形成正式资格与发布候选。阶段 1 的验证器测试不替代阶段 3/4。
 
-当前没有调用签名服务、修改系统证书存储、读取私钥或更改生产资源。研究与本方案仅用于推进上述实现，不能解除现有准入门槛。
+开发者本机没有安装测试证书或读取私钥；一次性云端机只使用本次创建的测试证书，并验证清理。没有调用生产签名服务或更改生产资源，上述实现不能解除现有准入门槛。

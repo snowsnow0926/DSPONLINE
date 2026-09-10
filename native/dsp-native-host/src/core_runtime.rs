@@ -4902,6 +4902,7 @@ impl CoreRegistry {
         expected_byte_length: u64,
         request: CorePrepareOfflineSourceExportRequest,
     ) -> anyhow::Result<CorePrepareOfflineSettlementExportResult> {
+        let mut profile = dsp_native_core::OpenPhaseProfile::new("offline-source");
         let valid_sha = |value: &str| {
             value.len() == 64
                 && value
@@ -4925,6 +4926,7 @@ impl CoreRegistry {
             bail!("native offline runtime source intent is invalid");
         }
         let parsed = parse_v47_envelope(reader, expected_byte_length)?;
+        profile.mark("parse-envelope");
         let proof = parsed.proof();
         if proof.source_byte_length != request.source_byte_length
             || proof.source_sha256 != request.source_sha256
@@ -4936,9 +4938,11 @@ impl CoreRegistry {
             bail!("native offline runtime source envelope binding changed");
         }
         let catalog = RuntimeCatalog::from_value(request.catalog, &request.registry_fingerprint)?;
+        profile.mark("catalog");
         let (source_state, _) =
             parsed.into_core_state(0, &request.registry_fingerprint, catalog)?;
         let source_summary = source_state.summary()?;
+        profile.mark("state-and-proof");
         if source_summary.canonical_sha256 != request.expected_canonical_sha256
             || source_summary.domain_sha256 != request.expected_domain_sha256
             || source_summary.paused
@@ -4965,6 +4969,7 @@ impl CoreRegistry {
         observed_now_ms: u64,
         export_id: String,
     ) -> anyhow::Result<CorePrepareOfflineSettlementExportResult> {
+        let mut profile = dsp_native_core::OpenPhaseProfile::new("offline-candidate");
         if observed_now_ms < source_saved_at_ms {
             bail!("native offline candidate clock regressed");
         }
@@ -5011,6 +5016,7 @@ impl CoreRegistry {
             });
         }
         let mut candidate = source_state.into_owned();
+        profile.mark("prepare-candidate");
         let advance = dsp_native_core::advance_offline_candidate(
             &mut candidate,
             &CoreAdvanceRequest {
@@ -5021,6 +5027,7 @@ impl CoreRegistry {
                 include_diagnostics: true,
             },
         )?;
+        profile.mark("advance");
         let complete_time_ledger = if settled_seconds <= 30 {
             advance.exact_scope == "pure-idle-bounded-exact"
                 && advance.exact_calibration_seconds == Some(settled_seconds as f64)
@@ -5062,6 +5069,7 @@ impl CoreRegistry {
             });
         }
         let candidate_summary = candidate.summary()?;
+        profile.mark("candidate-proof");
         if advance.previous_revision != source_summary.revision
             || candidate_summary.revision != advance.revision
             || candidate_summary.revision <= source_summary.revision
@@ -5070,9 +5078,11 @@ impl CoreRegistry {
             bail!("native offline candidate revision or catalog identity is invalid");
         }
         let preflight = candidate.write_v47_envelope(settled_at_ms, std::io::sink())?;
+        profile.mark("export-preflight");
         let exported = store.publish_export(&export_id, preflight.byte_length, |writer| {
             candidate.write_v47_envelope(settled_at_ms, writer)
         })?;
+        profile.mark("export-publish");
         if exported.revision != preflight.revision
             || exported.saved_at_ms != preflight.saved_at_ms
             || exported.byte_length != preflight.byte_length

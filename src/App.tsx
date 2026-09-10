@@ -23018,7 +23018,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               setSelectedRegionId(null);
               setSelectionMode(!coarsePointer);
               if (nextMobileShell) setMobileCanvasMode("layout");
-              setNotice(`已选中生产区域与 ${ids.length} 个节点；拖动任一选中节点可一起移动`);
+              setNotice(isEnglish ? `Selected region and ${ids.length} nodes` : `已选中区域与 ${ids.length} 个节点`);
             }}
             onChange={(changes) => {
               if (nativePlayerAuthorityOwnsRuntime) {

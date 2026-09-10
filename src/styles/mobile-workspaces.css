@@ -488,3 +488,8 @@ html:not([data-native-ui-scale])[data-ui-font-scale="200"] .game-shell[data-mobi
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-recipe,
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-statistics { scrollbar-gutter: stable; }
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-build-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.game-shell[data-mobile-shell="true"] .sidebar-edge-toggle {
+  /* The next mobile shell opens panels from its own navigation. Legacy side
+     handles otherwise float over the production-region editor in landscape. */
+  display: none !important;
+}

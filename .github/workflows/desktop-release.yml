@@ -44,7 +44,7 @@ jobs:
           $relative = node desktop/select-desktop-release-output.cjs
           if ($LASTEXITCODE -ne 0) { throw "Expected exactly one complete desktop release output" }
           "DSP_DESKTOP_RELEASE_OUTPUT=$relative" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: dsp-idle-${{ env.DSP_RELEASE_CHANNEL }}
           if-no-files-found: error

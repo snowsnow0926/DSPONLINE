@@ -4,7 +4,7 @@
 
 ## 独立输入
 
-main 的 `collectPackagedWindowsValidationCandidate()` 不接收参数，从自身 ASAR 的程序身份提供者、内置目录和固定矩阵取得事实。Host 的 `collect_installed_windows_validation_candidate()` 同样不接收路径/预期身份，从 OS 可执行路径、编译内置目录和矩阵独立取得事实。不会从 renderer、存档、资格正文或报告反填候选。
+main 的 `collectPackagedWindowsValidationCandidate()` 不接收参数，从自身模块所在 ASAR 推导资源位置，再由同包程序身份提供者独立检查；同时取得内置目录和固定矩阵。外层只读启动器的资源目录不作候选安装位置。Host 的 `collect_installed_windows_validation_candidate()` 同样不接收路径/预期身份，从 OS 可执行路径、编译内置目录和矩阵独立取得事实。不会从 renderer、存档、资格正文或报告反填候选。
 
 输出保持原十二字段顺序：version、sourceSha、buildId、editionId、channel、platform、arch、hostSha256、asarSha256、catalogSha256、rulesSha256、matrixSha256。前九字段沿用[程序身份合同](./windows-installed-program-identity.md)，内置目录沿用[独立目录](../reviews/rust-windows-builtin-catalog-2026-09-10.md)。
 

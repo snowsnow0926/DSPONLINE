@@ -18,7 +18,11 @@ Role: develop。完整 Windows Rust Goal 的实时接管前置增量。沿用 El
 
 验证前后 12 项源码/生成文件摘要一致。正常 release Host SHA-256 `adb20ed537e55eedd7756166e205db3c8c319a9cd49bb23acbc9ab1410ce8cf8`，助手 `873953fd1bb39a870b8b6f81fdc07d0cf9e732b40a0bb175bf0aefc015917db7`。守护正常 exit 0、无停止原因，401.93 秒，最低可用内存 7,981,652 KiB；6 GiB 启动/2 GiB 停止、BelowNormal 串行。完整核心/游戏/浏览器矩阵未在本批重跑，未改变对应规则或门槛，不将上一批结果作为当前重测。
 
-代码提交后再从干净源码构建冻结包，验证实际 ASAR/main、Host 和父进程的十二字段一致性。新构建驱动保存每条命令的 stdout/stderr、结果与摘要，避免上一批只保留命令回执的日志缺口。
+初版源码 `7cb5dc923fbea5608776b8f4f6247edeb80e9fc4` 已构建冻结，114 项打包前检查通过，构建守护正常退出，121.66 秒；每条命令的 stdout/stderr、结果与摘要已保存，避免上一批只保留命令回执的日志缺口。
+
+但初版 `package-validation-candidate-smoke-v1` **FAILED**：完整候选提供者误用外层 Electron 启动器的 `process.resourcesPath`，从冻结 ASAR 加载时触发 `installed-program-rejected`。这是身份探针的实际失败，不标作通过；子进程正常 exit 1、无强制清理、profile 已清理，守护无停止原因，2.42 秒。7cb 冻结包及失败日志保留。
+
+修复将安装位置从候选模块自身所在 ASAR 推导，再交给同包程序提供者做原有独立路径/文件检查；不接收外部路径、不覆盖进程资源属性、不放宽验签或资格。新增异目录启动器单测；最终 `validation-candidate-validate-v2` **PASS**：161 项相关检查、完整 Native **931 passed/1 skip/0 failed**（82.54 秒）、前端目录/摘要 **7/7**、类型、格式和目录漂移通过。12 项源码摘要前后一致。Rust 源码及 Host/助手实际二进制与 v1 完全相同，因此 Rust 全套及 Clippy 使用同批 v1 的对应证据，没有声称重新执行。守护正常 exit 0、无停止原因，131.68 秒、最低可用内存 8,384,360 KiB。修复后另建新包验证，不改写 7cb 包。
 
 ## 后续
 

@@ -37,6 +37,29 @@ test("workspace caller cannot forge an installed candidate by supplying argument
 });
 
 const moduleCode = fs.readFileSync(path.join(__dirname, "native-validation-candidate.cjs"), "utf8");
+test("candidate provider anchors to its own ASAR instead of the outer launcher's resources", async () => {
+  const root = "C:\\Frozen\\resources";
+  const program = { ...require("../native/fixtures/installed-program-v1.json").program,
+    hostSha256: "a".repeat(64), asarSha256: "b".repeat(64) };
+  const calls = [];
+  const bytes = Buffer.from(JSON.stringify(matrix, null, 2) + "\n");
+  const module = { exports: {} };
+  vm.runInNewContext(moduleCode, { module, __dirname: root + "\\app.asar\\desktop", Buffer, TextDecoder,
+    process: { resourcesPath: "C:\\UnrelatedLauncher\\resources" },
+    require: name => name === "node:path" ? path.win32
+      : name === "node:fs" ? { lstatSync: file => {
+        assert.equal(file, root + "\\app.asar\\desktop\\native-validation-matrix-v1.json");
+        return { isFile: () => true, isSymbolicLink: () => false, size: bytes.length };
+      }, readFileSync: () => bytes }
+      : name === "./native-installed-program.cjs" ? { collectPackagedWindowsProgramIdentity: async options => {
+        calls.push(options.resourcesPath); return program;
+      } } : require(name) });
+  const candidate = await module.exports.collectPackagedWindowsValidationCandidate();
+  assert.deepEqual(calls, [root]);
+  assert.equal(Object.keys(candidate).length, 12); assert.ok(Object.isFrozen(candidate));
+  assert.equal(candidate.sourceSha, program.sourceSha);
+  assert.equal(candidate.rulesSha256, deriveValidationRulesSha256(program, candidate.catalogSha256));
+});
 function parseFixture(bytes) {
   const module = { exports: {} };
   const fakeFs = { lstatSync: () => ({ isFile: () => true, isSymbolicLink: () => false, size: bytes.length }),

@@ -53,7 +53,11 @@ async function collectPackagedWindowsValidationCandidate() {
   // independently verifies that it is executing within its own ASAR.
   const content = collectBuiltinCatalogIdentity();
   const matrix = collectValidationMatrixIdentity();
-  const program = await collectPackagedWindowsProgramIdentity();
+  // Anchor to this module's own ASAR, including when the verified readonly
+  // package probe loads it through an external Electron launcher. The sibling
+  // program provider still independently checks its own ASAR location.
+  const resourcesPath = path.dirname(path.resolve(__dirname, ".."));
+  const program = await collectPackagedWindowsProgramIdentity({ resourcesPath });
   return Object.freeze({ ...program, catalogSha256: content.catalogSha256,
     rulesSha256: deriveValidationRulesSha256(program, content.catalogSha256), matrixSha256: matrix.matrixSha256 });
 }

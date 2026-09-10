@@ -24,6 +24,21 @@ Role: develop。完整 Windows Rust Goal 的实时接管前置增量。沿用 El
 
 修复将安装位置从候选模块自身所在 ASAR 推导，再交给同包程序提供者做原有独立路径/文件检查；不接收外部路径、不覆盖进程资源属性、不放宽验签或资格。新增异目录启动器单测；最终 `validation-candidate-validate-v2` **PASS**：161 项相关检查、完整 Native **931 passed/1 skip/0 failed**（82.54 秒）、前端目录/摘要 **7/7**、类型、格式和目录漂移通过。12 项源码摘要前后一致。Rust 源码及 Host/助手实际二进制与 v1 完全相同，因此 Rust 全套及 Clippy 使用同批 v1 的对应证据，没有声称重新执行。守护正常 exit 0、无停止原因，131.68 秒、最低可用内存 8,384,360 KiB。修复后另建新包验证，不改写 7cb 包。
 
-## 后续
+## 最终冻结应用验证
+
+最终运行源码 **0d7e1e01aba0aea29694fbc663e38c70c866b1a2**；从干净源码构建 **1.2.7+0d7e1e01aba0**，performance development / beta / win32 x64，EXE **NotSigned**，未公开发布。`package-0d7e1e01-receipt.json` 为 BUILD_AND_FREEZE_PASS，76 项制品/79 文件一致；9 个构建步骤全部通过并保留 stdout/stderr、结果、耗时和摘要，打包前实际进程/身份检查 **115/115**。Host 与助手字节和上述 v1/v2 相同。构建守护正常 exit 0、122.10 秒，最低可用内存 8,116,184 KiB；原 7cb 冻结文件逐个核对未变。
+
+`package-validation-candidate-smoke-v2.json` 为 **PASS**。实际 Electron 加载冻结 ASAR 的 main 模块；main、独立 Host 和父进程十二字段逐项相同。两端返回 authorityEligible/releaseAllowed=false；实际助手仍拒绝缺失 carrier。记录 **0 BrowserWindow、0 show、0 focus、0 系统弹窗**，正常 exit 0、无强制清理，profile 已清理，冻结文件前后不变。守护 2.49 秒，最低可用内存 8,535,352 KiB，仍按 6/2 GiB 门槛、BelowNormal 运行。
+
+| 身份字段 | 最终值 |
+| --- | --- |
+| ASAR SHA-256 | `801b4a20b1fa4f237f859bc113c548c85dddbe095f80a433bff699d1461d21e1` |
+| 内置目录 canonical SHA-256 | `3cc51a3f95dba83113d57a40e1ad367a4c695d71e72958af451342e3c0e038a8` |
+| 规则实现 SHA-256 | `b6cb8ab897fae4f80fd4ed1099082f57616f8a5e9b36e7daf1d7da9da080dfa4` |
+| 基础矩阵 canonical SHA-256 | `66cc2a9445a3a30809826589b5d5b9c0ca89aac0f273f28f0fd7a64bd117c96f` |
+
+这是实际包内身份提供者的验证，不是玩家实时运算接管、完整玩法回归、生产资格签发或新增性能收益。第一次失败没有放宽原门槛；源码修复、重新完整 Native 回归及另建新包的过程均保留。
+
+## 剩余工作
 
 独立候选字段齐全之后，仍需补 profile/夹具绑定、可信时间与撤销防回退、生产者认证、完整验收矩阵、验证会话准入和实际单所有者交接。旧终局长离线、浏览器失败、性能/内存、30 分钟/24 小时长测及安装升级回退仍按[完整目标](../rust/windows-full-development.md)推进，不削减完成条件。

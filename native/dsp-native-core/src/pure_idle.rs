@@ -1238,6 +1238,48 @@ fn capture_renewable_power_proof_snapshot(
 }
 
 fn capture_research_proof_snapshot(state: &CoreState) -> anyhow::Result<ResearchProofSnapshot> {
+    let started =
+        crate::profile_evidence::profile_environment_enabled().then(std::time::Instant::now);
+    let result =
+        capture_research_proof_snapshot_for_entities(state, research_proof_entity_indices(state));
+    if let Some(started) = started {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpure-idle-research-snapshot\t{:.3}",
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
+    }
+    result
+}
+
+fn research_proof_entity_indices(state: &CoreState) -> impl Iterator<Item = usize> + '_ {
+    let entity_count = state.entity_index.len();
+    let research_symbol = state.symbols.lookup("matrix_research");
+    let directory = &state.factory_topology.research_entity_indices;
+    // These compact recipe columns are installed with the raw records. Check
+    // the complete directory, including order and membership, without parsing
+    // every unrelated entity again. A stale directory keeps the old scan.
+    let directory_matches = state.entities.recipes.len() == entity_count
+        && directory.iter().copied().eq(state
+            .entities
+            .recipes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, symbol)| (Some(*symbol) == research_symbol).then_some(index)));
+    let selected = if directory_matches {
+        directory.as_slice()
+    } else {
+        &[]
+    };
+    selected
+        .iter()
+        .copied()
+        .chain(0..if directory_matches { 0 } else { entity_count })
+}
+
+fn capture_research_proof_snapshot_for_entities(
+    state: &CoreState,
+    entity_indices: impl Iterator<Item = usize>,
+) -> anyhow::Result<ResearchProofSnapshot> {
     let base = state.base_value();
     let research = base
         .get("research")
@@ -1304,7 +1346,7 @@ fn capture_research_proof_snapshot(state: &CoreState) -> anyhow::Result<Research
     }
 
     let mut labs = Vec::new();
-    for entity_index in 0..state.entity_index.len() {
+    for entity_index in entity_indices {
         let entity = state.parse_entity(entity_index)?;
         if entity.get("recipeId").and_then(Value::as_str) != Some("matrix_research")
             || number_at(Some(&entity), &["machineCount"]) <= EPSILON
@@ -8881,6 +8923,14 @@ fn offline_boundary_exact_budget(seconds: f64, entity_count: usize, belt_count: 
             <= OFFLINE_BOUNDARY_EXACT_MAX_WORK
 }
 
+/// Admission cost only, never a production or full-state certificate. Keep the
+/// existing flow probe's memory/record budget even for an exact boundary tail.
+pub(crate) fn fits_long_offline_candidate_budget(state: &CoreState, seconds: u64) -> bool {
+    seconds > 30
+        && seconds <= OFFLINE_BOUNDARY_EXACT_MAX_SECONDS as u64
+        && offline_flow::check_memory_and_work(state).is_ok()
+}
+
 /// New wire-distinct macro mode. It retains the deterministic 3x10-second
 /// calibration boundary and settles only independently certified domains:
 /// source/closed-recipe ordinary flow and its research/Dyson sinks, bounded
@@ -8904,6 +8954,64 @@ pub(crate) fn advance_offline_macro_v1(
     request: &CoreAdvanceRequest,
 ) -> anyhow::Result<CoreAdvanceResult> {
     advance_bounded_with_runtime(state, request, true, deterministic_runtime())
+}
+
+pub(crate) const OFFLINE_TRANSIENT_EXACT_ALGORITHM_VERSION: &str =
+    "native-offline-transient-exact-v1";
+
+/// Recover a short transient rejected by the unchanged macro proof using the
+/// actual Exact engine, never an unproved extrapolation. This candidate-only
+/// entry is deliberately absent from the durable operation / WAL dispatcher.
+pub(crate) fn advance_offline_candidate(
+    state: &mut CoreState,
+    request: &CoreAdvanceRequest,
+) -> anyhow::Result<CoreAdvanceResult> {
+    if request.advance_mode != CoreAdvanceMode::OfflineMacroV1 {
+        bail!("native offline candidate requires the offline mode");
+    }
+    let macro_result = advance_offline_macro_v1(state, request)?;
+    let seconds = request.simulation_seconds;
+    // At most twice the existing 30-second calibration, under the same
+    // 2,000-record and memory admission. Longer transients need a separately
+    // qualified budget; failed proof text is never used as authorization.
+    if macro_result.supported
+        || !(31.0..=60.0).contains(&seconds)
+        || seconds.fract() != 0.0
+        || request.wall_seconds != seconds
+        || !fits_long_offline_candidate_budget(state, seconds as u64)
+        || admission_reason(state, request).is_some()
+        || budget_attestation_reason(state, request).is_some()
+    {
+        return Ok(macro_result);
+    }
+    let before = match capture_settlement_snapshot(state) {
+        Ok(before) => before,
+        Err(_) => return Ok(macro_result),
+    };
+    let mut candidate = state.clone();
+    let mut exact = candidate.advance_exact(&exact_request(state.revision, seconds, seconds))?;
+    if !exact.supported || !exact.changed {
+        return Ok(macro_result);
+    }
+    let mut candidate = match prove_internal_exact_settlement_candidate_with_runtime(
+        &before,
+        candidate,
+        deterministic_runtime(),
+    ) {
+        Ok(candidate) => candidate,
+        Err(_) => return Ok(macro_result),
+    };
+    candidate.clear_pure_idle_private_session();
+    exact.exact_scope = "offline-transient-exact";
+    exact.algorithm_version = Some(OFFLINE_TRANSIENT_EXACT_ALGORITHM_VERSION);
+    exact.exact_calibration_seconds = Some(seconds);
+    exact.approximated_seconds = Some(0.0);
+    exact.summary = request
+        .include_diagnostics
+        .then(|| candidate.summary())
+        .transpose()?;
+    *state = candidate;
+    Ok(exact)
 }
 
 fn advance_bounded_with_runtime(
@@ -9178,6 +9286,7 @@ fn advance_bounded_with_runtime(
 
     let tail_seconds = budget.frozen_tail_seconds;
     let mut boundary_exact_seconds = 0.0;
+    let mut offline_state_proven = false;
     let mut tail_reason = None;
     if tail_seconds > EPSILON {
         let current_elapsed = candidate
@@ -9613,6 +9722,9 @@ fn advance_bounded_with_runtime(
                     format!("offline-history-apply-rejected: {reason}"),
                 );
             }
+            // Both private receipts bind the physical prefix and the entire
+            // tail. A material-only or frozen tail must never receive this tag.
+            offline_state_proven = true;
         }
         if let Some(progress) = offline_export_progress {
             match crate::simulation::advance_offline_no_export_progress(
@@ -9718,6 +9830,8 @@ fn advance_bounded_with_runtime(
         supported: true,
         exact_scope: if boundary_exact_seconds > EPSILON {
             "offline-boundary-exact"
+        } else if offline_state_proven {
+            "offline-state-proven"
         } else if tail_seconds > EPSILON && offline_macro {
             "offline-macro-v1"
         } else if tail_seconds > EPSILON && macro_v10 {
@@ -11129,6 +11243,107 @@ mod tests {
     }
 
     #[test]
+    fn offline_candidate_exact_transient_preserves_legacy_macro_and_matches_full_exact() {
+        let mut initial = with_quantum_upload_station(
+            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+            "iron_ingot",
+            "smelter",
+        );
+        let revision = initial.revision;
+        assert!(
+            initial
+                .advance_exact(&exact_request(revision, 30.0, 30.0))
+                .unwrap()
+                .supported
+        );
+        initial.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"] =
+            json!("9950");
+        initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"] =
+            json!("10000");
+        let source_hash = initial.summary().unwrap().canonical_sha256;
+        let mut transient_count = 0;
+        for seconds in [31.0, 32.0, 35.0, 59.0, 60.0] {
+            let revision = initial.revision;
+            let request = offline_macro_request(revision, seconds);
+            let mut legacy = initial.clone();
+            let legacy_result = advance_offline_macro_v1(&mut legacy, &request).unwrap();
+            let mut actual = initial.clone();
+            let result = advance_offline_candidate(&mut actual, &request).unwrap();
+            assert!(result.supported, "{seconds}: {:?}", result.reason);
+            if !legacy_result.supported {
+                transient_count += 1;
+                assert_eq!(legacy.summary().unwrap().canonical_sha256, source_hash);
+                assert_eq!(result.exact_scope, "offline-transient-exact");
+                assert_eq!(
+                    result.algorithm_version,
+                    Some(OFFLINE_TRANSIENT_EXACT_ALGORITHM_VERSION)
+                );
+                assert_eq!(result.exact_calibration_seconds, Some(seconds));
+                assert_eq!(result.approximated_seconds, Some(0.0));
+            } else {
+                assert_eq!(result.exact_scope, legacy_result.exact_scope);
+                assert_eq!(
+                    result.algorithm_version,
+                    Some(OFFLINE_MACRO_V1_ALGORITHM_VERSION)
+                );
+            }
+            let mut oracle = initial.clone();
+            assert!(
+                oracle
+                    .advance_exact(&exact_request(revision, seconds, seconds))
+                    .unwrap()
+                    .supported
+            );
+            assert_eq!(
+                actual.summary().unwrap().canonical_sha256,
+                oracle.summary().unwrap().canonical_sha256
+            );
+        }
+        assert!(
+            transient_count > 0,
+            "fixture must exercise a real rejected legacy macro"
+        );
+        assert_eq!(initial.summary().unwrap().canonical_sha256, source_hash);
+    }
+
+    #[test]
+    fn offline_candidate_exact_transient_preserves_admission_and_atomic_rejection() {
+        let initial = as_offline_fixture(productive_closed_recipe_macro_fixture(1.0));
+        for gate in [
+            "paused",
+            "time-warp",
+            "pending",
+            "wall",
+            "wrong-mode",
+            "revision",
+        ] {
+            let mut candidate = initial.clone();
+            let mut request = offline_macro_request(candidate.revision, 31.0);
+            match gate {
+                "paused" => candidate.base_value_mut()["paused"] = json!(true),
+                "time-warp" => candidate.base_value_mut()["timeWarp"]["enabled"] = json!(true),
+                "pending" => {
+                    candidate.base_value_mut()["timeWarp"]["pendingSimulationSeconds"] = json!(1)
+                }
+                "wall" => request.wall_seconds = 1.0,
+                "wrong-mode" => request.advance_mode = CoreAdvanceMode::Exact,
+                "revision" => request.base_revision += 1,
+                _ => unreachable!(),
+            }
+            let before = candidate.summary().unwrap();
+            let result = advance_offline_candidate(&mut candidate, &request);
+            if matches!(gate, "wrong-mode" | "revision") {
+                assert!(result.is_err(), "{gate}");
+            } else {
+                assert!(!result.unwrap().supported, "{gate}");
+            }
+            let after = candidate.summary().unwrap();
+            assert_eq!(after.canonical_sha256, before.canonical_sha256, "{gate}");
+            assert_eq!(after.revision, before.revision, "{gate}");
+        }
+    }
+
+    #[test]
     fn offline_macro_quantum_upload_preserves_capacity_and_finite_reserve_horizons() {
         for bounded_inventory in [true, false] {
             let mut initial = with_quantum_upload_station(
@@ -11347,7 +11562,7 @@ mod tests {
         let result =
             advance_macro_v10(&mut macro_state, &offline_macro_request(revision, 600.0)).unwrap();
         assert!(result.supported, "{:?}", result.reason);
-        assert_eq!(result.exact_scope, "offline-macro-v1");
+        assert_eq!(result.exact_scope, "offline-state-proven");
         assert_eq!(result.exact_calibration_seconds, Some(30.0));
         assert_eq!(result.approximated_seconds, Some(570.0));
         let mut exact = initial;
@@ -12148,6 +12363,124 @@ mod tests {
                 }),
             ],
         )
+    }
+
+    fn research_snapshot_index_fixture(mode: ResearchFixtureMode) -> CoreState {
+        let mut public = productive_research_macro_fixture(16.0, mode)
+            .materialize()
+            .unwrap();
+        let public = public.as_object_mut().unwrap();
+        let Some(Value::Array(mut entities)) = public.remove("entities") else {
+            panic!("entities")
+        };
+        let Some(Value::Array(belts)) = public.remove("belts") else {
+            panic!("belts")
+        };
+        let lab = entities
+            .iter()
+            .find(|entity| entity["id"] == "research-lab")
+            .unwrap()
+            .clone();
+        let mut inactive = lab.clone();
+        inactive["id"] = json!("inactive-lab");
+        inactive["machineCount"] = json!(0);
+        entities.insert(0, inactive);
+        let mut later = lab;
+        later["id"] = json!("later-lab");
+        entities.push(later);
+        fixture_state_from_parts_with_belts(Value::Object(public.clone()), entities, belts)
+    }
+
+    #[test]
+    fn research_snapshot_index_preserves_all_lab_fields_order_and_checkpoint_reload() {
+        for mode in [
+            ResearchFixtureMode::Finite,
+            ResearchFixtureMode::MultiInput,
+            ResearchFixtureMode::Infinite,
+        ] {
+            let state = research_snapshot_index_fixture(mode);
+            let expected =
+                capture_research_proof_snapshot_for_entities(&state, 0..state.entity_index.len())
+                    .unwrap();
+            assert_eq!(
+                expected
+                    .labs
+                    .iter()
+                    .map(|lab| lab.entity_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["research-lab", "later-lab"]
+            );
+            assert_eq!(research_proof_entity_indices(&state).count(), 3);
+            assert!(state.entity_index.len() > 3);
+            assert_eq!(capture_research_proof_snapshot(&state).unwrap(), expected);
+            let reloaded = checkpoint_reload_fixture(&state);
+            assert_eq!(
+                capture_research_proof_snapshot(&reloaded).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn research_snapshot_index_falls_back_for_missing_duplicate_reordered_and_unknown_rows() {
+        let source = research_snapshot_index_fixture(ResearchFixtureMode::Finite);
+        let expected =
+            capture_research_proof_snapshot_for_entities(&source, 0..source.entity_index.len())
+                .unwrap();
+        let rows = &source.factory_topology.research_entity_indices;
+        for broken in [
+            vec![],
+            vec![rows[0], rows[0], rows[1]],
+            vec![rows[2], rows[1], rows[0]],
+            vec![source.entity_index.len()],
+            vec![1],
+        ] {
+            let mut state = source.clone();
+            Arc::make_mut(&mut state.factory_topology).research_entity_indices = broken;
+            assert_eq!(
+                research_proof_entity_indices(&state).collect::<Vec<_>>(),
+                (0..state.entity_index.len()).collect::<Vec<_>>()
+            );
+            assert_eq!(capture_research_proof_snapshot(&state).unwrap(), expected);
+        }
+        let mut shortened = source.clone();
+        shortened.entities.recipes.pop();
+        assert_eq!(
+            research_proof_entity_indices(&shortened).count(),
+            source.entity_index.len()
+        );
+        assert_eq!(
+            capture_research_proof_snapshot(&shortened).unwrap(),
+            expected
+        );
+        assert_eq!(capture_research_proof_snapshot(&source).unwrap(), expected);
+    }
+
+    #[test]
+    fn research_snapshot_index_keeps_selected_lab_validation_and_empty_factory_behavior() {
+        let mut state = research_snapshot_index_fixture(ResearchFixtureMode::Finite);
+        let lab_index = state.entity_index.get("research-lab").copied().unwrap();
+        let mut lab = state.parse_entity(lab_index).unwrap();
+        lab.as_object_mut().unwrap().remove("inputs");
+        state.replace_entity_raw(lab_index, serde_json::to_string(&lab).unwrap().into());
+        let expected =
+            capture_research_proof_snapshot_for_entities(&state, 0..state.entity_index.len())
+                .unwrap_err();
+        assert_eq!(
+            capture_research_proof_snapshot(&state)
+                .unwrap_err()
+                .to_string(),
+            expected.to_string()
+        );
+        assert!(expected.to_string().contains("inputs"));
+
+        let no_labs = productive_powered_fixture(16.0, "infinite");
+        assert_eq!(research_proof_entity_indices(&no_labs).count(), 0);
+        let expected =
+            capture_research_proof_snapshot_for_entities(&no_labs, 0..no_labs.entity_index.len())
+                .unwrap();
+        assert!(expected.labs.is_empty());
+        assert_eq!(capture_research_proof_snapshot(&no_labs).unwrap(), expected);
     }
 
     fn productive_closed_recipe_dag_macro_fixture(multiplier: f64) -> CoreState {
@@ -14229,7 +14562,7 @@ mod tests {
                 advance_offline_macro_v1(&mut long, &offline_macro_request(revision, 600.0))
                     .unwrap();
             assert!(result.supported, "reason={:?}", result.reason);
-            assert_eq!(result.exact_scope, "offline-macro-v1");
+            assert_eq!(result.exact_scope, "offline-state-proven");
             assert_eq!(result.exact_calibration_seconds, Some(30.0));
             assert_eq!(result.approximated_seconds, Some(570.0));
             assert!(
@@ -19348,7 +19681,7 @@ mod tests {
             let prepared = prepare_construction_tail_certificate_with_runtime(
                 &state,
                 &snapshots,
-                &DeterministicRuntime::for_test(worker_count),
+                &DeterministicRuntime::for_test_with_indexed_worker_participation(worker_count),
             );
             assert!(
                 prepared.result.is_ok(),
@@ -19370,7 +19703,7 @@ mod tests {
         let ordinary_snapshots =
             exact_three_window_probe_isolating_construction(&state, &request).unwrap();
         let construction_snapshots = exact_three_window_probe(&state, &request).unwrap();
-        let runtime = DeterministicRuntime::for_test(8);
+        let runtime = DeterministicRuntime::for_test_with_indexed_worker_participation(8);
 
         let ordinary =
             prepare_ordinary_flow_certificate_with_runtime(&state, &ordinary_snapshots, &runtime);

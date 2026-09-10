@@ -52,6 +52,8 @@ mod orbital_station;
 mod ordinary_production;
 pub mod production_history;
 mod profile_evidence;
+#[doc(hidden)]
+pub use profile_evidence::OpenPhaseProfile;
 mod pure_idle;
 mod quantum_logistics;
 mod recipe_command;
@@ -77,6 +79,25 @@ pub use belts::BeltSchedulerDiagnostics;
 /// A mode name alone cannot make a changed long-tail algorithm replay-safe.
 pub fn offline_macro_algorithm_version() -> &'static str {
     pure_idle::OFFLINE_MACRO_V1_ALGORITHM_VERSION
+}
+
+/// Cheap cost preflight for disposable long-offline candidates. Passing this
+/// budget never establishes complete settlement or player authority.
+pub fn fits_long_offline_candidate_budget(state: &CoreState, seconds: u64) -> bool {
+    pure_idle::fits_long_offline_candidate_budget(state, seconds)
+}
+
+/// Disposable startup candidate only. Durable offline operations must keep
+/// using `CoreState::advance` and their persisted macro algorithm identity.
+pub fn advance_offline_candidate(
+    state: &mut CoreState,
+    request: &CoreAdvanceRequest,
+) -> anyhow::Result<CoreAdvanceResult> {
+    pure_idle::advance_offline_candidate(state, request)
+}
+
+pub fn offline_transient_exact_algorithm_version() -> &'static str {
+    pure_idle::OFFLINE_TRANSIENT_EXACT_ALGORITHM_VERSION
 }
 
 pub use catalog::{

@@ -70,4 +70,22 @@ describe("canvas line batch prototype", () => {
     }]]));
     expect([...batch.positions]).toEqual([215, 37, 402, 119]);
   });
+
+  it.each([
+    { missing: "source", measured: { sourceX: undefined, sourceY: undefined, targetX: 402, targetY: 119 }, expected: [210, 70, 402, 119] },
+    { missing: "target", measured: { sourceX: 215, sourceY: 37, targetX: undefined, targetY: undefined }, expected: [215, 37, 400, 90] },
+  ])("preserves the measured port when the $missing handle is not mounted", ({ measured, expected }) => {
+    const state = createInitialState();
+    const [source, target] = state.entities;
+    const belt = {
+      id: "canvas-partially-mounted-belt", planetId: state.activePlanetId,
+      source: source.id, target: target.id, itemId: source.resourceId ?? "iron_ore",
+      tier: 1 as const, lanes: 1, priority: 1 as const,
+    };
+    const batch = buildCanvasLineBatchFromGeometry([belt], state.activePlanetId, [
+      { id: source.id, x: 10, y: 20, width: 200, height: 100 },
+      { id: target.id, x: 400, y: 40, width: 200, height: 100 },
+    ], new Map(), new Set(), new Map([[belt.id, measured]]));
+    expect([...batch.positions]).toEqual(expected);
+  });
 });

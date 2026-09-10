@@ -12,7 +12,7 @@ const {
   verifyPackagedDesktopEditionIdentity,
 } = require("./performance-edition-identity.cjs");
 const { extractFile } = require("@electron/asar");
-const { expectedDesktopBuild, writeDesktopBuildEvidence } = require("./desktop-artifact-evidence.cjs");
+const { expectedDesktopBuild, writeDesktopBuildEvidence, catalogVerifierBuildMetadata, verifyPackagedCatalogVerifier } = require("./desktop-artifact-evidence.cjs");
 
 const repositoryRoot = path.resolve(__dirname, "..");
 const packageMetadata = require("../package.json");
@@ -121,8 +121,9 @@ function verifyPackagedOutput(outputDirectory) {
     unpackedDirectory,
     extractAsarFile: extractFile,
   });
-  if (buildMode !== "dist") return;
   const metadata = JSON.parse(extractFile(asarPath, "package.json").toString("utf8"));
+  verifyPackagedCatalogVerifier(outputDirectory, metadata);
+  if (buildMode !== "dist") return;
   if (metadata.cloudApiBaseUrl !== cloudApiBaseUrl || metadata.updateBaseUrl !== updateBaseUrl) {
     throw new Error("桌面安装包元数据中的云 API 或更新地址与发布配置不一致");
   }
@@ -152,10 +153,23 @@ function identityBuilderArgs(identity, targetOutputDirectory) {
 
 async function main() {
   if (!["pack", "dist", "release"].includes(mode)) throw new Error(`Unsupported desktop build mode: ${mode}`);
+  await (await import("../scripts/native-builtin-catalog.mjs")).verifyBuiltinCatalog();
+  await (await import("../scripts/native-validation-fixture.mjs")).verifyValidationFixture();
+  require("./native-validation-candidate.cjs").collectValidationMatrixIdentity();
   await (await import("../scripts/build-desktop-preload.mjs")).buildDesktopPreload();
+  // Freeze the helper identity before either builder attempt. It is embedded
+  // in app.asar, independently of the external qualification carrier.
+  const helperMetadata = catalogVerifierBuildMetadata(repositoryRoot);
+  const buildIdentity = expectedDesktopBuild(repositoryRoot, desktopIdentity, releaseChannel, { requireClean: mode === "release" });
+  const helperArguments = [
+    `--config.extraMetadata.nativeCatalogVerifierSha256=${helperMetadata.nativeCatalogVerifierSha256}`,
+    `--config.extraMetadata.nativeBuildSourceSha=${buildIdentity.sourceSha}`,
+    `--config.extraMetadata.nativeBuildId=${buildIdentity.buildId}`,
+  ];
   const builderArgs = [
     ...(mode === "pack" ? ["--dir"] : []),
     ...identityBuilderArgs(desktopIdentity, outputDirectory),
+    ...helperArguments,
     `--config.extraMetadata.releaseChannel=${releaseChannel}`,
     ...(updateBaseUrl ? [`--config.extraMetadata.updateBaseUrl=${updateBaseUrl}`] : []),
     ...(cloudApiBaseUrl ? [`--config.extraMetadata.cloudApiBaseUrl=${cloudApiBaseUrl}`] : []),
@@ -178,6 +192,7 @@ async function main() {
   const fallbackResult = await runBuilder([
     ...(mode === "pack" ? ["--dir"] : []),
     ...identityBuilderArgs(desktopIdentity, fallbackOutput),
+    ...helperArguments,
     `--config.extraMetadata.releaseChannel=${releaseChannel}`,
     ...(updateBaseUrl ? [`--config.extraMetadata.updateBaseUrl=${updateBaseUrl}`] : []),
     ...(cloudApiBaseUrl ? [`--config.extraMetadata.cloudApiBaseUrl=${cloudApiBaseUrl}`] : []),

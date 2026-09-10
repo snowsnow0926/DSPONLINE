@@ -2889,9 +2889,21 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
     let entities = (0..state.entity_index.len())
         .map(|index| state.parse_entity(index))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let indexes = entity_index(&entities);
+    admission_reason_with_entities(state, &entities)
+}
+
+/// Startup already owns the decoded entity graph. Borrow it for admission
+/// while preserving persisted row order and every route/owner check.
+pub(crate) fn admission_reason_with_entities(
+    state: &CoreState,
+    entities: &[Value],
+) -> anyhow::Result<Option<&'static str>> {
+    if entities.len() != state.entity_index.len() {
+        bail!("native interstellar admission entity topology changed");
+    }
+    let indexes = entity_index(entities);
     let base = state.base_value();
-    for station_index in station_indices(&entities) {
+    for station_index in station_indices(entities) {
         let station = entities[station_index].as_object().expect("station object");
         match string_at(station, "buildingId") {
             Some("planetary_logistics_station") => continue,
@@ -6163,6 +6175,69 @@ mod tests {
         assert_eq!(entities[0]["inputs"]["space_warper"], Value::from(0.0));
     }
 
+    #[test]
+    fn borrowed_admission_preserves_routes_rejections_and_source() {
+        for case in 0..7 {
+            let mut entities = dispatch_fixture_entities();
+            let route = json!({
+                "id": "route/Ω", "scope": "remote", "itemId": "iron_ore",
+                "peerId": entities[1]["id"], "vehicleStationId": entities[0]["id"],
+                "requiresWarp": true, "waypointStationIds": [], "warpersPerVessel": 1
+            });
+            entities[0]["stationRoutes"] = json!([route.clone(), route]);
+            entities[0]["stationRoutes"][1]["id"] = json!("route/second");
+            entities[0]["mod:unknown/Ω"] = json!({"text": "保留", "fraction": 0.125});
+            let expected = match case {
+                1 => {
+                    entities[0]["stationRoutes"][1]["vehicleStationId"] = json!("missing-owner");
+                    Some("interstellar-route-invalid")
+                }
+                2 => {
+                    entities[0]["stationRoutes"][1]["peerId"] = json!("missing-peer");
+                    Some("interstellar-route-invalid")
+                }
+                3 => {
+                    entities[0]["stationRoutes"][1]["waypointStationIds"] =
+                        json!(["missing-waypoint"]);
+                    Some("interstellar-route-invalid")
+                }
+                4 => {
+                    entities[0]["stationRoutes"][1]["requiresWarp"] = json!(false);
+                    Some("interstellar-route-invalid")
+                }
+                5 => {
+                    entities[0]["stationSlots"] = Value::Null;
+                    Some("interstellar-slots-invalid")
+                }
+                6 => {
+                    entities[0]["stationRoutes"][1] = json!({"scope": "local"});
+                    None
+                }
+                _ => None,
+            };
+            let state = dispatch_fixture_state(&entities);
+            let before = state.summary().unwrap();
+            let bytes = serde_json::to_vec(&entities).unwrap();
+            assert_eq!(
+                admission_reason(&state).unwrap(),
+                expected,
+                "raw case {case}"
+            );
+            assert_eq!(
+                admission_reason_with_entities(&state, &entities).unwrap(),
+                expected,
+                "borrowed case {case}"
+            );
+            assert!(admission_reason_with_entities(&state, &entities[..1]).is_err());
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), bytes);
+            assert_eq!(
+                state.summary().unwrap().canonical_sha256,
+                before.canonical_sha256
+            );
+            assert_eq!(state.revision, before.revision);
+        }
+    }
+
     fn dispatch_fixture_state(entities: &[Value]) -> CoreState {
         let entity_count = entities.len();
         let base = serde_json::to_vec(&dispatch_fixture_base()).unwrap();
@@ -9241,7 +9316,9 @@ mod tests {
         let activity = prepare_route_activity(&entities);
         let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
         let scan = update_congestion_with_runtime(
-            &DeterministicRuntime::for_test(worker_count),
+            // Require an actual second mapper to enter before the short
+            // fixture can finish on the first available Rayon worker.
+            &DeterministicRuntime::for_test_with_indexed_worker_participation(worker_count),
             &state,
             base,
             &mut entities,

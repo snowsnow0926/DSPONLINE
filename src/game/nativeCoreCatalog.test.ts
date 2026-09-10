@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
+import { getRecipesForBuilding } from "./content";
 
 describe("Windows native core catalog", () => {
-  it("freezes core recipes, buildings and belts in stable ID order", () => {
+  it("preserves the engine's default recipe order when technologies unlock more recipes", () => {
+    const catalog = createNativeCoreCatalog(createContentPackRuntimeSnapshot(createContentPackRegistry()));
+    for (const buildingId of ["arc_smelter", "assembling_machine_mk1", "matrix_lab", "chemical_plant", "oil_refinery"] as const) {
+      const recipes = getRecipesForBuilding(buildingId);
+      const native = catalog.recipes.filter(recipe => recipe.buildingId === buildingId);
+      expect(native.map(recipe => recipe.id), buildingId).toEqual(recipes.map(recipe => recipe.id));
+      for (const completed of [new Set<string>(), new Set(recipes.flatMap(recipe => recipe.requiredTechId ? [recipe.requiredTechId] : []))]) {
+        const unlocked = (recipe: { requiredTechId?: string }) => !recipe.requiredTechId || completed.has(recipe.requiredTechId);
+        expect(native.find(unlocked)?.id, buildingId).toBe(recipes.find(unlocked)?.id);
+      }
+    }
+  });
+
+  it("freezes core data with stable item IDs and engine recipe order", () => {
     const runtime = createContentPackRuntimeSnapshot(createContentPackRegistry());
     const catalog = createNativeCoreCatalog(runtime);
     expect(catalog.protocolVersion).toBe(1);

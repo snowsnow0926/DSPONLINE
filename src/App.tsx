@@ -682,6 +682,7 @@ import {
   type NativeProjectedEntityRecipeBinding,
 } from "./game/nativeProjectedEntityRecipeCommands";
 import { useNativeEntityRecipeCommandTransaction } from "./game/useNativeEntityRecipeCommandTransaction";
+import { createNativeProjectedLogisticsItemCommand } from "./game/nativeProjectedLogisticsItemCommands";
 import {
   createNativeProjectedEjectorOrbitCommand,
   createNativeProjectedTimeWarpRequestedMultiplierCommand,
@@ -2364,6 +2365,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [saveFailure, setSaveFailure] = useState<SaveGameResult | null>(null);
   const [runtimePersistenceProgress, setRuntimePersistenceProgress] = useState<RuntimePersistenceProgress | null>(null);
   const [primarySaveRejectedEditCount, setPrimarySaveRejectedEditCount] = useState(0);
+  const [primarySaveRejectedProgressId, setPrimarySaveRejectedProgressId] = useState<number | null>(null);
   const runtimePersistenceProgressIdRef = useRef(0);
   const authorityWorkspaceSyncIdRef = useRef(0);
   const [eventHistory, setEventHistory] = useState<Array<{ id: number; text: string }>>([]);
@@ -2709,9 +2711,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (!durablePrimarySaveInFlightRef.current && verifiedPrimarySaveInFlightDepthRef.current === 0) return false;
     const rejection = "本次操作未应用；保存完成后即可继续编辑";
     setPrimarySaveRejectedEditCount((count) => count + 1);
-    setRuntimePersistenceProgress((current) => current && !current.message.includes("本次操作未应用")
-      ? { ...current, message: `${current.message} ${rejection}` }
-      : current);
+    // Stage updates replace their status message. Keep rejected-edit feedback
+    // bound to this operation so it survives checkpoint/write/readback, while
+    // the next save cannot inherit a warning about an earlier rejected edit.
+    setPrimarySaveRejectedProgressId(runtimePersistenceProgressIdRef.current);
     setNotice(`正在创建权威主存档，${rejection}`);
     return true;
   }, []);
@@ -2741,12 +2744,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     typeof desktopBridge.getNativePlayerAuthorityState === "function" &&
     typeof desktopBridge.onNativePlayerAuthorityState === "function",
   );
+  const [nativeAuthorityStartupReconcilePending, setNativeAuthorityStartupReconcilePending] = useState(() =>
+    typeof desktopBridge?.onNativePlayerAuthorityHandoffRequest === "function");
+  const nativeAuthorityStartupReconcilePendingRef = useRef(nativeAuthorityStartupReconcilePending);
+  // An idle clock does not prove the browser's durable handoff journal is
+  // clear. Await main's startup challenge before constructing the JS Worker;
+  // otherwise reconciliation immediately discards its full-state transfer.
   // The main process may have recovered a Rust-owned lease before React ever
   // mounts. Fail closed until the first trusted broker pull says whether that
   // lease exists; otherwise the renderer could briefly start a second Worker
   // and enqueue an old JavaScript save during startup.
-  const nativePlayerAuthorityBootstrapPending = nativePlayerAuthorityClockSupported &&
-    nativePlayerAuthorityClockSnapshot.availability !== "ready";
+  const nativePlayerAuthorityBootstrapPending = nativeAuthorityStartupReconcilePending ||
+    nativePlayerAuthorityClockSupported && nativePlayerAuthorityClockSnapshot.availability !== "ready";
   useEffect(() => {
     const current = nativePlayerAuthorityClock.getSnapshot();
     if (current.currentFrame === null) {
@@ -2840,7 +2849,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       };
     }
     const clockSnapshot = nativePlayerAuthorityClock.getSnapshot();
-    if (nativePlayerAuthorityClockSupported && clockSnapshot.availability !== "ready") {
+    if (nativeAuthorityStartupReconcilePendingRef.current ||
+        nativePlayerAuthorityClockSupported && clockSnapshot.availability !== "ready") {
       return {
         protected: true,
         runtimeKind: "bootstrap-pending",
@@ -9204,6 +9214,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   useEffect(() => {
     if (!desktopBridge?.onNativePlayerAuthorityHandoffRequest) return;
+    const completeStartupReconciliation = () => {
+      nativeAuthorityStartupReconcilePendingRef.current = false;
+      setNativeAuthorityStartupReconcilePending(false);
+    };
     const sameIdentity = (
       request: DesktopNativePlayerAuthorityHandoffRequest,
       current: NonNullable<typeof nativeAuthorityHandoffRef.current>,
@@ -9335,7 +9349,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             inspection.storage === "indexeddb" &&
             !isLocalSaveNativeAuthorityLease(inspection.writerLease) &&
             (inspection.journalState === "missing" || journal?.phase === "handed-back");
-          if (noBrowserFence) resumeJavaScriptAfterPreTransferBlock();
+          if (noBrowserFence) {
+            completeStartupReconciliation();
+            resumeJavaScriptAfterPreTransferBlock();
+          }
           return {
             kind: "native-player-authority-startup-reconciled-v1",
             action: noBrowserFence ? "no-browser-fence" : "fail-closed",
@@ -9369,6 +9386,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             },
             decision,
           });
+          completeStartupReconciliation();
           resumeJavaScriptAfterPreTransferBlock();
           return {
             kind: "native-player-authority-startup-reconciled-v1",
@@ -9442,6 +9460,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         };
         nativeAuthorityPersistenceProtectedRef.current = true;
         simulationWorkerDisabledRef.current = true;
+        completeStartupReconciliation();
         setNativeAuthorityHandoffQuiescing(false);
         return {
           kind: "native-player-authority-startup-reconciled-v1",
@@ -17302,12 +17321,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     for (const belt of canvasTopology.belts) {
       const sourceHandle = getCanvasHandleEndpoint(lookup, belt.source, `out:${belt.itemId}`, "source");
       const targetHandle = getCanvasHandleEndpoint(lookup, belt.target, getFactoryBeltTargetHandleId(belt, canvasEntityBuildingById.get(belt.target)), "target");
-      if (!sourceHandle || !targetHandle) continue;
+      if (!sourceHandle && !targetHandle) continue;
       next.set(belt.id, {
-        sourceX: sourceHandle.x,
-        sourceY: sourceHandle.y,
-        targetX: targetHandle.x,
-        targetY: targetHandle.y,
+        sourceX: sourceHandle?.x,
+        sourceY: sourceHandle?.y,
+        targetX: targetHandle?.x,
+        targetY: targetHandle?.y,
       });
     }
     return next;
@@ -20565,6 +20584,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     commitNativeEntityRecipeCommand(binding, targetRecipeId);
   }, [commitNativeEntityRecipeCommand, nativeEntityRecipeProjectionBinding]);
+  const changeNativeLogisticsItem = useCallback((entityId: string, itemId: ItemId): void => {
+    const binding = nativeEntityRecipeProjectionBinding;
+    const route = nativeFactoryProjectionIdentityRef.current;
+    const source = nativePlayerAuthorityCommandBindingRef.current?.source;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current ||
+        !binding || binding.entity.id !== entityId || !route || !source ||
+        binding.sessionId !== route.sessionId || binding.runId !== route.runId ||
+        binding.revision !== route.revision || binding.activePlanetId !== route.planetId ||
+        source.sessionId !== binding.sessionId || source.runId !== binding.runId ||
+        source.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("建筑状态已变化，请重新选择物流物品");
+      return;
+    }
+    commitNativeProjectedCommand(binding.revision, revision => revision === binding.revision
+      ? createNativeProjectedLogisticsItemCommand(binding, itemId) : null,
+    () => setNotice("物流物品已更新，原缓存和传送带已返还"));
+  }, [commitNativeProjectedCommand, nativeEntityRecipeProjectionBinding]);
   const changeNativeBlackHolePaused = useCallback((
     entityId: string,
     paused: boolean,
@@ -23188,6 +23226,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onEnergyExchangerModeChange={changeNativeEnergyExchangerMode}
           onFuelItemChange={changeNativeFuelItem}
           onEntityRecipeChange={changeNativeEntityRecipe}
+          onLogisticsItemChange={changeNativeLogisticsItem}
           onBlackHolePausedChange={changeNativeBlackHolePaused}
           onGalacticExporterPausedChange={changeNativeGalacticExporterPaused}
           onMaterialDeliverySlotChange={changeNativeMaterialDeliverySlot}
@@ -24470,7 +24509,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         <header><Activity size={13} /><span>运行记录</span><button type="button" onClick={() => setEventHistory([])} title="清空运行记录" aria-label="清空运行记录"><X size={12} /></button></header>
         <div>{eventHistory.map((event) => <p key={event.id}>{event.text}</p>)}</div>
       </aside> : null}
-      {runtimePersistenceProgress ? <div className={`game-notice game-notice--${runtimePersistenceProgress.phase === "failed" ? "danger" : runtimePersistenceProgress.phase === "complete" ? "success" : "warning"} runtime-persistence-progress`} role="status" data-persistence-progress>{runtimePersistenceProgress.message}</div>
+      {runtimePersistenceProgress ? <div className={`game-notice game-notice--${runtimePersistenceProgress.phase === "failed" ? "danger" : runtimePersistenceProgress.phase === "complete" ? "success" : "warning"} runtime-persistence-progress`} role="status" data-persistence-progress>
+        {runtimePersistenceProgress.message}
+        {runtimePersistenceProgress.id === primarySaveRejectedProgressId
+          ? runtimePersistenceProgress.phase === "complete" ? " 本次操作未应用；现在可以重新操作" : " 本次操作未应用；保存完成后请重新操作"
+          : ""}
+      </div>
         : notice && (showRunLog || isPersistentNotice(notice)) ? <div className={`game-notice game-notice--${getNoticeTone(notice)}`} role="status" data-notice-tone={getNoticeTone(notice)}>{notice}</div> : null}
       {pureIdleActive ? <TimeWarpIdleOverlay
         game={game}

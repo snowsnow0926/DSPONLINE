@@ -1922,10 +1922,11 @@ test("construction cards craft in place and Ctrl-click chains building placement
   await expect(craftButton).toBeEnabled();
   await expect(craftButton).toHaveAttribute("data-craft-state", "direct");
   const consumedBurst = page.locator(".interaction-burst").filter({ hasText: "已消耗" });
-  await Promise.all([
-    consumedBurst.waitFor({ state: "visible" }),
-    craftButton.click(),
-  ]);
+  // Let the click's offline-report handler complete before starting another
+  // locator action. Concurrent handler-bearing waits can hold up the click
+  // that would produce this short-lived feedback in the first place.
+  await craftButton.click();
+  await expect(consumedBurst).toBeVisible();
   await expect(page.locator(".construction-item-shell").filter({ hasText: "火力发电厂" })).toContainText("×1");
   await craftButton.click();
   await expect(craftButton).toBeEnabled();

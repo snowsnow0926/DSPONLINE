@@ -194,6 +194,43 @@ describe("local save capacity safeguards", () => {
     expect(report.entries.filter((entry) => entry.category === "manual-snapshot" || entry.category === "protected")).toHaveLength(8);
   });
 
+  it("uses measured UTF-8 bytes for the same quota boundary without encoding the payload again", async () => {
+    let availableBytes = 0;
+    const estimate = vi.fn(async () => ({ usage: 1_000, quota: 1_000 + availableBytes }));
+    const store = await loadStore({ estimate });
+    const previous = envelope({ savedAt: 1, payloadBytes: 100 });
+    const next = envelope({ savedAt: 2, payloadBytes: 1_000 });
+    store.setLocalSaveValue(SAVE_KEY, previous);
+    const encoder = new TextEncoder();
+    const previousBytes = encoder.encode(previous).byteLength;
+    const nextBytes = encoder.encode(next).byteLength;
+    const requiredBytes = nextBytes - previousBytes;
+    const encode = vi.spyOn(TextEncoder.prototype, "encode");
+    for (const extra of [-1, 0]) {
+      availableBytes = requiredBytes + 256 * 1024 + extra;
+      encode.mockClear();
+      expect(await store.hasLocalSaveCapacityForBytes(SAVE_KEY, nextBytes)).toEqual({
+        ok: extra === 0, requiredBytes, availableBytes,
+      });
+      expect(encode).not.toHaveBeenCalled();
+      expect(await store.hasLocalSaveCapacity(SAVE_KEY, next)).toEqual({
+        ok: extra === 0, requiredBytes, availableBytes,
+      });
+    }
+    expect(await store.hasLocalSaveCapacityForBytes(SAVE_KEY, 0)).toMatchObject({ requiredBytes: 0 });
+    expect(store.getLocalSaveValue(SAVE_KEY)).toBe(previous);
+  });
+
+  it("rejects invalid measured lengths before querying quota", async () => {
+    const estimate = vi.fn(async () => ({ usage: 0, quota: 1_000_000 }));
+    const store = await loadStore({ estimate });
+    estimate.mockClear();
+    for (const bytes of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      await expect(store.hasLocalSaveCapacityForBytes(SAVE_KEY, bytes)).rejects.toThrow("Invalid measured save byte length");
+    }
+    expect(estimate).not.toHaveBeenCalled();
+  });
+
   it("deletes only explicitly selected managed recovery entries and blocks primary, slot, and automatic keys", async () => {
     const store = await loadStore();
     const primary = envelope({ savedAt: 1 });

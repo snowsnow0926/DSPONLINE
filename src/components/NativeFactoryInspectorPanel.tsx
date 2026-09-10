@@ -42,6 +42,7 @@ import type { NativeStationFleetKind } from "../game/nativeStationInventoryInten
 import type { NativeStationSlotMode, NativeStationSlotScope } from "../game/nativeStationSlotIntentCommands";
 import type { ItemId, LogisticsPriority, MaterialDeliverySlotMode, PowerPriority, RecipeId, StationMinimumLoad } from "../game/types";
 import { AccessibleDialog } from "./AccessibleDialog";
+import { getNativeProjectedLogisticsItemConfiguration } from "../game/nativeProjectedLogisticsItemCommands";
 import { PowerValue } from "./PowerValue";
 import { QuantityValue } from "./QuantityValue";
 
@@ -78,6 +79,7 @@ interface NativeFactoryInspectorPanelProps {
   ) => void;
   onFuelItemChange: (entityId: string, targetItemId: ItemId) => void;
   onEntityRecipeChange?: (entityId: string, targetRecipeId: RecipeId) => void;
+  onLogisticsItemChange?: (entityId: string, itemId: ItemId) => void;
   onBlackHolePausedChange: (
     entityId: string,
     paused: boolean,
@@ -573,6 +575,7 @@ function NativeEntitySummary({
   onEnergyExchangerModeChange,
   onFuelItemChange,
   onEntityRecipeChange,
+  onLogisticsItemChange,
   onBlackHolePausedChange,
   onGalacticExporterPausedChange,
   onMaterialDeliverySlotChange,
@@ -608,6 +611,7 @@ function NativeEntitySummary({
   ) => void;
   onFuelItemChange: (entityId: string, targetItemId: ItemId) => void;
   onEntityRecipeChange?: (entityId: string, targetRecipeId: RecipeId) => void;
+  onLogisticsItemChange?: (entityId: string, itemId: ItemId) => void;
   onBlackHolePausedChange: (
     entityId: string,
     paused: boolean,
@@ -640,6 +644,7 @@ function NativeEntitySummary({
     ? configuration.entity.galacticExporterPaused
     : null;
   const recipeConfiguration = getNativeProjectedEntityRecipeConfiguration(recipeBinding);
+  const logisticsConfiguration = getNativeProjectedLogisticsItemConfiguration(recipeBinding);
   const recipeEligible = entity.kind === "machine" &&
     isNativeProjectedOrdinaryRecipeBuilding(entity.buildingId);
   const [pendingRecipeChange, setPendingRecipeChange] = useState<PendingNativeEntityRecipeChange | null>(null);
@@ -801,6 +806,22 @@ function NativeEntitySummary({
         >{priority === 3 ? "高" : priority === 2 ? "中" : "低"}</button>)}
       </div>
     </section>}
+    {logisticsConfiguration ? <section className="native-inspector-safe-actions">
+      <strong>物流物品</strong>
+      <p>更换物品会返还当前缓存和相连传送带，需要重新连接线路。</p>
+      <label><span>储运物品</span><select aria-label="储运物品"
+        value={logisticsConfiguration.currentItemId ?? ""}
+        disabled={pending || !onLogisticsItemChange}
+        onChange={event => {
+          const itemId = event.target.value as ItemId;
+          if (!pending && logisticsConfiguration.options.some(item => item.id === itemId)) {
+            onLogisticsItemChange?.(entity.entityId, itemId);
+          }
+        }}>
+        <option value="" disabled>请选择物品</option>
+        {logisticsConfiguration.options.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select></label>
+    </section> : null}
     {!recipeEligible ? null : <section
       className="native-inspector-safe-actions"
       data-native-entity-recipe="semantic-intent-v1"
@@ -1327,6 +1348,7 @@ export function NativeFactoryInspectorPanel({
   onEnergyExchangerModeChange,
   onFuelItemChange,
   onEntityRecipeChange,
+  onLogisticsItemChange,
   onBlackHolePausedChange,
   onGalacticExporterPausedChange,
   onMaterialDeliverySlotChange,
@@ -1374,6 +1396,7 @@ export function NativeFactoryInspectorPanel({
     entityRecipeBinding.entity.kind === currentEntityConfiguration.entity.kind &&
     entityRecipeBinding.entity.buildingId === currentEntityConfiguration.entity.buildingId &&
     (entityRecipeBinding.entity.recipeId ?? null) === (currentEntityConfiguration.entity.recipeId ?? null) &&
+    (entityRecipeBinding.entity.storedItemId ?? null) === (currentEntityConfiguration.entity.storedItemId ?? null) &&
     entityRecipeBinding.entity.interactionLocked === currentEntityConfiguration.entity.interactionLocked
     ? entityRecipeBinding
     : null;
@@ -1450,6 +1473,7 @@ export function NativeFactoryInspectorPanel({
       onEnergyExchangerModeChange={onEnergyExchangerModeChange}
       onFuelItemChange={onFuelItemChange}
       onEntityRecipeChange={onEntityRecipeChange}
+      onLogisticsItemChange={onLogisticsItemChange}
       onBlackHolePausedChange={onBlackHolePausedChange}
       onGalacticExporterPausedChange={onGalacticExporterPausedChange}
       onMaterialDeliverySlotChange={onMaterialDeliverySlotChange}

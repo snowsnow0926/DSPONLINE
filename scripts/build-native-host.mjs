@@ -1,9 +1,18 @@
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
+import { verifyBuiltinCatalog } from "./native-builtin-catalog.mjs";
+import candidate from "../desktop/native-validation-candidate.cjs";
+import { verifyValidationFixture } from "./native-validation-fixture.mjs";
+
+// A stale generated directory must not be silently shipped or regenerated.
+await verifyBuiltinCatalog();
+await verifyValidationFixture();
+candidate.collectValidationMatrixIdentity();
 
 const manifestPath = resolve("native", "Cargo.toml");
-const binaryPath = resolve("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host");
+const binaryPaths = ["dsp-native-host", "dsp-catalog-verifier"].map((name) =>
+  resolve("native", "target", "release", process.platform === "win32" ? `${name}.exe` : name));
 
 const child = spawn("cargo", ["build", "--manifest-path", manifestPath, "--release", "--locked"], {
   stdio: "inherit",
@@ -21,9 +30,10 @@ child.once("exit", (code) => {
     process.exitCode = code ?? 1;
     return;
   }
-  if (!existsSync(binaryPath)) {
-    console.error(`Native-host build did not produce ${binaryPath}`);
-    process.exitCode = 1;
+  for (const binaryPath of binaryPaths) {
+    if (!existsSync(binaryPath)) {
+      console.error(`Native build did not produce ${binaryPath}`);
+      process.exitCode = 1;
+    }
   }
 });
-

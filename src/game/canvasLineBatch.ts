@@ -26,12 +26,14 @@ export interface CanvasLineNodeGeometry {
  * the port (and can appear to jump when the card changes LOD).  Keep this
  * structure in world coordinates so the renderer can apply the same viewport
  * transform as React Flow without reading DOM pixels during a draw.
+ * Either end can be unavailable when its collapsed card has no mounted handle;
+ * the measured coordinates at the other end must still be retained.
  */
 export interface CanvasLineEndpoint {
-  sourceX: number;
-  sourceY: number;
-  targetX: number;
-  targetY: number;
+  sourceX: number | undefined;
+  sourceY: number | undefined;
+  targetX: number | undefined;
+  targetY: number | undefined;
 }
 
 /**

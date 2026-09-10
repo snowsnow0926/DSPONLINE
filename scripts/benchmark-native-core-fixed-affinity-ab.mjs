@@ -52,6 +52,21 @@ const SYSTEM_CODES = new Set([
   "EEXIST", "EINVAL", "UNKNOWN", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
 ]);
 const PROCESS_SIGNALS = new Set(["SIGTERM", "SIGKILL"]);
+const LAUNCH_STAGES = Object.freeze([
+  "powershell-ready", "job-compiled", "job-attached", "dispatching-workload", "workload-returned",
+]);
+
+// Only retain a bounded, ordered prefix of fixed diagnostic labels. Child
+// output is not authentication or performance evidence and must not be copied
+// into a failure report: it may contain a private fixture or local paths.
+function readLaunchDiagnosticStage(output) {
+  let stageIndex = -1;
+  for (const match of String(output).matchAll(/^DSP_NATIVE_FIXED_AFFINITY_LAUNCH\t([a-z-]{1,32})\r?$/gm)) {
+    if (match[1] !== LAUNCH_STAGES[stageIndex + 1]) return null;
+    stageIndex += 1;
+  }
+  return LAUNCH_STAGES[stageIndex] ?? null;
+}
 const WINDOWS_KILL_ON_CLOSE_JOB_SOURCE = String.raw`
 using System;
 using System.ComponentModel;
@@ -181,6 +196,7 @@ function redactedFailureDiagnostic(error, fallbackCode, category) {
     exitStatus: safeIntegerOrNull(details?.exitStatus),
     signal,
     timedOut: code === "child-timeout" || systemCode === "ETIMEDOUT",
+    ...(LAUNCH_STAGES.includes(details?.launchStage) ? { launchStage: details.launchStage } : {}),
     redacted: true,
   };
 }
@@ -695,12 +711,17 @@ export function runPinnedFixedAffinitySample(options, dependencies = {}) {
   const jobSourceBase64 = Buffer.from(WINDOWS_KILL_ON_CLOSE_JOB_SOURCE, "utf8").toString("base64");
   const powershell = [
     "$ErrorActionPreference='Stop'",
+    "[Console]::Error.WriteLine(\"DSP_NATIVE_FIXED_AFFINITY_LAUNCH`tpowershell-ready\")",
     `$jobSource=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${jobSourceBase64}'))`,
     "Add-Type -TypeDefinition $jobSource -Language CSharp",
+    "[Console]::Error.WriteLine(\"DSP_NATIVE_FIXED_AFFINITY_LAUNCH`tjob-compiled\")",
     "[DspFixedAffinityKillOnCloseJob]::AttachCurrentProcess()",
+    "[Console]::Error.WriteLine(\"DSP_NATIVE_FIXED_AFFINITY_LAUNCH`tjob-attached\")",
     "$env:DSP_FIXED_AFFINITY_JOB_ROOT_PID=[string]$PID",
     `$command=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${commandBase64}'))`,
+    "[Console]::Error.WriteLine(\"DSP_NATIVE_FIXED_AFFINITY_LAUNCH`tdispatching-workload\")",
     "& cmd.exe /d /c $command",
+    "[Console]::Error.WriteLine(\"DSP_NATIVE_FIXED_AFFINITY_LAUNCH`tworkload-returned\")",
     "exit $LASTEXITCODE",
   ].join("; ");
   const encoded = Buffer.from(powershell, "utf16le").toString("base64");
@@ -734,6 +755,7 @@ export function runPinnedFixedAffinitySample(options, dependencies = {}) {
     },
   );
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const launchStage = readLaunchDiagnosticStage(output);
   if (result.error) {
     const systemCode = typeof result.error.code === "string" ? result.error.code : null;
     throw fixedAffinityFailure(systemCode === "ETIMEDOUT" ? "child-timeout" :
@@ -741,12 +763,14 @@ export function runPinnedFixedAffinitySample(options, dependencies = {}) {
       systemCode,
       signal: result.signal,
       exitStatus: result.status,
+      launchStage,
     });
   }
   if (result.status !== 0) {
     throw fixedAffinityFailure("child-exit-nonzero", {
       exitStatus: result.status,
       signal: result.signal,
+      launchStage,
     });
   }
   let sample;

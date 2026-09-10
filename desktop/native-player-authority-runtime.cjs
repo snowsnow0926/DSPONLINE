@@ -796,7 +796,8 @@ class NativePlayerAuthorityRuntime {
     if (options.now !== undefined && typeof options.now !== "function" ||
         options.schedule !== undefined && typeof options.schedule !== "function" ||
         options.cancel !== undefined && typeof options.cancel !== "function" ||
-        options.onTransition !== undefined && typeof options.onTransition !== "function") {
+        options.onTransition !== undefined && typeof options.onTransition !== "function" ||
+        options.lifetimeSignal !== undefined && !(options.lifetimeSignal instanceof AbortSignal)) {
       throw new TypeError("native player-authority runtime options are invalid");
     }
     this.registry = options.registry;
@@ -827,6 +828,12 @@ class NativePlayerAuthorityRuntime {
     this.persistenceBoundaryInFlight = false;
     this.shutdownRequested = false;
     this.lastError = null;
+    // A lifetime signal is stop-only. It grants no coverage, ownership or
+    // qualification, and an ended runtime must be replaced for recovery.
+    this.lifetimeSignal = options.lifetimeSignal ?? null;
+    this.onLifetimeAborted = () => this.shutdownForProcessExit();
+    if (this.lifetimeSignal?.aborted) this.shutdownForProcessExit();
+    else this.lifetimeSignal?.addEventListener("abort", this.onLifetimeAborted, { once: true });
   }
 
   snapshot() {
@@ -868,6 +875,7 @@ class NativePlayerAuthorityRuntime {
   }
 
   transition(phase, error = null) {
+    if (this.shutdownRequested && phase !== "shutdown") return this.snapshot();
     this.phase = phase;
     this.lastError = error;
     const snapshot = this.snapshot();
@@ -883,6 +891,20 @@ class NativePlayerAuthorityRuntime {
     );
     for (const entry of this.commandQueue.splice(0)) entry.reject(error);
     return error;
+  }
+
+  assertNotShutdown() {
+    if (this.shutdownRequested) {
+      throw runtimeError("native player-authority runtime is shutting down",
+        "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN");
+    }
+  }
+
+  invokeRegistry(method, ...args) {
+    // Check at dispatch time, including work queued in a Promise microtask.
+    // Already-dispatched work remains recoverable in Rust; never roll it back.
+    this.assertNotShutdown();
+    return this.registry[method](...args);
   }
 
   activate(request) {
@@ -933,8 +955,9 @@ class NativePlayerAuthorityRuntime {
     let recoveredCommand = null;
     let operation;
     operation = Promise.resolve()
-      .then(() => this.registry.recoverPlayerAuthorityCommand(this.ownerId, { sessionId }))
+      .then(() => this.invokeRegistry("recoverPlayerAuthorityCommand", this.ownerId, { sessionId }))
       .then((receipt) => {
+        this.assertNotShutdown();
         const recovered = validateRecoveryReceipt(receipt, sessionId);
         const nextSequence = recovered.sequence + 1;
         const nextDeadlineMs = recovered.settledDeadlineMs + TICK_MILLISECONDS;
@@ -1040,14 +1063,16 @@ class NativePlayerAuthorityRuntime {
 
   async performActivation(request) {
     try {
-      const preparedRaw = await this.registry.preparePlayerAuthority(this.ownerId, request);
+      const preparedRaw = await this.invokeRegistry("preparePlayerAuthority", this.ownerId, request);
+      this.assertNotShutdown();
       const prepared = validateLeaseReceipt(preparedRaw, "prepared", request);
-      const activeRaw = await this.registry.activatePlayerAuthority(this.ownerId, {
+      const activeRaw = await this.invokeRegistry("activatePlayerAuthority", this.ownerId, {
         sessionId: request.sessionId,
         runId: request.runId,
         expectedCheckpoint: request.expectedCheckpoint,
       });
       const active = validateLeaseReceipt(activeRaw, "active", request);
+      this.assertNotShutdown();
       if (active.sequence !== prepared.sequence) {
         throw runtimeError("native player-authority sequence changed during activation");
       }
@@ -1128,7 +1153,7 @@ class NativePlayerAuthorityRuntime {
         "NATIVE_PLAYER_AUTHORITY_HISTORY_UNAVAILABLE",
       ));
     }
-    return Promise.resolve(this.registry.playerAuthorityHistoryStatus(this.ownerId, {
+    return Promise.resolve(this.invokeRegistry("playerAuthorityHistoryStatus", this.ownerId, {
       sessionId: this.context.sessionId,
     }));
   }
@@ -1162,7 +1187,7 @@ class NativePlayerAuthorityRuntime {
     }
     const context = this.context;
     this.currentOperation = "history";
-    const operation = Promise.resolve().then(() => this.registry.commitPlayerAuthorityHistory(
+    const operation = Promise.resolve().then(() => this.invokeRegistry("commitPlayerAuthorityHistory",
       this.ownerId,
       {
         sessionId: context.sessionId,
@@ -1172,6 +1197,7 @@ class NativePlayerAuthorityRuntime {
         direction: request.direction,
       },
     )).then((receipt) => {
+      this.assertNotShutdown();
       const committed = receipt?.committed;
       if (!committed || receipt.direction !== request.direction ||
           committed.baseRevision !== request.baseRevision ||
@@ -1473,7 +1499,7 @@ class NativePlayerAuthorityRuntime {
     this.currentOperation = operationName;
     this.transition(request.targetPaused ? "pausing" : "resuming");
     let operation;
-    operation = Promise.resolve().then(() => this.registry.commitPlayerAuthorityPause(
+    operation = Promise.resolve().then(() => this.invokeRegistry("commitPlayerAuthorityPause",
       this.ownerId,
       request,
     )).then((receipt) => {
@@ -1656,7 +1682,7 @@ class NativePlayerAuthorityRuntime {
     this.currentOperation = "macro-advance";
     this.transition("macro-committing");
     let operation;
-    operation = Promise.resolve().then(() => this.registry.commitPlayerAuthorityMacroAdvance(this.ownerId, {
+    operation = Promise.resolve().then(() => this.invokeRegistry("commitPlayerAuthorityMacroAdvance", this.ownerId, {
       sessionId: context.sessionId,
       runId: context.runId,
       ...request,
@@ -1764,7 +1790,7 @@ class NativePlayerAuthorityRuntime {
     this.currentOperation = "macro-finish";
     this.transition("macro-finishing");
     let operation;
-    operation = Promise.resolve().then(() => this.registry.finishPlayerAuthorityMacroSession(this.ownerId, {
+    operation = Promise.resolve().then(() => this.invokeRegistry("finishPlayerAuthorityMacroSession", this.ownerId, {
       sessionId: context.sessionId,
       runId: context.runId,
       macroSessionId: pending.macroSessionId,
@@ -1830,7 +1856,7 @@ class NativePlayerAuthorityRuntime {
             "NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_UNAVAILABLE",
           );
         }
-        return this.registry.commitPlayerAuthorityOrbitalContractCommand(this.ownerId, {
+        return this.invokeRegistry("commitPlayerAuthorityOrbitalContractCommand", this.ownerId, {
           sessionId: context.sessionId,
           runId: context.runId,
           commandId: entry.request.commandId,
@@ -1847,7 +1873,7 @@ class NativePlayerAuthorityRuntime {
           "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_UNAVAILABLE",
           );
         }
-        return this.registry.commitPlayerAuthoritySystemSpaceStationCommand(this.ownerId, {
+        return this.invokeRegistry("commitPlayerAuthoritySystemSpaceStationCommand", this.ownerId, {
           sessionId: context.sessionId,
           runId: context.runId,
           commandId: entry.request.commandId,
@@ -1861,7 +1887,7 @@ class NativePlayerAuthorityRuntime {
         if (typeof this.registry.commitPlayerAuthorityOperationsSettingCommand !== "function") {
           throw runtimeError("native player-authority operations setting capability is unavailable", "NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_UNAVAILABLE");
         }
-        return this.registry.commitPlayerAuthorityOperationsSettingCommand(this.ownerId, {
+        return this.invokeRegistry("commitPlayerAuthorityOperationsSettingCommand", this.ownerId, {
           sessionId: context.sessionId,
           runId: context.runId,
           commandId: entry.request.commandId,
@@ -1870,7 +1896,7 @@ class NativePlayerAuthorityRuntime {
           intent: entry.request.intent,
         });
       }
-      return this.registry.commitPlayerAuthorityCommand(this.ownerId, {
+      return this.invokeRegistry("commitPlayerAuthorityCommand", this.ownerId, {
         sessionId: context.sessionId,
         runId: context.runId,
         commandId: entry.request.commandId,
@@ -2113,7 +2139,7 @@ class NativePlayerAuthorityRuntime {
     this.currentOperation = pauseDrain ? "pause" : "tick";
     let invocation;
     try {
-      invocation = this.registry.commitPlayerAuthorityTick(this.ownerId, batch.request);
+      invocation = this.invokeRegistry("commitPlayerAuthorityTick", this.ownerId, batch.request);
     } catch (cause) {
       invocation = Promise.reject(cause);
     }
@@ -2152,6 +2178,8 @@ class NativePlayerAuthorityRuntime {
   }
 
   shutdownForProcessExit() {
+    if (this.shutdownRequested) return this.snapshot();
+    this.lifetimeSignal?.removeEventListener("abort", this.onLifetimeAborted);
     if (this.timer !== null) this.cancel(this.timer);
     this.timer = null;
     this.shutdownRequested = true;

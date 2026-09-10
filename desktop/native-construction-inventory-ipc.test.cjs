@@ -43,7 +43,7 @@ test("construction inventory TypeScript contract is catalog-identity-bound, read
 test("Rust host publishes and dispatches the catalog-fenced construction inventory capability", () => {
   const protocol = fs.readFileSync(path.resolve(__dirname, "../native/dsp-native-host/src/protocol.rs"), "utf8");
   const runtime = fs.readFileSync(path.resolve(__dirname, "../native/dsp-native-host/src/core_runtime.rs"), "utf8");
-  const main = fs.readFileSync(path.resolve(__dirname, "../native/dsp-native-host/src/main.rs"), "utf8");
+  const main = fs.readFileSync(path.resolve(__dirname, "../native/dsp-native-host/src/rpc.rs"), "utf8");
 
   assert.match(protocol, /CoreConstructionInventoryProjection\s*\{[\s\S]*?session_id:\s*String,[\s\S]*?expected_revision:\s*u64,[\s\S]*?expected_registry_fingerprint:\s*String,[\s\S]*?cursor:\s*usize,[\s\S]*?limit:\s*usize/);
   assert.match(runtime, /pub fn construction_inventory_projection\([\s\S]*?expected_revision:\s*u64[\s\S]*?expected_registry_fingerprint:\s*&str[\s\S]*?\.construction_inventory_projection\([\s\S]*?expected_revision,[\s\S]*?expected_registry_fingerprint,[\s\S]*?cursor,[\s\S]*?limit/);

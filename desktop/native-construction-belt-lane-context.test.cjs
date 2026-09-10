@@ -140,7 +140,7 @@ test("direct and MessagePort surfaces are wired", () => {
     ["desktop/preload.cjs", /getNativeCoreConstructionBeltLaneContext/],
     ["src/desktop.ts", /DesktopNativeCoreConstructionBeltLaneContextRequest/],
     ["src/game/nativeCore.ts", /constructionBeltLaneContext/],
-    ["native/dsp-native-host/src/main.rs", /native-core-construction-belt-lane-context-v1/],
+    ["native/dsp-native-host/src/rpc.rs", /native-core-construction-belt-lane-context-v1/],
     ["native/dsp-native-host/src/protocol.rs", /CoreConstructionBeltLaneContext/],
   ]) assert.match(fs.readFileSync(path.join(root, file), "utf8"), pattern);
 });

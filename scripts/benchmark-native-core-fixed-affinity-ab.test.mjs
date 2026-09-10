@@ -757,7 +757,41 @@ test("child exit reports never persist raw Vitest output or mismatch fragments",
   }
 });
 
-test("Windows timeout closes the Job Object tree and removes its private stage", { timeout: 20_000 }, (context) => {
+test("launcher failure retains only ordered fixed bootstrap labels", () => {
+  const marker = (stage) => `DSP_NATIVE_FIXED_AFFINITY_LAUNCH\t${stage}\n`;
+  for (const [output, expected] of [
+    [marker("powershell-ready"), "powershell-ready"],
+    [["powershell-ready", "job-compiled", "job-attached", "dispatching-workload"].map(marker).join(""), "dispatching-workload"],
+    [marker("job-attached"), undefined],
+    [marker("powershell-ready") + marker("powershell-ready"), undefined],
+    [marker("private-fixture-content"), undefined],
+  ]) {
+    const prepared = prepare();
+    try {
+      const report = runFixedAffinityAb(prepared.configured, dependencies(prepared, {
+        runSample: (sampleOptions) => runPinnedFixedAffinitySample(sampleOptions, {
+          platform: "win32",
+          spawnSync: () => ({
+            status: null, signal: "SIGKILL",
+            error: Object.assign(new Error("PRIVATE_LAUNCH_ERROR"), { code: "ETIMEDOUT" }),
+            stdout: "PRIVATE_FIXTURE_PAYLOAD\n",
+            stderr: `${output}PRIVATE_FILE_PATH\n`,
+          }),
+        }),
+      }));
+      assert.equal(report.status, "NO_RESULT");
+      assert.equal(report.preflight[0].failure.code, "child-timeout");
+      assert.equal(report.preflight[0].failure.launchStage, expected);
+      assert.equal(JSON.stringify(report).includes("PRIVATE_"), false);
+      assert.equal(JSON.stringify(report).includes("private-fixture-content"), false);
+      assert.deepEqual(readdirSync(prepared.stageParent), []);
+    } finally {
+      rmSync(prepared.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Windows timeout closes the Job Object tree and removes its private stage", { timeout: 100_000 }, (context) => {
   if (process.platform !== "win32") {
     context.skip("Windows Job Object integration requires Windows");
     return;
@@ -793,9 +827,12 @@ test("Windows timeout closes the Job Object tree and removes its private stage",
     "fs.writeFileSync(pidFile, JSON.stringify({ ...pids, vitest: process.pid, host: host.pid, sampler: sampler.pid }));",
     "setInterval(() => {}, 1000);",
   ].join("\n"));
-  // The deadline also includes cold PowerShell startup and Add-Type compilation.
-  // Allow the six-process fixture to start before testing timeout tree cleanup.
+  // Retain the real launcher's default 30-second startup grace: a cold Windows
+  // CI Add-Type took 26 seconds, before the six-process fixture could start.
+  // Two 8 + 30 second launches plus staging/cleanup fit the outer test deadline.
   prepared.configured.timeoutMs = 8_000;
+  prepared.configured.nodePriority = "BelowNormal";
+  prepared.configured.nativePriority = "BelowNormal";
   let stageRoot = null;
   try {
     const report = runFixedAffinityAb(prepared.configured, dependencies(prepared, {
@@ -803,7 +840,6 @@ test("Windows timeout closes the Job Object tree and removes its private stage",
       onStageReady: (stage) => { stageRoot = stage.root; },
       runSample: (sampleOptions) => runPinnedFixedAffinitySample(sampleOptions, {
         platform: "win32",
-        timeoutGraceMs: 250,
       }),
     }));
     assert.equal(report.status, "NO_RESULT");
@@ -814,7 +850,8 @@ test("Windows timeout closes the Job Object tree and removes its private stage",
     assert.equal(existsSync(stageRoot), false);
     assert.deepEqual(readdirSync(prepared.stageParent), []);
 
-    assert.equal(existsSync(pidFile), true);
+    assert.equal(existsSync(pidFile), true,
+      `six-process fixture never recorded readiness: ${JSON.stringify(report.preflight.map((sample) => sample.failure))}`);
     const recorded = JSON.parse(readFileSync(pidFile, "utf8"));
     const pids = Object.values(recorded).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
     assert.equal(pids.length, 6);

@@ -8774,7 +8774,7 @@ function normalizeCoreAdvance(value) {
   const source = objectWithKeys(value, ["supported", "exactScope", "changed", "previousRevision", "revision"], ["reason", "algorithmVersion", "exactCalibrationSeconds", "approximatedSeconds", "beltScheduler", "summary"], "native core advance result");
   const result = {
     supported: boolean(source.supported, "native advance supported flag"),
-    exactScope: oneOf(source.exactScope, ["no-change", "clock-only", "simple-factory-v1", "pure-idle-bounded-exact", "pure-idle-conservative-v2", "pure-idle-macro-v10", "offline-macro-v1", "unsupported-domain"], "native advance exact scope"),
+    exactScope: oneOf(source.exactScope, ["no-change", "clock-only", "simple-factory-v1", "pure-idle-bounded-exact", "pure-idle-conservative-v2", "pure-idle-macro-v10", "offline-macro-v1", "offline-state-proven", "offline-boundary-exact", "offline-transient-exact", "unsupported-domain"], "native advance exact scope"),
     changed: boolean(source.changed, "native advance changed flag"),
     previousRevision: safeInteger(source.previousRevision, "native advance previous revision"),
     revision: safeInteger(source.revision, "native advance revision"),
@@ -8907,9 +8907,26 @@ function normalizeCoreOfflineCandidateExport(value) {
     throw protocolError("native offline candidate time or source binding");
   }
   if (result.prepared) {
+    // A macro request within its exact prefix reports the actual bounded-exact
+    // scope. Admit it only with a complete 1..30 second exact time ledger.
+    const boundedExact = result.advance?.exactScope === "pure-idle-bounded-exact" &&
+      result.settledSeconds >= 1 && result.settledSeconds <= 30 &&
+      result.advance.exactCalibrationSeconds === result.settledSeconds &&
+      result.advance.approximatedSeconds === 0;
+    const longVersion = result.settledSeconds > 30 && result.settledSeconds <= 28_800 &&
+      result.advance?.algorithmVersion === "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity";
+    const completeTail = longVersion && (
+      result.advance.exactScope === "offline-state-proven" &&
+        result.advance.exactCalibrationSeconds === 30 && result.advance.approximatedSeconds === result.settledSeconds - 30 ||
+      result.advance.exactScope === "offline-boundary-exact" &&
+        result.advance.exactCalibrationSeconds === result.settledSeconds && result.advance.approximatedSeconds === 0);
+    const transientExact = result.settledSeconds >= 31 && result.settledSeconds <= 60 &&
+      result.advance?.exactScope === "offline-transient-exact" &&
+      result.advance.algorithmVersion === "native-offline-transient-exact-v1" &&
+      result.advance.exactCalibrationSeconds === result.settledSeconds && result.advance.approximatedSeconds === 0;
     if (result.settledSeconds < 1 || result.reason !== undefined || !result.advance || !result.export ||
         !result.candidateSummary || !result.advance.supported ||
-        result.advance.exactScope !== "offline-macro-v1" ||
+        (!boundedExact && !completeTail && !transientExact) ||
         result.advance.previousRevision !== result.sourceSummary.revision ||
         result.advance.revision !== result.candidateSummary.revision ||
         result.export.mode !== "normal" ||
@@ -8919,7 +8936,7 @@ function normalizeCoreOfflineCandidateExport(value) {
       throw protocolError("native offline candidate prepared binding");
     }
   } else if (result.export || result.candidateSummary || result.settledSeconds === 0 && result.advance ||
-      result.settledSeconds > 0 && !result.advance || result.reason === undefined) {
+      result.reason === undefined) {
     throw protocolError("native offline candidate unavailable binding");
   }
   return result;

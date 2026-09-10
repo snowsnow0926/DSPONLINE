@@ -1,0 +1,40 @@
+# Rust RP1：减少精确参考计算的电力扫描｜2026-09-09
+
+Role: develop。此轮继续处理短离线校验成本和 Windows 单元超时，所有本机验证均为无窗口 Node、低优先级、串行。未启动桌面游戏，未修改玩家存档或生产服务。
+
+## 原因和实现
+
+7fd Windows PR 的有限矿脉长挂机案例实际耗时 6,451 ms，超过原 Vitest 5 秒；此失败保留。原案例在本机单独带 CPU 采样通过，不能因此否认云端失败。采样发现电力计算仍占较大比例；源码进一步确认两处可移除的全局扫描：
+
+- 电源完整索引缺少某电网的键时，旧代码再次过滤所有星球的实体。现在明确返回空电源列表；没有索引的调用仍按原规则扫描。
+- 行星阶段已经持有完整索引，但汇总燃料储备时没有传入。现在电网储能、燃料和行星燃料统计统一使用当前阶段索引。
+
+索引保留实体引用，燃料消耗后读取当前数值；当前行星生产/制造阶段不添加或替换实体，拓扑转换后的现有索引重建逻辑不变。电力分配、实际扣料、模拟秒数、存档格式和 Rust 采用资格不变。此改动属于共享 JS 计算，不代表 Web/Android 已接入 Rust。
+
+## 当前证据
+
+源码父提交为 `5e3a1d7d99599746da5735e2a8c958950197023f`，本轮工作树 engine SHA-256 为 `9402b10ba9a8e276fb2b77fa5fffdf8f23223bb405dda4d751a58aaa82683d09`。
+
+| 检查 | 结果及范围 |
+| --- | --- |
+| 旧代码运行两个新增扫描反例 | 旧两项通过、新两项失败；各发现一次不必要的全局扫描 |
+| 修复后空星球、电力/引擎、有限矿脉和多线程四文件 | 243 pass / 0 skip / 0 fail；原案例、原 2 秒宏结算断言和默认 5 秒时限均未调整 |
+| 实际 TypeScript 项目检查 | 通过；守护 41.805 秒，最低可用 6,495,848 KiB，3/2 GiB 门槛 |
+| 冻结公开大工厂完整对照 | 同一 27,107 实体、60,000 传送带工厂，推进 5 秒；六次完整状态逐字段相同，每次输入均未改动 |
+| 完整本机单元（单 worker，无重试） | 3,172 pass / 39 skip / 0 fail；原有限矿脉案例 2,246.685 ms 通过 |
+| 本工作树 Web 生产构建 | tsc、Vite、startup budget、thin-UI 和 native coverage 五步均退出 0；不是新桌面制品 |
+| f427 新源码云端 | 生产构建、Linux 单元 3,170/41 skip/0 fail 及 Server/Ops/Native 通过；独立 Windows Rust 1,365/5 ignored、Native 674/1 skip、游戏单元 3,172/39 skip，均零失败。浏览器完整 445 expected / 33 skip / 7 unexpected / 3 flaky，仍失败 |
+
+公开对照按旧/新、新/旧、旧/新顺序在同一个 Node 进程运行，三对毫秒观测为 `2031.023 / 1356.569`、`1550.219 / 1385.557`、`1344.746 / 1282.731`。存在冷启动和预热影响，只作为子步骤诊断，不作为新的 Windows 完整等待收益。六次完整结果 SHA-256 均为 `028ed0d9031691acb4a984e55f7eb4aa07bc0a9f40aa44b71f4b8a754584de21`，冻结来源为 `dc44de7555c0343b2c6be15776e257e1eeb8f79300c89b233741d9a72de6b0de`。
+
+首版对照驱动把 Rolldown `define` 放在错误层级，构建警告后因 `import.meta.env` 缺失在首次模拟前失败。原记录保留；第二版改为已安装 API 的 `transform.define` 后完成全部对照，没有修改比较断言或游戏规则。
+
+## 证据定位与后续
+
+开发 worktree 的 `artifacts/rust-rp1-loop/` 中保留：`game-timing-profile-v4*`、`power-lookup-before-v1.json`、`power-lookup-focused-v1.json`、`power-lookup-typecheck-v1-guard/`、`probe-power-lookup-v{1,2}.mjs`、`power-lookup-public-v{1,2}-guard/`、`power-lookup-public-v2/report.json`、`power-lookup-full-unit-v1.json` 和 `power-lookup-build-v1.json`。定向守护 13.212 秒，最低 8,129,172 KiB；公开对照守护 13.596 秒，最低 7,020,500 KiB；完整单元守护 358.032 秒，最低 6,756,580 KiB；构建守护 44.445 秒，最低 6,032,472 KiB，均 6/2 GiB、正常退出 0。
+
+f427 已收齐完整回归结果，整体仍未通过；终局成功结算的持久提交/重进、浏览器失败及历史堆损坏根因缺口继续保留，见[上一轮准确范围](./rust-rp1-private-cancel-2026-09-09.md)。后台约束已复核，未发现遗留测试游戏进程；仅使用符合[后台测试策略](./rust-rp1-background-testing-2026-09-09.md)的入口，不能调用旧 show/focus 驱动。
+
+f427 主 CI 为 `34308685637`。两组 JSON 分别经 GitHub SHA-256 `86103c6ffad83ee8c788861dc0a53e5a48697321bccb6d1c445ce8c6ae1f1673` / `dc2ddb8f9627081f0e84a639efd245347e2271f7ecc3cf1f4e93081b079d36da` 核对；审计 `cloud-f427-browser-audit-v1.json`，第一组 231/11 skip/3 unexpected/2 flaky，第二组 214/22 skip/4 unexpected/1 flaky。七项涉及连续建设、奖励动画、移动统计宽度、两项堆叠交互/坐标、冷菜单 p95 1,099 ms 超出 500 ms，以及缓冲设置总超时。失败不能统一归因于机器慢；新 7 项也不能与 7fd 29 项简单相减视为已修复数量。
+
+该主 CI 的 Server/Ops/Native 终态成功：Server 390/2 skip 加 station 4/4、Ops 60/2 skip、Rust core 1,113/5 ignored 加 Host 245+3、Native 670/5 skip。独立 Windows `34308685622` 成功，正常优化 Rust core 1,113/5 ignored 加 Host 249+3、Native 674/1 skip、游戏单元 3,172/39 skip；原时限未改，本次有限矿脉案例通过。原始日志 `cloud-f427-server-native-v1.log`、`cloud-f427-windows-v1.log` 保留；不能从一次通过推定历史堆损坏根因已解决。

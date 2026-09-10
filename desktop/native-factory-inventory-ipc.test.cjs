@@ -42,7 +42,7 @@ test("factory inventory TypeScript contract is revision-bound and included in tr
 test("Rust host publishes and dispatches the revision-fenced factory inventory capability", () => {
   const protocol = fs.readFileSync(path.resolve(__dirname, "../native/dsp-native-host/src/protocol.rs"), "utf8");
   const runtime = fs.readFileSync(path.resolve(__dirname, "../native/dsp-native-host/src/core_runtime.rs"), "utf8");
-  const main = fs.readFileSync(path.resolve(__dirname, "../native/dsp-native-host/src/main.rs"), "utf8");
+  const main = fs.readFileSync(path.resolve(__dirname, "../native/dsp-native-host/src/rpc.rs"), "utf8");
 
   assert.match(protocol, /CoreFactoryInventoryProjection\s*\{[\s\S]*?session_id:\s*String,[\s\S]*?expected_revision:\s*u64,[\s\S]*?cursor:\s*usize,[\s\S]*?limit:\s*usize/);
   assert.match(runtime, /pub fn factory_inventory_projection\([\s\S]*?expected_revision:\s*u64[\s\S]*?\.factory_inventory_projection\(expected_revision, cursor, limit\)/);

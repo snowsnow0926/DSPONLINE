@@ -2,19 +2,16 @@ import { readFile, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import ts from "typescript";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const STATE_PATH = path.join(ROOT, "native/dsp-native-core/src/state.rs");
-const HOST_PATH = path.join(ROOT, "native/dsp-native-host/src/main.rs");
+const HOST_PATH = path.join(ROOT, "native/dsp-native-host/src/rpc.rs");
 const HOST_RUNTIME_PATH = path.join(ROOT, "native/dsp-native-host/src/core_runtime.rs");
 const HOST_LEASE_PATH = path.join(ROOT, "native/dsp-native-host/src/exact_realtime_lease.rs");
 const APP_PATH = path.join(ROOT, "src/App.tsx");
 const REGISTRY_PATH = path.join(ROOT, "native/native-surface-registry.json");
 const MANIFEST_PATH = path.join(ROOT, "native/native-coverage-manifest.json");
-
-function lineNumber(source, offset) {
-  return source.slice(0, offset).split("\n").length;
-}
 
 function parseCoverage(source) {
   const struct = source.match(/pub struct DomainCoverage \{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
@@ -49,15 +46,36 @@ function parseCapabilities(source, dependencySources) {
   return [...new Set(capabilities)].sort();
 }
 
-function parseLegacyWriteGuards(source) {
+export function parseLegacyWriteGuards(source) {
+  const file = ts.createSourceFile("App.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  if (file.parseDiagnostics.length) throw new Error("cannot parse protected write surfaces");
   const entries = new Map();
-  for (const match of source.matchAll(/rejectLegacyFactoryInteractionWhileNative\("([^"]+)"\)/g)) {
-    const label = match[1];
-    const entry = entries.get(label) ?? { label, occurrences: 0, lines: [] };
-    entry.occurrences += 1;
-    entry.lines.push(lineNumber(source, match.index));
-    entries.set(label, entry);
+  function labelsOf(argument, depth = 0) {
+    if (!argument || depth > 16) throw new Error("protected write surface requires one static label or bounded conditional labels");
+    if (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument)) return [argument.text];
+    if (ts.isParenthesizedExpression(argument)) return labelsOf(argument.expression, depth + 1);
+    if (ts.isConditionalExpression(argument)) {
+      return [...new Set([...labelsOf(argument.whenTrue, depth + 1), ...labelsOf(argument.whenFalse, depth + 1)])];
+    }
+    throw new Error("protected write surface requires one static label or bounded conditional labels");
   }
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && node.expression.text === "rejectLegacyFactoryInteractionWhileNative") {
+      const argument = node.arguments[0];
+      if (node.arguments.length !== 1) {
+        throw new Error("protected write surface requires one static label");
+      }
+      for (const label of labelsOf(argument)) {
+        const entry = entries.get(label) ?? { label, occurrences: 0, lines: [] };
+        entry.occurrences += 1;
+        entry.lines.push(file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1);
+        entries.set(label, entry);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
   return [...entries.values()].sort((left, right) => left.label.localeCompare(right.label, "zh-CN"));
 }
 
@@ -106,7 +124,7 @@ export async function buildNativeCoverageManifest() {
     schemaVersion: 1,
     generatedFrom: [
       "native/dsp-native-core/src/state.rs",
-      "native/dsp-native-host/src/main.rs",
+      "native/dsp-native-host/src/rpc.rs",
       "native/dsp-native-host/src/core_runtime.rs",
       "native/dsp-native-host/src/exact_realtime_lease.rs",
       "src/App.tsx",

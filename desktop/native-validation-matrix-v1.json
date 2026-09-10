@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "kind": "native-foundation-evidence-matrix-v1",
+  "scope": "windows-normal-main-1x-builtin-v1",
+  "evidenceClass": "TEST_ONLY",
+  "reportKind": "native-qualification-check-v1",
+  "requiredChecks": [
+    "single-owner",
+    "first-tick",
+    "command-material-conservation",
+    "pause-resume",
+    "persist-reopen",
+    "exit-inflight",
+    "lost-ack-retry",
+    "host-restart",
+    "threaded-determinism",
+    "compatibility-roundtrip",
+    "realtime-throughput",
+    "process-tree-memory"
+  ],
+  "resultPolicy": {
+    "minimumPassed": 1,
+    "maximumFailed": 0,
+    "maximumSkipped": 0,
+    "maximumFlaky": 0
+  },
+  "authorityEligible": false,
+  "releaseAllowed": false
+}

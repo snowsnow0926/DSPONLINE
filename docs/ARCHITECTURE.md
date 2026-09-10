@@ -1,5 +1,99 @@
 # 系统架构
 
+> **Rust 旧写入接口边界（2026-09-10）**：main 转移会话后，Host 对 coreAdvance/coreApplyCommand 额外校验该存档的实际持久玩家租约，覆盖新开别名；租约损坏或无法读取也返回错误。coreClose 会清理进程级历史，因此玩家租约存在时拒绝关闭，即使目标会话不存在。正常 Shutdown 保留恢复；玩家 tick/command/pause/macro 继续使用原 WAL、检查点和租约确认链。此前交接适配固定使用协调器 revision/checkpoint/ownerId 和 main 15 秒期限。真实浏览器落盘、完整界面和可信准入仍待验收，见[当前报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)。
+
+> **main runtime 终止屏障（2026-09-10）**：shutdown 为终态，迟到 transition 不得恢复 active；registry 调用在真实派发前统一检查停止标记。准备/激活、恢复及历史回复更新前检查，已派发持久操作保留 Rust 恢复权威。会话 broker 从真实 token 提供 stop-only AbortSignal，runtime 可订阅并立即取消时钟/拒绝后续操作；实际准入、云隔离与 profile 切换仍未启用，见[修复与证据](./reviews/rust-windows-runtime-lifetime-2026-09-10.md)。
+
+> **Windows 持续验证会话（2026-09-10）**：Host/助手专用 hold-validation-session 入口实际持有原目录/夹具锁，严格有界递增序号与 challenge；15 秒无完整请求退出。main 自身 ASAR 定位助手，保留真实进程与 opaque token，5 秒心跳、响应期限、失效通知及确认释放；启动失败须确认退出或明确报告终止未确认。5c801a83 新冻结包已验证持续持有、自动续期、独立双释放及替换后新身份。仅用于合成验证会话，尚未接到普通 serve/tick、renderer IPC 或云网络隔离，不授予玩法权限；见[持续合同](./rust/windows-validation-lease-v1.md)。
+
+> **Windows 会话身份（2026-09-10）**：公开 normal/main v47 初始夹具分别编入 Rust 和自身 ASAR，构建验证漂移；main 排他创建独立目录，Host 与独立平台助手只接受 32 位 selector，以 Windows 句柄核对实际目录与固定夹具。共享目录锁增加 FILE_LIST_DIRECTORY，补齐空目录/首次打开成员前的防重命名。491 新包已核对两端身份与替换失效；Rust lease 保持目录/文件锁，但只读快照不保持锁，不等于运行租约。持续 main 租约、网络隔离、正文绑定及实际接管尚未接入，见[合同](./rust/windows-validation-session-v1.md)。
+
+> **Windows 完整验证候选身份（2026-09-10）**：main 从自身 ASAR、Host 从自身 OS 可执行路径，无外部参数地独立取得程序九字段、内置目录、规则与基础矩阵摘要，形成正文所需十二字段；0d7 实包三方已核对一致。规则摘要在冻结后绑定实际 Host/ASAR/目录，避免自引用；矩阵仍为既有 TEST_ONLY 基础检查合同，构建和检查器拒绝漂移。只读 `inspect-validation-candidate` 不创建存档或模拟，不授予权威；完整可信上下文、生产矩阵及真实接管仍待完成，见[精确合同](./rust/windows-validation-candidate-v1.md)。
+
+> **Windows 内置目录身份（2026-09-10）**：构建从独立前端模块图和空扩展包注册表生成完整 Native 目录，编入 Host 并随 ASAR 打包。main 有界读入自身成员、Host 使用编译字节和实际 RuntimeCatalog 解析器，两端独立计算 canonical 摘要；`inspect-builtin-catalog` 不打开 SaveStore。441 冻结包内实际 main/Host/父进程已核对一致。构建检查目录漂移；该事实及匹配器尚未接入正文或权威门禁，不代替规则/矩阵/发布者/会话资格，见[实现与验证](./reviews/rust-windows-builtin-catalog-2026-09-10.md)。
+
+> **短瞬态候选边界（2026-09-10，已实包验证）**：`advance_offline_candidate` 仅供临时启动候选；旧宏观拒绝后，在 31–60 整秒及原成本/模式门槛内，从原状态执行真实 Exact 并通过完整结算证明。独立 `offline-transient-exact` / `native-offline-transient-exact-v1` 与 Host 能力、双端时间账及摘要校验同时成立才可采用。持久 OfflineMacroV1/WAL 不调用新入口，失败不改变源。68 实包短瞬态实际 32 秒成功/取消及原六组长离线、落盘/重开均通过；实时权威仍关闭。见[完整验证](./reviews/rust-windows-short-transient-2026-09-10.md)。
+
+> **Windows 有界长离线候选（2026-09-10）**：Host 只把私有物理状态/历史证明均成功并通过最终结算证明的尾段标为 `offline-state-proven`；容量/矿量从真实前缀逐秒推进的尾段保留 `offline-boundary-exact`。main/renderer 同时核对 v3 算法、完整时间账本、源和候选摘要，长候选还需新 capability 与 8 小时/2,000 记录预算。成本准入不授予状态资格；通用宏观或冻结尾段不采用。a962 实包六组成功/取消、保存与重开已通过；源会话、检查点、WAL、存档版本和实时权威保持原合同，见[完整边界与验证](./reviews/rust-windows-complete-long-offline-2026-09-10.md)。
+
+> **Windows 安装程序身份（2026-09-10）**：packer 将源码 SHA/Build ID 嵌入自身 ASAR；main 使用 `original-fs` 读取容器、ASAR 接口读取成员，交叉核对 renderer 版本并分块计算 Host/ASAR 摘要。Host 从自己的 OS 可执行路径独立定位资源，锁定祖先和文件，从同一组句柄验证有界 ASAR 元数据、完整 UTF-8 与摘要；只读 `inspect-program` 不创建存档或模拟。两端输出九字段文件事实，未连接准入；内容/规则/矩阵、时效/撤销、生产者和其他可信上下文仍待实现，见[双端合同](./rust/windows-installed-program-identity.md)及[实际验证](./reviews/rust-windows-host-installed-program-2026-09-10.md)。
+
+> **Native 输入草稿边界（2026-09-10）**：物资托盘和生产缓存上限分别绑定会话、运行、注册表、行星与本字段权威原值；普通投影 revision 不清理输入。布局提交前清理失效上下文，blur 再核验绑定及 pending，Escape 先撤销绑定；保持原生命令为唯一写入出口。没有开放玩家实时准入，见[实现及验证](./reviews/rust-windows-native-limit-drafts-2026-09-10.md)。
+
+> **Native 写入口清单（2026-09-10）**：使用 TS AST 枚举真实保护调用及静态条件分支，忽略注释/示例文本；动态标签使生成失败。清单保留分类、调用位置与原权威关闭边界，不以分类数替代完整游戏资格，见[实际范围](./reviews/rust-windows-save-ui-candidate-2026-09-10.md)。
+
+> **启动和保存反馈边界（2026-09-10，候选）**：菜单模块载入与本地目录初始化可以重叠；React 挂载仍等待目录和桌面关闭保护就绪，不提前恢复游戏。保存拒绝操作的反馈绑定保存 ID，阶段更新不能清掉它，后续保存不会继承该警告。存档与 Rust 权威合同不变，见[本批实现和待验范围](./reviews/rust-windows-save-ui-candidate-2026-09-10.md)。
+
+> **验证专用资格正文（2026-09-10）**：main WeakMap 与 Host 私有类型只接受已认证 catalog 字节，再独立核验完整候选、发布者密钥版本、有限期隔离合成会话和撤销条件；16 KiB 固定字节合同与共享向量明确游戏内容 catalog 和外部签名 catalog 的区别。输出不是实时授权；可信上下文提供者、生产者认证和持久单写者接入待完成，见[正文合同](./rust/windows-validation-body-v1.md)。
+
+> **菜单快照来源复用（2026-09-10，开发候选）**：调用者保有完整状态的 proof 保存不再额外生成快照用运行态 transfer；到期快照转移已完成持久读回的压缩主档，仅重建外层封装及绑定摘要。独立持久验证、fencing/CAS、备份、主档身份与提交前让位保留；checkpoint/envelope 接管仍返回所需运行态。未改变持久版本或 Rust 实时资格，见[实现与验证](./reviews/rust-rp1-primary-snapshot-reuse-2026-09-10.md)。
+
+> **Windows helper 实包验证（2026-09-09，未发布）**：c09cfdf2 冻结 beta 的 76 项制品/79 文件通过，包内助手身份及真实 Electron ASAR 调用通过，窗口/焦点/对话框为 0。相关回归 70/1 权限 skip/0 fail；cd515 云端 Host/main 实际签名生命周期另行通过。两种构建分开记录，尚未接完整资格和实际游戏接管，见[实包证据](./reviews/rust-windows-catalog-package-2026-09-09.md)。
+
+> **Windows helper 制品绑定（2026-09-09，开发候选）**：packer 将独立 Rust 助手放到固定 native 资源目录，并把该次构建摘要嵌入 app.asar 元数据；包内 main factory 只读取自己的元数据。新内部制品清单 schema 2 强制核对该资源，schema 1 保留历史读取且不能满足显式的新助手要求。这些是制品身份检查，不授予运行资格，见[随包交付进度](./reviews/rust-windows-catalog-package-2026-09-09.md)。
+
+> **Windows catalog 验证边界（2026-09-09，开发候选）**：Host 的 Windows 成员验证模块与独立只读 Rust 助手复用验证代码，各自在自己的进程重新打开文件并调用 WinTrust；main 固定助手路径及独立程序/发布者摘要，检查有界响应和 nonce 后保存内部不可伪造的正文凭据。该调用模块尚未连接游戏启动或纳入冻结安装包，正文认证不授予实时权威。后续 schema、候选/生产者、时效撤销及单写者交接独立执行，见[实现与限制](./reviews/rust-windows-main-catalog-helper-2026-09-09.md)。
+
+> **菜单保存所有权（2026-09-09，开发候选）**：菜单完整状态通过原保存队列请求 Worker proof；已协调的当前 IndexedDB 主档由 save Worker 生成信封/绑定凭据和快照 transfer，persistence Worker 负责原 fencing/CAS、备份与精确读回。主线程保留调用者状态，仅处理小型回执；成功后才进入工厂。旧模式迁移、未知目录与无 Worker/IndexedDB 环境保留兼容保存路径。协议与持久版本不变，详见 [后台保存接入](./reviews/rust-rp1-startup-worker-save-2026-09-09.md)。
+
+> Windows 普通模拟启动先等待两项独立检查：main 时钟可读，以及 main 发起的启动 handoff 挑战完成。idle 时钟不能证明浏览器持久锁已清除；无锁、持久归还完成或匹配 Rust 会话并完成绑定才结束等待。同步保存和异步 JS 租约入口共用该等待状态，unknown/失败继续受保护；不支持 handoff 接口的环境保留原启动路径。该顺序避免先创建并传输整厂、随即停止重建 Worker。见[实包定位与回归](./reviews/rust-rp1-startup-reconcile-order-2026-09-09.md)。
+
+> Rust canonical 校验候选在单流、双流和对象入口使用固定 1 KiB 栈缓冲合并细碎哈希输入，递归访问共享同一个缓冲，大字符串片段直接传递，入口返回前完成 flush。完整字段、编码和摘要算法不变；没有缓存完整工厂或更改存档格式。专项已通过，最终完整核心及实际 Host/终局验证仍待终态，见[候选与验证](./reviews/rust-rp1-canonical-buffer-2026-09-10.md)。
+
+> 跨语言状态校验的流式 SHA-256 复用固定块 DataView，ProofWriter 复用 8 字节数值缓冲；同步消费后再覆写，原字节序、字段顺序、Unicode、数值和 revision 规则保持。完整摘要与实际 Rust 对照通过，详见[校验优化](./reviews/rust-rp1-proof-buffer-reuse-2026-09-09.md)。开发证据生产器仍有八项 TEST_ONLY 库测试，七项进程内重开、一项独立子进程持久边界恢复；没有改变生产准入或接入正式资格，见[恢复范围](./reviews/rust-windows-process-recovery-2026-09-09.md)。
+
+> 开发侧新增 TEST_ONLY 资格证据一致性检查：有界读取同一份字节做摘要和解析，绑定独立冻结的 source/Host/ASAR/catalog/rules/matrix，区分实际执行方式和 passed/failed/skipped/flaky。它未接入 renderer/main/Host，始终不授予身份认证、实时权威或发布许可；正式信任链仍待实现，见[ADR-009](./architecture/ADR-009-WINDOWS-RUST-QUALIFICATION.md)。
+
+> Rust 建造阶段 `run_centers()` 直接移动从候选基础状态移出的 automation/jobs/quantumMaterialBuffer 映射，避免先取得所有权又递归复制。必需字段错误、可选空缓冲、调度与写回规则不变；完整核心回归通过，完整用户等待收益待测。
+
+> 存档文本 checksum 对连续四个 ASCII 字符按原次序执行四次 FNV-1a 更新；Unicode、代理对、无效代理替换与短尾部仍按原 UTF-8 规则处理，checksum/字节数及全部保存保护保持。该循环主要服务 ASCII 占多数的 JSON，密集 Unicode 子样本存在反向耗时变化；完整保存步骤当前仅约 2.2% 收益，不推导完整菜单速度。详见[测量与边界](./reviews/rust-rp1-save-checksum-2026-09-09.md)。
+
+> 原生兼容存档导出在精确长度限制内使用固定 64 KiB `BufWriter`，合并逐实体、逐传送带与 JSON 分隔符写入；结束后必须核对完整长度、显式 flush、同步文件，再按原路径保护原子发布并同步目录。回调、长度或写入失败仍清理临时文件，原有导出保持不变。存档格式、校验、磁盘预算和离线准入不变，见[实现及完整状态验证](./reviews/rust-rp1-export-buffer-2026-09-09.md)。
+
+> 精确模拟的完整电源索引缺少电网键时表示没有电源，不再回退扫描所有星球；行星阶段的储能和燃料统计统一使用已构建的阶段索引。索引引用当前实体，原扣料顺序、全局阶段屏障和拓扑转换后的重建保持不变。无索引调用仍保留原扫描行为，见[边界及验证](./reviews/rust-rp1-power-lookup-2026-09-09.md)。
+
+> 保存容量估算和 IndexedDB record 元数据复用同一 payload 已计算并校验的 UTF-8 长度，避免为长度再分配整份编码缓冲区。Worker proof 提供主档/快照长度，协调写入只复用刚构建 catalog 的长度；无测量值的路径仍自行编码。原 catalog 构建、checksum、旧档结构验证及精确读回均保留。当前候选在完整终局保存专项中把主线程六次大型重复编码降为零，尚未证明新的整体菜单提速，见[测量与边界](./reviews/rust-rp1-save-byte-length-2026-09-09.md)。
+
+> 普通主档的原生离线尝试位于 `prepareTimeWarpDeferredLoad()` 之后：匹配日志独占恢复时间段并阻止普通离线重复计算；无匹配日志时，原有生产恢复函数解除未提交加速事务、将 pending 真实时间加入一次普通离线预算。Runtime source 的状态与 `savedAt` 绑定恢复后的来源，合计超过 30 秒仍回退完整现有流程。直接提交未恢复 raw timeWarp 状态的 Host 拒绝不能代表菜单入口行为；授权终局恢复来源的一秒全状态证明和范围见[复核记录](./reviews/rust-rp1-recovered-endgame-source-2026-09-09.md)。
+
+> 显式关闭施工批处理的参考模拟路径按当前物料逐作业直接规划，不探测或复用批量循环；独立逐步骤对照继续核对生产默认批处理的完整状态。该选项仅见于现有回归测试调用，默认生产路径的循环证明、缓存和预算保持原实现。见[验证成本记录](./reviews/rust-rp1-js-validation-cost-2026-09-09.md)。
+
+> 施工缺料判断使用只读的逐物料余额，仅访问当前配方输入，分别保持在制库存、托盘和量子直供的取整及消费顺序；重复输入条目不得重复使用同一库存。实际库存预留、扣除和产出仍由原结算流程提交，不新增存档字段。当前验证范围见[材料检查开发证据](./reviews/rust-rp1-js-validation-cost-2026-09-09.md)。
+
+> JS 精确模拟的完整机器索引中，星球缺席键明确表示空机器列表，不再回退全实体扫描；机器列表为空或行星没有制造中心时，直接结束对应无对象阶段。保留所有有对象流程和模拟秒数。两项旧代码反例及定向状态检查通过；随后本机全量及轻量云端均仍有递归量子建设计时失败，不能当作全量资格通过，见[空星球阶段记录](./reviews/rust-rp1-js-validation-cost-2026-09-09.md)。
+
+> 普通公开大工厂的读取缓冲已走通真实 Windows 离屏入口：`67a2ffbe` 无原生检查点的 5 秒候选完整采用、取消保档、真实保存来源和两次重开通过；三对继续到可操作中位缩短 72.13%。两包 UI/JS 相同，仍是临时来源完整证明后采用的现有架构，没有扩大宏准入。原始终局 timeWarp 状态、长离线和实时资格保持现有限制，见[实际入口证据](./reviews/rust-rp1-buffered-large-ui-wait-2026-09-09.md)。
+
+> v47 读取缓冲候选在 BoundedHashReader 内层新增 64 KiB BufReader，减少普通文件的逐字节读取，同时让哈希/UTF-16 分类继续跟随已消费字节。正常优化 Rust 1,363/5 ignored/0 失败、Native 全量 674/1 跳过/0 失败通过；本机 `6bf9f983` Host 的公开三对文件导入和运行态请求中位缩短 92.25%/89.64%，完整状态相同。授权终局来源仍因 timeWarp 激活被宏结算准入拒绝，原档不变；未开放新状态类别、长离线或实时接管。新大工厂完整 UI 等待和全量 JS 两项计时失败待验，见[开发记录](./reviews/rust-rp1-v47-read-buffer-2026-09-09.md)。
+
+> `33d96597` 的 hidden-no-focus-offscreen-v2 已通过三组实际流程和 12 次正常关闭：从未显示/聚焦且静音，每次有实际绘制，菜单就绪后三帧 186.5–213.4 ms。这是后续桌面测试的必需入口；普通用户窗口保持原行为。完整证据见[后台验收记录](./reviews/rust-rp1-background-testing-2026-09-09.md)。
+
+> 后台测试后续改为 hidden-no-focus-offscreen-v2：只对已经验证的隔离后台 profile 启用离屏窗口和 60 FPS 绘制，普通窗口设置不变。原因是 Windows 隐藏窗口即使关闭节流仍可能停止 requestAnimationFrame；实际探针要求从未显示/聚焦、静音、真实绘制以及菜单就绪后 3 帧不超过 500 ms。性能对照必须注明并保持相同离屏合成方式。下方 v1 为前一实现，见[失败与调整记录](./reviews/rust-rp1-background-testing-2026-09-09.md)。
+
+> 隔离桌面测试增加显式后台策略：仅身份初始化验证后的性能开发版临时 profile 可启用 hidden-no-focus-v1，窗口不可见、不可聚焦、不进任务栏且静音，系统对话框取消或计数。实际显示/聚焦事件独立记录为验证失败，普通客户端不安装这些钩子。隐藏渲染的计时关闭后台节流并由真实驱动验证，不改变模拟规则。见[后台验证记录](./reviews/rust-rp1-background-testing-2026-09-09.md)。
+
+> Windows 普通离线已接 `startNativeOfflineSourceStartup`：renderer 先发目录/来源时间头，main 此刻取可信时钟；运行态 v2 信封 256 KiB 分块并等待 ACK，main 验证大小/SHA、同步独占临时文件，最终 canonical/domain proof 绑定临时 revision 0。每次用独立 Host/SaveStore，确认进程退出后传出候选，清理自己的临时目录再发 `sourceClosed`；取消、窗口销毁与退出排空本次请求，旧检查点兼容保留。实际普通主档、自然保存来源、取消、持久采用及正常重开均通过。仍只采用 1–30 秒精确结果，JS 实时权威不变；同步完整证明和候选缓冲的终局成本待测。见[技术证据](./reviews/rust-rp1-runtime-source-entry-2026-09-09.md)。下方 Host-only 描述保留上批事实。
+
+> 普通离线增加 Host 内部 `corePrepareOfflineSourceExport` / `native-core-offline-runtime-source-export-v1`：经受保护文件读取器验证的普通主档运行态信封，以字节数、SHA-256、保存时间、目录身份和完整 canonical/domain proof 绑定一次性 revision 0 CoreState。只允许 1–30 秒精确前缀，不注册会话、不发布检查点、不追加 WAL；候选导出复用旧路径的校验/发布逻辑。已有会话借用后按需复制，临时来源转移所有权，避免额外复制完整来源。当前只是 Host 协议，尚未开放新的 preload 或 renderer API；未来 main 必须拥有路径、时钟、传输限额和清理，来源需是既有 JS 加载校验后的完整运行态。见[接口及验证边界](./reviews/rust-rp1-runtime-source-2026-09-09.md)。
+
+> Native 普通离线 DTO 区分 macro 的短精确前缀与长尾：`pure-idle-bounded-exact` 只在 1–30 秒、exactCalibrationSeconds 等于全部结算时间且 approximatedSeconds 为零时通过；源、revision、时间、导出证明仍绑定。计算前的正常拒绝允许没有 advance，但必须有原因且没有候选或导出。自动采用的 30 秒门禁不变。
+
+> Windows 普通离线传输的导出根目录与 Host 初始化共用 `desktopRuntimeIdentity` 和对应版本目录名，经 `resolveFixedNativeSaveRootPath()` 验证；普通版与性能开发版各用自身固定目录。实际 main 处理块的回归测试覆盖这两种身份，防止变量重命名后运行时才报错并回退 JS。
+
+> 菜单恢复入口：目录中的 UTF-8 字节数和 payload checksum 标识原主档。`readLocalSavePayloadWithChunkJournalSource()` 同时保留原文引用和已验证的恢复结果；目录仍与原主档比较，恢复结果独立经过 Worker 的完整校验。JSON 顺序不同或有效增量推进不会被错当成目录损坏；主档/目录在等待期间变化仍拒绝。同步保存缓存保留原主档，加载直接使用恢复状态，避免将重组正文当成磁盘原文而误报保存冲突。IDB/native journal 必须不早于有效主档的 savedAt，在读取大块数据前检查；同一状态 checksum 不代表同一保存时间。旧字符串读取接口及 primary→backup→snapshot 顺序不变，不新增存档字段或绕过 journal 与主档的绑定。
+
+> Rust 戴森逐秒环境：`load()` 独立复制四份戴森记录，吸收/衰减及发电汇总直接只读借用基础状态，全部成功后才 `save()`。不再为这两处计算每秒复制整份基础状态及无关生产历史；四份结果的写入顺序、失败原子性、浮点和模拟步长不变。
+
+> Rust Exact 内部写入清单：候选每个真实历史边界以 `FactoryWriterEvents::snapshot()` 生成与原 `clone().seal()` 相同的有序唯一行，同时去除收集器内此前秒数的重复行。累计提交行计数独立保留，各领域/拓扑标记及来源校验不变；最终提交仍 `seal()`，不写存档、不跳过模拟或历史边界。目的在于避免精确长回退反复复制和排序随时长增长的重复记录。
+
+> Rust 大档冷开诊断：显式 `DSP_NATIVE_CORE_OPEN_PROFILE=1` 输出固定阶段名、进程 ID、单调耗时及用于关联采样的系统时间。真实档测试可同时保留最多 4,096 个私有内存采样点；默认关闭，无玩家内容、状态写入或资格变更。系统时间仅用于诊断关联，不能用于模拟或确定性证明；采样峰值不等于完整分配追踪。
+
+> Rust 冷开准入复用：当调用者已经持有当前修订的解析实体列表时，戴森及本地/星际物流准入借用该只读列表，不再各分配第二份完整实体图。长度与原索引必须相同；实体顺序、目录构造、发射目标、全部路线和归属校验及错误优先次序保持不变。没有现成列表的内部调用继续通过原解析入口，戴森入口仍先验证基字段形状，再完整解码后检查目标。GameState、保存、模拟和准入范围不变。
+
+> **Rust 物理证明逐条签名（2026-09-08，开发候选）**：离线流证明沿用原物料归一化和 canonical 字节顺序，逐条解码实体与传送带后立即写入 SHA，借用无需修改的基字段；不先展开整份状态、复制历史再删除。有限矿实际扣除和每条带的计数仍逐条校验，未知字段保留，读取原始记录条数以覆盖待重建索引的行。旧整份展开实现仅保留为测试参考，11 项物理证明专项通过；预算、算法身份、WAL 及玩家资格不变。完整 release Rust 1,348/5 ignored、公共目录 14/2 性能跳过通过；独立性能与验证范围见[阶段证据](./reviews/rust-rp1-streamed-physical-proof-2026-09-08.md)。
+
+> **Rust 普通离线历史有序追加（2026-09-08，开发候选）**：局部 `ProductionHistoryAppender` 独占历史数组，首次追加继续稳定排序，后续时间戳单调时复用顺序，回退时重新排序；桶合并保留最后一条时间戳、保留窗口只淘汰前缀。原 1/10/60 秒桶、舍入、权重和终端遥测不变，重建用同一时钟边界辅助函数，候选成功前不安装。GameState、WAL 与算法版本不变；该结构没有新增共享可变状态。普通流证明的 30 次观察 / 60,000 记录步预算仍限制最多 2,000 个实体与带记录，实时及长离线自动资格不扩大。源码、全字节对照和验证缺口见 [阶段记录](./reviews/rust-rp1-history-append-2026-09-08.md)。
+
 > **1.2.7 并发模态隔离（2026-09-08，未发布）**：同一 Document 由模态栈统一计算背景 inert/aria-hidden。当前顶层的 surface、portal 分支和明确附加焦点根保持可交互，仍然打开的下层约束继续保护背景；注册、注销均重新计算，最后退出还原原属性与滚动状态。解决普通离线报告与工作区同次挂载时互相禁用的问题，不修改存档或结算逻辑。
 
 > **1.2.7 挂机停止恢复边界（2026-09-08，未发布）**：纯挂机启动恢复仅随权威启动状态执行，不因保存尺寸变化后回调重建而重新认领正在停止的会话。已验证但未完成保存的终态候选在本页内绑定会话、权威租约和冻结墙钟边界保留；重试复用候选，不重复结算，也不增加等待保存期间的收益。独立恢复诊断导出只读原主档与恢复日志，不触发结算、清理或上传，见[专项开发记录](./reviews/1.2.7-idle-stop-recovery-2026-09-08.md)。

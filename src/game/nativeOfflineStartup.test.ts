@@ -8,6 +8,7 @@ import type {
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
 import { createInitialState } from "./engine";
 import { tryNativeOfflineStartupSettlement } from "./nativeOfflineStartup";
+import { recoverOrphanedTimeWarpForOffline } from "./offlineTimeWarpRecovery";
 import { createNativeCoreRevisionProof } from "./nativeCoreProof";
 import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
 import type { DeferredLoadedGame } from "./storage";
@@ -51,23 +52,23 @@ function summary(
   };
 }
 
-function fixture() {
+function fixture(settledSeconds = SETTLED_SECONDS) {
   const runtime = createContentPackRuntimeSnapshot(createContentPackRegistry());
   const state = { ...createInitialState(), elapsedSeconds: 2, paused: false };
-  const candidateState = { ...state, elapsedSeconds: state.elapsedSeconds + SETTLED_SECONDS };
+  const candidateState = { ...state, elapsedSeconds: state.elapsedSeconds + settledSeconds };
   const sourceSummary = summary(state, REVISION, runtime.fingerprint);
   const candidateSummary = summary(candidateState, REVISION + 1, runtime.fingerprint);
   const transfer = serializeSaveEnvelopeToTransfer(candidateState, {
     formatVersion: 2,
     kind: "primary",
-    savedAt: SAVED_AT + SETTLED_SECONDS * 1_000,
+    savedAt: SAVED_AT + settledSeconds * 1_000,
     mode: "normal",
     slot: "main",
   });
   const loaded: DeferredLoadedGame = {
     state,
     savedAt: SAVED_AT,
-    offlineSeconds: SETTLED_SECONDS,
+    offlineSeconds: settledSeconds,
     offlineReport: null,
   };
   const closeNativeCore = vi.fn(async () => ({ closed: true }));
@@ -77,13 +78,13 @@ function fixture() {
     prepared: true,
     strategy: "macro-v1",
     sourceSavedAtMs: SAVED_AT,
-    settledAtMs: SAVED_AT + SETTLED_SECONDS * 1_000,
-    settledSeconds: SETTLED_SECONDS,
+    settledAtMs: SAVED_AT + settledSeconds * 1_000,
+    settledSeconds,
     sourceSummary,
     candidateSummary,
     advance: {
       supported: true,
-      exactScope: "offline-macro-v1",
+      exactScope: "pure-idle-bounded-exact",
       changed: true,
       previousRevision: REVISION,
       revision: REVISION + 1,
@@ -97,7 +98,7 @@ function fixture() {
       mode: "normal",
       result: {
         revision: REVISION + 1,
-        savedAtMs: SAVED_AT + SETTLED_SECONDS * 1_000,
+        savedAtMs: SAVED_AT + settledSeconds * 1_000,
         byteLength: transfer.byteLength,
         envelopeSha256: "b".repeat(64),
         stateChecksum: transfer.stateChecksum,
@@ -149,6 +150,242 @@ function fixture() {
 }
 
 describe("Windows native offline startup", () => {
+  async function sourceFixture(settledSeconds = SETTLED_SECONDS) {
+    const current = fixture(settledSeconds);
+    const status = await current.desktop.getNativePerformanceStatus();
+    current.desktop.getNativePerformanceStatus = vi.fn(async () => ({ ...status,
+      capabilities: [...status.capabilities, "native-core-offline-runtime-source-export-v1"],
+    }));
+    const original = await current.prepareNativeOfflineStartup({} as DesktopNativeOfflineStartupRequest);
+    if (!original.prepared) throw new Error("fixture must contain a candidate");
+    current.prepareNativeOfflineStartup.mockClear();
+    const sourceSummary = summary(current.state, 0, current.runtime.fingerprint);
+    const candidateSummary = summary(current.candidateState, 1, current.runtime.fingerprint);
+    const candidate = { ...original, sourceSummary, candidateSummary,
+      advance: { ...original.advance, previousRevision: 0, revision: 1, summary: candidateSummary },
+      export: { ...original.export, result: { ...original.export.result, revision: 1 } },
+    };
+    const chunks: Uint8Array[] = [];
+    const write = vi.fn(async (chunk: ArrayBuffer) => { chunks.push(new Uint8Array(chunk)); });
+    const finish = vi.fn(async (_proof: { expectedCanonicalSha256: string; expectedDomainSha256: string }) => candidate);
+    const cancel = vi.fn();
+    const start = vi.fn(() => ({ write, finish, cancel }));
+    current.desktop.startNativeOfflineSourceStartup = start;
+    return { ...current, chunks, write, finish, cancel, start, candidate };
+  }
+
+  async function longSourceFixture(seconds = 600, boundary = false) {
+    const current = await sourceFixture(seconds);
+    const status = await current.desktop.getNativePerformanceStatus();
+    current.desktop.getNativePerformanceStatus = vi.fn(async () => ({ ...status,
+      capabilities: [...status.capabilities, "native-core-offline-complete-candidate-v1"] }));
+    Object.assign(current.candidate.advance, {
+      exactScope: boundary ? "offline-boundary-exact" : "offline-state-proven",
+      algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity",
+      exactCalibrationSeconds: boundary ? seconds : 30,
+      approximatedSeconds: boundary ? 0 : seconds - 30,
+    });
+    return current;
+  }
+
+  it.each([false, true])("adopts a complete long source with a bound time ledger (boundary=%s)", async boundary => {
+    const current = await longSourceFixture(600, boundary);
+    const original = JSON.stringify(current.loaded);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") throw new Error("expected complete long candidate");
+    expect(result.state).toEqual(current.candidateState);
+    expect(result.loaded.offlineSeconds).toBe(600);
+    expect(result.approximation).toMatchObject({ mode: boundary ? "exact" : "approximate",
+      calibrationWindowSeconds: boundary ? 600 : 30, approximatedSeconds: boundary ? 0 : 570,
+      maxEstimatedError: 0, maxNonCriticalError: 0, validationScope: boundary ? "leaderboard-critical" : "all-state" });
+    expect(JSON.stringify(current.loaded)).toBe(original);
+    expect(current.desktop.recoverNativeSave).not.toHaveBeenCalled();
+    expect(current.cancel).toHaveBeenCalled();
+  });
+
+  async function transientSourceFixture(seconds = 31) {
+    const current = await longSourceFixture(seconds, true);
+    const status = await current.desktop.getNativePerformanceStatus();
+    current.desktop.getNativePerformanceStatus = vi.fn(async () => ({ ...status,
+      capabilities: [...status.capabilities, "native-core-offline-transient-exact-v1"] }));
+    Object.assign(current.candidate.advance, { exactScope: "offline-transient-exact",
+      algorithmVersion: "native-offline-transient-exact-v1" });
+    return current;
+  }
+
+  it.each([31, 32, 35, 60])("adopts a separately versioned %s-second Exact transient without changing the source", async seconds => {
+    const current = await transientSourceFixture(seconds);
+    const original = JSON.stringify(current.loaded);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") throw new Error("expected Exact transient candidate");
+    expect(result.state).toEqual(current.candidateState);
+    expect(result.approximation).toMatchObject({ mode: "exact", calibrationWindowSeconds: seconds,
+      approximatedSeconds: 0, algorithmVersion: "native-offline-transient-exact-v1" });
+    expect(JSON.stringify(current.loaded)).toBe(original);
+    expect(current.cancel).toHaveBeenCalled();
+  });
+
+  it.each(["capability", "algorithm", "partial", "approximation", "too-short", "too-long"])(
+    "rejects a transient with invalid %s evidence and preserves its source", async invalid => {
+      const current = await transientSourceFixture(invalid === "too-short" ? 30 : invalid === "too-long" ? 61 : 31);
+      const original = JSON.stringify(current.loaded);
+      if (invalid === "capability") {
+        const status = await current.desktop.getNativePerformanceStatus();
+        current.desktop.getNativePerformanceStatus = vi.fn(async () => ({ ...status,
+          capabilities: status.capabilities.filter(value => value !== "native-core-offline-transient-exact-v1") }));
+      } else if (invalid === "algorithm") current.candidate.advance.algorithmVersion = "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity";
+      else if (invalid === "partial") current.candidate.advance.exactCalibrationSeconds = 30;
+      else if (invalid === "approximation") current.candidate.advance.approximatedSeconds = 1;
+      const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+      expect(result.status).toBe("fallback");
+      expect(JSON.stringify(current.loaded)).toBe(original);
+      expect(current.cancel).toHaveBeenCalled();
+    });
+
+  it.each([
+    { exactScope: "offline-macro-v1" as const },
+    { algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1" },
+    { exactCalibrationSeconds: 29, approximatedSeconds: 571 },
+    { approximatedSeconds: 569 },
+    { exactScope: "offline-boundary-exact" as const },
+  ])("rejects an incomplete long candidate without altering its source: %j", async change => {
+    const current = await longSourceFixture();
+    const original = JSON.stringify(current.loaded);
+    Object.assign(current.candidate.advance, change);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("fallback");
+    expect(JSON.stringify(current.loaded)).toBe(original);
+    expect(current.cancel).toHaveBeenCalled();
+  });
+
+  it.each(["time", "records"])("refuses long candidates outside the existing %s budget before transferring", async budget => {
+    const current = await longSourceFixture();
+    if (budget === "time") current.loaded.offlineSeconds = 28_801;
+    else current.loaded.state.entities = Array.from({ length: 2_001 }, () => current.loaded.state.entities[0]);
+    expect((await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop })).status).toBe("fallback");
+    expect(current.start).not.toHaveBeenCalled();
+  });
+
+  it("uses the verified loaded runtime without reading or adopting any native checkpoint", async () => {
+    const current = await sourceFixture();
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") throw new Error("expected a candidate");
+    expect(result.state).toEqual(JSON.parse(JSON.stringify(current.candidateState)));
+    expect(current.desktop.recoverNativeSave).not.toHaveBeenCalled();
+    expect(current.desktop.openNativeCore).not.toHaveBeenCalled();
+    expect(current.prepareNativeOfflineStartup).not.toHaveBeenCalled();
+    expect(current.closeNativeCore).not.toHaveBeenCalled();
+    expect(current.cancel).toHaveBeenCalled();
+    const bytes = new Uint8Array(current.chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of current.chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    const source = JSON.parse(new TextDecoder().decode(bytes));
+    expect(source.state).toEqual(JSON.parse(JSON.stringify(current.loaded.state)));
+    expect(source.savedAt).toBe(current.loaded.savedAt);
+    expect(current.finish).toHaveBeenCalledWith({
+      expectedCanonicalSha256: current.candidate.sourceSummary.canonicalSha256,
+      expectedDomainSha256: current.candidate.sourceSummary.domainSha256,
+    });
+  });
+
+  it("binds an orphan-recovered source to its earlier checkpoint and combined wall interval once", async () => {
+    const current = await sourceFixture();
+    const orphan: DeferredLoadedGame = {
+      ...current.loaded,
+      savedAt: SAVED_AT + 5_000,
+      offlineSeconds: SETTLED_SECONDS - 5,
+      state: {
+        ...current.state,
+        timeWarp: { ...current.state.timeWarp, enabled: true, pendingWallSeconds: 5, pendingSimulationSeconds: 40 },
+        idleSettlement: { ...current.state.idleSettlement, currentRunStartedAt: SAVED_AT },
+      },
+    };
+    const original = JSON.stringify(orphan);
+    // StartMenu performs this only after excluding a matching live journal.
+    const recovered = recoverOrphanedTimeWarpForOffline(orphan);
+    if (!recovered.ok) throw new Error("expected orphan recovery");
+    expect(recovered.loaded).toEqual(current.loaded);
+    expect(recovered.summary).toMatchObject({
+      recoveredPendingWallSeconds: 5,
+      discardedPendingSimulationSeconds: 40,
+      submittedOfflineSeconds: SETTLED_SECONDS,
+    });
+    const repeated = recoverOrphanedTimeWarpForOffline(recovered.loaded);
+    if (!repeated.ok) throw new Error("expected idempotent recovery");
+    expect(repeated.loaded).toBe(recovered.loaded);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: repeated.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    if (result.status !== "complete") throw new Error("expected recovered candidate");
+    expect(result.state).toEqual(JSON.parse(JSON.stringify(current.candidateState)));
+    expect(result.loaded.savedAt).toBe(SAVED_AT);
+    expect(result.loaded.offlineSeconds).toBe(SETTLED_SECONDS);
+    expect(current.start).toHaveBeenCalledOnce();
+    expect(current.start).toHaveBeenCalledWith(expect.objectContaining({ sourceSavedAtMs: SAVED_AT }));
+    const source = JSON.parse(new TextDecoder().decode(Buffer.concat(current.chunks)));
+    expect(source.savedAt).toBe(SAVED_AT);
+    expect(source.state).toEqual(JSON.parse(JSON.stringify(current.state)));
+    expect(current.finish).toHaveBeenCalledWith({
+      expectedCanonicalSha256: current.candidate.sourceSummary.canonicalSha256,
+      expectedDomainSha256: current.candidate.sourceSummary.domainSha256,
+    });
+    expect(JSON.stringify(orphan)).toBe(original);
+  });
+
+  it("retains the complete recovered interval when pending wall time crosses the native limit", async () => {
+    const current = await sourceFixture();
+    const orphan: DeferredLoadedGame = {
+      ...current.loaded,
+      savedAt: SAVED_AT + 6_000,
+      offlineSeconds: SETTLED_SECONDS - 5,
+      state: { ...current.state, timeWarp: { ...current.state.timeWarp, enabled: true, pendingWallSeconds: 6, pendingSimulationSeconds: 48 } },
+    };
+    const original = JSON.stringify(orphan);
+    const recovered = recoverOrphanedTimeWarpForOffline(orphan);
+    if (!recovered.ok) throw new Error("expected orphan recovery");
+    const prepared = JSON.stringify(recovered.loaded);
+    expect(recovered.loaded.offlineSeconds).toBe(31);
+    expect(recovered.loaded.savedAt).toBe(SAVED_AT);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: recovered.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("fallback");
+    expect(current.start).not.toHaveBeenCalled();
+    expect(current.prepareNativeOfflineStartup).not.toHaveBeenCalled();
+    expect(current.desktop.recoverNativeSave).not.toHaveBeenCalled();
+    expect(JSON.stringify(recovered.loaded)).toBe(prepared);
+    expect(JSON.stringify(orphan)).toBe(original);
+  });
+
+  it("cancels source upload without calculating or mutating the original loaded state", async () => {
+    const current = await sourceFixture();
+    const original = JSON.stringify(current.loaded);
+    const controller = new AbortController();
+    current.write.mockImplementationOnce(async () => { controller.abort(); });
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime, signal: controller.signal }, { desktop: current.desktop });
+    expect(result.status).toBe("fallback");
+    expect(current.finish).not.toHaveBeenCalled();
+    expect(current.cancel).toHaveBeenCalled();
+    expect(JSON.stringify(current.loaded)).toBe(original);
+  });
+
+  it("discards a temporary candidate with a changed full source proof", async () => {
+    const current = await sourceFixture();
+    current.candidate.sourceSummary.canonicalSha256 = "0".repeat(64);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("fallback");
+    expect(current.cancel).toHaveBeenCalled();
+    expect(current.closeNativeCore).not.toHaveBeenCalled();
+  });
+
+  it("retains the original loaded state when temporary Host or cleanup fails", async () => {
+    const current = await sourceFixture();
+    const original = JSON.stringify(current.loaded);
+    current.finish.mockRejectedValueOnce(new Error("temporary Host cleanup failed"));
+    expect(await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop })).toMatchObject({ status: "fallback" });
+    expect(current.cancel).toHaveBeenCalled();
+    expect(JSON.stringify(current.loaded)).toBe(original);
+  });
+
   it("keeps productive long intervals on the JS decision path without opening a native candidate", async () => {
     const current = fixture();
     current.loaded.offlineSeconds = 600;

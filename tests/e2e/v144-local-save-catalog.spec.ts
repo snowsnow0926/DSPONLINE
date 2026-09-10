@@ -109,6 +109,30 @@ async function installColdReadInstrumentation(page: Page): Promise<void> {
   });
 }
 
+test("menu code loads alongside the catalog but cannot mount before storage is ready", async ({ page }) => {
+  await page.goto("/?menu=1&storageMigration=production");
+  await expect(page.locator(".start-menu")).toBeVisible();
+  await seedCatalogedPayload(page, anonymousPayload(4 * 1024));
+  let releaseStorage!: () => void;
+  const storageGate = new Promise<void>(resolve => { releaseStorage = resolve; });
+  await page.route("**/src/game/localSaveStore.ts*", async route => {
+    await storageGate;
+    await route.continue();
+  });
+  const launcherRequested = page.waitForRequest(request => new URL(request.url()).pathname === "/src/GameLauncher.tsx", { timeout: 5_000 });
+  // Attach a rejection handler immediately, including if navigation fails.
+  const launcherResult = launcherRequested.then(() => true, () => false);
+  try {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    expect(await launcherResult, "menu module must be requested without awaiting the blocked storage module").toBe(true);
+    await expect(page.locator(".start-menu")).toHaveCount(0);
+  } finally {
+    releaseStorage();
+  }
+  await expect(page.locator(".start-menu-primary")).toContainText("继续游戏");
+  await page.unroute("**/src/game/localSaveStore.ts*");
+});
+
 test("catalog-backed current and 2x cold menus never hydrate or parse payload strings", async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto("/?menu=1&storageMigration=production");
@@ -143,8 +167,8 @@ test("catalog-backed current and 2x cold menus never hydrate or parse payload st
   }
   const sorted = reports.flatMap((report) => report.samples).sort((left, right) => left - right);
   const p95 = sorted[Math.ceil(sorted.length * 0.95) - 1];
-  expect(p95).toBeLessThanOrEqual(500);
   console.log(`V144_COLD_CATALOG ${JSON.stringify({ p95, reports })}`);
+  expect(p95).toBeLessThanOrEqual(500);
 });
 
 test("legacy 35 MiB indexing parses one payload off-main and writes a bound small catalog", async ({ page }) => {

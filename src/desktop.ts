@@ -284,6 +284,19 @@ export interface DesktopNativeOfflineStartupRequest {
   readonly strategy: "macro-v1";
 }
 
+/** Main anchors time before encoding; finish binds the verified runtime proof. */
+export interface DesktopNativeOfflineSourceStartRequest {
+  readonly registryFingerprint: string;
+  readonly catalog: DesktopNativeCoreCatalog;
+  readonly sourceSavedAtMs: number;
+}
+
+export interface DesktopNativeOfflineSourceTransfer {
+  write: (chunk: ArrayBuffer) => Promise<void>;
+  finish: (proof: { readonly expectedCanonicalSha256: string; readonly expectedDomainSha256: string }) => Promise<DesktopNativeOfflineStartupResult>;
+  cancel: () => void;
+}
+
 export interface DesktopBridge {
   isDesktop: true;
   setFontScale: (scale: number) => Promise<{ scale: number; zoomFactor: number }>;
@@ -334,6 +347,10 @@ export interface DesktopBridge {
   prepareNativeOfflineStartup?: (
     request: DesktopNativeOfflineStartupRequest,
   ) => Promise<DesktopNativeOfflineStartupResult>;
+  /** Disposable read-only source upload; chunks are bounded and acknowledged. */
+  startNativeOfflineSourceStartup?: (
+    request: DesktopNativeOfflineSourceStartRequest,
+  ) => DesktopNativeOfflineSourceTransfer;
   getRuntimeDiagnostics: () => Promise<DesktopRuntimeDiagnostics>;
   getNativeProjectionSubscriptionDiagnostics?: () =>
     Promise<DesktopNativeProjectionSubscriptionDiagnostics>;
@@ -3597,7 +3614,7 @@ export interface DesktopNativeCoreAdvanceRequest extends DesktopNativeCoreSessio
 
 export interface DesktopNativeCoreAdvanceResult {
   supported: boolean;
-  exactScope: "no-change" | "clock-only" | "simple-factory-v1" | "pure-idle-bounded-exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "offline-macro-v1" | "unsupported-domain";
+  exactScope: "no-change" | "clock-only" | "simple-factory-v1" | "pure-idle-bounded-exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "offline-macro-v1" | "offline-state-proven" | "offline-boundary-exact" | "offline-transient-exact" | "unsupported-domain";
   changed: boolean;
   previousRevision: number;
   revision: number;

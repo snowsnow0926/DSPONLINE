@@ -47,13 +47,14 @@ function createNativeOfflineExportId() {
   return `offlinecandidate${randomUUID().replaceAll("-", "")}`;
 }
 
-function waitForPortMessage(port, accept, timeoutMs = NATIVE_OFFLINE_EXPORT_ACK_TIMEOUT_MS) {
+function waitForPortMessage(port, accept, timeoutMs = NATIVE_OFFLINE_EXPORT_ACK_TIMEOUT_MS, signal) {
   return new Promise((resolve, reject) => {
     let timer = null;
     const cleanup = () => {
       if (timer) clearTimeout(timer);
       port.off("message", onMessage);
       port.off("close", onClose);
+      signal?.removeEventListener("abort", onAbort);
     };
     const onMessage = (event) => {
       if (!accept(event?.data)) return;
@@ -66,6 +67,12 @@ function waitForPortMessage(port, accept, timeoutMs = NATIVE_OFFLINE_EXPORT_ACK_
         code: "NATIVE_OFFLINE_STARTUP_TRANSFER_CLOSED",
       }));
     };
+    const onAbort = () => {
+      cleanup();
+      reject(Object.assign(new Error("native offline startup transfer cancelled"), { name: "AbortError", code: "ABORTED" }));
+    };
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener("abort", onAbort, { once: true });
     port.on("message", onMessage);
     port.on("close", onClose);
     timer = setTimeout(() => {
@@ -100,21 +107,28 @@ async function streamNativeOfflineStartupCandidate({
   if (!validLogicalId(exportId, 128) || exportId.includes(":") || exportId.includes(".")) {
     throw new TypeError("native offline startup export identity is invalid");
   }
+  port.start?.();
+  const result = normalizeResult(await registry.prepareOfflineSettlementExport(
+    ownerId,
+    intent,
+    observedNowMs,
+    exportId,
+  ));
+  return streamNativeOfflineCandidateResult({ result, exportId, nativeRootPath, port, fileSystem });
+}
+
+async function streamNativeOfflineCandidateResult({ result, exportId, nativeRootPath, port,
+  fileSystem = fs, signal }) {
+  if (signal?.aborted) throw Object.assign(new Error("native offline startup transfer cancelled"), { name: "AbortError", code: "ABORTED" });
   let exportPath = null;
   let exportHandle = null;
   try {
     port.start?.();
-    const result = normalizeResult(await registry.prepareOfflineSettlementExport(
-      ownerId,
-      intent,
-      observedNowMs,
-      exportId,
-    ));
     if (!result.prepared) {
       port.postMessage({ start: result, payloadByteLength: 0 });
       port.postMessage({ end: true, totalBytes: 0, envelopeSha256: null });
       await waitForPortMessage(port, (message) =>
-        exactKeys(message, ["completeAck"]) && message.completeAck === null);
+        exactKeys(message, ["completeAck"]) && message.completeAck === null, undefined, signal);
       return result;
     }
     // The export identity is main-generated, so this is the only candidate
@@ -154,7 +168,7 @@ async function streamNativeOfflineStartupCandidate({
         offset,
       });
       await waitForPortMessage(port, (message) =>
-        exactKeys(message, ["ack"]) && message.ack === offset);
+        exactKeys(message, ["ack"]) && message.ack === offset, undefined, signal);
     }
     const envelopeSha256 = digest.digest("hex");
     if (offset !== proof.byteLength || envelopeSha256 !== proof.envelopeSha256) {
@@ -162,7 +176,7 @@ async function streamNativeOfflineStartupCandidate({
     }
     port.postMessage({ end: true, totalBytes: offset, envelopeSha256 });
     await waitForPortMessage(port, (message) =>
-      exactKeys(message, ["completeAck"]) && message.completeAck === envelopeSha256);
+      exactKeys(message, ["completeAck"]) && message.completeAck === envelopeSha256, undefined, signal);
     return result;
   } finally {
     if (exportHandle) await exportHandle.close().catch(() => undefined);
@@ -177,4 +191,5 @@ module.exports = {
   createNativeOfflineExportId,
   normalizeNativeOfflineStartupIntent,
   streamNativeOfflineStartupCandidate,
+  streamNativeOfflineCandidateResult,
 };

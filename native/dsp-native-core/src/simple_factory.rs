@@ -2590,16 +2590,36 @@ fn static_admission_reason_with_records(
     if let Some(reason) = belt_reason {
         return Ok(Some(reason));
     }
-    if let Some(reason) = crate::dyson::admission_reason(state)? {
+    let dyson_reason = match parsed_entities {
+        Some(entities) => crate::dyson::admission_reason_with_entities(state, entities)?,
+        None => crate::dyson::admission_reason(state)?,
+    };
+    if let Some(reason) = dyson_reason {
         return Ok(Some(reason));
     }
-    if let Some(reason) = crate::local_logistics::admission_reason(state)? {
+    let local_reason = match parsed_entities {
+        Some(entities) => crate::local_logistics::admission_reason_with_entities(state, entities)?,
+        None => crate::local_logistics::admission_reason(state)?,
+    };
+    if let Some(reason) = local_reason {
         return Ok(Some(reason));
     }
-    if let Some(reason) = crate::quantum_logistics::admission_reason(state)? {
+    let quantum_reason = match parsed_entities {
+        Some(entities) => {
+            crate::quantum_logistics::admission_reason_with_entities(state, entities)?
+        }
+        None => crate::quantum_logistics::admission_reason(state)?,
+    };
+    if let Some(reason) = quantum_reason {
         return Ok(Some(reason));
     }
-    if let Some(reason) = crate::interstellar_logistics::admission_reason(state)? {
+    let interstellar_reason = match parsed_entities {
+        Some(entities) => {
+            crate::interstellar_logistics::admission_reason_with_entities(state, entities)?
+        }
+        None => crate::interstellar_logistics::admission_reason(state)?,
+    };
+    if let Some(reason) = interstellar_reason {
         return Ok(Some(reason));
     }
     Ok(None)
@@ -8570,7 +8590,7 @@ fn prepare_advance_with_runtime_options(
             finalize_public_factory_boundary_before_history(state, &mut base, &mut entities)?;
             let flow_requirement = crate::production_history::belt_flow_requirement(&base)?;
             let prepared_belt_flow = belt_runtime.prepared_flow(flow_requirement)?;
-            let cumulative_history_writer_events = factory_writer_events.clone().seal();
+            let cumulative_history_writer_events = factory_writer_events.snapshot();
             let history_record = state.record_production_history_for_exact_step(
                 &mut base,
                 &entities,

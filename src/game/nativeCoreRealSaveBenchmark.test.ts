@@ -20,6 +20,46 @@ import type { GameState } from "./types";
 const runBenchmark = process.env.DSP_RUN_NATIVE_CORE_BENCHMARK === "1";
 const benchmarkOpenOnly = process.env.DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY === "1";
 const benchmarkExactOnly = process.env.DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY === "1";
+
+function readExactBenchmarkSeconds(environment: NodeJS.ProcessEnv): number {
+  const raw = environment.DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS;
+  if (raw === undefined) return 1;
+  if (!/^[1-9][0-9]*$/.test(raw) || Number(raw) > 30) {
+    throw new Error("Exact benchmark duration must be an integer from 1 through 30 seconds");
+  }
+  const seconds = Number(raw);
+  if (seconds !== 1 && (environment.DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY !== "1" ||
+    environment.DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY === "1" ||
+    environment.DSP_NATIVE_CORE_PROFILE === "1" ||
+    readFixedAffinityProcessPolicyRequest(environment) !== null)) {
+    throw new Error("Multi-second Exact requires exact-only mode without the fixed one-second profile contract");
+  }
+  return seconds;
+}
+
+function advanceExactBenchmarkReference(
+  source: GameState,
+  seconds: number,
+  profiler: ReturnType<typeof createSimulationProfiler>,
+) {
+  // Match nativeCoreDifferential's existing boundary contract: aligned whole
+  // seconds publish each public second; an unaligned save retains legacy
+  // outer-call history sampling. Never silently normalize a player's clock.
+  const publicSeconds = Math.abs(source.elapsedSeconds - source.historyRecordedAt) <= 0.0001;
+  const durations = publicSeconds ? Array<number>(seconds).fill(1) : [seconds];
+  let state = source;
+  let exactAdvanceDurationMs = 0;
+  let conservationFailure: string | null = null;
+  for (const duration of durations) {
+    const result = advanceExactSimulationForConservationDiagnostic(state, duration, duration, profiler);
+    state = result.state;
+    exactAdvanceDurationMs += result.exactAdvanceDurationMs;
+    conservationFailure ??= result.conservationFailure;
+  }
+  return { state, exactAdvanceDurationMs, conservationFailure,
+    boundaryPolicy: publicSeconds ? "aligned-public-seconds" : "unaligned-legacy-batch" };
+}
+
 const fixturePath = process.env.DSP_NATIVE_CORE_FIXTURE ||
   "C:\\Users\\WINDOWS\\Downloads\\dsp-idle-save-2026-08-24 (1).json\\dsp-idle-save-2026-08-24 (1).json";
 const require = createRequire(import.meta.url);
@@ -325,13 +365,54 @@ interface PrivatePeakSample {
   intervalMaxMs: number | null;
   samplingCadenceValid: boolean;
   error: string | null;
+  // Optional bounded diagnostic timeline; absent in ordinary qualification runs.
+  timeline?: Array<{ unixMillis: number; privateBytes: number }>;
+  timelineTruncated?: boolean;
+  reader?: "windows-process-memory-counters-ex-v1";
 }
+
+// Query only the exact Host handle. Process.Refresh()/PrivateMemorySize64
+// repeatedly reconstructs process information and can exceed the 50 ms
+// sampling interval on a busy desktop. Keep the same private-commit metric
+// and cadence gates using the documented single-process Win32 counter.
+const privateMemoryCounterSource = `
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class DspPrivatePeakNative {
+  public static int TestReadDelayMs = 0;
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Counters {
+    public uint Size, PageFaultCount;
+    public UIntPtr PeakWorkingSet, WorkingSet, PeakPagedPool, PagedPool;
+    public UIntPtr PeakNonPagedPool, NonPagedPool, Pagefile, PeakPagefile, PrivateUsage;
+  }
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern SafeProcessHandle OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  private static extern bool K32GetProcessMemoryInfo(SafeProcessHandle process, out Counters counters, uint size);
+  public static long Read(SafeProcessHandle process) {
+    Counters counters;
+    if (!K32GetProcessMemoryInfo(process, out counters, (uint)Marshal.SizeOf(typeof(Counters))))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    var value = checked((long)counters.PrivateUsage.ToUInt64());
+    if (TestReadDelayMs > 0) System.Threading.Thread.Sleep(TestReadDelayMs);
+    return value;
+  }
+}`;
 
 async function startPrivatePeakSampler(
   pid: number | undefined,
   phase: PrivatePeakSample["phase"],
   intervalMs = 50,
+  testReadDelayMs = 0,
 ): Promise<{ stop: () => Promise<PrivatePeakSample> }> {
+  // Only the scheduling regression injects read overhead. Real benchmark
+  // callers retain the default zero delay and the original cadence gates.
+  if (!Number.isSafeInteger(testReadDelayMs) || testReadDelayMs < 0 || testReadDelayMs > 200) {
+    throw new RangeError("private peak test read delay is outside the bounded range");
+  }
   const baselineBytes = privateBytes(pid);
   if (process.platform !== "win32" || !Number.isSafeInteger(pid) || !pid) {
     return {
@@ -359,6 +440,7 @@ async function startPrivatePeakSampler(
   }
 
   const stopPath = path.join(os.tmpdir(), `dsp-native-private-peak-${process.pid}-${pid}-${crypto.randomUUID()}.stop`);
+  const recordTimeline = process.env.DSP_NATIVE_CORE_OPEN_PROFILE === "1";
   const quotedStopPath = stopPath.replaceAll("'", "''");
   const script = [
     "$ErrorActionPreference='Stop'",
@@ -367,20 +449,27 @@ async function startPrivatePeakSampler(
     `$intervalMs=${intervalMs}`,
     "$samplerProcess=[System.Diagnostics.Process]::GetCurrentProcess()",
     "try { $samplerProcess.PriorityClass=[System.Diagnostics.ProcessPriorityClass]::High } catch { }",
-    "$targetProcess=[System.Diagnostics.Process]::GetProcessById($targetPid)",
+    `Add-Type -TypeDefinition '${privateMemoryCounterSource.replaceAll("'", "''")}'`,
+    `[DspPrivatePeakNative]::TestReadDelayMs=${testReadDelayMs}`,
+    "$targetHandle=[DspPrivatePeakNative]::OpenProcess(0x1000,$false,$targetPid)",
+    "if ($targetHandle.IsInvalid) { throw 'private peak sampler could not open target query handle' }",
     "$peak=0L",
     "$samples=0L",
     "$readErrors=0L",
     "$lastReadSucceeded=$false",
     "$lastSampleAt=0L",
     "$clockFrequency=[double][System.Diagnostics.Stopwatch]::Frequency",
+    "$intervalTicks=[long][Math]::Ceiling(($intervalMs*$clockFrequency)/1000.0)",
     "$intervals=[System.Collections.Generic.List[long]]::new()",
-    "$sample={ param([bool]$recordInterval); $sampleAt=[System.Diagnostics.Stopwatch]::GetTimestamp(); if ($recordInterval -and $lastSampleAt -gt 0) { $elapsedMs=[long][Math]::Round((($sampleAt-$lastSampleAt)*1000.0)/$clockFrequency); [void]$intervals.Add($elapsedMs) }; $lastSampleAt=$sampleAt; try { $targetProcess.Refresh(); $value=$targetProcess.PrivateMemorySize64; if ($value -gt $peak) { $peak=$value }; $samples++; $lastReadSucceeded=$true } catch { $readErrors++; $lastReadSucceeded=$false } }",
-    ". $sample $false",
+    `$recordTimeline=$${recordTimeline ? "true" : "false"}`,
+    "$sample={ param([bool]$recordInterval); $sampleAt=[System.Diagnostics.Stopwatch]::GetTimestamp(); if ($recordInterval -and $lastSampleAt -gt 0) { $elapsedMs=[long][Math]::Round((($sampleAt-$lastSampleAt)*1000.0)/$clockFrequency); [void]$intervals.Add($elapsedMs) }; $lastSampleAt=$sampleAt; try { $value=[DspPrivatePeakNative]::Read($targetHandle); if ($value -gt $peak) { $peak=$value }; $samples++; $lastReadSucceeded=$true; if ($recordTimeline -and $samples -le 4096) { [Console]::Out.WriteLine((\"SAMPLE`t{0}`t{1}\" -f [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(),$value)) } } catch { $readErrors++; $lastReadSucceeded=$false } }",
+    "try { . $sample $false",
     "[Console]::Out.WriteLine('READY')",
     "[Console]::Out.Flush()",
-    "while (-not [System.IO.File]::Exists($stopPath)) { [System.Threading.Thread]::Sleep($intervalMs); . $sample $true }",
-    ". $sample $false",
+    // Wait only for the remaining period. Actual timestamp gaps still include
+    // every read and scheduler delay; genuine cadence failures stay rejected.
+    "while (-not [System.IO.File]::Exists($stopPath)) { $remainingMs=(($lastSampleAt+$intervalTicks-[System.Diagnostics.Stopwatch]::GetTimestamp())*1000.0)/$clockFrequency; if ($remainingMs -gt 0) { [System.Threading.Thread]::Sleep([int][Math]::Ceiling($remainingMs)) }; . $sample $true }",
+    ". $sample $false } finally { $targetHandle.Dispose() }",
     "$sorted=@($intervals | Sort-Object)",
     "$intervalCount=$sorted.Count",
     "$intervalMin=if ($intervalCount -gt 0) { [long]$sorted[0] } else { 0L }",
@@ -475,7 +564,12 @@ async function startPrivatePeakSampler(
           stderr.trim() || null,
         ].filter((value): value is string => Boolean(value));
         const error = samplerFailures.length === 0 ? null : samplerFailures.join("; ");
+        const timeline = recordTimeline ? [...stdout.matchAll(/SAMPLE\t(\d+)\t(\d+)/g)].map((entry) => ({
+          unixMillis: Number(entry[1]), privateBytes: Number(entry[2]),
+        })) : undefined;
         return {
+          reader: "windows-process-memory-counters-ex-v1",
+          ...(timeline ? { timeline, timelineTruncated: sampleCount > 4096 } : {}),
           phase,
           pid,
           samplerPid: Number.isSafeInteger(child.pid) ? child.pid ?? null : null,
@@ -549,8 +643,72 @@ function logBenchmarkRecord(label: string, value: Record<string, unknown>): void
 }
 
 describe("fixed-affinity benchmark process-policy contract", () => {
+  it("keeps the default one-second contract and bounds opt-in multi-second diagnostics", () => {
+    expect(readExactBenchmarkSeconds({})).toBe(1);
+    expect(readExactBenchmarkSeconds({ DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS: "1" })).toBe(1);
+    for (const seconds of [2, 5, 30]) {
+      expect(readExactBenchmarkSeconds({ DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY: "1",
+        DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS: String(seconds) })).toBe(seconds);
+    }
+    for (const raw of ["", "0", "-1", "1.5", "31", "Infinity", "NaN", " 5", "5e0", "05"]) {
+      expect(() => readExactBenchmarkSeconds({ DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY: "1",
+        DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS: raw })).toThrow("integer from 1 through 30");
+    }
+    for (const incompatible of [
+      { DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY: "0" },
+      { DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY: "1" },
+      { DSP_NATIVE_CORE_PROFILE: "1" },
+      { DSP_NATIVE_CORE_BENCHMARK_AFFINITY: "F", DSP_NATIVE_CORE_BENCHMARK_NODE_PRIORITY: "Normal",
+        DSP_NATIVE_CORE_BENCHMARK_NATIVE_PRIORITY: "Normal" },
+    ]) {
+      expect(() => readExactBenchmarkSeconds({ DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY: "1",
+        DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS: "5", ...incompatible })).toThrow();
+    }
+  });
+
   it.skipIf(runBenchmark)("does not allocate real-save scratch while the benchmark suite is skipped", () => {
     expect(nativeBenchmarkScratchRootCreations).toBe(0);
+  });
+
+  it.skipIf(process.platform !== "win32")("samples private committed memory from the exact process at the required cadence", { timeout: 20_000 }, async () => {
+    const sampler = await startPrivatePeakSampler(process.pid, "open");
+    let sample: PrivatePeakSample;
+    // Commit pages and retain them through both independent readers. This
+    // verifies the metric is private commit, not a working-set surrogate.
+    const allocation = new Uint8Array(64 * 1024 * 1024);
+    try {
+      allocation.fill(0x5a);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } finally {
+      sample = await sampler.stop();
+    }
+    expect(allocation[allocation.length - 1]).toBe(0x5a);
+    expect(sample.reader).toBe("windows-process-memory-counters-ex-v1");
+    expect(sample.error).toBeNull();
+    expect(sample.sampleCount).toBeGreaterThan(3);
+    expect(sample.peakBytes! - sample.baselineBytes!).toBeGreaterThan(48 * 1024 * 1024);
+    expect(sample.finalBytes! - sample.baselineBytes!).toBeGreaterThan(48 * 1024 * 1024);
+    expect(Math.abs(sample.peakBytes! - sample.finalBytes!)).toBeLessThan(16 * 1024 * 1024);
+  });
+
+  it.skipIf(process.platform !== "win32")("accounts for counter-read time without relaxing the original cadence gate", { timeout: 20_000 }, async () => {
+    // Each actual Win32 read costs an additional 60 ms in this contract test.
+    // Adding a fixed 50 ms sleep makes real sample gaps exceed the original
+    // 100 ms p95 limit; scheduling from the observed sample time does not.
+    const sampler = await startPrivatePeakSampler(process.pid, "open", 50, 60);
+    let sample: PrivatePeakSample;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } finally {
+      sample = await sampler.stop();
+    }
+    expect(sample.error).toBeNull();
+    expect(sample.sampleCount).toBeGreaterThan(3);
+    expect(sample.readErrors).toBe(0);
+    expect(sample.lastReadSucceeded).toBe(true);
+    expect(sample.intervalP95Ms).toBeLessThanOrEqual(100);
+    expect(sample.intervalMaxMs).toBeLessThanOrEqual(250);
+    expect(sample.peakBytes).toBeGreaterThan(0);
   });
 
   it("creates a fresh empty scratch child without reopening a prior killed sample", () => {
@@ -760,6 +918,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
   });
 
   it("loads the 80k entity / 155k belt fixture with exact v47 hash and bounded native memory", { timeout: 300_000 }, async () => {
+    const exactSeconds = readExactBenchmarkSeconds(process.env);
     const fixedAffinityProcessPolicy = readFixedAffinityProcessPolicyRequest();
     if (fixedAffinityProcessPolicy) {
       applyOrCaptureFixedAffinityProcessPolicy({
@@ -894,7 +1053,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     // Preserve the bounded native profile tail here so the failed report still
     // names the resident indexes responsible for the excess instead of forcing
     // developers to weaken or bypass the memory assertion to diagnose it.
-    if (process.env.DSP_NATIVE_CORE_PROFILE === "1" && client.stderrTail?.trim()) {
+    if ((process.env.DSP_NATIVE_CORE_PROFILE === "1" || process.env.DSP_NATIVE_CORE_OPEN_PROFILE === "1") && client.stderrTail?.trim()) {
       console.log(client.stderrTail.trim());
     }
     // Emit the complete immutable open evidence before enforcing the memory
@@ -903,6 +1062,14 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     expect(opened.summary.memory.estimatedRuntimeBytes).toBeLessThan(sourceBytes * 3);
     expect(opened.summary.canonicalComponents).toEqual(sourceComponents);
     expect(opened.summary.canonicalSha256).toBe(sourceSha256);
+    if (process.platform === "win32" && process.env.DSP_NATIVE_CORE_OPEN_PROFILE === "1") {
+      expect(openPeakSample.timelineTruncated).toBe(false);
+      expect(openPeakSample.timeline?.length).toBe(openPeakSample.sampleCount);
+      expect(openPeakSample.timeline?.length).toBeGreaterThan(1);
+      expect(Math.max(...openPeakSample.timeline!.map((sample) => sample.privateBytes))).toBe(openPeakSample.peakBytes);
+      expect(openPeakSample.readErrors).toBe(0);
+      expect(openPeakSample.samplingCadenceValid).toBe(true);
+    }
     if (benchmarkOpenOnly) {
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
       return;
@@ -958,8 +1125,8 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         sessionId: opened.sessionId,
         request: {
           baseRevision: resumed.revision,
-          simulationSeconds: 1,
-          wallSeconds: 1,
+          simulationSeconds: exactSeconds,
+          wallSeconds: exactSeconds,
           includeDiagnostics: false,
         },
       };
@@ -1069,7 +1236,8 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         state: expected,
         conservationFailure: conservationValidationFailure,
         exactAdvanceDurationMs: jsAdvanceDurationMs,
-      } = advanceExactSimulationForConservationDiagnostic(expectedInitial, 1, 1, jsProfiler);
+        boundaryPolicy,
+      } = advanceExactBenchmarkReference(expectedInitial, exactSeconds, jsProfiler);
       const jsAdvanceAndConservationDurationMs = performance.now() - jsDiagnosticStartedAt;
       const conservationSummary = aggregateConservationSummary(expected);
       const expectedFields = Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(expected)) as Record<string, unknown>)
@@ -1109,6 +1277,9 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         : [];
       logBenchmarkRecord("exact", {
         nativeCoreExactRealSaveAdvance: {
+          simulationSeconds: exactSeconds,
+          wallSeconds: exactSeconds,
+          javascriptBoundaryPolicy: boundaryPolicy,
           exactState: advancedSummary.canonicalSha256 === stableCanonicalSha256(expected),
           revision: advancedSummary.revision,
           expectedRevision: resumed.revision + 1,

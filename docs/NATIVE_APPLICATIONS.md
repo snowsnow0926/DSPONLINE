@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> **当前 Rust 开发制品（2026-09-09，未发布）**：另有冻结 `2bb10b43` Windows beta/offline 包，75 件运行清单文件、78 件冻结文件校验一致，NotSigned。公开大工厂短离线完成、取消、自然保存来源和重开八例通过，32 次隐藏静音正常关闭；完整回归仍有失败，不替换下方正式下载。包内本机 Host 与云端另构建 Host 的摘要分别记录，见[当前制品身份和验证缺口](./reviews/rust-rp1-current-batch-validation-2026-09-09.md)。
+
 > **当前正式下载（2026-09-08）**：Android stable 已发布 `1.2.7 / 1002007`（`cn.dsponline.network`），沿用历史证书，v2/v3、zipalign、APK/AAB 证书连续性和公网 APK 完整哈希通过，minimumSupportedVersionCode 保持 1000002。共享保存、导入及挂机恢复修复已包含；正式 APK 的模拟器保存/后台/重开通过，实体设备及最终直接从 1.2.6 升级仍未验证。Windows stable 保持 1.2.6 `NotSigned`；下方 1.2.7 Windows 包是开发候选。Rust 跨端接入留待后续，详情见 [1.2.7 发布记录](./releases/1.2.7.md)。
 
 > **1.2.7 第三轮本地验证候选（2026-09-07）**：目录打包生成内部 `desktop-build-evidence.json`，绑定源码 SHA、Build ID、edition/channel 及 app.asar、Host 和目录文件摘要；正式收集入口进一步验证安装器、YAML 和 feed 引用。`npm run test:desktop-package` 先验证 clean source 对应的离线性能包，缺包/错包退出 2，并为每次运行建立独立证据目录。该内部清单不是签名或发布许可；冻结新包 1.2.7+27c4f15fd621 的真实桌面旅程已 8/8 通过，见 [第三轮开发记录](./reviews/1.2.7-round3-development-2026-09-07.md)。

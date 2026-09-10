@@ -118,7 +118,7 @@ test("renderer broker submits only bounded intent and returns one contiguous dur
 test("main and preload expose one intent-only channel and no renderer patch surface", () => {
   const main = fs.readFileSync("desktop/main.cjs", "utf8");
   const preload = fs.readFileSync("desktop/preload.cjs", "utf8");
-  const rust = fs.readFileSync("native/dsp-native-host/src/main.rs", "utf8");
+  const rust = fs.readFileSync("native/dsp-native-host/src/rpc.rs", "utf8");
   const coreRuntime = fs.readFileSync("native/dsp-native-host/src/core_runtime.rs", "utf8");
   assert.match(main, /desktop:native-player-authority-system-space-station-intent/);
   assert.match(main, /nativePlayerAuthoritySystemSpaceStationBroker\.commit\(ownerId, request\)/);

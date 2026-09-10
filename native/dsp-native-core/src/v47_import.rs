@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::io::{Error as IoError, ErrorKind, Read};
+use std::io::{BufReader, Cursor, Error as IoError, ErrorKind, Read};
 
 use anyhow::{Context, bail};
 use serde::de::{DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor};
@@ -16,6 +16,7 @@ pub const MAX_V47_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
 pub const V47_IMPORT_JS_COMPATIBILITY_REQUIRED_CODE: &str =
     "NATIVE_V47_IMPORT_JS_COMPATIBILITY_REQUIRED";
 const MAX_BASE_FIELD_BYTES: usize = 64 * 1024 * 1024;
+const SOURCE_READ_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024 - 2;
 const MAX_STATE_FIELDS: usize = 512;
 const MAX_ENTITY_COUNT: usize = 2_000_000;
@@ -623,13 +624,74 @@ struct Envelope {
 }
 
 pub fn parse_v47_envelope<R: Read>(
-    reader: R,
+    mut reader: R,
     expected_byte_length: u64,
 ) -> anyhow::Result<ParsedV47Envelope> {
     if expected_byte_length == 0 || expected_byte_length > MAX_V47_IMPORT_BYTES {
         bail!("native v47 import file size is invalid");
     }
-    parse_v47_envelope_with_length(reader, Some(expected_byte_length))
+    // The caller already bounds and binds the source length. Decode valid
+    // sources from a slice instead of driving serde through one-byte reads.
+    // Release this temporary buffer before constructing the CoreState.
+    let mut bytes = Vec::with_capacity(expected_byte_length as usize);
+    if let Err(error) = reader
+        .by_ref()
+        .take(expected_byte_length)
+        .read_to_end(&mut bytes)
+    {
+        return parse_v47_envelope_with_length(
+            Cursor::new(bytes).chain(DeferredReadFailure(Some(error))),
+            Some(expected_byte_length),
+        );
+    }
+    if bytes.len() as u64 != expected_byte_length {
+        return parse_v47_envelope_with_length(bytes.as_slice(), Some(expected_byte_length));
+    }
+    // A successful final EOF is part of file identity verification. Replaying
+    // failures through the old decoder also preserves an earlier syntax or
+    // UTF-16 compatibility error over a prefetched later I/O failure.
+    let mut extra = Vec::with_capacity(1);
+    if let Err(error) = reader.by_ref().take(1).read_to_end(&mut extra) {
+        return parse_v47_envelope_with_length(
+            Cursor::new(bytes).chain(DeferredReadFailure(Some(error))),
+            Some(expected_byte_length),
+        );
+    }
+    if !extra.is_empty() {
+        return parse_v47_envelope_with_length(
+            Cursor::new(bytes).chain(Cursor::new(extra)).chain(reader),
+            Some(expected_byte_length),
+        );
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    let envelope = match Envelope::deserialize(&mut deserializer).and_then(|envelope| {
+        deserializer.end()?;
+        Ok(envelope)
+    }) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            // The streaming decoder observes only consumed bytes when it
+            // classifies legal lone surrogates. Never scan unread suffixes.
+            return parse_v47_envelope_with_length(bytes.as_slice(), Some(expected_byte_length));
+        }
+    };
+    finish_v47_envelope(
+        envelope,
+        bytes.len() as u64,
+        hex::encode(Sha256::digest(&bytes)),
+        Some(expected_byte_length),
+    )
+}
+
+struct DeferredReadFailure(Option<IoError>);
+
+impl Read for DeferredReadFailure {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        self.0.take().map_or(Ok(0), Err)
+    }
 }
 
 /// Parses a decoded v47 JSON stream whose final byte length is not known in
@@ -644,7 +706,12 @@ fn parse_v47_envelope_with_length<R: Read>(
     reader: R,
     expected_byte_length: Option<u64>,
 ) -> anyhow::Result<ParsedV47Envelope> {
-    let mut reader = BoundedHashReader::new(reader);
+    // serde_json requests individual bytes. Buffer the source so file-backed
+    // imports do not issue one disk read per byte. Keep hashing and UTF-16
+    // inspection outside the buffer: read-ahead must not change which bytes
+    // count toward error classification after an earlier syntax error.
+    let mut reader =
+        BoundedHashReader::new(BufReader::with_capacity(SOURCE_READ_BUFFER_BYTES, reader));
     let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
     let envelope_result = Envelope::deserialize(&mut deserializer);
     let trailing_result = if envelope_result.is_ok() {
@@ -661,6 +728,20 @@ fn parse_v47_envelope_with_length<R: Read>(
         result.context("native v47 envelope contains trailing data")?;
     }
     let (source_byte_length, source_sha256) = reader.finish();
+    finish_v47_envelope(
+        envelope,
+        source_byte_length,
+        source_sha256,
+        expected_byte_length,
+    )
+}
+
+fn finish_v47_envelope(
+    envelope: Envelope,
+    source_byte_length: u64,
+    source_sha256: String,
+    expected_byte_length: Option<u64>,
+) -> anyhow::Result<ParsedV47Envelope> {
     if source_byte_length == 0 {
         bail!("native v47 import decoded stream is empty");
     }
@@ -979,6 +1060,148 @@ mod tests {
         .into_bytes();
         let parsed = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap();
         assert_eq!(parsed.proof().state_checksum, "9c35dbff");
+    }
+
+    #[test]
+    fn batches_underlying_reads_without_changing_envelope_proofs() {
+        let mut bytes = fixture(false);
+        // Legal trailing whitespace crosses several reader-buffer boundaries.
+        bytes.extend(std::iter::repeat_n(b' ', 512 * 1024));
+        let expected = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap();
+        let mut reader = TinyChunkReader {
+            bytes: &bytes,
+            offset: 0,
+            reads: 0,
+            maximum_chunk: usize::MAX,
+        };
+        let parsed = parse_v47_envelope(&mut reader, bytes.len() as u64).unwrap();
+        assert_eq!(reader.offset, bytes.len());
+        assert_eq!(parsed.proof().source_sha256, expected.proof().source_sha256);
+        assert_eq!(parsed.proof().source_byte_length, bytes.len() as u64);
+        assert_eq!(
+            parsed.proof().state_checksum,
+            expected.proof().state_checksum
+        );
+        assert_eq!(parsed.base, expected.base);
+        assert_eq!(parsed.entities, expected.entities);
+        assert_eq!(parsed.belts, expected.belts);
+        assert!(
+            reader.reads <= bytes.len().div_ceil(64 * 1024),
+            "expected bounded chunk reads, got {} for {} bytes",
+            reader.reads,
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn buffered_source_still_requires_successful_final_eof() {
+        struct RejectEof<'a>(&'a [u8]);
+        impl Read for RejectEof<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() {
+                    return Err(IoError::new(
+                        ErrorKind::InvalidData,
+                        "fixture identity changed at EOF",
+                    ));
+                }
+                self.0.read(buffer)
+            }
+        }
+        let bytes = fixture(false);
+        let error = parse_v47_envelope(RejectEof(&bytes), bytes.len() as u64).unwrap_err();
+        assert!(format!("{error:#}").contains("fixture identity changed at EOF"));
+    }
+
+    #[test]
+    fn fixed_length_slice_matches_streaming_records_and_complete_proof() {
+        for pretty in [false, true] {
+            let bytes = fixture(pretty);
+            let expected =
+                parse_v47_envelope_with_length(bytes.as_slice(), Some(bytes.len() as u64)).unwrap();
+            let actual = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap();
+            assert_eq!(
+                serde_json::to_value(actual.proof()).unwrap(),
+                serde_json::to_value(expected.proof()).unwrap()
+            );
+            assert_eq!(actual.base, expected.base);
+            assert_eq!(actual.entities, expected.entities);
+            assert_eq!(actual.belts, expected.belts);
+        }
+    }
+
+    #[test]
+    fn prefetched_io_failure_keeps_the_original_decode_error_precedence() {
+        for bytes in [fixture(false), br#"{! "later":"\ud800"}"#.to_vec()] {
+            for expected_length in [bytes.len() as u64, bytes.len() as u64 + 1] {
+                let source = || {
+                    bytes
+                        .as_slice()
+                        .chain(DeferredReadFailure(Some(IoError::new(
+                            ErrorKind::InvalidData,
+                            "fixture changed after buffered bytes",
+                        ))))
+                };
+                let expected =
+                    parse_v47_envelope_with_length(source(), Some(expected_length)).unwrap_err();
+                let actual = parse_v47_envelope(source(), expected_length).unwrap_err();
+                assert_eq!(format!("{actual:#}"), format!("{expected:#}"));
+                assert_eq!(
+                    actual
+                        .downcast_ref::<V47ImportJavascriptCompatibilityRequired>()
+                        .is_some(),
+                    expected
+                        .downcast_ref::<V47ImportJavascriptCompatibilityRequired>()
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_length_slice_keeps_trailing_and_length_error_precedence() {
+        for suffix in [
+            b" \n ".as_slice(),
+            b" {}".as_slice(),
+            br#" "\ud800""#.as_slice(),
+        ] {
+            let mut bytes = fixture(false);
+            let original_length = bytes.len() as u64;
+            bytes.extend_from_slice(suffix);
+            for expected_length in [original_length, bytes.len() as u64, bytes.len() as u64 + 1] {
+                let expected =
+                    parse_v47_envelope_with_length(bytes.as_slice(), Some(expected_length));
+                let actual = parse_v47_envelope(bytes.as_slice(), expected_length);
+                match (actual, expected) {
+                    (Err(actual), Err(expected)) => {
+                        assert_eq!(format!("{actual:#}"), format!("{expected:#}"));
+                        assert!(
+                            actual
+                                .downcast_ref::<V47ImportJavascriptCompatibilityRequired>()
+                                .is_none()
+                        );
+                    }
+                    (Ok(actual), Ok(expected)) => {
+                        assert_eq!(
+                            serde_json::to_value(actual.proof()).unwrap(),
+                            serde_json::to_value(expected.proof()).unwrap()
+                        );
+                    }
+                    _ => panic!("fixed-length and streaming parser acceptance differs"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unread_surrogate_after_a_syntax_error_does_not_change_error_classification() {
+        let bytes = br#"{! "later":"\ud800"}"#;
+        let error = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<V47ImportJavascriptCompatibilityRequired>()
+                .is_none()
+        );
+        assert!(format!("{error:#}").contains("decode native v47 envelope"));
     }
 
     #[test]

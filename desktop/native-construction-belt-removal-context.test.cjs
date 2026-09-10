@@ -137,7 +137,7 @@ test("direct and MessagePort surfaces are wired without App ownership", () => {
   const preload = fs.readFileSync(path.join(root, "desktop", "preload.cjs"), "utf8");
   const desktop = fs.readFileSync(path.join(root, "src", "desktop.ts"), "utf8");
   const nativeCore = fs.readFileSync(path.join(root, "src", "game", "nativeCore.ts"), "utf8");
-  const rustMain = fs.readFileSync(path.join(root, "native", "dsp-native-host", "src", "main.rs"), "utf8");
+  const rustMain = fs.readFileSync(path.join(root, "native", "dsp-native-host", "src", "rpc.rs"), "utf8");
   const rustProtocol = fs.readFileSync(path.join(root, "native", "dsp-native-host", "src", "protocol.rs"), "utf8");
   assert.match(main, /desktop:native-core-construction-belt-removal-context/);
   assert.match(main, /construction-belt-removal-context-v1/);

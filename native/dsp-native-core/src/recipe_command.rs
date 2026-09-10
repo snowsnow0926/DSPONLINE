@@ -1,9 +1,11 @@
-//! Minimal, durable single-entity recipe-selection intent.
+//! Durable recipe and ordinary logistics-item selection intents.
 //!
 //! The renderer submits only `{ entityId, targetRecipeId }`. Rust re-reads the
 //! current built-in catalog and authoritative entity, refunds both production
 //! buffers, removes and refunds every incident belt, and resets the same
-//! entity fields as the public-v47 JavaScript `setEntityRecipe()` transition.
+//! entity fields as the public-v47 JavaScript `setEntityRecipe()` or
+//! `setLogisticsItem()` transition. Both also reproduce cloneFactoryEntity's
+//! empty-map initialization for newly placed entities elsewhere in the state.
 //! No inventory, topology, or derived entity patch is renderer-authored.
 
 use std::collections::BTreeMap;
@@ -21,6 +23,7 @@ use crate::{
 };
 
 const INTENT_ROOT: &str = "entityRecipe";
+const LOGISTICS_INTENT_ROOT: &str = "entityLogisticsItem";
 const INTENT_LEAF: &str = "intent";
 const MAX_OPAQUE_ENTITY_ID_BYTES: usize = 512;
 const MAX_CATALOG_ID_BYTES: usize = 160;
@@ -54,6 +57,7 @@ const BUILTIN_ORDINARY_RECIPE_BUILDINGS: &[&str] = &[
 struct RecipeIntent {
     entity_id: String,
     target_recipe_id: String,
+    logistics: bool,
 }
 
 #[derive(Debug)]
@@ -62,13 +66,14 @@ struct ValidatedRecipeTransition {
     entity_index: usize,
     before_entity: Value,
     target_recipe_id: String,
+    logistics: bool,
 }
 
 fn exact_intent_path(path: &[PathSegment]) -> bool {
     matches!(
         path,
         [PathSegment::Key(root), PathSegment::Key(leaf)]
-            if root == INTENT_ROOT && leaf == INTENT_LEAF
+            if (root == INTENT_ROOT || root == LOGISTICS_INTENT_ROOT) && leaf == INTENT_LEAF
     )
 }
 
@@ -98,14 +103,19 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<RecipeInte
     if !exact_intent_path(&change.path) || change.operation != "set" {
         bail!("native player-authority recipe intent path is invalid")
     }
+    let logistics =
+        matches!(&change.path[0], PathSegment::Key(root) if root == LOGISTICS_INTENT_ROOT);
+    let target_key = if logistics {
+        "targetItemId"
+    } else {
+        "targetRecipeId"
+    };
     let intent = change
         .value
         .as_ref()
         .and_then(Value::as_object)
         .filter(|intent| {
-            intent.len() == 2
-                && intent.contains_key("entityId")
-                && intent.contains_key("targetRecipeId")
+            intent.len() == 2 && intent.contains_key("entityId") && intent.contains_key(target_key)
         })
         .ok_or_else(|| anyhow!("native player-authority recipe intent is invalid"))?;
     let entity_id = intent
@@ -114,13 +124,14 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<RecipeInte
         .filter(|value| valid_opaque_id(value, MAX_OPAQUE_ENTITY_ID_BYTES))
         .ok_or_else(|| anyhow!("native player-authority recipe entity ID is invalid"))?;
     let target_recipe_id = intent
-        .get("targetRecipeId")
+        .get(target_key)
         .and_then(Value::as_str)
         .filter(|value| valid_opaque_id(value, MAX_CATALOG_ID_BYTES))
         .ok_or_else(|| anyhow!("native player-authority target recipe ID is invalid"))?;
     Ok(RecipeIntent {
         entity_id: entity_id.to_owned(),
         target_recipe_id: target_recipe_id.to_owned(),
+        logistics,
     })
 }
 
@@ -208,9 +219,7 @@ fn validated_transition(
     let entity = before_entity
         .as_object()
         .ok_or_else(|| anyhow!("native player-authority recipe entity is invalid"))?;
-    if entity.get("kind").and_then(Value::as_str) != Some("machine")
-        || entity.get("planetId").and_then(Value::as_str) != Some(active_planet_id)
-    {
+    if entity.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
         bail!("native player-authority recipe target is not an active-planet machine")
     }
     if entity
@@ -218,6 +227,56 @@ fn validated_transition(
         .is_some_and(|locked| locked.as_bool() != Some(false))
     {
         bail!("native player-authority recipe target is locked or malformed")
+    }
+    if intent.logistics {
+        let building_id = entity
+            .get("buildingId")
+            .and_then(Value::as_str)
+            .filter(|id| matches!(*id, "storage_mk1" | "storage_tank" | "splitter_4way"))
+            .ok_or_else(|| anyhow!("native logistics item building is unsupported"))?;
+        let building = state
+            .catalog
+            .buildings
+            .get(building_id)
+            .filter(|building| {
+                Some(building.kind.as_str()) == entity.get("kind").and_then(Value::as_str)
+                    && matches!(building.kind.as_str(), "storage" | "splitter")
+            })
+            .ok_or_else(|| anyhow!("native logistics item building kind is invalid"))?;
+        let item = state
+            .catalog
+            .items
+            .get(&intent.target_recipe_id)
+            .ok_or_else(|| anyhow!("native logistics target item is unknown"))?;
+        let accepts = building.accepts.as_deref().unwrap_or("any");
+        if accepts != "any"
+            && accepts != item.kind
+            && !(accepts == "solid" && item.kind == "matrix")
+        {
+            bail!("native logistics target item kind is incompatible")
+        }
+        if let Some(current) = entity.get("storedItemId").filter(|value| !value.is_null()) {
+            let current = current
+                .as_str()
+                .filter(|id| state.catalog.items.contains_key(*id))
+                .ok_or_else(|| anyhow!("native logistics current item is invalid"))?;
+            if current == intent.target_recipe_id {
+                bail!("native logistics target item is unchanged")
+            }
+        }
+        safe_positive_integer(entity.get("machineCount"), "machine count")?;
+        validate_buffer(state, entity.get("inputs"), "input inventory")?;
+        validate_buffer(state, entity.get("outputs"), "output inventory")?;
+        return Ok(ValidatedRecipeTransition {
+            entity_id: intent.entity_id,
+            entity_index,
+            before_entity,
+            target_recipe_id: intent.target_recipe_id,
+            logistics: true,
+        });
+    }
+    if entity.get("kind").and_then(Value::as_str) != Some("machine") {
+        bail!("native player-authority recipe target is not a machine")
     }
     let building_id = entity
         .get("buildingId")
@@ -272,6 +331,7 @@ fn validated_transition(
         entity_index,
         before_entity,
         target_recipe_id: intent.target_recipe_id,
+        logistics: false,
     })
 }
 
@@ -323,6 +383,28 @@ pub(crate) fn expand_intent(
     let candidate_base_object = candidate_base
         .as_object_mut()
         .expect("the native core base is an object");
+    // copyState snapshots the active tray into planetTrays before applying
+    // refunds. Preserve that ordering; syncing after refund would duplicate
+    // the new tray contents into a different public-v47 field too early.
+    if let Some(active) = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        && let Some(trays) = candidate_base_object
+            .get_mut("planetTrays")
+            .and_then(Value::as_object_mut)
+        && trays.contains_key(active)
+    {
+        trays.insert(
+            active.to_owned(),
+            Value::Object(
+                state.base_value()["tray"]
+                    .as_object()
+                    .ok_or_else(|| anyhow!("native selection tray is invalid"))?
+                    .clone(),
+            ),
+        );
+    }
     for field in ["inputs", "outputs"] {
         for (item_id, amount) in before_entity[field]
             .as_object()
@@ -387,15 +469,25 @@ pub(crate) fn expand_intent(
         .expect("recipe transition validated the entity object");
     candidate_entity_object.insert("inputs".to_owned(), Value::Object(Map::new()));
     candidate_entity_object.insert("outputs".to_owned(), Value::Object(Map::new()));
-    candidate_entity_object.insert("progress".to_owned(), Value::from(0));
-    candidate_entity_object.insert(
-        "proliferatorBonusProgress".to_owned(),
-        Value::Object(Map::new()),
-    );
-    candidate_entity_object.insert(
-        "recipeId".to_owned(),
-        Value::from(transition.target_recipe_id),
-    );
+    if transition.logistics {
+        candidate_entity_object.insert(
+            "storedItemId".to_owned(),
+            Value::from(transition.target_recipe_id),
+        );
+        candidate_entity_object.insert("routingCursor".to_owned(), Value::from(0));
+        candidate_entity_object.insert("stationProgress".to_owned(), Value::from(0));
+        candidate_entity_object.remove("stationPeerId");
+    } else {
+        candidate_entity_object.insert("progress".to_owned(), Value::from(0));
+        candidate_entity_object.insert(
+            "proliferatorBonusProgress".to_owned(),
+            Value::Object(Map::new()),
+        );
+        candidate_entity_object.insert(
+            "recipeId".to_owned(),
+            Value::from(transition.target_recipe_id),
+        );
+    }
 
     let mut top_level_changes = Vec::new();
     create_expected_value_patches(
@@ -404,19 +496,45 @@ pub(crate) fn expand_intent(
         Vec::new(),
         &mut top_level_changes,
     );
-    let mut entity_changes = Vec::new();
-    create_expected_value_patches(
-        &transition.before_entity,
-        &candidate_entity,
-        Vec::new(),
-        &mut entity_changes,
-    );
-    if entity_changes.is_empty() {
-        bail!("native player-authority recipe transition is empty")
+    let mut changed_entities = Vec::new();
+    let mut entity_change_count = 0usize;
+    for index in 0..state.entities.ids.len() {
+        let before = state.parse_entity(index)?;
+        let mut after = if index == transition.entity_index {
+            candidate_entity.clone()
+        } else {
+            if ["stationLastSupplyPeerBySlot", "proliferatorBonusProgress"]
+                .iter()
+                .all(|field| before.get(*field).is_some_and(|value| !value.is_null()))
+            {
+                continue;
+            }
+            before.clone()
+        };
+        // JS copyState() clones these optional maps into empty objects even on
+        // unrelated, just-placed entities. Keep exact public-v47 parity without
+        // changing the JS oracle or dropping those fields from comparisons.
+        for field in ["stationLastSupplyPeerBySlot", "proliferatorBonusProgress"] {
+            if after.get(field).is_none_or(Value::is_null) {
+                after[field] = Value::Object(Map::new());
+            }
+        }
+        let mut changes = Vec::new();
+        create_expected_value_patches(&before, &after, Vec::new(), &mut changes);
+        if !changes.is_empty() {
+            entity_change_count = entity_change_count
+                .checked_add(changes.len())
+                .filter(|count| *count <= MAX_EXPANDED_CHANGE_COUNT)
+                .ok_or_else(|| anyhow!("native selection initialization exceeds change budget"))?;
+            changed_entities.push(RecordPatch {
+                id: state.entities.ids[index].to_owned(),
+                changes,
+            });
+        }
     }
     let expanded_change_count = top_level_changes
         .len()
-        .checked_add(entity_changes.len())
+        .checked_add(entity_change_count)
         .and_then(|count| count.checked_add(removed_belt_ids.len()))
         .ok_or_else(|| anyhow!("native player-authority recipe change count overflows"))?;
     if expanded_change_count > MAX_EXPANDED_CHANGE_COUNT {
@@ -426,10 +544,7 @@ pub(crate) fn expand_intent(
         protocol_version: command.protocol_version,
         base_revision: command.base_revision,
         top_level_changes,
-        changed_entities: vec![RecordPatch {
-            id: transition.entity_id,
-            changes: entity_changes,
-        }],
+        changed_entities,
         added_entities: Vec::new(),
         removed_entity_ids: Vec::new(),
         changed_belts: Vec::new(),
@@ -688,6 +803,112 @@ mod tests {
         assert_eq!(state.canonical_sha256().unwrap(), source_hash);
     }
 
+    fn logistics_state() -> CoreState {
+        let mut state = test_state();
+        let definition = serde_json::from_value(serde_json::json!({
+            "id": "storage_mk1", "kind": "storage", "speed": 1,
+            "inputCapacity": 600, "outputCapacity": 600, "accepts": "solid"
+        }))
+        .unwrap();
+        Arc::make_mut(&mut state.catalog)
+            .buildings
+            .insert("storage_mk1".to_owned(), definition);
+        replace_entity(&mut state, "smelter-main", |entity| {
+            entity["kind"] = Value::from("storage");
+            entity["buildingId"] = Value::from("storage_mk1");
+            entity["storedItemId"] = Value::from("iron_ore");
+            entity["stationPeerId"] = Value::from("old-peer");
+            entity["stationProgress"] = Value::from(0.5);
+            entity["routingCursor"] = Value::from(3);
+        });
+        state
+    }
+
+    fn logistics_intent(revision: u64, item: &str) -> SimulationCommandPatch {
+        let mut command = intent(revision, "smelter-main", "unused");
+        command.top_level_changes[0].path[0] = PathSegment::Key(LOGISTICS_INTENT_ROOT.to_owned());
+        command.top_level_changes[0].value = Some(serde_json::json!({
+            "entityId": "smelter-main", "targetItemId": item
+        }));
+        command
+    }
+
+    #[test]
+    fn logistics_intent_preserves_refunds_progress_and_durable_receipts() {
+        let mut live = logistics_state();
+        live.base_value_mut().insert(
+            "planetTrays".to_owned(),
+            serde_json::json!({"home": {"iron_ore": 0}, "away": {"iron_ore": 3}}),
+        );
+        let mut replay = live.clone();
+        let command = logistics_intent(live.revision, "electromagnetic_matrix");
+        let receipt = live.apply_player_authority_command(&command).unwrap();
+        assert_eq!(receipt, replay.apply_command(&command).unwrap());
+        assert_eq!(
+            receipt,
+            live.deterministic_player_authority_resume_result(&command, 7, 8)
+                .unwrap()
+        );
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        let target = entity(&live, "smelter-main");
+        assert_eq!(target["storedItemId"], "electromagnetic_matrix");
+        assert_eq!(target["inputs"], serde_json::json!({}));
+        assert_eq!(target["outputs"], serde_json::json!({}));
+        assert_eq!(target["progress"], 0.75);
+        assert_eq!(target["routingCursor"], 0);
+        assert_eq!(target["stationProgress"], 0);
+        assert!(target.get("stationPeerId").is_none());
+        assert_eq!(live.base_value()["tray"]["iron_ore"], 11);
+        assert_eq!(live.base_value()["planetTrays"]["home"]["iron_ore"], 10);
+        assert_eq!(live.base_value()["planetTrays"]["away"]["iron_ore"], 3);
+        assert_eq!(live.base_value()["tray"]["iron_ingot"], 7);
+        assert_eq!(live.base_value()["portableFleet"]["logistics_drone"], 6);
+        assert_eq!(live.base_value()["construction"]["conveyor_belt_mk1"], 7);
+        assert_eq!(live.base_value()["construction"]["conveyor_belt_mk2"], 13);
+        assert!(live.belt_index.is_empty());
+    }
+
+    #[test]
+    fn logistics_intent_rejects_stale_mixed_locked_unknown_and_overflow_without_mutation() {
+        for variant in 0..8 {
+            let mut state = logistics_state();
+            let mut command = logistics_intent(state.revision, "copper_ingot");
+            match variant {
+                0 => command.base_revision -= 1,
+                1 => {
+                    command.top_level_changes[0].value.as_mut().unwrap()["refund"] =
+                        Value::from(999)
+                }
+                2 => replace_entity(&mut state, "smelter-main", |entity| {
+                    entity["interactionLocked"] = Value::from(true)
+                }),
+                3 => replace_entity(&mut state, "smelter-main", |entity| {
+                    entity["planetId"] = Value::from("away")
+                }),
+                4 => {
+                    command.top_level_changes[0].value.as_mut().unwrap()["targetItemId"] =
+                        Value::from("missing")
+                }
+                5 => {
+                    state.base_value_mut()["tray"]["iron_ore"] =
+                        Value::from(MAX_JAVASCRIPT_SAFE_INTEGER)
+                }
+                6 => {
+                    command.top_level_changes[0].value.as_mut().unwrap()["targetItemId"] =
+                        Value::from("iron_ore")
+                }
+                _ => command.changed_entities.push(RecordPatch {
+                    id: "smelter-main".to_owned(),
+                    changes: vec![],
+                }),
+            }
+            assert_rejected_without_mutation(&mut state, &command);
+        }
+    }
+
     #[test]
     fn recipe_intent_matches_js_refunds_and_is_identical_for_live_and_wal_replay() {
         let mut live = test_state();
@@ -696,8 +917,13 @@ mod tests {
 
         let expanded = expand_intent(&live, &command).unwrap();
         assert_eq!(expanded.removed_belt_ids, ["belt-z", "belt-a"]);
-        assert_eq!(expanded.changed_entities.len(), 1);
-        assert_eq!(expanded.changed_entities[0].id, "smelter-main");
+        assert!(
+            expanded
+                .changed_entities
+                .iter()
+                .any(|entity| entity.id == "smelter-main")
+        );
+        assert_eq!(expanded.changed_entities.len(), 5);
 
         let live_receipt = live.apply_player_authority_command(&command).unwrap();
         let replay_receipt = replay.apply_command(&command).unwrap();

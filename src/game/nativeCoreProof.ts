@@ -24,6 +24,7 @@ class IncrementalSha256 {
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
   ]);
   private readonly block = new Uint8Array(64);
+  private readonly blockView = new DataView(this.block.buffer);
   private readonly words = new Uint32Array(64);
   private blockLength = 0;
   private totalBytes = 0;
@@ -39,7 +40,7 @@ class IncrementalSha256 {
       this.blockLength += copied;
       offset += copied;
       if (this.blockLength === 64) {
-        this.compress(this.block);
+        this.compress();
         this.blockLength = 0;
       }
     }
@@ -53,20 +54,20 @@ class IncrementalSha256 {
     this.block[this.blockLength++] = 0x80;
     if (this.blockLength > 56) {
       this.block.fill(0, this.blockLength);
-      this.compress(this.block);
+      this.compress();
       this.blockLength = 0;
     }
     this.block.fill(0, this.blockLength, 56);
-    const view = new DataView(this.block.buffer);
+    const view = this.blockView;
     view.setUint32(56, Math.floor(bitLength / 0x1_0000_0000), false);
     view.setUint32(60, bitLength >>> 0, false);
-    this.compress(this.block);
+    this.compress();
     return [...this.state].map((value) => value.toString(16).padStart(8, "0")).join("");
   }
 
-  private compress(block: Uint8Array): void {
+  private compress(): void {
     const words = this.words;
-    const view = new DataView(block.buffer, block.byteOffset, 64);
+    const view = this.blockView;
     for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(index * 4, false);
     for (let index = 16; index < 64; index += 1) {
       const x = words[index - 15];
@@ -114,30 +115,127 @@ class IncrementalSha256 {
   }
 }
 
+interface CanonicalFieldShape {
+  inputKeys: string[];
+  fields: Array<{ key: string; encodedKey: string }>;
+}
+
 class ProofWriter {
   private readonly hash = new IncrementalSha256();
+  private readonly numericBytes = new Uint8Array(8);
+  private readonly numericView = new DataView(this.numericBytes.buffer);
+  private readonly buffer = new Uint8Array(64 * 1024);
+  private bufferedBytes = 0;
   private pendingText = "";
+  private readonly fieldShapes = new Map<number, CanonicalFieldShape>();
+  private cachedFieldCount = 0;
+  private readonly quotedStrings = new Map<string, string>();
+  private cachedStringCharacters = 0;
+
+  quotedString(value: string): void {
+    const known = this.quotedStrings.get(value);
+    if (known !== undefined) { this.text(known); return; }
+    const encoded = JSON.stringify(value);
+    if (value.length <= 256) {
+      if (this.quotedStrings.size >= 1_024 || this.cachedStringCharacters + value.length > 65_536) {
+        this.quotedStrings.clear();
+        this.cachedStringCharacters = 0;
+      }
+      this.quotedStrings.set(value, encoded);
+      this.cachedStringCharacters += value.length;
+    }
+    this.text(encoded);
+  }
+
+  canonicalFields(record: Record<string, unknown>): CanonicalFieldShape["fields"] {
+    // Validate current membership every time; only names/order are reused,
+    // never values or a previous state proof. Factories repeat the same entity
+    // and belt shapes hundreds of thousands of times in one canonical walk.
+    const keys = Object.keys(record).filter((key) => {
+      const value = record[key];
+      return value !== undefined && typeof value !== "function" && typeof value !== "symbol";
+    });
+    const previous = this.fieldShapes.get(keys.length);
+    if (previous) {
+      let matches = true;
+      for (let index = 0; index < keys.length; index += 1) {
+        if (keys[index] !== previous.inputKeys[index]) { matches = false; break; }
+      }
+      if (matches) return previous.fields;
+    }
+    const fields = keys.slice().sort().map((key) => ({ key, encodedKey: JSON.stringify(key) }));
+    // Bound retained names even for unusual user-authored maps. Keep one
+    // exact shape per field count; no delimiter-based signature can collide.
+    if (keys.length <= 256 && keys.every((key) => key.length <= 256)) {
+      const nextCount = this.cachedFieldCount - (previous?.inputKeys.length ?? 0) + keys.length;
+      if (nextCount > 4_096) { this.fieldShapes.clear(); this.cachedFieldCount = 0; }
+      else this.cachedFieldCount -= previous?.inputKeys.length ?? 0;
+      this.fieldShapes.set(keys.length, { inputKeys: keys, fields });
+      this.cachedFieldCount += keys.length;
+    }
+    return fields;
+  }
 
   text(value: string): void {
     if (this.pendingText.length + value.length > 64 * 1024) this.flushText();
-    if (value.length > 64 * 1024) this.hash.update(encoder.encode(value));
+    if (value.length > 64 * 1024) this.appendText(value);
     else this.pendingText += value;
   }
 
   bytes(value: Uint8Array): void {
     this.flushText();
-    this.hash.update(value);
+    let offset = 0;
+    while (offset < value.byteLength) {
+      if (this.bufferedBytes === this.buffer.byteLength) this.flushBytes();
+      const copied = Math.min(value.byteLength - offset, this.buffer.byteLength - this.bufferedBytes);
+      this.buffer.set(value.subarray(offset, offset + copied), this.bufferedBytes);
+      this.bufferedBytes += copied;
+      offset += copied;
+    }
+  }
+
+  uint64LittleEndian(value: number): void {
+    if (!Number.isSafeInteger(value) || value < 0) throw new RangeError("native core revision is outside the safe integer range");
+    this.numericView.setUint32(0, value >>> 0, true);
+    this.numericView.setUint32(4, Math.floor(value / 0x1_0000_0000), true);
+    this.bytes(this.numericBytes);
+  }
+
+  float64LittleEndian(value: unknown): void {
+    const numeric = typeof value === "number" && Number.isFinite(value) ? value : 0;
+    this.numericView.setFloat64(0, numeric, true);
+    // bytes() copies the number before this writer reuses its scratch space.
+    this.bytes(this.numericBytes);
   }
 
   finish(): string {
     this.flushText();
+    this.flushBytes();
     return this.hash.digestHex();
   }
 
   private flushText(): void {
     if (!this.pendingText) return;
-    this.hash.update(encoder.encode(this.pendingText));
+    this.appendText(this.pendingText);
     this.pendingText = "";
+  }
+
+  private appendText(value: string): void {
+    let offset = 0;
+    while (offset < value.length) {
+      const { read, written } = encoder.encodeInto(value.slice(offset), this.buffer.subarray(this.bufferedBytes));
+      offset += read;
+      this.bufferedBytes += written;
+      // encodeInto never splits a UTF-8 sequence. Zero progress means the
+      // remaining buffer cannot hold the next complete code point.
+      if (written === 0 || this.bufferedBytes === this.buffer.byteLength) this.flushBytes();
+    }
+  }
+
+  private flushBytes(): void {
+    if (this.bufferedBytes === 0) return;
+    this.hash.update(this.buffer.subarray(0, this.bufferedBytes));
+    this.bufferedBytes = 0;
   }
 }
 
@@ -147,12 +245,16 @@ function writeCanonical(writer: ProofWriter, value: unknown, arrayEntry = false)
     else throw new Error("native core canonical proof encountered a non-persisted value");
     return;
   }
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    writer.text(JSON.stringify(value));
+  if (typeof value === "string") {
+    writer.quotedString(value);
+    return;
+  }
+  if (value === null || typeof value === "boolean") {
+    writer.text(value === null ? "null" : value ? "true" : "false");
     return;
   }
   if (typeof value === "number") {
-    writer.text(Number.isFinite(value) ? JSON.stringify(value) : "null");
+    writer.text(Number.isFinite(value) ? String(value) : "null");
     return;
   }
   if (typeof value !== "object") throw new Error(`native core canonical proof does not support ${typeof value}`);
@@ -167,13 +269,9 @@ function writeCanonical(writer: ProofWriter, value: unknown, arrayEntry = false)
   }
   writer.text("{");
   const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).filter((key) => {
-    const field = record[key];
-    return field !== undefined && typeof field !== "function" && typeof field !== "symbol";
-  }).sort();
-  keys.forEach((key, index) => {
+  writer.canonicalFields(record).forEach(({ key, encodedKey }, index) => {
     if (index > 0) writer.text(",");
-    writer.text(JSON.stringify(key));
+    writer.text(encodedKey);
     writer.text(":");
     writeCanonical(writer, record[key]);
   });
@@ -187,19 +285,11 @@ export function canonicalNativeCoreSha256(value: unknown): string {
 }
 
 function writeUint64LittleEndian(writer: ProofWriter, value: number): void {
-  if (!Number.isSafeInteger(value) || value < 0) throw new RangeError("native core revision is outside the safe integer range");
-  const bytes = new Uint8Array(8);
-  const view = new DataView(bytes.buffer);
-  view.setUint32(0, value >>> 0, true);
-  view.setUint32(4, Math.floor(value / 0x1_0000_0000), true);
-  writer.bytes(bytes);
+  writer.uint64LittleEndian(value);
 }
 
 function writeFloat64LittleEndian(writer: ProofWriter, value: unknown): void {
-  const numeric = typeof value === "number" && Number.isFinite(value) ? value : 0;
-  const bytes = new Uint8Array(8);
-  new DataView(bytes.buffer).setFloat64(0, numeric, true);
-  writer.bytes(bytes);
+  writer.float64LittleEndian(value);
 }
 
 function optionalString(value: unknown): string | null {
@@ -305,4 +395,3 @@ export function createNativeCoreRevisionProof(
     registryFingerprint,
   };
 }
-

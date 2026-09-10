@@ -765,10 +765,11 @@ pub(crate) fn advance_environment(
     base: &mut Map<String, Value>,
     seconds: f64,
 ) -> anyhow::Result<()> {
-    let snapshot = base.clone();
+    // `load` owns the four Dyson records. The base is read-only until `save`,
+    // so cloning unrelated inventory/history for this environment is redundant.
     let mut state = load(base)?;
-    absorb(&snapshot, &mut state, seconds)?;
-    decay(&snapshot, &mut state, seconds)?;
+    absorb(base, &mut state, seconds)?;
+    decay(base, &mut state, seconds)?;
     save(base, state);
     Ok(())
 }
@@ -2207,9 +2208,8 @@ pub(crate) fn apply_certified_sail_launch_schedule(
 }
 
 pub(crate) fn finalize(base: &mut Map<String, Value>) -> anyhow::Result<()> {
-    let snapshot = base.clone();
     let mut state = load(base)?;
-    update_generation(&snapshot, &mut state)?;
+    update_generation(base, &mut state)?;
     save(base, state);
     Ok(())
 }
@@ -2459,6 +2459,23 @@ pub(crate) fn run_ray_receivers(
 }
 
 pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'static str>> {
+    admission_reason_with_records(state, None)
+}
+
+pub(crate) fn admission_reason_with_entities(
+    state: &CoreState,
+    entities: &[Value],
+) -> anyhow::Result<Option<&'static str>> {
+    if entities.len() != state.entity_index.len() {
+        bail!("native Dyson admission entity topology changed");
+    }
+    admission_reason_with_records(state, Some(entities))
+}
+
+fn admission_reason_with_records(
+    state: &CoreState,
+    parsed_entities: Option<&[Value]>,
+) -> anyhow::Result<Option<&'static str>> {
     let base = state.base_value();
     for system_id in SYSTEM_IDS {
         if !base
@@ -2475,10 +2492,18 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
             return Ok(Some("dyson-state-shape-unsupported"));
         }
     }
-    for entity in (0..state.entity_index.len())
-        .map(|index| state.parse_entity(index))
-        .collect::<anyhow::Result<Vec<_>>>()?
-    {
+    // Keep base-shape validation before decoding and decode every fallback row
+    // before target checks, preserving the historical error precedence.
+    let decoded;
+    let entities = if let Some(entities) = parsed_entities {
+        entities
+    } else {
+        decoded = (0..state.entity_index.len())
+            .map(|index| state.parse_entity(index))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        &decoded
+    };
+    for entity in entities {
         let Some(entity) = entity.as_object() else {
             bail!("native Dyson entity is invalid");
         };
@@ -2717,6 +2742,61 @@ mod tests {
         (entities, receiver_indices)
     }
 
+    #[test]
+    fn borrowed_admission_preserves_dyson_target_rejections_and_source() {
+        for case in 0..4 {
+            let mut entities = vec![receiver_entity(3), receiver_entity(4)];
+            entities[1]["buildingId"] = json!("em_rail_ejector");
+            entities[1]["targetDysonOrbitId"] = json!("orbit/Ω");
+            let expected = match case {
+                1 => {
+                    entities[1]["targetDysonOrbitId"] = json!("missing-orbit");
+                    Some("dyson-ejector-target-unsupported")
+                }
+                2 => {
+                    entities[1]["planetId"] = json!("missing-planet");
+                    Some("dyson-ejector-target-unsupported")
+                }
+                3 => Some("dyson-state-shape-unsupported"),
+                _ => None,
+            };
+            let mut state = fixture_state(&entities);
+            let base = state.base_value_mut();
+            for system in SYSTEM_IDS {
+                base["dysonPlans"]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(system.to_owned(), json!({}));
+                base["dysonEngineering"]["orbitsBySystem"]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(system.to_owned(), json!([{"id": "orbit/Ω"}]));
+            }
+            if case == 3 {
+                base["dysonPlans"].as_object_mut().unwrap().remove("aurora");
+            }
+            let before = state.summary().unwrap();
+            let bytes = serde_json::to_vec(&entities).unwrap();
+            assert_eq!(
+                admission_reason(&state).unwrap(),
+                expected,
+                "raw case {case}"
+            );
+            assert_eq!(
+                admission_reason_with_entities(&state, &entities).unwrap(),
+                expected,
+                "borrowed case {case}"
+            );
+            assert!(admission_reason_with_entities(&state, &entities[..1]).is_err());
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), bytes);
+            assert_eq!(
+                state.summary().unwrap().canonical_sha256,
+                before.canonical_sha256
+            );
+            assert_eq!(state.revision, before.revision);
+        }
+    }
+
     fn fixture_state(entities: &[Value]) -> CoreState {
         let entity_count = entities.len();
         let base = serde_json::to_vec(&fixture_base()).unwrap();
@@ -2849,6 +2929,107 @@ mod tests {
             );
         }
         entity
+    }
+
+    #[test]
+    fn borrowed_environment_and_finalize_match_full_base_snapshots() {
+        for active in [false, true] {
+            let mut original = launch_fixture_base();
+            original.insert(
+                "productionHistory".to_owned(),
+                json!(
+                    (0..64)
+                        .map(|step| json!({
+                            "elapsedSeconds": step, "inventory": {"iron_ore": step * 123},
+                            "mod:opaque/Ω": [null, -0.0, {"unchanged": "历史"}]
+                        }))
+                        .collect::<Vec<_>>()
+                ),
+            );
+            original.insert(
+                "mod:unrelated".to_owned(),
+                json!({"nested": [{"keep": -0.0}, 17]}),
+            );
+            if active {
+                original["research"]["completedTechIds"] = json!([
+                    "dyson_shell",
+                    "dyson_absorption_1",
+                    "solar_sail_life_1",
+                    "solar_sail_life_2"
+                ]);
+                original["dysonSwarm"]["sailsInOrbit"] = json!(10_000);
+                original["dysonSwarm"]["totalLaunched"] = json!(10_000);
+                original["dysonPlans"]["helios"]["structurePoints"] = json!(100);
+                original["dysonEngineering"]["absorptionProgressBySystem"] = json!(
+                    SYSTEM_IDS
+                        .into_iter()
+                        .map(|id| (id, 0.25))
+                        .collect::<BTreeMap<_, _>>()
+                );
+            }
+            let unrelated_history = original["productionHistory"].clone();
+            let mut borrowed = original.clone();
+            for (step, seconds) in [0.0, 0.125, 1.0, 5.0, 60.0, 1_200.0]
+                .into_iter()
+                .enumerate()
+            {
+                let snapshot = original.clone();
+                let mut dyson = load(&original).unwrap();
+                absorb(&snapshot, &mut dyson, seconds).unwrap();
+                decay(&snapshot, &mut dyson, seconds).unwrap();
+                save(&mut original, dyson);
+                advance_environment(&mut borrowed, seconds).unwrap();
+                assert_eq!(
+                    serde_json::to_vec(&borrowed).unwrap(),
+                    serde_json::to_vec(&original).unwrap(),
+                    "environment active={active} seconds={seconds}"
+                );
+
+                // Finalization must observe intervening research changes,
+                // rather than accidentally retaining the environment's inputs.
+                for base in [&mut original, &mut borrowed] {
+                    base["endgame"]["infiniteResearch"]["stellar_harnessing"]["level"] =
+                        json!(step + 3);
+                }
+                let snapshot = original.clone();
+                let mut dyson = load(&original).unwrap();
+                update_generation(&snapshot, &mut dyson).unwrap();
+                save(&mut original, dyson);
+                finalize(&mut borrowed).unwrap();
+                assert_eq!(
+                    serde_json::to_vec(&borrowed).unwrap(),
+                    serde_json::to_vec(&original).unwrap(),
+                    "finalize active={active} seconds={seconds}"
+                );
+                assert_eq!(borrowed["productionHistory"], unrelated_history);
+            }
+            if active {
+                assert!(finite(borrowed["dysonSwarm"].get("totalExpired")) > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_dyson_environment_failures_leave_the_base_unchanged() {
+        for field in [
+            "dysonSwarm",
+            "dysonSphere",
+            "dysonEngineering",
+            "dysonPlans",
+        ] {
+            for finalize_only in [false, true] {
+                let mut base = launch_fixture_base();
+                base.insert(field.to_owned(), Value::Null);
+                let before = serde_json::to_vec(&base).unwrap();
+                let result = if finalize_only {
+                    finalize(&mut base)
+                } else {
+                    advance_environment(&mut base, 1.0)
+                };
+                assert!(result.is_err(), "{field} finalize={finalize_only}");
+                assert_eq!(serde_json::to_vec(&base).unwrap(), before);
+            }
+        }
     }
 
     fn legacy_launch_per_entity(

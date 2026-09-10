@@ -352,6 +352,7 @@ function fixture(overrides = {}) {
     }),
     cancel: overrides.cancel ?? ((token) => { token.cancelled = true; }),
     onTransition: overrides.onTransition,
+    lifetimeSignal: overrides.lifetimeSignal,
     minimumYieldMs: 1,
   });
   return {
@@ -2804,11 +2805,127 @@ test("shutdown rejects active and queued command promises without starting anoth
   const second = value.runtime.commitCommand(playerCommand(8, "shutdown-queued", 2));
   const firstResult = first.catch((error) => error);
   const secondResult = second.catch((error) => error);
+  // This case covers a command that has reached Host before shutdown; the
+  // separate microtask case below requires zero dispatch when shutdown wins.
+  await Promise.resolve();
   value.runtime.shutdownForProcessExit();
   assert.equal((await firstResult).code, "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN");
   assert.equal((await secondResult).code, "NATIVE_PLAYER_AUTHORITY_COMMAND_QUEUE_ABORTED");
   assert.equal(value.runtime.snapshot().queuedCommands, 0);
   assert.equal(value.calls.filter(([operation]) => operation === "command").length, 1);
+});
+
+for (const pendingPhase of ["prepare", "activate"]) {
+  test(`shutdown during ${pendingPhase} cannot activate or restart the clock`, async () => {
+    const pending = deferred(), entered = deferred(), transitions = [];
+    const method = pendingPhase === "prepare" ? "preparePlayerAuthority" : "activatePlayerAuthority";
+    const value = fixture({ onTransition: state => transitions.push(state.phase), registry: {
+      [method](ownerId, request) { value.calls.push([pendingPhase, ownerId, request]); entered.resolve(); return pending.promise; },
+    } });
+    const activation = value.runtime.activate({ sessionId: "core-main-1", runId: "player-run-1",
+      expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000 });
+    await entered.promise;
+    const rejected = assert.rejects(activation, error => error.code === "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN");
+    value.runtime.shutdownForProcessExit();
+    pending.resolve(leaseReceipt(pendingPhase === "prepare" ? "prepared" : "active", value.checkpoint, 10_000));
+    await rejected;
+    assert.equal(value.runtime.snapshot().phase, "shutdown");
+    assert.equal(value.runtime.context, null); assert.equal(value.timers.length, 0);
+    assert.deepEqual(transitions.slice(transitions.indexOf("shutdown")), ["shutdown"]);
+    assert.equal(value.calls.filter(([name]) => name === "activate").length, pendingPhase === "prepare" ? 0 : 1);
+  });
+}
+
+test("shutdown before the command microtask prevents any Host dispatch", async () => {
+  const value = fixture();
+  await value.runtime.activate({ sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000 });
+  const first = assert.rejects(value.runtime.commitCommand(playerCommand(7, "not-dispatched")), /shutting down|shut down/);
+  value.runtime.shutdownForProcessExit();
+  await first; await value.runtime.inFlight;
+  assert.equal(value.calls.filter(([name]) => name === "command").length, 0);
+  assert.equal(value.runtime.snapshot().phase, "shutdown");
+  assert.equal(value.runtime.snapshot().revision, 7);
+});
+
+test("lifetime abort stops the active clock and cannot grant or restore authority", async () => {
+  const controller = new AbortController(), value = fixture({ lifetimeSignal: controller.signal });
+  await value.runtime.activate({ sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000 });
+  const acknowledged = value.runtime.snapshot();
+  controller.abort();
+  assert.equal(value.runtime.snapshot().phase, "shutdown"); assert.equal(value.timers[0].cancelled, true);
+  assert.equal(value.runtime.snapshot().revision, acknowledged.revision);
+  value.setNow(50_000); value.timers[0].callback(); await value.runtime.settleDue();
+  await assert.rejects(value.runtime.commitCommand(playerCommand(7, "after-lifetime")));
+  await assert.rejects(value.runtime.setPaused(true));
+  assert.equal(value.calls.filter(([name]) => name === "tick" || name === "command").length, 0);
+  const ended = fixture({ lifetimeSignal: controller.signal });
+  await assert.rejects(ended.runtime.activate({ sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: ended.checkpoint, settledDeadlineMs: 10_000 }));
+  assert.equal(ended.calls.length, 0); assert.equal(ended.runtime.snapshot().phase, "shutdown");
+  assert.throws(() => fixture({ lifetimeSignal: { aborted: false, addEventListener() {} } }), /options are invalid/);
+  const denied = fixture({ lifetimeSignal: new AbortController().signal, registry: {
+    async preparePlayerAuthority(_owner, request) { return leaseReceipt("prepared", value.checkpoint, request.settledDeadlineMs, false); },
+  } });
+  await assert.rejects(denied.runtime.activate({ sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: denied.checkpoint, settledDeadlineMs: 10_000 }));
+  assert.equal(denied.calls.filter(([name]) => name === "activate").length, 0);
+});
+
+test("shutdown during recovery preserves the terminal state instead of accepting a late durable receipt", async () => {
+  const pending = deferred(), entered = deferred(), value = fixture({ registry: {
+    recoverPlayerAuthorityCommand() { entered.resolve(); return pending.promise; },
+  } });
+  const recovery = value.runtime.recoverPendingCommand({ sessionId: "core-main-1" });
+  await entered.promise;
+  const rejected = assert.rejects(recovery, error => error.code === "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN");
+  value.runtime.shutdownForProcessExit();
+  pending.resolve({ runId: "player-run-1", sequence: 4, commandId: "durable-command-4",
+    baseRevision: 10, revision: 11, settledDeadlineMs: 15_000, duplicate: true,
+    ...changeReceipt(), checkpoint: { generation: 8, rootHash: HASH_A, revision: 11 }, summary: summary(11) });
+  await rejected; assert.equal(value.runtime.snapshot().phase, "shutdown");
+  assert.equal(value.runtime.context, null); assert.equal(value.timers.length, 0);
+});
+
+for (const kind of ["history", "pause", "macro", "macro-finish", "recovery"]) {
+  test(`lifetime end before ${kind} dispatch sends no further Host operation`, async () => {
+    const controller = new AbortController(), value = fixture({ lifetimeSignal: controller.signal, registry: {
+      commitPlayerAuthorityHistory() { value.calls.push(["history"]); throw Error("must not dispatch"); },
+      recoverPlayerAuthorityCommand() { value.calls.push(["recover-command"]); throw Error("must not dispatch"); },
+    } });
+    if (kind !== "recovery") await value.runtime.activate({ sessionId: "core-main-1", runId: "player-run-1",
+      expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000 });
+    const macro = { macroSessionId: "lifetime-macro", operationId: "advance-1", baseRevision: 7,
+      simulationMilliseconds: 1_000, wallMilliseconds: 1_000 };
+    if (kind === "macro-finish") await value.runtime.commitMacroAdvance(macro);
+    const count = value.calls.length;
+    const operation = kind === "history" ? value.runtime.commitHistory({ operationId: "history-stop", baseRevision: 7, direction: "undo" })
+      : kind === "pause" ? value.runtime.setPaused(true)
+      : kind === "macro" ? value.runtime.commitMacroAdvance(macro)
+      : kind === "macro-finish" ? value.runtime.finishMacroSession({ macroSessionId: macro.macroSessionId })
+      : value.runtime.recoverPendingCommand({ sessionId: "core-main-1" });
+    const rejected = assert.rejects(operation, error => error.code === "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN");
+    controller.abort(); await rejected;
+    assert.equal(value.calls.length, count); assert.equal(value.runtime.snapshot().phase, "shutdown");
+    assert.equal(value.runtime.timer, null);
+  });
+}
+
+test("a history ACK received after shutdown cannot update or publish the old main context", async () => {
+  const pending = deferred(), entered = deferred(), value = fixture({ registry: {
+    commitPlayerAuthorityHistory() { entered.resolve(); return pending.promise; },
+  } });
+  await value.runtime.activate({ sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000 });
+  const operation = value.runtime.commitHistory({ operationId: "history-late", baseRevision: 7, direction: "undo" });
+  await entered.promise;
+  const rejected = assert.rejects(operation, error => error.code === "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN");
+  value.runtime.shutdownForProcessExit();
+  pending.resolve({ direction: "undo", committed: { baseRevision: 7, revision: 8,
+    checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 } }, history: { revision: 8 } });
+  await rejected; assert.equal(value.runtime.snapshot().revision, 7);
+  assert.equal(value.runtime.snapshot().phase, "shutdown"); assert.equal(value.runtime.timer, null);
 });
 
 test("the authority clock is instantiated in main and is absent from renderer IPC", () => {

@@ -252,9 +252,12 @@ class NativeHostClient {
     this.stderrTail = "";
     this.structuredProfileRequestActive = false;
     this.exited = false;
+    this.closed = true;
+    this.stopPromise = null;
   }
 
   async start(clientVersion = "1.2.7") {
+    if (this.stopPromise) await this.stopPromise;
     if (this.child && !this.exited) return this.hello;
     if (this.startPromise) return this.startPromise;
     this.startPromise = (async () => {
@@ -266,6 +269,8 @@ class NativeHostClient {
       });
       this.child = child;
       this.exited = false;
+      this.closed = false;
+      child.once("close", () => { if (this.child === child) this.closed = true; });
       child.stdout.on("data", (chunk) => this.onStdout(chunk));
       child.stderr.on("data", (chunk) => {
         this.stderrTail = `${this.stderrTail}${Buffer.from(chunk).toString("utf8")}`.slice(-MAX_NATIVE_HOST_STDERR_TAIL_BYTES);
@@ -387,9 +392,45 @@ class NativeHostClient {
 
   async stop() {
     const child = this.child;
-    if (!child || this.exited) return;
-    try { await this.request({ operation: "shutdown" }, 5_000); } catch { /* process exit is handled below */ }
-    if (!this.exited) child.kill();
+    if (!child || this.closed) return;
+    if (this.stopPromise) return this.stopPromise;
+    const deadline = performance.now() + 5_000;
+    let markClosed;
+    const closed = new Promise((resolve) => {
+      markClosed = () => { this.closed = true; resolve(true); };
+      child.once("close", markClosed);
+    });
+    const waitForClose = async (milliseconds) => {
+      if (this.closed) return true;
+      let timer;
+      try {
+        return await Promise.race([closed, new Promise((resolve) => {
+          timer = setTimeout(() => resolve(false), Math.max(0, milliseconds));
+        })]);
+      } finally { clearTimeout(timer); }
+    };
+    this.stopPromise = (async () => {
+      let acknowledged = this.exited;
+      if (!this.exited) {
+        try {
+          await this.request({ operation: "shutdown" }, 5_000);
+          acknowledged = true;
+        } catch { /* A failed shutdown still requires confirmed process close. */ }
+      }
+      // The shutdown reply is written before the process releases its handles.
+      // Preserve the existing five-second deadline; do not kill a healthy Host
+      // in the interval between its reply and normal close.
+      if (acknowledged && await waitForClose(deadline - performance.now())) return;
+      if (!this.closed) child.kill();
+      if (!await waitForClose(2_000)) {
+        throw new NativeHostError("native host termination could not be confirmed", "NATIVE_HOST_STOP_UNCONFIRMED");
+      }
+    })().finally(() => {
+      child.removeListener("close", markClosed);
+      // An unconfirmed termination permanently prevents this client restarting.
+      if (this.closed) this.stopPromise = null;
+    });
+    return this.stopPromise;
   }
 
   onStdout(chunk) {

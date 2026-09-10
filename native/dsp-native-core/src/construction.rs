@@ -3529,19 +3529,21 @@ pub(crate) fn run_centers(
             planet_metric_writer_indices: Vec::new(),
         });
     }
-    let mut automation = base
-        .remove("constructionAutomation")
-        .and_then(|value| value.as_object().cloned())
-        .ok_or_else(|| anyhow!("native construction automation state is missing"))?;
+    // These values were removed from the owned candidate. Move their maps;
+    // cloning here recursively copies every job and quantum buffer per step.
+    let mut automation = match base.remove("constructionAutomation") {
+        Some(Value::Object(value)) => value,
+        _ => bail!("native construction automation state is missing"),
+    };
     let enabled = automation.get("enabled").and_then(Value::as_bool) == Some(true);
-    let mut jobs = automation
-        .remove("jobs")
-        .and_then(|value| value.as_object().cloned())
-        .ok_or_else(|| anyhow!("native construction jobs are missing"))?;
-    let mut buffers = automation
-        .remove("quantumMaterialBuffer")
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let mut jobs = match automation.remove("jobs") {
+        Some(Value::Object(value)) => value,
+        _ => bail!("native construction jobs are missing"),
+    };
+    let mut buffers = match automation.remove("quantumMaterialBuffer") {
+        Some(Value::Object(value)) => value,
+        _ => Map::new(),
+    };
     let mut wake_centers = BTreeSet::new();
     let planet_metric_writer_indices = selected_center_indices.clone();
     let selected_center_indices = selected_center_indices.into_iter().collect::<HashSet<_>>();

@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,6 +44,7 @@ const MAX_PLAYER_AUTHORITY_COMMAND_RECEIPT_IDS: usize = 65_536;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const WAL_FRAME_HEADER_BYTES: u64 = 8;
 const DEFAULT_RETAIN_GENERATIONS: usize = 2;
+const EXPORT_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 const SAVE_SLOTS: [&str; 2] = ["normal-main", "speedrun-main"];
 const SLOT_DIRECTORIES: [&str; 3] = ["generations", "chunks", "wal"];
 #[cfg(windows)]
@@ -582,7 +583,7 @@ impl Drop for TemporaryPathGuard {
 }
 
 struct ExactLengthWriter<'a> {
-    inner: &'a mut File,
+    inner: &'a mut dyn Write,
     remaining: u64,
 }
 
@@ -1291,12 +1292,19 @@ impl SaveStore {
             .open(&temporary)?;
         temporary_guard.arm();
         let result = {
+            // Record-sized JSON fragments must not each become a disk write.
+            // Bound accepted bytes outside the buffer, then flush it before
+            // syncing or publishing the temporary file.
+            let mut buffered = BufWriter::with_capacity(EXPORT_WRITE_BUFFER_BYTES, &mut file);
             let mut writer = ExactLengthWriter {
-                inner: &mut file,
+                inner: &mut buffered,
                 remaining: expected_bytes,
             };
             let result = write(&mut writer).context("stream native compatibility export")?;
             writer.finish()?;
+            buffered
+                .flush()
+                .context("flush native compatibility export")?;
             result
         };
         file.sync_all()?;
@@ -3836,7 +3844,10 @@ mod tests {
 
     #[cfg(windows)]
     fn create_directory_redirect(link: &Path, target: &Path) {
+        use std::os::windows::process::CommandExt;
         let output = std::process::Command::new("cmd.exe")
+            // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS for background tests.
+            .creation_flags(0x0800_0000 | 0x0000_4000)
             .args(["/d", "/c", "mklink", "/J"])
             .arg(link)
             .arg(target)
@@ -4117,6 +4128,78 @@ mod tests {
         assert!(error.to_string().contains("wrote fewer bytes"));
         assert!(!export_root.join("short-export.part").exists());
         assert!(!export_root.join("short-export.json").exists());
+    }
+
+    #[test]
+    fn buffered_export_publishes_all_fragments_and_unflushed_tail() {
+        let root = tempdir().unwrap();
+        let (store, _) = open_with_scripted_disk_probe(root.path());
+        let expected = "{\"item\":\"矿石🙂\",\"amount\":17}\n"
+            .repeat(8_193)
+            .into_bytes();
+        assert!(expected.len() > EXPORT_WRITE_BUFFER_BYTES * 3);
+        assert_ne!(expected.len() % EXPORT_WRITE_BUFFER_BYTES, 0);
+        let result = store
+            .publish_export("fragmented-export", expected.len() as u64, |writer| {
+                for fragment in expected.chunks(13) {
+                    writer.write_all(fragment)?;
+                }
+                // The caller deliberately does not flush its final fragment.
+                Ok(73)
+            })
+            .unwrap();
+        assert_eq!(result, 73);
+        drop(store);
+        let export_root = root.path().join("exports");
+        assert_eq!(
+            fs::read(export_root.join("fragmented-export.json")).unwrap(),
+            expected
+        );
+        assert!(!export_root.join("fragmented-export.part").exists());
+    }
+
+    #[test]
+    fn buffered_export_rejects_excess_bytes_before_publication() {
+        let root = tempdir().unwrap();
+        let (store, _) = open_with_scripted_disk_probe(root.path());
+        let error = store
+            .publish_export("oversized-export", 5, |writer| {
+                writer.write_all(b"abc")?;
+                writer.write_all(b"def")?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("exceeded its preflighted byte length"));
+        let export_root = root.path().join("exports");
+        assert!(!export_root.join("oversized-export.json").exists());
+        assert!(!export_root.join("oversized-export.part").exists());
+    }
+
+    #[test]
+    fn buffered_export_callback_failure_preserves_existing_export() {
+        let root = tempdir().unwrap();
+        let (store, _) = open_with_scripted_disk_probe(root.path());
+        store
+            .publish_export("existing-export", 4, |writer| {
+                writer.write_all(b"keep")?;
+                Ok(())
+            })
+            .unwrap();
+        let partial = vec![b'x'; EXPORT_WRITE_BUFFER_BYTES + 17];
+        let error = store
+            .publish_export::<()>("aborted-export", partial.len() as u64 + 1, |writer| {
+                writer.write_all(&partial)?;
+                anyhow::bail!("deliberate export callback failure")
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("deliberate export callback failure"));
+        let export_root = root.path().join("exports");
+        assert_eq!(
+            fs::read(export_root.join("existing-export.json")).unwrap(),
+            b"keep"
+        );
+        assert!(!export_root.join("aborted-export.json").exists());
+        assert!(!export_root.join("aborted-export.part").exists());
     }
 
     #[test]

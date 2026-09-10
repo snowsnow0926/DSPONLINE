@@ -935,11 +935,11 @@ test("offline candidate export binds source, one-shot advance, and envelope proo
     settledSeconds: 600,
     advance: {
       supported: true,
-      exactScope: "offline-macro-v1",
+      exactScope: "offline-state-proven",
       changed: true,
       previousRevision: 2,
       revision: 3,
-      algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1",
+      algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity",
       exactCalibrationSeconds: 30,
       approximatedSeconds: 570,
       summary: candidateSummary,
@@ -961,6 +961,71 @@ test("offline candidate export binds source, one-shot advance, and envelope proo
   const normalized = normalizeRendererNativeResult("coreOfflineCandidateExport", value);
   assert.equal(normalized.prepared, true);
   assert.equal(normalized.export.result.byteLength, 2048);
+  for (const advance of [
+    { ...value.advance, exactScope: "offline-macro-v1" },
+    { ...value.advance, algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1" },
+    { ...value.advance, exactCalibrationSeconds: 29, approximatedSeconds: 571 },
+    { ...value.advance, approximatedSeconds: 569 },
+    { ...value.advance, exactScope: "offline-boundary-exact" },
+  ]) {
+    assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", { ...value, advance }), /prepared binding is invalid/);
+  }
+  const boundary = { ...value, advance: { ...value.advance, exactScope: "offline-boundary-exact", exactCalibrationSeconds: 600, approximatedSeconds: 0 } };
+  assert.equal(normalizeRendererNativeResult("coreOfflineCandidateExport", boundary).prepared, true);
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...value, settledSeconds: 28_801, settledAtMs: 28_802_000,
+    advance: { ...value.advance, approximatedSeconds: 28_771 },
+    export: { ...value.export, result: { ...value.export.result, savedAtMs: 28_802_000 } },
+  }), /prepared binding is invalid/);
+  const bounded = {
+    ...value,
+    settledSeconds: 5,
+    settledAtMs: 6_000,
+    advance: { ...value.advance, exactScope: "pure-idle-bounded-exact", exactCalibrationSeconds: 5, approximatedSeconds: 0 },
+    export: { ...value.export, result: { ...value.export.result, savedAtMs: 6_000 } },
+  };
+  assert.equal(normalizeRendererNativeResult("coreOfflineCandidateExport", bounded).prepared, true);
+  for (const advance of [
+    { ...bounded.advance, approximatedSeconds: 1 },
+    { ...bounded.advance, exactCalibrationSeconds: 4 },
+    { ...bounded.advance, exactCalibrationSeconds: undefined },
+  ]) {
+    assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", { ...bounded, advance }), /prepared binding is invalid/);
+  }
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...bounded, settledSeconds: 31, settledAtMs: 32_000,
+    advance: { ...bounded.advance, exactCalibrationSeconds: 31 },
+    export: { ...bounded.export, result: { ...bounded.export.result, savedAtMs: 32_000 } },
+  }), /prepared binding is invalid/);
+  for (const seconds of [31, 32, 35, 60]) {
+    const transient = { ...bounded, settledSeconds: seconds, settledAtMs: 1_000 + seconds * 1_000,
+      advance: { ...bounded.advance, exactScope: "offline-transient-exact",
+        algorithmVersion: "native-offline-transient-exact-v1", exactCalibrationSeconds: seconds },
+      export: { ...bounded.export, result: { ...bounded.export.result, savedAtMs: 1_000 + seconds * 1_000 } } };
+    assert.equal(normalizeRendererNativeResult("coreOfflineCandidateExport", transient).prepared, true);
+    for (const change of [{ approximatedSeconds: 1 }, { exactCalibrationSeconds: seconds - 1 },
+      { algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity" }]) {
+      assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+        ...transient, advance: { ...transient.advance, ...change },
+      }), /prepared binding is invalid/);
+    }
+    for (const outside of [30, 61]) {
+      assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+        ...transient, settledSeconds: outside, settledAtMs: 1_000 + outside * 1_000,
+        advance: { ...transient.advance, exactCalibrationSeconds: outside },
+        export: { ...transient.export, result: { ...transient.export.result, savedAtMs: 1_000 + outside * 1_000 } },
+      }), /prepared binding is invalid/);
+    }
+  }
+  const unavailable = {
+    prepared: false, strategy: "macro-v1", sourceSavedAtMs: 1_000,
+    settledAtMs: 32_000, settledSeconds: 31, sourceSummary,
+    reason: "candidate interval outside the qualified exact prefix",
+  };
+  assert.equal(normalizeRendererNativeResult("coreOfflineCandidateExport", unavailable).prepared, false);
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...unavailable, export: bounded.export,
+  }), /unavailable binding is invalid/);
   assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
     ...value,
     sourcePath: SECRET_PATH,

@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 import { resolveDurableSimulationRuntimeEnabled } from "../../src/game/runtimePersistenceMode";
+import { waitForFactoryRuntimeReady } from "./runtime-helpers";
 
 const durableMode = resolveDurableSimulationRuntimeEnabled(process.env);
 
@@ -245,6 +246,7 @@ async function openLauncher(page: Page, seeded?: { primary: string }): Promise<v
   // not perform that handshake. Keep the accepted default path unchanged.
   await page.goto(durableMode ? "/?menu=1&storageMigration=production" : "/");
   await continueDurableMenu(page);
+  await waitForFactoryRuntimeReady(page);
   if (durableMode && seeded) seeded.primary = (await readPrimary(page)).raw;
 }
 

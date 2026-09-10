@@ -44,18 +44,20 @@ export function App() {
     void importWithRecovery(() => import("./game/contentPacks"), "内容包注册表")
       .then((contentPacks) => contentPacks.applyContentPackRegistry(contentPacks.loadContentPackRegistry()))
       .then(() => importWithRecovery(() => import("./game/storage"), "本地存档模块"))
-      .then(async ({ loadGame }) => {
+      .then(async ({ loadGame, loadInspectedGame }) => {
         // The local/dev bypass is mounted after IndexedDB initialization, at
         // which point catalog mode intentionally holds no large raw payload in
-        // the synchronous cache. Hydrate only the selected verified candidate
-        // before calling the legacy synchronous loader used by test fixtures.
+        // the synchronous cache. Retain the persisted bytes for save conflict
+        // checks, and load the independently verified recovery state directly.
         const [{ resolveMenuContinueSave }, { retainLocalSavePayload }] = await Promise.all([
           importWithRecovery(() => import("./game/savePreviewPayload"), "本地存档正文"),
           importWithRecovery(() => import("./game/localSaveStore"), "本地存档目录"),
         ]);
         const selected = await resolveMenuContinueSave("normal");
-        if (selected) retainLocalSavePayload(selected.save.key, selected.raw);
-        if (active) setLaunch({ id: Date.now(), loaded: loadGame() });
+        if (selected) retainLocalSavePayload(selected.save.key, selected.primaryRaw);
+        if (active) setLaunch({ id: Date.now(), loaded: selected
+          ? loadInspectedGame(selected.inspection, "normal", selected.save.source) ?? loadGame()
+          : loadGame() });
       })
       .finally(() => { if (active) setBypassLoading(false); });
     return () => { active = false; };

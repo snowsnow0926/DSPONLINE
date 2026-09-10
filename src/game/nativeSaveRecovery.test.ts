@@ -39,6 +39,15 @@ describe("native checkpoint manifest-first recovery", () => {
     expect(f.read).toHaveBeenCalledTimes(1);
     expect(f.read.mock.calls[0][0].key).toBe(f.manifestKey);
   });
+  it("rejects an older native checkpoint even when the newer primary state checksum is unchanged", async () => {
+    const f = fixture();
+    const newer = JSON.stringify({ ...JSON.parse(f.raw), savedAt: 30 });
+    expect(JSON.parse(newer).checksum).toBe(JSON.parse(f.raw).checksum);
+    expect(restoreChunkedSavePayloadFromRecords(newer, "normal", f.records)).toBeNull();
+    expect(await restoreWindowsNativeSavePayload(newer, "normal")).toBeNull();
+    expect(f.read).toHaveBeenCalledTimes(1);
+    expect(f.read.mock.calls[0][0].key).toBe(f.manifestKey);
+  });
   it.each(["missing", "corrupt", "generation", "duplicate", "invalid-primary"])("preserves the primary on %s readback", async (failure) => {
     const f = fixture();
     const key = [...f.records.keys()][0];

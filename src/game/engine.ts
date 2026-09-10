@@ -27,6 +27,7 @@ import {
   getTechnology,
   isDeprecatedTechnology,
 } from "./content";
+import { constructionMaterialsAvailable } from "./constructionMaterialAvailability";
 import {
   DEFAULT_GALAXY_SEED,
   createGalaxyState,
@@ -3959,7 +3960,10 @@ export function getEntityPowerGridId(entity: FactoryEntity): PowerGridId {
 }
 
 function gridPowerSources(state: GameState, planetId: PlanetId, gridId: PowerGridId, lookup?: SimulationLookupContext): FactoryEntity[] {
-  return lookup?.powerSourcesByPlanetGrid.get(`${planetId}|${gridId}`) ?? state.entities.filter((entity) => entity.planetId === planetId && getEntityPowerGridId(entity) === gridId &&
+  // The simulation index is complete: an absent key means this grid has no
+  // source, rather than requiring another scan of every planet's entities.
+  if (lookup) return lookup.powerSourcesByPlanetGrid.get(`${planetId}|${gridId}`) ?? [];
+  return state.entities.filter((entity) => entity.planetId === planetId && getEntityPowerGridId(entity) === gridId &&
     (entity.kind === "power" || (entity.buildingId === "ray_receiver" && entity.recipeId === "ray_power")));
 }
 
@@ -5467,7 +5471,9 @@ function runMachines(
   skippedEntityIds?: ReadonlySet<string>,
 ): void {
   const profile = getPlanetIndustrialProfile(state, planetId);
-  const runtimes = lookup?.machineRuntimesByPlanet.get(planetId) ?? state.entities.flatMap((entity): IndexedMachineRuntime[] => {
+  // An absent planet entry in a complete lookup means there are no machines;
+  // it is not a missing lookup that needs a scan of every planet's entities.
+  const runtimes = lookup ? (lookup.machineRuntimesByPlanet.get(planetId) ?? []) : state.entities.flatMap((entity): IndexedMachineRuntime[] => {
     const recipe = getRecipe(entity.recipeId);
     if (entity.planetId !== planetId || entity.kind !== "machine" || entity.buildingId === "ray_receiver" || !entity.buildingId || !recipe) return [];
     const building = getBuilding(entity.buildingId);
@@ -5489,6 +5495,7 @@ function runMachines(
       matrixResearch: recipe.id === "matrix_research",
     }];
   });
+  if (runtimes.length === 0) return;
   let industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
   let matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
   // Technology membership is read for every machine. Large factories can
@@ -7090,7 +7097,7 @@ export function runPlanetSimulationPhase(
       storageDischargeKw: gridPlan.storageDischargeKw,
       storageChargeKw: gridPlan.storageChargeKw,
     });
-    const storage = gridStoredEnergy(state, planetId, gridId, lookup);
+    const storage = gridStoredEnergy(state, planetId, gridId, phaseLookup);
     state.powerGridMetrics[planetId][gridId] = {
       gridId,
       generationKw: round(gridPlan.generationKw, 2),
@@ -7107,7 +7114,7 @@ export function runPlanetSimulationPhase(
       storageChargeKw: round(gridPlan.storageChargeKw, 2),
       storedEnergyMj: round(storage.stored, 3),
       storageCapacityMj: round(storage.capacity, 3),
-      fuelReserveSeconds: fuelReserveSeconds(state, planetId, gridId, lookup),
+      fuelReserveSeconds: fuelReserveSeconds(state, planetId, gridId, phaseLookup),
       totalItemsPerMinute: 0,
       connectedEntities: gridPlan.connectedEntities,
       disconnectedEntities: gridPlan.disconnectedEntities,
@@ -7165,7 +7172,7 @@ export function runPlanetSimulationPhase(
     storageChargeKw: round(power.storageChargeKw, 2),
     storedEnergyMj: round(storage.stored, 3),
     storageCapacityMj: round(storage.capacity, 3),
-    fuelReserveSeconds: fuelReserveSeconds(state, planetId),
+    fuelReserveSeconds: fuelReserveSeconds(state, planetId, undefined, phaseLookup),
     totalItemsPerMinute: round((phaseLookup.entitiesByPlanet.get(planetId) ?? []).reduce((sum, entity) =>
       entity.planetId === planetId ? sum + entity.productionRate : sum, 0), 2),
   };
@@ -12161,7 +12168,7 @@ function constructionAutomationInputsAvailable(
 ): boolean {
   const tray = trayForPlanet(state, planetId);
   const quantumBuffer = entityId ? constructionAutomationQuantumBuffer(state, entityId) : {};
-  return Boolean(planConstructionAutomationConsumptionWithQuantum(job.inventory, tray, quantumBuffer, constructionAutomationRequirements(step)));
+  return constructionMaterialsAvailable(job.inventory, tray, quantumBuffer, constructionAutomationRequirements(step));
 }
 
 function finishConstructionAutomationStep(
@@ -12858,8 +12865,9 @@ function runConstructionCenters(
   profiler?: SimulationProfiler,
   lookup?: SimulationLookupContext,
 ): void {
-  const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
   const centerEntities = entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center");
+  if (centerEntities.length === 0) return;
+  const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
   const activeTargetCountForBudget = getActiveConstructionAutomationTargets(state).length;
   const extendedBudget = batchConstructionAutomation && activeTargetCountForBudget > 1 &&
     centerEntities.some((entity) => entity.machineCount >= CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD);
@@ -12950,7 +12958,16 @@ function runConstructionCenters(
           break;
         }
         let resolved: CachedConstructionAutomationPlan | { plan: ConstructionAutomationPlan; batch: RepeatableConstructionAutomationBatch | null } | null;
-        if (Object.keys(quantumBuffer).length > 0) {
+        if (!batchConstructionAutomation) {
+          // The reference path plans one job from current stock. Probing or
+          // caching a batch cycle here both wastes work and couples the
+          // supposedly independent oracle to the optimization it checks.
+          if (profiler) profiler.constructionPlanBuilds += 1;
+          resolved = {
+            plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId, quantumBuffer),
+            batch: null,
+          };
+        } else if (Object.keys(quantumBuffer).length > 0) {
           // A direct quantum delivery changes the planner's virtual input set;
           // bypass the tray-only cache and spend one bounded plan build. The
           // resulting repeatable batch consumes the center buffer directly,
@@ -13001,9 +13018,7 @@ function runConstructionCenters(
             }
           }
         } else {
-          resolved = batchConstructionAutomation
-            ? resolveConstructionAutomationPlan(state, target.definition, entity.planetId, planCache, budget, profiler)
-            : { plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId), batch: null };
+          resolved = resolveConstructionAutomationPlan(state, target.definition, entity.planetId, planCache, budget, profiler);
         }
         if (!resolved) {
           if (profiler) profiler.constructionGuardHits += 1;

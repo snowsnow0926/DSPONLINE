@@ -5,6 +5,73 @@ const { PassThrough } = require("node:stream");
 const path = require("node:path");
 const test = require("node:test");
 
+function installMockHostExit(child) {
+  const close = () => { child.emit("exit", 0, null); child.emit("close", 0, null); };
+  child.kill = close;
+  child.stdin.on("data", (chunk) => {
+    const request = JSON.parse(parseFrames(Buffer.from(chunk)).frames[0].payload.toString("utf8"));
+    if (request.operation === "shutdown") queueMicrotask(close);
+  });
+}
+
+function stopFixture() {
+  const child = new EventEmitter();
+  let kills = 0, requests = 0;
+  child.kill = () => { kills++; };
+  const client = new NativeHostClient({ binaryPath: path.resolve("unused-host"), rootPath: path.resolve("unused-root") });
+  client.child = child;
+  client.closed = false;
+  client.request = async () => { requests++; return { accepted: true }; };
+  return { child, client, kills: () => kills, requests: () => requests };
+}
+
+test("Host shutdown ACK waits for close and simultaneous stops share one request", async () => {
+  const fixture = stopFixture();
+  let stopped = false;
+  const first = fixture.client.stop().then(() => { stopped = true; });
+  const second = fixture.client.stop();
+  await Promise.resolve();
+  assert.equal(stopped, false);
+  assert.equal(fixture.kills(), 0);
+  fixture.client.exited = true;
+  fixture.child.emit("exit", 0, null);
+  await Promise.resolve();
+  assert.equal(stopped, false);
+  fixture.child.emit("close", 0, null);
+  await Promise.all([first, second]);
+  assert.equal(stopped, true);
+  assert.equal(fixture.requests(), 1);
+  assert.equal(fixture.kills(), 0);
+});
+
+test("Host shutdown kills only after its deadline and still waits for confirmed close", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fixture = stopFixture();
+  let stopped = false;
+  const stopping = fixture.client.stop().then(() => { stopped = true; });
+  await Promise.resolve();
+  t.mock.timers.tick(5_000);
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+  assert.equal(fixture.kills(), 1);
+  assert.equal(stopped, false);
+  fixture.child.emit("close", null, "SIGTERM");
+  await stopping;
+  assert.equal(stopped, true);
+});
+
+test("an unconfirmed Host stop rejects and cannot silently restart the same client", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fixture = stopFixture();
+  const rejected = assert.rejects(fixture.client.stop(), { code: "NATIVE_HOST_STOP_UNCONFIRMED" });
+  await Promise.resolve();
+  t.mock.timers.tick(5_000);
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+  t.mock.timers.tick(2_000);
+  await rejected;
+  assert.equal(fixture.kills(), 1);
+  await assert.rejects(fixture.client.start(), { code: "NATIVE_HOST_STOP_UNCONFIRMED" });
+});
+
 const {
   CONTROL_RESPONSE_KIND,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
@@ -2080,7 +2147,7 @@ test("native host spawn inherits the parent environment and accepts only bounded
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
-  child.kill = () => child.emit("exit", 0, null);
+  installMockHostExit(child);
   child.stdin.on("data", (chunk) => {
     const requestFrame = parseFrames(Buffer.from(chunk)).frames[0];
     const request = JSON.parse(requestFrame.payload.toString("utf8"));
@@ -2123,7 +2190,7 @@ test("structured profile request is bound to its response frame and ignores late
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
-  child.kill = () => child.emit("exit", 0, null);
+  installMockHostExit(child);
   child.stdin.on("data", (chunk) => {
     const requestFrame = parseFrames(Buffer.from(chunk)).frames[0];
     const request = JSON.parse(requestFrame.payload.toString("utf8"));

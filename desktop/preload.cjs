@@ -610,8 +610,103 @@ function subscribeNativeCoreProjection(request, listener) {
   });
 }
 
+function normalizeNativeOfflineSourcePreloadRequest(request) {
+  const keys = ["registryFingerprint", "catalog", "sourceSavedAtMs"];
+  if (!hasExactKeys(request, keys) || !validLogicalPreloadId(request.registryFingerprint, 256) ||
+      !Number.isSafeInteger(request.sourceSavedAtMs) || request.sourceSavedAtMs < 0 ||
+      !request.catalog || request.catalog.protocolVersion !== 1 ||
+      request.catalog.registryFingerprint !== request.registryFingerprint ||
+      ![request.catalog.items, request.catalog.buildings, request.catalog.recipes, request.catalog.belts].every(Array.isArray) ||
+      Buffer.byteLength(JSON.stringify(request), "utf8") > 8 * 1024 * 1024 - 16_384) {
+    throw new TypeError("Windows 原生离线来源请求无效");
+  }
+  return Object.fromEntries(keys.map((key) => [key, request[key]]));
+}
+
+function startNativeOfflineSourceStartup(request) {
+  const normalized = normalizeNativeOfflineSourcePreloadRequest(request);
+  let send;
+  let cancelTransfer = () => undefined;
+  let ready = false;
+  let readyResolve;
+  let readyReject;
+  let acknowledgement = null;
+  let offset = 0;
+  let writing = false;
+  let ended = false;
+  let failure = null;
+  const readyPromise = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+  readyPromise.catch(() => undefined);
+  const source = {
+    attach(port, cancel) { send = (message) => port.postMessage(message); cancelTransfer = cancel; },
+    onMessage(message) {
+      if (hasExactKeys(message, ["sourceReady"]) && message.sourceReady === true) {
+        if (ready || ended) throw new Error("duplicate source ready");
+        ready = true;
+        readyResolve();
+        return true;
+      }
+      if (hasExactKeys(message, ["sourceAck"])) {
+        if (!ready || !acknowledgement || message.sourceAck !== offset) throw new Error("invalid source ACK");
+        const pending = acknowledgement;
+        acknowledgement = null;
+        pending.resolve();
+        return true;
+      }
+      return false;
+    },
+  };
+  const result = receiveNativeOfflineStartupCandidate(normalized, source);
+  result.catch((error) => {
+    failure = error;
+    readyReject(error);
+    acknowledgement?.reject(error);
+    acknowledgement = null;
+  });
+  return Object.freeze({
+    async write(chunk) {
+      if (!(chunk instanceof ArrayBuffer) || chunk.byteLength < 1 || chunk.byteLength > MAX_NATIVE_OFFLINE_STARTUP_CHUNK_BYTES ||
+          writing || ended || offset + chunk.byteLength > MAX_NATIVE_OFFLINE_STARTUP_TRANSFER_BYTES) {
+        cancelTransfer();
+        throw new TypeError("Windows 原生离线来源分片无效");
+      }
+      writing = true;
+      try {
+        await readyPromise;
+        if (failure) throw failure;
+        offset += chunk.byteLength;
+        const accepted = new Promise((resolve, reject) => { acknowledgement = { resolve, reject }; });
+        accepted.catch(() => undefined);
+        try { send({ sourceChunk: new Uint8Array(chunk), offset }); }
+        catch (error) { cancelTransfer(); throw error; }
+        await accepted;
+      } finally { writing = false; }
+    },
+    async finish(proof) {
+      if (ended || writing || offset < 1 || !hasExactKeys(proof, ["expectedCanonicalSha256", "expectedDomainSha256"]) ||
+          typeof proof.expectedCanonicalSha256 !== "string" || !/^[a-f0-9]{64}$/.test(proof.expectedCanonicalSha256) ||
+          typeof proof.expectedDomainSha256 !== "string" || !/^[a-f0-9]{64}$/.test(proof.expectedDomainSha256)) {
+        cancelTransfer();
+        throw new TypeError("Windows 原生离线来源证明无效");
+      }
+      await readyPromise;
+      if (failure) throw failure;
+      ended = true;
+      try { send({ sourceEnd: true, totalBytes: offset, ...proof }); }
+      catch (error) { cancelTransfer(); throw error; }
+      return result;
+    },
+    cancel() { cancelTransfer(); },
+  });
+}
+
 function prepareNativeOfflineStartup(request) {
-  const normalizedRequest = normalizeNativeOfflineStartupPreloadRequest(request);
+  return receiveNativeOfflineStartupCandidate(request, null);
+}
+
+
+function receiveNativeOfflineStartupCandidate(request, sourceTransfer) {
+  const normalizedRequest = sourceTransfer ? normalizeNativeOfflineSourcePreloadRequest(request) : normalizeNativeOfflineStartupPreloadRequest(request);
   return new Promise((resolve, reject) => {
     const channel = new MessageChannel();
     let settled = false;
@@ -621,6 +716,7 @@ function prepareNativeOfflineStartup(request) {
     let receivedBytes = 0;
     let payloadHash = null;
     let payloadChecksum = 0x811c9dc5;
+    let sourceResult = null;
     const finish = (callback) => {
       if (settled) return;
       settled = true;
@@ -639,10 +735,27 @@ function prepareNativeOfflineStartup(request) {
         message: "Windows 原生离线结算候选超时，正在回退兼容结算",
       }))), NATIVE_OFFLINE_STARTUP_TIMEOUT_MS);
     };
+    sourceTransfer?.attach(channel.port1, () => {
+      if (settled) return;
+      try { channel.port1.postMessage({ cancel: true }); } finally {
+        finish(() => reject(Object.assign(new Error("Windows 原生离线结算已取消"), { name: "AbortError", code: "ABORTED" })));
+      }
+    });
     armWatchdog();
     channel.port1.onmessage = (event) => {
+      if (settled) return;
       armWatchdog();
       const message = event.data;
+      if (sourceTransfer) {
+        if (hasExactKeys(message, ["sourceClosed"]) && message.sourceClosed === true) {
+          if (!sourceResult) { failProtocol(); return; }
+          finish(() => resolve(sourceResult));
+          return;
+        }
+        if (sourceResult) { failProtocol(); return; }
+        try { if (sourceTransfer.onMessage(message)) return; }
+        catch { failProtocol(); return; }
+      }
       if (message?.error) {
         const error = createRendererNativeError(message.error, {
           fallbackCode: "NATIVE_OFFLINE_STARTUP_FAILED",
@@ -710,7 +823,8 @@ function prepareNativeOfflineStartup(request) {
             return;
           }
           channel.port1.postMessage({ completeAck: null });
-          finish(() => resolve(start));
+          if (sourceTransfer) sourceResult = start;
+          else finish(() => resolve(start));
           return;
         }
         const expectedSha256 = start.export.result.envelopeSha256;
@@ -722,11 +836,9 @@ function prepareNativeOfflineStartup(request) {
         }
         const checksum = (payloadChecksum >>> 0).toString(16).padStart(8, "0");
         channel.port1.postMessage({ completeAck: actualSha256 });
-        finish(() => resolve({
-          ...start,
-          payloadBytes: payload.buffer,
-          payloadChecksum: checksum,
-        }));
+        const candidate = { ...start, payloadBytes: payload.buffer, payloadChecksum: checksum };
+        if (sourceTransfer) sourceResult = candidate;
+        else finish(() => resolve(candidate));
         return;
       }
       failProtocol();
@@ -734,7 +846,7 @@ function prepareNativeOfflineStartup(request) {
     channel.port1.onmessageerror = failProtocol;
     channel.port1.start?.();
     ipcRenderer.postMessage(
-      "desktop:native-offline-startup-transfer",
+      sourceTransfer ? "desktop:native-offline-source-transfer" : "desktop:native-offline-startup-transfer",
       normalizedRequest,
       [channel.port2],
     );
@@ -783,6 +895,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   recoverNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-recover", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算恢复失败" }, {}),
   /** Read-only candidate: renderer never supplies time, a path, or an export ID. */
   prepareNativeOfflineStartup,
+  startNativeOfflineSourceStartup,
   getRuntimeDiagnostics: () => ipcRenderer.invoke("desktop:runtime-diagnostics"),
   getNativeProjectionSubscriptionDiagnostics: () =>
     invokeNative("desktop:native-projection-subscription-diagnostics", {

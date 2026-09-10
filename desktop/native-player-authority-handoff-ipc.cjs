@@ -31,6 +31,35 @@ const TERMINAL_STARTUP_RECONCILE_ACTIONS = new Set([
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const { QUIESCENCE_ACK_KIND } = require("./native-player-authority-handoff.cjs");
+
+// Keep the main entry and actual RPC integration on the same transport adapter.
+// Only the validated bridge response can supply the browser's fence receipt.
+async function requestNativePlayerAuthorityQuiescence(bridge, request, timeoutMs) {
+  const browserFence = await bridge.request(request.ownerId, {
+    kind: COMMIT_REQUEST_KIND,
+    handoffId: request.handoffId,
+    sessionId: request.sessionId,
+    runId: request.runId,
+    revision: request.revision,
+    checkpoint: request.checkpoint,
+    publicWriterFence: request.publicWriterFence,
+    settledDeadlineMs: request.settledDeadlineMs,
+  }, timeoutMs);
+  return Object.freeze({ browserFence, acknowledgement: Object.freeze({
+    kind: QUIESCENCE_ACK_KIND,
+    handoffId: request.handoffId,
+    sessionId: request.sessionId,
+    runId: request.runId,
+    ownerId: request.ownerId,
+    revision: request.revision,
+    checkpoint: request.checkpoint,
+    publicWriterFence: request.publicWriterFence,
+    settledDeadlineMs: request.settledDeadlineMs,
+    rendererInFlightCoreOperations: browserFence.rendererInFlightCoreOperations,
+    workerInFlightCoreOperations: browserFence.workerInFlightCoreOperations,
+  }) });
+}
 
 class NativePlayerAuthorityHandoffIpcError extends Error {
   constructor(message, code, cause) {
@@ -670,5 +699,6 @@ module.exports = {
   STARTUP_RECONCILE_REQUEST_KIND,
   STARTUP_RECONCILED_RESULT_KIND,
   startupReconciliationIsTerminalResolved,
+  requestNativePlayerAuthorityQuiescence,
   subscribeRendererToNativePlayerAuthorityHandoff,
 };

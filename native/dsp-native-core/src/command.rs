@@ -668,8 +668,14 @@ fn station_progress_value(progress: f64) -> Value {
 
 fn safe_json_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
     value
-        .and_then(Value::as_u64)
-        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .and_then(Value::as_f64)
+        .filter(|value| {
+            value.is_finite()
+                && *value >= 0.0
+                && *value <= MAX_JAVASCRIPT_SAFE_INTEGER as f64
+                && value.fract() == 0.0
+        })
+        .map(|value| value as u64)
         .ok_or_else(|| anyhow!("native player-authority {label} is not a safe integer"))
 }
 
@@ -1033,12 +1039,12 @@ fn expected_ordinary_placement_entity(
         .get("position")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("native player-authority building position is invalid"))?;
-    let x = position
+    position
         .get("x")
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
         .ok_or_else(|| anyhow!("native player-authority building X position is invalid"))?;
-    let y = position
+    position
         .get("y")
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
@@ -1050,7 +1056,13 @@ fn expected_ordinary_placement_entity(
         &expected_id,
         active_planet_id,
     )?;
-    expected.insert("position".to_owned(), serde_json::json!({ "x": x, "y": y }));
+    // JavaScript serializes whole-number coordinates as JSON integers. After
+    // validating their numeric domain, retain that representation: serde_json
+    // treats 4000 and 4000.0 as different Number values under strict equality.
+    expected.insert(
+        "position".to_owned(),
+        serde_json::json!({ "x": position["x"], "y": position["y"] }),
+    );
     if addition.value != Value::Object(expected) {
         bail!("native player-authority placed entity fields are not canonical")
     }
@@ -12598,6 +12610,33 @@ mod tests {
         command
     }
 
+    #[test]
+    fn safe_json_integer_accepts_native_integral_floats_without_rounding_fractions() {
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(1),
+            Value::from(1.0),
+            Value::from(-0.0),
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER),
+        ] {
+            assert_eq!(
+                safe_json_integer(Some(&value), "test").unwrap(),
+                value.as_f64().unwrap() as u64
+            );
+        }
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(0.5),
+            serde_json::json!("1"),
+            serde_json::json!(true),
+            Value::Null,
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER + 1),
+        ] {
+            assert!(safe_json_integer(Some(&value), "test").is_err());
+        }
+        assert!(safe_json_integer(None, "test").is_err());
+    }
+
     fn empty_player_command(revision: u64) -> SimulationCommandPatch {
         SimulationCommandPatch {
             protocol_version: crate::CORE_PROTOCOL_VERSION,
@@ -12669,6 +12708,41 @@ mod tests {
             }),
         }];
         command
+    }
+
+    #[test]
+    fn player_placement_accepts_javascript_integer_and_fractional_coordinates() {
+        for position in [
+            serde_json::json!({ "x": 4000, "y": -4000 }),
+            serde_json::json!({ "x": 0, "y": 24.5 }),
+            serde_json::json!({ "x": -12.25, "y": 24 }),
+        ] {
+            let mut state = player_command_state();
+            let mut command = ordinary_placement_command(state.revision);
+            command.added_entities[0].value["position"] = position.clone();
+            state.apply_player_authority_command(&command).unwrap();
+            assert_eq!(state.parse_entity(3).unwrap()["position"], position);
+            assert_eq!(state.base_value()["construction"]["arc_smelter"], 3);
+            assert_eq!(state.revision, 10);
+        }
+    }
+
+    #[test]
+    fn player_placement_rejects_invalid_coordinates_without_debiting_stock() {
+        for position in [
+            serde_json::json!({ "x": "4000", "y": 4000 }),
+            serde_json::json!({ "x": 0, "y": null }),
+            serde_json::json!({ "x": 0 }),
+            serde_json::json!({ "x": 0, "y": 0, "extra": 1 }),
+        ] {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            let mut command = ordinary_placement_command(state.revision);
+            command.added_entities[0].value["position"] = position;
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+            assert_eq!(state.revision, 9);
+        }
     }
 
     fn ordinary_stack_change_command(

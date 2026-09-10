@@ -59,4 +59,33 @@ describe("canonical save envelope inspection", () => {
     expect(inspectCanonicalSaveEnvelope(raw.replace('{"formatVersion":2', '{"formatVersion":2,"formatVersion":2'))).toBeNull();
     expect(inspectCanonicalSaveEnvelope(raw.slice(0, -1))).toBeNull();
   });
+
+  it("counts reordered and escaped collection fields without including nested arrays", () => {
+    const envelope = JSON.parse(fixtureRaw());
+    const { entities, belts, ...rest } = envelope.state;
+    envelope.state = { belts, extra: { entities: [1, 2, 3], belts: [4, 5] }, ...rest, entities };
+    const raw = JSON.stringify(envelope).replace('"state":', '"st\\u0061te":')
+      .replace('"belts":', '"b\\u0065lts":');
+    expect(inspectCanonicalSaveEnvelope(raw)?.state).toMatchObject({ entityCount: 2, beltCount: 1 });
+
+    envelope.state.entities = [];
+    envelope.state.belts = [];
+    expect(inspectCanonicalSaveEnvelope(JSON.stringify(envelope))?.state)
+      .toMatchObject({ entityCount: 0, beltCount: 0 });
+  });
+
+  it("still rejects malformed, duplicate and missing state collections", () => {
+    const raw = fixtureRaw();
+    for (const malformed of [
+      raw.replace('"entities":[', '"entities":{},"discarded":['),
+      raw.replace('"entities":[', '"entities":[],"entities":['),
+      raw.replace('"entities":[', '"entities":[],"entit\\u0069es":['),
+      raw.replace('"entities":[', '"missingEntities":['),
+      raw.replace('"belts":[', '"belts":null,"discarded":['),
+      raw.replace('"belts":[', '"belts":[,'),
+      raw.replace('"belts":[{"id":"belt-1"}]', '"belts":[{"id":"belt-1"},]'),
+      raw.replace('"state":{', '"state":{"invalid":"\\q",'),
+      raw.replace('"state":{', '"state":{"unclosed":['),
+    ]) expect(inspectCanonicalSaveEnvelope(malformed)).toBeNull();
+  });
 });

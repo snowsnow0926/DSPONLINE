@@ -61,6 +61,34 @@ describe("native core JavaScript checkpoint proofs", () => {
     }
   });
 
+  it("reuses only exact field names while values, order and omitted members change", () => {
+    const value = Array.from({ length: 600 }, (_, index) => {
+      if (index % 4 === 0) return { z: index, a: { x: index, missing: undefined }, omitted: undefined };
+      if (index % 4 === 1) return { a: index + 1, z: null, omitted: index };
+      if (index % 4 === 2) return { "z\u0000a": index, a: "quote\"中🙂", omitted: undefined };
+      return { z: undefined, a: [index, null], omitted: index };
+    });
+    expect(canonicalNativeCoreSha256(value)).toBe(canonicalReference(value));
+    value[0].a = 17;
+    expect(canonicalNativeCoreSha256(value)).toBe(canonicalReference(value));
+  });
+
+  it("keeps canonical output exact beyond bounded field-shape caching", () => {
+    const shapes = Array.from({ length: 260 }, (_, length) =>
+      Object.fromEntries(Array.from({ length }, (_, index) => [`field-${length - index}`, index])));
+    const value = [shapes, { ["界".repeat(300)]: "long key" }, ...shapes.reverse()];
+    expect(canonicalNativeCoreSha256(value)).toBe(canonicalReference(value));
+  });
+
+  it("preserves scalar encoding while bounded quoted strings are replaced", () => {
+    const repeated = ["", "重复🙂", "\ud800", "\u0000\"\\\n", "x".repeat(256), "y".repeat(257)];
+    const values = Array.from({ length: 2_500 }, (_, index) => [
+      `unique-${index}-${"x".repeat(index % 100)}`, ...repeated,
+      0, -0, 1, -1, Number.MIN_VALUE, Number.MAX_VALUE, 1e-7, 1e21, Infinity, NaN, null, false, true,
+    ]);
+    expect(canonicalNativeCoreSha256(values)).toBe(canonicalReference(values));
+  });
+
   it("creates a revision-bound full and domain proof without mutating state", () => {
     const state = createInitialState(0x1234abcd);
     const before = structuredClone(state);

@@ -115,6 +115,11 @@ class IncrementalSha256 {
   }
 }
 
+interface CanonicalFieldShape {
+  inputKeys: string[];
+  fields: Array<{ key: string; encodedKey: string }>;
+}
+
 class ProofWriter {
   private readonly hash = new IncrementalSha256();
   private readonly numericBytes = new Uint8Array(8);
@@ -122,6 +127,54 @@ class ProofWriter {
   private readonly buffer = new Uint8Array(64 * 1024);
   private bufferedBytes = 0;
   private pendingText = "";
+  private readonly fieldShapes = new Map<number, CanonicalFieldShape>();
+  private cachedFieldCount = 0;
+  private readonly quotedStrings = new Map<string, string>();
+  private cachedStringCharacters = 0;
+
+  quotedString(value: string): void {
+    const known = this.quotedStrings.get(value);
+    if (known !== undefined) { this.text(known); return; }
+    const encoded = JSON.stringify(value);
+    if (value.length <= 256) {
+      if (this.quotedStrings.size >= 1_024 || this.cachedStringCharacters + value.length > 65_536) {
+        this.quotedStrings.clear();
+        this.cachedStringCharacters = 0;
+      }
+      this.quotedStrings.set(value, encoded);
+      this.cachedStringCharacters += value.length;
+    }
+    this.text(encoded);
+  }
+
+  canonicalFields(record: Record<string, unknown>): CanonicalFieldShape["fields"] {
+    // Validate current membership every time; only names/order are reused,
+    // never values or a previous state proof. Factories repeat the same entity
+    // and belt shapes hundreds of thousands of times in one canonical walk.
+    const keys = Object.keys(record).filter((key) => {
+      const value = record[key];
+      return value !== undefined && typeof value !== "function" && typeof value !== "symbol";
+    });
+    const previous = this.fieldShapes.get(keys.length);
+    if (previous) {
+      let matches = true;
+      for (let index = 0; index < keys.length; index += 1) {
+        if (keys[index] !== previous.inputKeys[index]) { matches = false; break; }
+      }
+      if (matches) return previous.fields;
+    }
+    const fields = keys.slice().sort().map((key) => ({ key, encodedKey: JSON.stringify(key) }));
+    // Bound retained names even for unusual user-authored maps. Keep one
+    // exact shape per field count; no delimiter-based signature can collide.
+    if (keys.length <= 256 && keys.every((key) => key.length <= 256)) {
+      const nextCount = this.cachedFieldCount - (previous?.inputKeys.length ?? 0) + keys.length;
+      if (nextCount > 4_096) { this.fieldShapes.clear(); this.cachedFieldCount = 0; }
+      else this.cachedFieldCount -= previous?.inputKeys.length ?? 0;
+      this.fieldShapes.set(keys.length, { inputKeys: keys, fields });
+      this.cachedFieldCount += keys.length;
+    }
+    return fields;
+  }
 
   text(value: string): void {
     if (this.pendingText.length + value.length > 64 * 1024) this.flushText();
@@ -192,12 +245,16 @@ function writeCanonical(writer: ProofWriter, value: unknown, arrayEntry = false)
     else throw new Error("native core canonical proof encountered a non-persisted value");
     return;
   }
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    writer.text(JSON.stringify(value));
+  if (typeof value === "string") {
+    writer.quotedString(value);
+    return;
+  }
+  if (value === null || typeof value === "boolean") {
+    writer.text(value === null ? "null" : value ? "true" : "false");
     return;
   }
   if (typeof value === "number") {
-    writer.text(Number.isFinite(value) ? JSON.stringify(value) : "null");
+    writer.text(Number.isFinite(value) ? String(value) : "null");
     return;
   }
   if (typeof value !== "object") throw new Error(`native core canonical proof does not support ${typeof value}`);
@@ -212,13 +269,9 @@ function writeCanonical(writer: ProofWriter, value: unknown, arrayEntry = false)
   }
   writer.text("{");
   const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).filter((key) => {
-    const field = record[key];
-    return field !== undefined && typeof field !== "function" && typeof field !== "symbol";
-  }).sort();
-  keys.forEach((key, index) => {
+  writer.canonicalFields(record).forEach(({ key, encodedKey }, index) => {
     if (index > 0) writer.text(",");
-    writer.text(JSON.stringify(key));
+    writer.text(encodedKey);
     writer.text(":");
     writeCanonical(writer, record[key]);
   });

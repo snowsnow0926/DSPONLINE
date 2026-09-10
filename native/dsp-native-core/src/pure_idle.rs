@@ -1238,6 +1238,48 @@ fn capture_renewable_power_proof_snapshot(
 }
 
 fn capture_research_proof_snapshot(state: &CoreState) -> anyhow::Result<ResearchProofSnapshot> {
+    let started =
+        crate::profile_evidence::profile_environment_enabled().then(std::time::Instant::now);
+    let result =
+        capture_research_proof_snapshot_for_entities(state, research_proof_entity_indices(state));
+    if let Some(started) = started {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpure-idle-research-snapshot\t{:.3}",
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
+    }
+    result
+}
+
+fn research_proof_entity_indices(state: &CoreState) -> impl Iterator<Item = usize> + '_ {
+    let entity_count = state.entity_index.len();
+    let research_symbol = state.symbols.lookup("matrix_research");
+    let directory = &state.factory_topology.research_entity_indices;
+    // These compact recipe columns are installed with the raw records. Check
+    // the complete directory, including order and membership, without parsing
+    // every unrelated entity again. A stale directory keeps the old scan.
+    let directory_matches = state.entities.recipes.len() == entity_count
+        && directory.iter().copied().eq(state
+            .entities
+            .recipes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, symbol)| (Some(*symbol) == research_symbol).then_some(index)));
+    let selected = if directory_matches {
+        directory.as_slice()
+    } else {
+        &[]
+    };
+    selected
+        .iter()
+        .copied()
+        .chain(0..if directory_matches { 0 } else { entity_count })
+}
+
+fn capture_research_proof_snapshot_for_entities(
+    state: &CoreState,
+    entity_indices: impl Iterator<Item = usize>,
+) -> anyhow::Result<ResearchProofSnapshot> {
     let base = state.base_value();
     let research = base
         .get("research")
@@ -1304,7 +1346,7 @@ fn capture_research_proof_snapshot(state: &CoreState) -> anyhow::Result<Research
     }
 
     let mut labs = Vec::new();
-    for entity_index in 0..state.entity_index.len() {
+    for entity_index in entity_indices {
         let entity = state.parse_entity(entity_index)?;
         if entity.get("recipeId").and_then(Value::as_str) != Some("matrix_research")
             || number_at(Some(&entity), &["machineCount"]) <= EPSILON
@@ -12321,6 +12363,124 @@ mod tests {
                 }),
             ],
         )
+    }
+
+    fn research_snapshot_index_fixture(mode: ResearchFixtureMode) -> CoreState {
+        let mut public = productive_research_macro_fixture(16.0, mode)
+            .materialize()
+            .unwrap();
+        let public = public.as_object_mut().unwrap();
+        let Some(Value::Array(mut entities)) = public.remove("entities") else {
+            panic!("entities")
+        };
+        let Some(Value::Array(belts)) = public.remove("belts") else {
+            panic!("belts")
+        };
+        let lab = entities
+            .iter()
+            .find(|entity| entity["id"] == "research-lab")
+            .unwrap()
+            .clone();
+        let mut inactive = lab.clone();
+        inactive["id"] = json!("inactive-lab");
+        inactive["machineCount"] = json!(0);
+        entities.insert(0, inactive);
+        let mut later = lab;
+        later["id"] = json!("later-lab");
+        entities.push(later);
+        fixture_state_from_parts_with_belts(Value::Object(public.clone()), entities, belts)
+    }
+
+    #[test]
+    fn research_snapshot_index_preserves_all_lab_fields_order_and_checkpoint_reload() {
+        for mode in [
+            ResearchFixtureMode::Finite,
+            ResearchFixtureMode::MultiInput,
+            ResearchFixtureMode::Infinite,
+        ] {
+            let state = research_snapshot_index_fixture(mode);
+            let expected =
+                capture_research_proof_snapshot_for_entities(&state, 0..state.entity_index.len())
+                    .unwrap();
+            assert_eq!(
+                expected
+                    .labs
+                    .iter()
+                    .map(|lab| lab.entity_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["research-lab", "later-lab"]
+            );
+            assert_eq!(research_proof_entity_indices(&state).count(), 3);
+            assert!(state.entity_index.len() > 3);
+            assert_eq!(capture_research_proof_snapshot(&state).unwrap(), expected);
+            let reloaded = checkpoint_reload_fixture(&state);
+            assert_eq!(
+                capture_research_proof_snapshot(&reloaded).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn research_snapshot_index_falls_back_for_missing_duplicate_reordered_and_unknown_rows() {
+        let source = research_snapshot_index_fixture(ResearchFixtureMode::Finite);
+        let expected =
+            capture_research_proof_snapshot_for_entities(&source, 0..source.entity_index.len())
+                .unwrap();
+        let rows = &source.factory_topology.research_entity_indices;
+        for broken in [
+            vec![],
+            vec![rows[0], rows[0], rows[1]],
+            vec![rows[2], rows[1], rows[0]],
+            vec![source.entity_index.len()],
+            vec![1],
+        ] {
+            let mut state = source.clone();
+            Arc::make_mut(&mut state.factory_topology).research_entity_indices = broken;
+            assert_eq!(
+                research_proof_entity_indices(&state).collect::<Vec<_>>(),
+                (0..state.entity_index.len()).collect::<Vec<_>>()
+            );
+            assert_eq!(capture_research_proof_snapshot(&state).unwrap(), expected);
+        }
+        let mut shortened = source.clone();
+        shortened.entities.recipes.pop();
+        assert_eq!(
+            research_proof_entity_indices(&shortened).count(),
+            source.entity_index.len()
+        );
+        assert_eq!(
+            capture_research_proof_snapshot(&shortened).unwrap(),
+            expected
+        );
+        assert_eq!(capture_research_proof_snapshot(&source).unwrap(), expected);
+    }
+
+    #[test]
+    fn research_snapshot_index_keeps_selected_lab_validation_and_empty_factory_behavior() {
+        let mut state = research_snapshot_index_fixture(ResearchFixtureMode::Finite);
+        let lab_index = state.entity_index.get("research-lab").copied().unwrap();
+        let mut lab = state.parse_entity(lab_index).unwrap();
+        lab.as_object_mut().unwrap().remove("inputs");
+        state.replace_entity_raw(lab_index, serde_json::to_string(&lab).unwrap().into());
+        let expected =
+            capture_research_proof_snapshot_for_entities(&state, 0..state.entity_index.len())
+                .unwrap_err();
+        assert_eq!(
+            capture_research_proof_snapshot(&state)
+                .unwrap_err()
+                .to_string(),
+            expected.to_string()
+        );
+        assert!(expected.to_string().contains("inputs"));
+
+        let no_labs = productive_powered_fixture(16.0, "infinite");
+        assert_eq!(research_proof_entity_indices(&no_labs).count(), 0);
+        let expected =
+            capture_research_proof_snapshot_for_entities(&no_labs, 0..no_labs.entity_index.len())
+                .unwrap();
+        assert!(expected.labs.is_empty());
+        assert_eq!(capture_research_proof_snapshot(&no_labs).unwrap(), expected);
     }
 
     fn productive_closed_recipe_dag_macro_fixture(multiplier: f64) -> CoreState {

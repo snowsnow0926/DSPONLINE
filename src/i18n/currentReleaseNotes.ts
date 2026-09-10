@@ -23,7 +23,7 @@ export function getCurrentReleaseNotes(locale: AppLocale) {
       { id: "v129-region-selection", title: en ? "Move regions with selected nodes" : "生产区域与节点一起移动",
         description: en ? "Include production regions in box selection. Fully enclosed regions follow selected nodes, with combined undo and redo. Resize boundaries separately as before." : "框选模式可开启“同时选中生产区域”；完整框住的区域随选中节点一起拖动，撤销与重做同步恢复两者。区域边界仍可单独调整。" },
       { id: "v129-android-recovery", title: en ? "Android connectivity and restart recovery" : "保留安卓云连接并改善重启恢复",
-        description: en ? "Keep the 1.2.8 cloud and update fixes; wait for interrupted writer leases before resuming. Update over the existing installation to keep saves." : "保留 1.2.8 云服务和更新配置修复，异常关闭后等待旧写入租约释放再恢复。请直接覆盖安装，保留本地存档。" },
+        description: en ? "Keep the 1.2.8 cloud and update fixes; wait for interrupted writer leases before resuming. Fix mobile settlement reports opening an exit prompt or moving offscreen. Update over the existing installation to keep saves." : "保留 1.2.8 云服务和更新配置修复，异常关闭后等待旧写入租约释放再恢复。修复手机结算报告误显示退出提示、偏出屏幕的问题。请直接覆盖安装，保留本地存档。" },
     ],
   } as const;
 }

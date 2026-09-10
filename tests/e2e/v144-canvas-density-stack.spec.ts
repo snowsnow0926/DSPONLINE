@@ -884,7 +884,15 @@ test("an exact 50-card stack paints one leader and glow while retaining hidden e
     );
   })).toBeCloseTo(0, 1);
   await expect(beltCanvas).toHaveAttribute("data-first-route-mode", "1");
-  await expect(beltCanvas).toHaveAttribute("data-first-route-center", "256");
+  // The lower route must clear the measured full leader by 64 world units.
+  // Native fonts can change its height; a hard-coded Windows height masks that.
+  await expect.poll(() => leaderInput.evaluate((handle) => {
+    const node = handle.closest<HTMLElement>(".react-flow__node")!;
+    const viewport = document.querySelector<HTMLElement>(".react-flow__viewport")!;
+    const zoom = new DOMMatrixReadOnly(getComputedStyle(viewport).transform).a;
+    const canvas = document.querySelector<HTMLCanvasElement>("canvas.canvas-belt-layer")!;
+    return Number(canvas.dataset.firstRouteCenter) - (node.getBoundingClientRect().height / zoom + 64);
+  })).toBeCloseTo(0, 1);
   await expect(page.locator(".react-flow__edge")).toHaveCount(0);
   const hit = await page.evaluate(() => {
     const pane = document.querySelector<HTMLElement>(".react-flow__pane")!;

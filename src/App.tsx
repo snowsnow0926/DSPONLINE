@@ -5519,23 +5519,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setCommandPaletteOpen(false);
   }, [closeAllWorkspaces]);
   const mobileNavigation = useMobileNavigation({ enabled: nextMobileShell, onFactoryRequested: returnMobileToFactory });
-  const offlineMobileModalRef = useRef(false);
+  const offlineMobileModalRef = useRef<"closed" | "opening" | "open">("closed");
   useEffect(() => {
     // Retain the report until the idle overlay releases modal ownership.
     // A hidden report must not make the visible recovery controls inert.
     if (pureIdleActive) return;
-    if (!nextMobileShell) {
-      offlineMobileModalRef.current = false;
+    if (!nextMobileShell || !offlineReport) {
+      offlineMobileModalRef.current = "closed";
       return;
     }
-    if (offlineReport && !offlineMobileModalRef.current) {
-      offlineMobileModalRef.current = true;
+    if (offlineMobileModalRef.current === "closed") {
+      offlineMobileModalRef.current = "opening";
       mobileNavigation.openModal("offline");
       return;
     }
-    if (offlineReport && offlineMobileModalRef.current &&
-      !(mobileNavigation.overlay?.kind === "modal" && mobileNavigation.overlay.id === "offline")) {
-      offlineMobileModalRef.current = false;
+    if (mobileNavigation.overlay?.kind === "modal" && mobileNavigation.overlay.id === "offline") {
+      offlineMobileModalRef.current = "open";
+      return;
+    }
+    // An effect replay can run before openModal's state update commits. Only
+    // a previously observed open modal can be dismissed by navigation.
+    if (offlineMobileModalRef.current === "open") {
+      offlineMobileModalRef.current = "closed";
       setOfflineReport(null);
     }
   }, [mobileNavigation.openModal, mobileNavigation.overlay, nextMobileShell, offlineReport, pureIdleActive]);
@@ -5544,7 +5549,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       mobileNavigation.requestBack();
       return;
     }
-    offlineMobileModalRef.current = false;
+    offlineMobileModalRef.current = "closed";
     setOfflineReport(null);
   }, [mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell]);
   const activeMobileWorkspace: MobileWorkspaceId | null = technologyOpen ? "technology"

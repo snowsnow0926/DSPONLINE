@@ -82,8 +82,8 @@ function performancePackageFixture() {
   return value;
 }
 
-test("source package is a 1.2.7 native candidate and retains an isolated performance build path", () => {
-  assert.equal(packageMetadata.version, "1.2.7");
+test("source package has a release version and retains an isolated performance build path", () => {
+  assert.match(packageMetadata.version, /^\d+\.\d+\.\d+$/);
   assert.equal(validateStablePackageIdentity(packageMetadata, {
     requireBuildConfiguration: true,
     requireOfflineDefaults: true,

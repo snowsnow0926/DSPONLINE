@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { injectOneConservativeDecision } from "./offline-decision-test-helpers";
 
-const RELEASE_NOTE_ID = "2026-09-08-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-10-v1.2.9";
 
 async function seedBatchSave(page: Page, options: { offlineSeconds?: number; paused?: boolean; topology?: boolean; bypassMenu?: boolean } = {}) {
   await page.addInitScript(({ offlineSeconds, paused, topology, bypassMenu, releaseNoteId }) => {
@@ -112,6 +112,45 @@ for (const scenario of [
     await expect(report.getByRole("button", { name: "确认结算" })).toBeVisible();
   });
 }
+
+test("animated next-mobile settlement report stays inside the viewport and its actions remain tappable", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await seedBatchSave(page, { offlineSeconds: 120, bypassMenu: false });
+  await page.setViewportSize({ width: 360, height: 592 });
+  await page.goto("/?menu=1&mobileUi=next");
+  await page.getByRole("button", { name: /继续游戏/ }).click();
+  await page.getByRole("dialog", { name: "选择离线结算方式" })
+    .getByRole("button", { name: /快速结算（推荐）/ }).click();
+  const report = page.getByRole("dialog", { name: "离线结算报告" });
+  await expect(report).toBeVisible();
+  await expect(page.getByRole("alertdialog", { name: "保存并返回主菜单" })).toHaveCount(0);
+  await expect(page.locator(".game-shell")).toHaveAttribute("data-mobile-shell", "true");
+  await expect(page.locator(".game-shell")).toHaveAttribute("data-reduced-motion", "false");
+  await report.evaluate(async (element) => { await Promise.all(element.getAnimations().map((animation) => animation.finished)); });
+  for (const size of [{ width: 360, height: 592 }, { width: 592, height: 360 }]) {
+    await page.setViewportSize(size);
+    for (const scale of [0.8, 1, 1.25, 1.5, 2]) {
+      await page.evaluate((value) => document.documentElement.style.setProperty("--ui-font-scale", String(value)), scale);
+      await expect.poll(() => report.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight;
+      })).toBe(true);
+      for (const name of ["关闭离线结算报告", "确认结算"]) {
+        const button = report.getByRole("button", { name, exact: true });
+        await expect(button).toBeVisible();
+        await expect.poll(() => button.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          const hit = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+          return hit !== null && element.contains(hit);
+        })).toBe(true);
+      }
+    }
+    await page.screenshot({ path: `artifacts/qa/v129-animated-offline-report-${size.width}.png` });
+  }
+  await report.getByRole("button", { name: "确认结算", exact: true }).click();
+  await expect(report).toHaveCount(0);
+  await expect(page.locator(".factory-canvas")).toBeVisible();
+});
 
 test("mobile construction inventory deletion reuses the guarded confirmation", async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });

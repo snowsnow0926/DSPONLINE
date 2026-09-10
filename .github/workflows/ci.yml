@@ -97,8 +97,14 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             playwright-${{ runner.os }}-
-      - run: npx playwright install --with-deps chrome
-      - run: npm run test:e2e -- --shard=1/2
+      - name: Verify existing Chrome or install the same stable channel
+        shell: bash
+        run: |
+          if ! node scripts/verify-ci-chrome.mjs; then
+            npx playwright install --with-deps chrome
+            node scripts/verify-ci-chrome.mjs
+          fi
+      - run: npm run test:e2e -- --shard=1/2 --workers=1
       - name: Report slowest tests in this shard
         if: always()
         run: npm run test:report:slowest -- --limit 10
@@ -129,8 +135,14 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             playwright-${{ runner.os }}-
-      - run: npx playwright install --with-deps chrome
-      - run: npm run test:e2e -- --shard=2/2
+      - name: Verify existing Chrome or install the same stable channel
+        shell: bash
+        run: |
+          if ! node scripts/verify-ci-chrome.mjs; then
+            npx playwright install --with-deps chrome
+            node scripts/verify-ci-chrome.mjs
+          fi
+      - run: npm run test:e2e -- --shard=2/2 --workers=1
       - name: Report slowest tests in this shard
         if: always()
         run: npm run test:report:slowest -- --limit 10

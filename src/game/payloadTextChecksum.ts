@@ -7,6 +7,22 @@ export function computeSavePayloadTextChecksum(value: string): { checksum: strin
   for (let index = 0; index < value.length; index += 1) {
     let code = value.charCodeAt(index);
     if (code <= 0x7f) {
+      // JSON is mostly ASCII. Consume four bytes in their original FNV order
+      // when all four are ASCII; Unicode still uses the exact encoder below.
+      if (index + 3 < value.length) {
+        const second = value.charCodeAt(index + 1);
+        const third = value.charCodeAt(index + 2);
+        const fourth = value.charCodeAt(index + 3);
+        if ((second | third | fourth) <= 0x7f) {
+          hash = Math.imul(hash ^ code, 0x01000193);
+          hash = Math.imul(hash ^ second, 0x01000193);
+          hash = Math.imul(hash ^ third, 0x01000193);
+          hash = Math.imul(hash ^ fourth, 0x01000193);
+          byteLength += 4;
+          index += 3;
+          continue;
+        }
+      }
       hash = Math.imul(hash ^ code, 0x01000193);
       byteLength += 1;
     } else if (code <= 0x7ff) {

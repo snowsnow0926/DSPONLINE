@@ -6,6 +6,7 @@ import { deserializeSimulationStateTransfer, serializeSimulationStateForTransfer
 import { inspectSaveEnvelopeChecksum } from "./saveEnvelopeIntegrity";
 import { sha256Bytes } from "./payloadDigest";
 import { prepareSavePayloadTransport } from "./savePayloadCompression";
+import { rewrapAuthoritativePrimarySnapshot } from "./authoritativeSnapshotRewrap";
 import {
   canonicalAuthoritativeSaveJson,
   canonicalizeAuthoritativeSaveSettings,
@@ -91,6 +92,20 @@ self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
   const request = event.data;
   const authoritativeProof = isAuthoritativeProofRequest(request);
   try {
+    const snapshotSource = "snapshotSource" in request ? request.snapshotSource : undefined;
+    if (snapshotSource) {
+      if (!authoritativeProof || request.state || request.stateTransfer || request.envelopeTransfer ||
+        request.kind !== "snapshot" || request.slot !== "main" || request.formatVersion !== 2 ||
+        request.checkpointOverlay || request.expectedStateIdentity || !request.reason) {
+        throw new Error("自动快照必须使用独立的已提交主档来源");
+      }
+      const snapshot = await rewrapAuthoritativePrimarySnapshot(snapshotSource, request.savedAt, request.reason);
+      self.postMessage({ id: request.id, ...snapshot, durationMs: Math.max(0, performance.now() - startedAt) } satisfies
+        AuthoritativeSaveSerializationResponse, [snapshot.bytes]);
+      return;
+    }
+    if ("includeSourceStateTransfer" in request && request.includeSourceStateTransfer === false &&
+      (!authoritativeProof || !request.state)) throw new Error("只有调用者保有完整状态时可以省略运行态传输");
     const envelopeTransfer = "envelopeTransfer" in request ? request.envelopeTransfer : undefined;
     const sourceCount = Number(request.state !== undefined) + Number(request.stateTransfer !== undefined) + Number(envelopeTransfer !== undefined);
     if (sourceCount !== 1) {
@@ -105,11 +120,11 @@ self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
     const state = authoritativeProof
       ? applyCheckpointOverlay(sourceState, request.checkpointOverlay)
       : sourceState;
-    // Envelope sources are converted to the runtime transfer used to rebase
-    // the normal simulation Worker after the proof-bound primary commit. It is
+    // Envelope and cloned authoritative sources also return a runtime transfer
+    // for rebase or a due recovery snapshot after the primary commit. It is
     // serialized from the exact post-overlay state that produces the save
     // proof, so persistence and runtime authority cannot diverge.
-    const returnedStateTransfer = envelopeTransfer
+    const returnedStateTransfer = envelopeTransfer || authoritativeProof && request.state && request.includeSourceStateTransfer !== false
       ? serializeSimulationStateForTransfer(state)
       : sourceTransfer;
     const binaryTransport = envelopeTransfer?.buffer instanceof Blob ? "blob" : "array-buffer";

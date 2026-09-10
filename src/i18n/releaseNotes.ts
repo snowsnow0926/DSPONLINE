@@ -1,5 +1,6 @@
 import type { AppLocale } from "./locale";
-import { getCurrentReleaseNotes as getEagerCurrentReleaseNotes } from "./currentReleaseNotes";
+export { getCurrentReleaseNotes } from "./currentReleaseNotes";
+export { getReleaseNotes127 } from "./releaseNotes127";
 
 export interface LocalizedReleaseNoteRecord {
   id: string;
@@ -905,8 +906,14 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 }
 
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
-export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
-  return getEagerCurrentReleaseNotes(locale);
+
+export function getReleaseNotes128(locale: AppLocale): LocalizedReleaseNoteRecord {
+  const en = locale === "en";
+  return { id: "2026-09-09-v1.2.8", version: "1.2.8", date: en ? "September 9, 2026" : "2026年9月9日",
+    title: en ? "Android Cloud Connectivity Fix" : "安卓云连接修复",
+    summary: en ? "Restores cloud service and update addresses in the Android package while preserving existing installations and saves." : "补回安卓安装包的云服务和更新地址，保留现有安装与本地存档。",
+    items: [{ id: "v128-endpoints", title: en ? "Restore cloud and update connectivity" : "恢复云服务与更新连接",
+      description: en ? "Official packages verify endpoint configuration. Install over the previous version without uninstalling." : "正式构建检查云服务、更新和账号地址配置；直接覆盖安装，无需卸载。" }] };
 }
 
 export function getReleaseNotes126(locale: AppLocale): LocalizedReleaseNoteRecord {

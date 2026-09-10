@@ -65,7 +65,8 @@ import { getPerformancePeaks, getPerformancePhaseShares, type PerformanceMonitor
 import type { LargeSaveAutosavePolicy } from "../game/largeSaveAutosavePolicy";
 import { MEMORY_AUTO_PAUSE_THRESHOLD_PRESETS_MIB, type MemoryAutoPauseThresholdMiB } from "../game/memoryBudget";
 import { clearClientErrors, collectClientDiagnostics, downloadDiagnostics, getClientErrors } from "../game/diagnostics";
-import { fetchCloudPublicStatus, resumeCloudSession, sendCloudFeedback, type CloudPublicStatus } from "../game/cloud";
+import { cloudApiBase, fetchCloudPublicStatus, resumeCloudSession, sendCloudFeedback, type CloudPublicStatus } from "../game/cloud";
+import { playerDisplayAdjustment } from "../game/playerDisplayAdjustment";
 import { resetOnboarding } from "../game/onboarding";
 import { applyPwaUpdate, getPwaRuntimeState, requestPwaInstall, subscribePwaRuntime, type PwaRuntimeState } from "../pwa";
 import { pwaUpdateStatusCopy } from "../pwaStatusCopy";
@@ -1225,6 +1226,8 @@ function SupportPanel({ game, report }: { game: GameState; report: AutomaticPerf
     };
   }, []);
 
+  const historicalPlayers = playerDisplayAdjustment(cloudApiBase(true), window.location.href);
+  const displayedPlayerTotal = cloudStatus ? cloudStatus.players.total + (historicalPlayers?.count ?? 0) : null;
   const diagnostics = () => collectClientDiagnostics(game, report);
   const submitFeedback = async () => {
     if (!feedback.trim()) return;
@@ -1251,7 +1254,7 @@ function SupportPanel({ game, report }: { game: GameState; report: AutomaticPerf
       <section className="support-status-grid">
         <article><Bug size={18} /><span><small>本机错误记录</small><strong>{errors.length}</strong></span><button type="button" disabled={errors.length === 0} onClick={() => { clearClientErrors(); setErrorRevision((value) => value + 1); }}>清空</button></article>
         <article><Cloud size={18} /><span><small>今日进入工厂</small><strong>{cloudStatus?.players.today.toLocaleString("zh-CN") ?? "--"}</strong></span><em>{cloudStatus ? `${cloudStatus.timeZone} 日历` : "等待云节点"}</em></article>
-        <article><Users size={18} /><span><small>累计游玩玩家</small><strong>{cloudStatus?.players.total.toLocaleString("zh-CN") ?? "--"}</strong></span><em>匿名标识去重</em></article>
+        <article><Users size={18} /><span><small>累计游玩玩家</small><strong>{displayedPlayerTotal?.toLocaleString("zh-CN") ?? "--"}</strong></span><em title={historicalPlayers?.description}>{historicalPlayers?.label ?? "匿名标识去重"}</em></article>
         <article className="support-player-online"><Radio size={18} /><span><small>当前在线游玩</small><strong>{cloudStatus?.players.online.toLocaleString("zh-CN") ?? "--"}</strong></span><em>{cloudStatus ? `${cloudStatus.players.onlineWindowSeconds} 秒内活跃` : "等待云节点"}</em></article>
         <article><Smartphone size={18} /><span><small>PWA 状态</small><strong>{pwa.installed ? "已安装" : pwa.supported ? "浏览器运行" : "不可用"}</strong></span>{pwa.installAvailable ? <button type="button" onClick={() => void requestPwaInstall()}>安装</button> : null}</article>
         <article data-pwa-update-status={pwa.updateStatus}><RotateCcw size={18} /><span><small>网页版本</small><strong>v{__APP_VERSION__}</strong></span>{pwa.updateStatus === "downloaded-await-restart" && pwa.updateAvailable ? <button className="ready" type="button" onClick={applyPwaUpdate}>重启并更新</button> : <em className={`settings-state settings-state--${pwaUpdateCopy.tone}`} role="status" data-copy-key={pwaUpdateCopy.key}>{pwaUpdateCopy.text}</em>}</article>

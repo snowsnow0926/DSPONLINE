@@ -25,6 +25,8 @@ import {
 } from "@xyflow/react";
 import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { Activity, AlertTriangle, ArrowUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Focus, Map as MapIcon, PanelRightClose, RefreshCw, Route, Satellite, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
+import { useCanvasKeyboardPan } from "./hooks/useCanvasKeyboardPan";
+import { enclosedCanvasRegionIds, moveCanvasSelection } from "./game/canvasRegionSelection";
 import {
   ConstructionDock,
   HeaderControls,
@@ -2249,6 +2251,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [regionDraft, setRegionDraft] = useState<CanvasRegionRectangle | null>(null);
   const [regionResizePreview, setRegionResizePreview] = useState<{ regionId: string; rectangle: CanvasRegionRectangle } | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const [includeRegionsInSelection, setIncludeRegionsInSelection] = useState(false);
+  const [selectedRegionIds, setSelectedRegionIds] = useState<string[]>([]);
+  const selectedRegionIdsRef = useRef<string[]>([]);
+  const regionSelectionStartRef = useRef<{ point: { x: number; y: number }; previous: string[] } | null>(null);
+  const [regionGroupMovePreview, setRegionGroupMovePreview] = useState<{ regionIds: string[]; x: number; y: number } | null>(null);
+  selectedRegionIdsRef.current = selectedRegionIds;
   const [miningEntityId, setMiningEntityId] = useState<string | null>(null);
   const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuides>({ x: null, y: null });
   const [connectionDraft, setConnectionDraft] = useState<ConnectionDraft | null>(null);
@@ -2294,6 +2302,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     primaryId: string;
     primaryPosition: { x: number; y: number };
     members: Array<{ id: string; position: { x: number; y: number } }>;
+    regions: CanvasRegion[];
     nativeIdentity: null | {
       sessionId: string;
       runId: string;
@@ -2364,6 +2373,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [saveFailure, setSaveFailure] = useState<SaveGameResult | null>(null);
   const [runtimePersistenceProgress, setRuntimePersistenceProgress] = useState<RuntimePersistenceProgress | null>(null);
   const [primarySaveRejectedEditCount, setPrimarySaveRejectedEditCount] = useState(0);
+  const [primarySaveRejectedProgressId, setPrimarySaveRejectedProgressId] = useState<number | null>(null);
   const runtimePersistenceProgressIdRef = useRef(0);
   const authorityWorkspaceSyncIdRef = useRef(0);
   const [eventHistory, setEventHistory] = useState<Array<{ id: number; text: string }>>([]);
@@ -2709,9 +2719,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (!durablePrimarySaveInFlightRef.current && verifiedPrimarySaveInFlightDepthRef.current === 0) return false;
     const rejection = "本次操作未应用；保存完成后即可继续编辑";
     setPrimarySaveRejectedEditCount((count) => count + 1);
-    setRuntimePersistenceProgress((current) => current && !current.message.includes("本次操作未应用")
-      ? { ...current, message: `${current.message} ${rejection}` }
-      : current);
+    setPrimarySaveRejectedProgressId(runtimePersistenceProgressIdRef.current);
     setNotice(`正在创建权威主存档，${rejection}`);
     return true;
   }, []);
@@ -5300,6 +5308,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setTimeWarpComputeState(next);
   }, []);
   const { screenToFlowPosition, setCenter, setViewport, fitView, getViewport, zoomIn, zoomOut } = useReactFlow();
+  useCanvasKeyboardPan({
+    getViewport,
+    setViewport: (viewport) => setViewport(viewport, { duration: 0 }),
+    enabled: () => Boolean(factoryCanvasRef.current?.isConnected) && !gameRef.current.timeWarp.enabled &&
+      !nodeDragActiveRef.current && !regionPointerRef.current && !regionResizeRef.current &&
+      !regionSelectionStartRef.current && !flowStore.getState().userSelectionRect && !canvasMultiTouchRef.current &&
+      (!nextMobileShell || mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay),
+  });
+  useEffect(() => {
+    setSelectedRegionIds([]);
+    setRegionGroupMovePreview(null);
+    regionSelectionStartRef.current = null;
+  }, [game.activePlanetId]);
+  useEffect(() => {
+    if (!includeRegionsInSelection) setSelectedRegionIds([]);
+  }, [includeRegionsInSelection]);
+  useEffect(() => {
+    if (selectedEntityIds.length === 0) setSelectedRegionIds((current) => current.length ? [] : current);
+  }, [selectedEntityIds]);
   const flowStore = useStoreApi<FactoryFlowNode, FactoryFlowEdge>();
   const updateConnectionCandidateNode = useCallback((nodeId: string | null) => {
     if (connectionCandidateNodeIdRef.current === nodeId) return;
@@ -5492,23 +5519,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setCommandPaletteOpen(false);
   }, [closeAllWorkspaces]);
   const mobileNavigation = useMobileNavigation({ enabled: nextMobileShell, onFactoryRequested: returnMobileToFactory });
-  const offlineMobileModalRef = useRef(false);
+  const offlineMobileModalRef = useRef<"closed" | "opening" | "open">("closed");
   useEffect(() => {
     // Retain the report until the idle overlay releases modal ownership.
     // A hidden report must not make the visible recovery controls inert.
     if (pureIdleActive) return;
-    if (!nextMobileShell) {
-      offlineMobileModalRef.current = false;
+    if (!nextMobileShell || !offlineReport) {
+      offlineMobileModalRef.current = "closed";
       return;
     }
-    if (offlineReport && !offlineMobileModalRef.current) {
-      offlineMobileModalRef.current = true;
+    if (offlineMobileModalRef.current === "closed") {
+      offlineMobileModalRef.current = "opening";
       mobileNavigation.openModal("offline");
       return;
     }
-    if (offlineReport && offlineMobileModalRef.current &&
-      !(mobileNavigation.overlay?.kind === "modal" && mobileNavigation.overlay.id === "offline")) {
-      offlineMobileModalRef.current = false;
+    if (mobileNavigation.overlay?.kind === "modal" && mobileNavigation.overlay.id === "offline") {
+      offlineMobileModalRef.current = "open";
+      return;
+    }
+    // An effect replay can run before openModal's state update commits. Only
+    // a previously observed open modal can be dismissed by navigation.
+    if (offlineMobileModalRef.current === "open") {
+      offlineMobileModalRef.current = "closed";
       setOfflineReport(null);
     }
   }, [mobileNavigation.openModal, mobileNavigation.overlay, nextMobileShell, offlineReport, pureIdleActive]);
@@ -5517,7 +5549,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       mobileNavigation.requestBack();
       return;
     }
-    offlineMobileModalRef.current = false;
+    offlineMobileModalRef.current = "closed";
     setOfflineReport(null);
   }, [mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell]);
   const activeMobileWorkspace: MobileWorkspaceId | null = technologyOpen ? "technology"
@@ -17302,12 +17334,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     for (const belt of canvasTopology.belts) {
       const sourceHandle = getCanvasHandleEndpoint(lookup, belt.source, `out:${belt.itemId}`, "source");
       const targetHandle = getCanvasHandleEndpoint(lookup, belt.target, getFactoryBeltTargetHandleId(belt, canvasEntityBuildingById.get(belt.target)), "target");
-      if (!sourceHandle || !targetHandle) continue;
+      if (!sourceHandle && !targetHandle) continue;
       next.set(belt.id, {
-        sourceX: sourceHandle.x,
-        sourceY: sourceHandle.y,
-        targetX: targetHandle.x,
-        targetY: targetHandle.y,
+        sourceX: sourceHandle?.x,
+        sourceY: sourceHandle?.y,
+        targetX: targetHandle?.x,
+        targetY: targetHandle?.y,
       });
     }
     return next;
@@ -18487,6 +18519,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const onNodeDrag = useCallback((_event: MouseEvent | TouchEvent, node: FactoryFlowNode, draggedNodes: FactoryFlowNode[]) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
+    const group = multiDragStartRef.current;
+    if (group?.regions.length) setRegionGroupMovePreview({ regionIds: group.regions.map((region) => region.id),
+      x: node.position.x - group.primaryPosition.x, y: node.position.y - group.primaryPosition.y });
     const threshold = 7 / Math.max(0.3, viewportZoom);
     const index = dragAlignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
     const moving = (draggedNodes.length > 0 ? draggedNodes : [node]).map((candidate) => ({
@@ -18726,6 +18761,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [activeEntityById, setNodes]);
 
   const cancelPendingTouchAction = useCallback(() => {
+    regionSelectionStartRef.current = null;
+    setRegionGroupMovePreview(null);
     stopCanvasPointerMotion();
     blockCanvasTouchRef.current = true;
     nodeDragActiveRef.current = false;
@@ -21594,7 +21631,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       };
     }
     const primary = members.find((member) => member.id === node.id) ?? { id: node.id, position: { ...node.position } };
-    multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members, nativeIdentity };
+    const regions = !nativeIdentity && selectedEntityIdsRef.current.includes(node.id)
+      ? gameRef.current.canvasRegions.filter((region) => region.planetId === gameRef.current.activePlanetId && selectedRegionIdsRef.current.includes(region.id))
+      : [];
+    multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members, regions, nativeIdentity };
     setDraggedEntityIds([node.id, ...members.map((member) => member.id).filter((id) => id !== node.id)]);
     if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragActiveCount = String(Math.max(1, members.length));
     nodeDragActiveRef.current = true;
@@ -21602,6 +21642,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     dragAlignmentSpatialIndexRef.current = alignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
   }, [activeEntityById, alignmentSpatialIndex, factoryCanvasPlanetId]);
   const handleFactoryNodeDragStop = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node, draggedNodes) => {
+    setRegionGroupMovePreview(null);
     const dragGestureEpoch = nodeDragGestureEpochRef.current;
     nodeDragGestureEpochRef.current = null;
     nodeDragActiveRef.current = false;
@@ -21629,7 +21670,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const positions = multiDrag && multiDrag.members.length > 1
       ? multiDrag.members.map((member) => ({
           id: member.id,
-          position: snapFlowPosition({
+          position: (multiDrag.regions.length ? (position: { x: number; y: number }) => position : snapFlowPosition)({
             x: member.position.x + snappedPrimary.x - multiDrag.primaryPosition.x,
             y: member.position.y + snappedPrimary.y - multiDrag.primaryPosition.y,
           }),
@@ -21691,7 +21732,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragOverlapBlocked = "false";
-    if (!commitGame((current) => moveEntities(current, positions))) {
+    if (!commitGame((current) => multiDrag?.regions.length
+      ? moveCanvasSelection(current, positions, multiDrag.regions, {
+        x: snappedPrimary.x - multiDrag.primaryPosition.x, y: snappedPrimary.y - multiDrag.primaryPosition.y,
+      }) : moveEntities(current, positions))) {
       restoreCanvasEntityPositions();
       return;
     }
@@ -21781,6 +21825,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     blueprintPlacementId ?? "",
     blueprintAllowOverlap,
     selectedRegionId ?? "",
+    includeRegionsInSelection,
+    selectedRegionIds.join("|"),
+    regionGroupMovePreview ? `${regionGroupMovePreview.x}:${regionGroupMovePreview.y}` : "",
     regionDraft ? `${regionDraft.x}:${regionDraft.y}:${regionDraft.width}:${regionDraft.height}` : "",
     regionResizePreview ? `${regionResizePreview.rectangle.x}:${regionResizePreview.rectangle.y}:${regionResizePreview.rectangle.width}:${regionResizePreview.rectangle.height}` : "",
     minimapCollapsed,
@@ -22575,6 +22622,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
             onPointerCancelCapture={(event) => {
               if (syntheticTouchCancelRef.current) return;
+              regionSelectionStartRef.current = null;
+              setRegionGroupMovePreview(null);
               longPressBindings.onPointerCancelCapture?.(event);
               stopCanvasPointerMotion();
               if (endCanvasMultiTouch(event)) return;
@@ -22644,6 +22693,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             edgeTypes={EDGE_TYPES}
             onNodesChange={handleNodesChange}
             onSelectionChange={onSelectionChange}
+            onSelectionStart={(event) => {
+              if (!includeRegionsInSelection || nativePlayerAuthorityOwnsRuntimeRef.current) return;
+              const rectangle = flowStore.getState().userSelectionRect;
+              regionSelectionStartRef.current = { point: rectangle ? { x: rectangle.startX, y: rectangle.startY }
+                : screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+                previous: event.shiftKey ? selectedRegionIdsRef.current : [] };
+              setSelectedRegionId(null);
+            }}
+            onSelectionEnd={(event) => {
+              const selection = regionSelectionStartRef.current;
+              regionSelectionStartRef.current = null;
+              if (!selection || !includeRegionsInSelection || nativePlayerAuthorityOwnsRuntimeRef.current) return;
+              const ids = enclosedCanvasRegionIds(gameRef.current.canvasRegions, gameRef.current.activePlanetId,
+                selection.point, screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+              setSelectedRegionIds([...new Set([...selection.previous, ...ids])]);
+            }}
             onConnect={onConnect}
             onConnectStart={onConnectStart}
             onConnectEnd={onConnectEnd}
@@ -22757,6 +22822,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
                 regions={factoryCanvasRegions}
                 draft={regionDraft}
                 selectedRegionId={selectedRegionId}
+                groupedRegionIds={selectedRegionIds}
+                groupMovePreview={regionGroupMovePreview}
                 resizePreview={regionResizePreview}
                 resizeHandleSize={(coarsePointer ? 34 : 14) / Math.max(0.25, viewportZoom)}
                 onSelect={(regionId) => { setSelectedRegionId(regionId); setRegionMode(false); }}
@@ -22821,6 +22888,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           </div> : <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />}
 
           <CanvasSelectionTools
+            includeRegions={includeRegionsInSelection}
+            selectedRegionCount={selectedRegionIds.length}
+            onIncludeRegionsChange={nativePlayerAuthorityOwnsRuntime ? undefined : setIncludeRegionsInSelection}
             selectionMode={selectionMode}
             regionMode={regionMode}
             lineFindMode={lineFindMode}
@@ -22929,6 +22999,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           </section> : null}
           {factoryCanvasRegions.find((region) => region.id === selectedRegionId) ? <CanvasRegionEditor
             region={factoryCanvasRegions.find((region) => region.id === selectedRegionId)!}
+            onSelectContents={nativePlayerAuthorityOwnsRuntime ? undefined : () => {
+              const region = gameRef.current.canvasRegions.find((candidate) => candidate.id === selectedRegionId);
+              if (!region) return;
+              const measured = new Map(nodes.map((node) => [node.id, node.measured]));
+              const ids = gameRef.current.entities.filter((entity) => {
+                const size = measured.get(entity.id);
+                return entity.planetId === region.planetId && !entity.interactionLocked &&
+                  entity.position.x >= region.x && entity.position.y >= region.y &&
+                  entity.position.x + (size?.width ?? 256) <= region.x + region.width &&
+                  entity.position.y + (size?.height ?? 180) <= region.y + region.height;
+              }).map((entity) => entity.id);
+              if (!ids.length) { setNotice("该生产区域内没有完整包含的可移动节点"); return; }
+              const beltIds = collectCanvasSelectionBeltIds(activePlanetBeltsRef.current, ids, []);
+              selectedEntityIdsRef.current = ids;
+              selectedBeltIdsRef.current = beltIds;
+              selectedRegionIdsRef.current = [region.id];
+              setSelectedEntityIds(ids);
+              setSelectedBeltIds(beltIds);
+              setSelectedBeltId(null);
+              setIncludeRegionsInSelection(true);
+              setSelectedRegionIds([region.id]);
+              setSelectedRegionId(null);
+              setSelectionMode(!coarsePointer);
+              if (nextMobileShell) setMobileCanvasMode("layout");
+              setNotice(isEnglish ? `Selected region and ${ids.length} nodes` : `已选中区域与 ${ids.length} 个节点`);
+            }}
             onChange={(changes) => {
               if (nativePlayerAuthorityOwnsRuntime) {
                 const frame = nativeAuthoritativeFactoryWorkspaceFrame;
@@ -24470,7 +24566,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         <header><Activity size={13} /><span>运行记录</span><button type="button" onClick={() => setEventHistory([])} title="清空运行记录" aria-label="清空运行记录"><X size={12} /></button></header>
         <div>{eventHistory.map((event) => <p key={event.id}>{event.text}</p>)}</div>
       </aside> : null}
-      {runtimePersistenceProgress ? <div className={`game-notice game-notice--${runtimePersistenceProgress.phase === "failed" ? "danger" : runtimePersistenceProgress.phase === "complete" ? "success" : "warning"} runtime-persistence-progress`} role="status" data-persistence-progress>{runtimePersistenceProgress.message}</div>
+      {runtimePersistenceProgress ? <div className={`game-notice game-notice--${runtimePersistenceProgress.phase === "failed" ? "danger" : runtimePersistenceProgress.phase === "complete" ? "success" : "warning"} runtime-persistence-progress`} role="status" data-persistence-progress>
+        {runtimePersistenceProgress.message}
+        {runtimePersistenceProgress.id === primarySaveRejectedProgressId
+          ? runtimePersistenceProgress.phase === "complete" ? " 本次操作未应用；现在可以重新操作" : " 本次操作未应用；保存完成后请重新操作"
+          : ""}
+      </div>
         : notice && (showRunLog || isPersistentNotice(notice)) ? <div className={`game-notice game-notice--${getNoticeTone(notice)}`} role="status" data-notice-tone={getNoticeTone(notice)}>{notice}</div> : null}
       {pureIdleActive ? <TimeWarpIdleOverlay
         game={game}

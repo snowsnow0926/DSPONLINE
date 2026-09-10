@@ -113,6 +113,13 @@ test("catalog-backed current and 2x cold menus never hydrate or parse payload st
   test.setTimeout(120_000);
   await page.goto("/?menu=1&storageMigration=production");
   await expect(page.locator(".start-menu")).toBeVisible();
+  // Repeated cold opens represent an existing player who has acknowledged
+  // this release. Exercise that real UI once, outside the timed samples;
+  // the dedicated release suite covers first-display and dismissal behavior.
+  const announcement = page.locator(".release-notes-dialog");
+  await expect(announcement).toBeVisible();
+  await announcement.getByRole("button", { name: "我知道了", exact: true }).click();
+  await expect(announcement).toHaveCount(0);
   await installColdReadInstrumentation(page);
 
   const reports: Array<{ bytes: number; samples: number[]; catalogBytes: number }> = [];
@@ -143,8 +150,8 @@ test("catalog-backed current and 2x cold menus never hydrate or parse payload st
   }
   const sorted = reports.flatMap((report) => report.samples).sort((left, right) => left - right);
   const p95 = sorted[Math.ceil(sorted.length * 0.95) - 1];
-  expect(p95).toBeLessThanOrEqual(500);
   console.log(`V144_COLD_CATALOG ${JSON.stringify({ p95, reports })}`);
+  expect(p95).toBeLessThanOrEqual(500);
 });
 
 test("legacy 35 MiB indexing parses one payload off-main and writes a bound small catalog", async ({ page }) => {

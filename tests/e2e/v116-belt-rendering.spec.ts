@@ -45,7 +45,7 @@ test("dense belt endpoints follow measured multi-port handles", async ({ page })
   const raw = buildMultiPortDenseFactory();
   await page.addInitScript((fixture) => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-08-v1.2.7");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     window.localStorage.setItem("dsp-idle-network.endgame-extreme.v1", "true");
     window.localStorage.setItem("dsp-idle-network.endgame-extreme-ack.v1", "true");
@@ -66,25 +66,26 @@ test("dense belt endpoints follow measured multi-port handles", async ({ page })
   await expect(canvas).toHaveAttribute("data-segments", "200");
   const targetHandle = page.locator('.react-flow__handle[data-handleid="in:magnetic_coil"]').first();
   await expect(targetHandle).toBeVisible();
-  const targetNode = targetHandle.locator("xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' react-flow__node ')]");
-  const nodeBox = await targetNode.boundingBox();
-  const handleBox = await targetHandle.boundingBox();
-  if (!nodeBox || !handleBox) throw new Error("multi-port target geometry is unavailable");
-  const expectedTargetY = await page.evaluate(({ nodeWorldY, nodeScreenTop, handleTop, handleHeight }) => {
+  // Sample the handle, node and viewport together while the initial view may
+  // still be moving; separate protocol reads can mix different zoom frames.
+  await expect.poll(async () => targetHandle.evaluate((handle) => {
+    const node = handle.closest<HTMLElement>(".react-flow__node");
     const viewport = document.querySelector<HTMLElement>(".react-flow__viewport");
-    if (!viewport) throw new Error("React Flow viewport is missing");
+    const beltCanvas = document.querySelector<HTMLCanvasElement>("canvas.canvas-belt-layer");
+    if (!node || !viewport || !beltCanvas) throw new Error("multi-port target geometry is unavailable");
+    const nodeBox = node.getBoundingClientRect();
+    const handleBox = handle.getBoundingClientRect();
     const zoom = new DOMMatrixReadOnly(getComputedStyle(viewport).transform).a;
-    return nodeWorldY + (handleTop - nodeScreenTop + handleHeight / 2) / zoom;
-  }, { nodeWorldY: 120, nodeScreenTop: nodeBox.y, handleTop: handleBox.y, handleHeight: handleBox.height });
-  const actualTargetY = Number(await canvas.getAttribute("data-first-target-y"));
-  expect(actualTargetY).toBeCloseTo(expectedTargetY, 1);
+    const expectedTargetY = 120 + (handleBox.top - nodeBox.top + handleBox.height / 2) / zoom;
+    return Number(beltCanvas.dataset.firstTargetY) - expectedTargetY;
+  })).toBeCloseTo(0, 1);
 });
 
 test("dense belt pixels stay attached after viewport pan and zoom", async ({ page }) => {
   const raw = buildMultiPortDenseFactory();
   await page.addInitScript((fixture) => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-08-v1.2.7");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     window.localStorage.setItem("dsp-idle-network.endgame-extreme.v1", "true");
     window.localStorage.setItem("dsp-idle-network.endgame-extreme-ack.v1", "true");

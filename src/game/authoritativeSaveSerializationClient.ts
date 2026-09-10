@@ -1,4 +1,5 @@
 import { loadContentPackRegistry } from "./contentPacks";
+import type { GameState } from "./types";
 import type { SimulationStateTransfer } from "./simulationRuntimeProtocol";
 import type {
   AuthoritativeSaveCatalogSeed,
@@ -6,6 +7,7 @@ import type {
 } from "./authoritativeSavePersistenceProtocol";
 import type {
   AuthoritativeSaveExpectedStateIdentity,
+  AuthoritativePrimarySnapshotSource,
   AuthoritativeSaveCheckpointOverlay,
   AuthoritativeSaveEnvelopeTransfer,
   AuthoritativeSaveSerializationRequest,
@@ -22,9 +24,8 @@ import {
 const SAVE_FORMAT_VERSION = 2;
 const AUTHORITATIVE_SERIALIZATION_TIMEOUT_MS = 120_000;
 
-export interface AuthoritativeSerializedSavePayload<Payload extends WorkerBinaryPayload = ArrayBuffer> {
+export interface AuthoritativeSerializedSaveProofPayload<Payload extends WorkerBinaryPayload = ArrayBuffer> {
   bytes: Payload;
-  sourceStateTransfer: Payload;
   sourceEnvelopeTransfer?: Payload;
   proof: AuthoritativeSavePayloadProof;
   catalogSeed: AuthoritativeSaveCatalogSeed;
@@ -33,8 +34,15 @@ export interface AuthoritativeSerializedSavePayload<Payload extends WorkerBinary
   compressionDurationMs: number;
 }
 
+export interface AuthoritativeSerializedSavePayload<Payload extends WorkerBinaryPayload = ArrayBuffer>
+  extends AuthoritativeSerializedSaveProofPayload<Payload> {
+  sourceStateTransfer: Payload;
+}
+
 type AuthoritativeSaveSerializationSource =
   | { kind: "state"; transfer: SimulationStateTransfer }
+  | { kind: "cloned-state"; state: GameState }
+  | { kind: "snapshot"; payload: AuthoritativePrimarySnapshotSource }
   | { kind: "envelope"; transfer: AuthoritativeSaveEnvelopeTransfer };
 
 interface AuthoritativeSaveSerializationOptions {
@@ -68,7 +76,8 @@ export class AuthoritativeSaveSerializationClientError extends Error {
 function serializeAuthoritativeSaveSourceInWorker(
   source: AuthoritativeSaveSerializationSource,
   options: AuthoritativeSaveSerializationOptions = {},
-): Promise<AuthoritativeSerializedSavePayload<WorkerBinaryPayload>> {
+  includeSourceStateTransfer = true,
+): Promise<AuthoritativeSerializedSaveProofPayload<WorkerBinaryPayload>> {
   const savedAt = options.savedAt ?? Date.now();
   const kind = options.kind ?? "primary";
   const slot = options.slot ?? "main";
@@ -96,7 +105,9 @@ function serializeAuthoritativeSaveSourceInWorker(
     const id = 1;
     let settled = false;
     const timeoutMs = options.timeoutMs ?? AUTHORITATIVE_SERIALIZATION_TIMEOUT_MS;
-    const ownershipLost = () => source.transfer.buffer instanceof ArrayBuffer && source.transfer.buffer.byteLength === 0;
+    const ownershipLost = () => source.kind === "snapshot"
+      ? source.payload.bytes.byteLength === 0
+      : source.kind !== "cloned-state" && source.transfer.buffer instanceof ArrayBuffer && source.transfer.buffer.byteLength === 0;
     const finish = (operation: () => void) => {
       if (settled) return;
       settled = true;
@@ -134,7 +145,10 @@ function serializeAuthoritativeSaveSourceInWorker(
         return;
       }
       if (!isWorkerBinaryPayload(bytes) || !proof || !catalogSeed || !summary ||
-        !isWorkerBinaryPayload(sourceStateTransfer) ||
+        (source.kind !== "envelope" && !(bytes instanceof ArrayBuffer)) ||
+        (includeSourceStateTransfer && !isWorkerBinaryPayload(sourceStateTransfer)) ||
+        (!includeSourceStateTransfer && sourceStateTransfer !== undefined) ||
+        (source.kind === "cloned-state" && includeSourceStateTransfer && !(sourceStateTransfer instanceof ArrayBuffer)) ||
         (source.kind === "envelope" && !isWorkerBinaryPayload(sourceEnvelopeTransfer)) ||
         proof.integrity !== "valid" || proof.storedByteLength !== workerBinaryPayloadByteLength(bytes) ||
         (proof.transportEncoding !== "raw" && proof.transportEncoding !== "gzip") ||
@@ -151,7 +165,7 @@ function serializeAuthoritativeSaveSourceInWorker(
         options.onProgress?.({ stage: "serialized", savedAt, bytes: workerBinaryPayloadByteLength(bytes), durationMs });
         resolve({
           bytes,
-          sourceStateTransfer,
+          ...(sourceStateTransfer ? { sourceStateTransfer } : {}),
           ...(sourceEnvelopeTransfer ? { sourceEnvelopeTransfer } : {}),
           proof,
           catalogSeed,
@@ -168,23 +182,59 @@ function serializeAuthoritativeSaveSourceInWorker(
       kind,
       slot,
       ...(options.reason ? { reason: options.reason } : {}),
-      ...(source.kind === "state"
-        ? { stateTransfer: source.transfer }
-        : { envelopeTransfer: source.transfer }),
+      ...(source.kind === "snapshot"
+        ? { snapshotSource: source.payload }
+        : source.kind === "state"
+          ? { stateTransfer: source.transfer }
+          : source.kind === "envelope"
+            ? { envelopeTransfer: source.transfer }
+            : { state: source.state }),
       contentPackRegistry: loadContentPackRegistry(),
       includePayloadSha256: true,
       includeAuthoritativeProof: true,
+      ...(!includeSourceStateTransfer ? { includeSourceStateTransfer: false as const } : {}),
       ...(options.expectedStateIdentity ? { expectedStateIdentity: options.expectedStateIdentity } : {}),
       ...(options.checkpointOverlay ? { checkpointOverlay: options.checkpointOverlay } : {}),
     };
     try {
-      worker.postMessage(request, workerBinaryPayloadTransferables(source.transfer.buffer));
+      worker.postMessage(request, source.kind === "cloned-state" ? [] : source.kind === "snapshot"
+        ? [source.payload.bytes] : workerBinaryPayloadTransferables(source.transfer.buffer));
     } catch (error) {
       finish(() => reject(new AuthoritativeSaveSerializationClientError(
         "worker-operation", error instanceof Error ? error.message : "无法发送save Worker请求", ownershipLost(),
       )));
     }
   });
+}
+
+/** Clone a caller-owned state once; serialization, proof and snapshot transfer
+ * generation stay in the Worker. Failure never consumes the caller's state. */
+export function serializeAuthoritativeSaveStateInWorker(
+  state: GameState,
+  options: AuthoritativeSaveSerializationOptions = {},
+): Promise<AuthoritativeSerializedSavePayload<ArrayBuffer>> {
+  return serializeAuthoritativeSaveSourceInWorker(
+    { kind: "cloned-state", state }, options,
+  ) as Promise<AuthoritativeSerializedSavePayload<ArrayBuffer>>;
+}
+
+/** Caller retains its complete state; due snapshots reuse the committed
+ * compressed primary instead of generating another full runtime buffer. */
+export function serializeAuthoritativePrimarySaveInWorker(
+  state: GameState,
+  options: AuthoritativeSaveSerializationOptions = {},
+): Promise<AuthoritativeSerializedSaveProofPayload<ArrayBuffer>> {
+  return serializeAuthoritativeSaveSourceInWorker({ kind: "cloned-state", state }, options, false) as
+    Promise<AuthoritativeSerializedSaveProofPayload<ArrayBuffer>>;
+}
+
+export function rewrapAuthoritativePrimaryAsSnapshotInWorker(
+  payload: AuthoritativePrimarySnapshotSource,
+  savedAt: number,
+): Promise<AuthoritativeSerializedSaveProofPayload<ArrayBuffer>> {
+  return serializeAuthoritativeSaveSourceInWorker({ kind: "snapshot", payload }, {
+    savedAt, kind: "snapshot", slot: "main", reason: "自动快照",
+  }, false) as Promise<AuthoritativeSerializedSaveProofPayload<ArrayBuffer>>;
 }
 
 export function serializeAuthoritativeSaveStateTransferInWorker(
@@ -201,7 +251,8 @@ export function serializeAuthoritativeSaveEnvelopeTransferInWorker(
   envelopeTransfer: AuthoritativeSaveEnvelopeTransfer,
   options: AuthoritativeSaveSerializationOptions = {},
 ): Promise<AuthoritativeSerializedSavePayload<WorkerBinaryPayload>> {
-  return serializeAuthoritativeSaveSourceInWorker({ kind: "envelope", transfer: envelopeTransfer }, options);
+  return serializeAuthoritativeSaveSourceInWorker({ kind: "envelope", transfer: envelopeTransfer }, options) as
+    Promise<AuthoritativeSerializedSavePayload<WorkerBinaryPayload>>;
 }
 
 /** Backward-compatible name; authoritative path always accepts a transferable state. */

@@ -54,7 +54,7 @@ async function seed(page: Page, expiresAt = BASE_TIME + 15_000) {
   await page.clock.install({ time: new Date(BASE_TIME - 1_000) });
   await page.clock.pauseAt(new Date(BASE_TIME));
   await page.addInitScript(() => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-08-v1.2.7");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
   });
   await page.route("**/__android_lease_seed.html", (route) => route.fulfill({

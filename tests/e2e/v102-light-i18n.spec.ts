@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-09-08-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-10-v1.2.9";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -109,21 +109,20 @@ test("English light release notes are localized and persist dismissal", async ({
     window.localStorage.removeItem("dsp-idle-network.release-notes.seen.v1");
   });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Web and Android: Save and Offline Preparation Improvements" });
+  await page.goto("/?menu=1&lang=en&releaseNotesTest=1");
+  const dialog = page.getByRole("dialog", { name: "Shared Performance and Canvas Controls" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.2.7");
-  await expect(dialog).toContainText("Less overhead when saving and importing");
-  await expect(dialog).toContainText("Automatic recovery snapshots do less repeated work");
-  await expect(dialog).toContainText("Lighter offline preparation");
-  await expect(dialog).toContainText("More reliable idle stopping and recovery");
-  await expect(dialog).toContainText("Version 1.2.6 gameplay and existing saves are preserved");
-  await expect(dialog).toContainText("What this release includes");
-  await expect(dialog).toContainText("The Windows download stays at its current version.");
+  await expect(dialog).toContainText("1.2.9");
+  await expect(dialog).toContainText("Background saves and snapshots");
+  await expect(dialog).toContainText("Less work in multi-planet factories");
+  await expect(dialog).toContainText("Navigate with WASD");
+  await expect(dialog).toContainText("Move regions with selected nodes");
+  await expect(dialog).toContainText("Android connectivity and restart recovery");
+  await expect(dialog).toContainText("GameState v47 and existing saves remain compatible.");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe(RELEASE_NOTE_ID);
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-09-10-v1.2.9");
 });
 
 test("English light primary workspaces use opaque light surfaces", async ({ page }) => {

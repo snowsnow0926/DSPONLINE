@@ -1,65 +1,29 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-09-08-v1.2.7";
+export const CURRENT_RELEASE_ID = "2026-09-10-v1.2.9";
 
-/**
- * The start menu only needs the current release summary. Keep it in a small
- * eager module so the historical release archive stays behind the dialog's
- * lazy boundary and does not inflate the first menu render.
- */
+/** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
-  const english = locale === "en";
+  const en = locale === "en";
   return {
     id: CURRENT_RELEASE_ID,
-    date: english ? "September 8, 2026" : "2026年9月8日",
-    version: "1.2.7",
-    title: english ? "Web and Android: Save and Offline Preparation Improvements" : "网页版与安卓版：保存及离线准备优化",
-    summary: english
-      ? "Version 1.2.7 improves saving, importing, and offline preparation on Web and Android, along with recovery and save retries after stopping idle mode. Version 1.2.6 gameplay and existing saves remain compatible. The Windows download stays at its current version."
-      : "1.2.7 为网页版和安卓版带来保存、导入与离线准备优化，并改进挂机停止后的恢复与保存重试。保留 1.2.6 的游戏规则与旧存档兼容性，Windows 下载版本维持现状。",
+    date: en ? "September 10, 2026" : "2026年9月10日",
+    version: "1.2.9",
+    title: en ? "Shared Performance and Canvas Controls" : "多端性能优化与画布操作更新",
+    summary: en
+      ? "Less repeated work during simulation, loading, saving and automatic snapshots. Navigate with WASD and move selected production regions with their nodes. GameState v47 and existing saves remain compatible."
+      : "减少模拟、读档、保存和自动快照中的重复扫描与复制；新增 WASD 平移视野，以及生产区域与节点一起框选移动。保持现有存档兼容。",
     items: [
-      {
-        id: "v127-save-import",
-        title: english ? "Less overhead when saving and importing" : "保存与导入减少重复处理",
-        description: english
-          ? "Large saves require less repeated copying and checking during saving and import. JSON and gzip files remain supported, with integrity checks and recovery options preserved. Importing does not overwrite the original file."
-          : "大存档保存和导入减少重复复制与检查，继续支持 JSON 和 gzip 文件，并保留完整性校验与救援选项。导入不会覆盖原始文件。",
-      },
-      {
-        id: "v127-automatic-snapshots",
-        title: english ? "Automatic recovery snapshots do less repeated work" : "自动快照减少重复处理",
-        description: english
-          ? "Automatic recovery snapshots reuse the save that was just verified, while keeping their own integrity checks. A failed snapshot does not undo a successful main save, and manual snapshots remain available."
-          : "自动恢复快照复用刚刚验证成功的主存档，同时保留独立校验。快照失败不会撤销已成功的主存档保存，手动快照仍可正常使用。",
-      },
-      {
-        id: "v127-offline-preparation",
-        title: english ? "Lighter offline preparation" : "离线准备更轻量",
-        description: english
-          ? "Returning to a large factory involves fewer repeated checks and copies before offline settlement. Complex factories may still ask you to choose how to proceed; cancel and exact retry remain available, with production rules unchanged."
-          : "返回大型工厂时，离线结算前减少重复检查与复制。复杂工厂仍可能需要玩家选择结算方式，取消和精确重试保持可用，产出规则不变。",
-      },
-      {
-        id: "v127-idle-recovery",
-        title: english ? "More reliable idle stopping and recovery" : "挂机停止与恢复更可靠",
-        description: english
-          ? "Fixes recovery reopening, hidden reports blocking idle controls, and dialogs disabling one another. Save retries reuse the completed result while the page remains open. Android startup can wait for the previous page's expired save lease. Export Recovery Data stays available independently; its private diagnostic file is not a completed save and is never uploaded automatically."
-          : "修复恢复界面重复启动、隐藏报告阻挡挂机操作，以及多个弹窗互相禁用的问题。同一页面内重试保存复用已完成结果，安卓快速重开可等待上一页面的存档写入权正常交还；也可独立“导出恢复数据”。诊断文件包含私人数据，不代表已结算存档，不会自动上传。",
-      },
-      {
-        id: "v127-gameplay-compatibility",
-        title: english ? "Version 1.2.6 gameplay and existing saves are preserved" : "保留 1.2.6 玩法与旧存档",
-        description: english
-          ? "Rate replication still advances white-matrix research and per-system Dyson progress. Planet factory reset still requires three confirmations and preserves natural resource reserves and global progress. Existing saves remain usable without a format upgrade."
-          : "产率复制继续直结白矩阵科研和逐恒星系戴森进度。星球工厂重置仍需三次确认，并保留天然资源储量与全局进度。旧存档可继续使用，无需升级存档格式。",
-      },
-      {
-        id: "v127-release-scope",
-        title: english ? "What this release includes" : "本次更新范围",
-        description: english
-          ? "Web and Android receive the shared save and offline preparation improvements. Bringing the Rust core to these platforms remains future work. The Windows download stays at its current version."
-          : "网页版和安卓版采用共同的保存与离线准备优化。Rust 核心的跨端接入将继续开发，Windows 下载版本维持现状。",
-      },
+      { id: "v129-shared-save", title: en ? "Background saves and snapshots" : "保存与自动快照减少重复处理",
+        description: en ? "Workers process large saves and reuse verified primary data for snapshots, retaining backups and readback checks." : "后台 Worker 处理大存档，自动快照复用已验证主档；保留备份、完整校验和写入后读回。" },
+      { id: "v129-shared-simulation", title: en ? "Less work in multi-planet factories" : "多星球模拟减少无效扫描",
+        description: en ? "Reuse power indexes, skip empty phases, and check construction materials without copying full inventories." : "复用完整电力索引，跳过空星球机器与施工阶段，施工材料检查不再复制完整库存。" },
+      { id: "v129-wasd", title: en ? "Navigate with WASD" : "WASD 平移画布视野",
+        description: en ? "Hold WASD to move the view. Typing, dialogs, modifier shortcuts and focus loss stop navigation." : "按住 WASD 可连续移动视野；输入文字、弹窗、组合快捷键或切换窗口时不会误移动画布。" },
+      { id: "v129-region-selection", title: en ? "Move regions with selected nodes" : "生产区域与节点一起移动",
+        description: en ? "Include production regions in box selection. Fully enclosed regions follow selected nodes, with combined undo and redo. Resize boundaries separately as before." : "框选模式可开启“同时选中生产区域”；完整框住的区域随选中节点一起拖动，撤销与重做同步恢复两者。区域边界仍可单独调整。" },
+      { id: "v129-android-recovery", title: en ? "Android connectivity and restart recovery" : "保留安卓云连接并改善重启恢复",
+        description: en ? "Keep the 1.2.8 cloud and update fixes; wait for interrupted writer leases before resuming. Fix mobile settlement reports opening an exit prompt or moving offscreen. Update over the existing installation to keep saves." : "保留 1.2.8 云服务和更新配置修复，异常关闭后等待旧写入租约释放再恢复。修复手机结算报告误显示退出提示、偏出屏幕的问题。请直接覆盖安装，保留本地存档。" },
     ],
   } as const;
 }

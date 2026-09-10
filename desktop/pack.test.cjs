@@ -278,7 +278,7 @@ test("real feed generator and identity selector agree on a synthetic stable rele
   assert.equal(selected.relativeOutputDirectory, "release");
   const feed = JSON.parse(fs.readFileSync(path.join(source, "update-feed", "desktop", "beta", "release.json"), "utf8"));
   assert.equal(feed.channel, "beta");
-  assert.equal(feed.files[1].name, "dsp-idle-1.2.7-x64-setup.exe");
+  assert.equal(feed.files[1].name, `dsp-idle-${context().version}-x64-setup.exe`);
   assert.throws(
     () => selectCompleteDesktopReleaseOutput({
       repositoryRoot: root,

@@ -199,6 +199,7 @@ $status = @(& git -C $workspace status --porcelain=v1 --untracked-files=all 2>$n
 if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) { throw "ANDROID_RELEASE_WORKTREE_NOT_CLEAN" }
 
 $childEnvironment = @{
+  DSP_ANDROID_BUILD_PROFILE = 'official'
   DSP_ANDROID_KEYSTORE = $keystorePath
   DSP_ANDROID_KEYSTORE_PASSWORD = [string]$properties["storePassword"]
   DSP_ANDROID_KEY_ALIAS = [string]$properties["keyAlias"]

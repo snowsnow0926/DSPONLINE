@@ -591,6 +591,21 @@ export async function restoreChunkedSavePayload(baseRaw: string, mode: SaveMode)
   return restoreChunkedSavePayloadWithReader(baseRaw, mode, readLocalSaveInternalValue);
 }
 
+function manifestMatchesPrimary(
+  manifest: ChunkedSaveManifest | null,
+  mode: SaveMode,
+  primary: ReturnType<typeof inspectSaveEnvelopeChecksum>,
+): manifest is ChunkedSaveManifest {
+  const savedAt = primary.parsed?.savedAt;
+  // The state checksum deliberately excludes envelope time. An unchanged
+  // state saved again must still supersede an older journal; otherwise a
+  // recovery can rewind savedAt and make already-consumed time eligible again.
+  return manifest !== null && manifest.mode === mode &&
+    manifest.basePrimaryChecksum === primary.recordedChecksum &&
+    typeof savedAt === "number" && Number.isSafeInteger(savedAt) && savedAt >= 0 &&
+    manifest.savedAt >= savedAt;
+}
+
 /** Validate the primary and manifest before pulling any large native/IDB chunks. */
 export async function restoreChunkedSavePayloadWithReader(
   baseRaw: string,
@@ -601,7 +616,7 @@ export async function restoreChunkedSavePayloadWithReader(
   const baseChecksum = integrity.recordedChecksum;
   if (!baseChecksum || integrity.status === "invalid") return null;
   const manifest = parseManifest(await readRecord(manifestKey(mode)));
-  if (!manifest || manifest.mode !== mode || manifest.basePrimaryChecksum !== baseChecksum) return null;
+  if (!manifestMatchesPrimary(manifest, mode, integrity)) return null;
   const values = new Map<string, string>();
   for (const chunk of manifest.chunks) {
     const text = await readRecord(chunkKey(mode, chunk.id));
@@ -632,7 +647,7 @@ export function restoreChunkedSavePayloadFromRecords(
   const baseChecksum = integrity.recordedChecksum;
   if (!baseChecksum || integrity.status === "invalid") return null;
   const manifest = parseManifest(records.get(manifestKey(mode)) ?? null);
-  if (!manifest || manifest.mode !== mode || manifest.basePrimaryChecksum !== baseChecksum) return null;
+  if (!manifestMatchesPrimary(manifest, mode, integrity)) return null;
   const values = new Map<string, string>();
   for (const chunk of manifest.chunks) {
     const text = records.get(chunkKey(mode, chunk.id));

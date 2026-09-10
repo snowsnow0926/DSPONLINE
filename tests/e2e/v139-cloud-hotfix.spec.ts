@@ -90,7 +90,7 @@ test.afterAll(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-test("reports the 1.2.7 native candidate version and a unique build id", async ({ page }) => {
+test("reports the current package version and a unique build id", async ({ page }) => {
   await page.goto("/?menu=1");
   const application = process.env.DSP_E2E_USE_PREVIEW === "1"
     ? await page.evaluate(async () => {
@@ -103,8 +103,9 @@ test("reports the 1.2.7 native candidate version and a unique build id", async (
         const { collectClientDiagnostics } = await import("/src/game/diagnostics.ts");
         return collectClientDiagnostics().application as { version: string; build: string };
       });
-  expect(application.version).toBe("1.2.7");
-  expect(application.build).toMatch(/^1\.2\.7\+[0-9a-f]{12}(?:\.dirty)?$/);
+  expect(application.version).toBe(process.env.npm_package_version);
+  expect(application.build.startsWith(`${process.env.npm_package_version}+`)).toBe(true);
+  expect(application.build.split("+")[1]).toMatch(/^[0-9a-f]{12}(?:\.dirty)?$/);
 });
 
 test("browser protocol uploads sparse v46 normal and speedrun saves without rewriting them", async ({ page }) => {

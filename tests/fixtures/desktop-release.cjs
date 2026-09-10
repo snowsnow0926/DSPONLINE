@@ -8,8 +8,9 @@ const { writeDesktopBuildEvidence } = require("../../desktop/desktop-artifact-ev
 const { STABLE_IDENTITY, PERFORMANCE_EDITION_IDENTITY } = require("../../desktop/performance-edition-identity.cjs");
 
 const SOURCE = "a".repeat(40);
+const VERSION = require("../../package.json").version;
 function context(identity = STABLE_IDENTITY, channel = "stable", sourceSha = SOURCE) {
-  return { version: "1.2.7", sourceSha, buildId: `1.2.7+${sourceSha.slice(0, 12)}`, editionId: identity.editionId, channel };
+  return { version: VERSION, sourceSha, buildId: `${VERSION}+${sourceSha.slice(0, 12)}`, editionId: identity.editionId, channel };
 }
 async function writeFixture(root, relative = "release", channel = "stable", options = {}) {
   const identity = options.identity ?? (relative.includes("performance") ? PERFORMANCE_EDITION_IDENTITY : STABLE_IDENTITY);

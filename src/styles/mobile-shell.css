@@ -633,6 +633,9 @@ html:not([data-native-ui-scale])[data-ui-font-scale="200"] .game-shell[data-mobi
   grid-template-rows: minmax(56px, auto) minmax(50px, auto) minmax(0, 1fr) minmax(58px, auto);
   border-radius: 8px;
   transform: none;
+  /* The desktop report animation retains a -50% centering transform. This
+     inset mobile sheet needs only the shared opacity transition. */
+  animation-name: factory-workspace-enter;
 }
 
 .game-shell[data-mobile-shell="true"] .offline-report > header {

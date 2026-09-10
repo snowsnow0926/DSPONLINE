@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-09-08-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-10-v1.2.9";
 
 async function seedV108Factory(page: Page, options: { mobileUi?: "legacy" | "next"; theme?: "dark" | "light"; fontScale?: number } = {}) {
   await page.addInitScript(({ releaseNoteId, mobileUi, theme, fontScale }) => {
@@ -116,13 +116,20 @@ test("structurally complete checksum failures show real progress and require two
   await result.getByRole("button", { name: "再次确认并救援" }).click();
   expect((await download).suggestedFilename()).toContain("rescue-backup");
   await expect(page.locator(".factory-canvas")).toBeVisible();
-  const integrity = await page.evaluate(() => {
-    const rawSave = window.localStorage.getItem("dsp-idle-network.save.v1")!;
+  const integrity = await page.evaluate(async () => {
+    // Worker-backed saves use IndexedDB and need not retain a localStorage
+    // mirror. Read the durable payload, then verify its checksum independently.
+    const { readPersistedLocalSaveValue } = await import("/src/game/localSaveStore.ts");
+    const rawSave = await readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+    if (!rawSave) throw new Error("Rescued primary save was not persisted");
     const parsed = JSON.parse(rawSave);
     return { formatVersion: parsed.formatVersion, version: parsed.state.version, checksum: parsed.checksum, state: parsed.state };
   });
   expect(integrity.version).toBe(47);
+  expect(integrity.formatVersion).toBe(2);
   expect(integrity.checksum).toBe(checksum(integrity.formatVersion, integrity.state));
+  expect(integrity.state.elapsedSeconds).toBeGreaterThanOrEqual(12_143);
+  expect(integrity.state.entities.find((entity: { id: string }) => entity.id === "rescue-storage").outputs.iron_ingot).toBe(42);
 });
 
 test("delivery-hub ports reset independently and the performance monitor samples only on demand", async ({ page }) => {

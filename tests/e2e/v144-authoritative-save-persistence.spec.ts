@@ -33,7 +33,13 @@ function primaryFixture(savedAt: number, revision: number, marker: string) {
 }
 
 async function openBarePage(page: Page): Promise<void> {
-  await page.goto("/src/game/authoritativeSavePersistenceClient.ts");
+  await page.route("**/__authoritative_persistence_seed.html", (route) => route.fulfill({
+    contentType: "text/html; charset=utf-8",
+    // Vite installs platform globals through its dev client. The persistence
+    // seed remains free of App, writer initialization and runtime side effects.
+    body: '<!doctype html><html><head><script type="module" src="/@vite/client"></script></head><body>Authoritative persistence seed</body></html>',
+  }));
+  await page.goto("/__authoritative_persistence_seed.html");
 }
 
 async function seedPrimary(page: Page, primary: ReturnType<typeof primaryFixture>): Promise<void> {

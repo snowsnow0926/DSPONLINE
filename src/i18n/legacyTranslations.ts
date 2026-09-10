@@ -5,6 +5,16 @@ import type { AppLocale } from "./locale";
 type TranslationMap = Readonly<Record<string, string>>;
 
 const UI_EN: TranslationMap = {
+  "恢复数据导出": "Recovery Data Export",
+  "导出恢复数据": "Export Recovery Data",
+  "正在导出恢复数据…": "Exporting recovery data…",
+  "正在读取恢复数据，不会重新结算或改写存档…": "Reading recovery data without rerunning settlement or changing saves…",
+  "包含私人存档和恢复日志，仅保存到本机或由你主动分享；诊断包不代表已结算结果。": "Contains private saves and recovery logs. Save it locally or share it deliberately; this diagnostic is not a completed settlement.",
+  "已打开系统保存或分享面板。请妥善保管私人数据。": "The system save or share panel is open. Keep your private data secure.",
+  "已发起恢复数据下载。请妥善保管私人数据。": "Recovery data download started. Keep your private data secure.",
+  "已打开系统保存或分享面板；部分本地日志无法读取，包内已注明。请妥善保管私人数据。": "The system save or share panel is open. Some local logs could not be read; the diagnostic records this. Keep your private data secure.",
+  "已发起恢复数据下载；部分本地日志无法读取，包内已注明。请妥善保管私人数据。": "Recovery data download started. Some local logs could not be read; the diagnostic records this. Keep your private data secure.",
+  "导出未完成，原存档与恢复日志未改变。请重试，并保留本地数据。": "Export did not complete. The original save and recovery logs are unchanged. Please retry and keep your local data.",
   "DSP极简网络": "DSP Idle Network",
   "星系生产资料库": "Stellar Production Library",
   "生产资料库": "Production Library",
@@ -964,6 +974,8 @@ const UI_EN: TranslationMap = {
   "重新打开 5 步基础操作和从手动采矿到白糖、跨星物流与戴森云的 13 步进阶教学。": "Replay the 5-step basic tutorial and the 13-step advanced tutorial from manual mining through White Matrices, interstellar logistics, and the Dyson Swarm.",
   "重新开始教学": "Restart Tutorial",
   "正在载入工作区": "Loading Workspace",
+  "正在后台计算生产统计，页面仍可操作": "Calculating production statistics in the background; the page remains interactive",
+  "没有符合条件的物品": "No items match the filters",
   "管理": "Management",
   "效率": "Efficiency",
   "网络": "Networks",

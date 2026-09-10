@@ -20,12 +20,15 @@ use crate::state::{
     PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS,
 };
 
+mod offline_flow;
+mod offline_history;
+
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
     "native-pure-idle-macro-v10-closed-ledger-construction-quantum-v15";
-const OFFLINE_MACRO_V1_ALGORITHM_VERSION: &str =
-    "native-offline-macro-v1-closed-ledger-one-shot-v1";
+pub(crate) const OFFLINE_MACRO_V1_ALGORITHM_VERSION: &str =
+    "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -38,6 +41,8 @@ const TERMINAL_SAIL_ITEM_ID: &str = "solar_sail";
 const SETTLEMENT_ENTITY_ROWS_PER_CHUNK: usize = 256;
 const MAX_BOUNDED_HANDCRAFT_TAIL_BATCHES: i128 = 4_096;
 const HANDCRAFT_PROGRESS_EPSILON: f64 = 0.0001;
+const OFFLINE_BOUNDARY_EXACT_MAX_SECONDS: f64 = 8.0 * 60.0 * 60.0;
+const OFFLINE_BOUNDARY_EXACT_MAX_WORK: u128 = 4_000_000;
 
 /// The product authority runs one pure-idle settlement at a time. The Rust
 /// test harness normally overlaps dozens of large synthetic macro settlements,
@@ -2808,6 +2813,80 @@ fn checked_material_delta(
         .ok_or_else(|| format!("{label}.{item_id} delta overflowed"))
 }
 
+/// A closed upload-only tower moves already-owned material; its output slots
+/// are buffers, not recipe production declarations. This classification grants
+/// no material rate: the three exact windows must still close all production,
+/// consumption, owned stock, recipe dependencies and finite reserve debits.
+/// Keep mixed demand/local routes and transitions outside this narrow case.
+fn is_ordinary_quantum_upload_endpoint(state: &CoreState, entity: &Value) -> bool {
+    if entity.get("kind").and_then(Value::as_str) != Some("station")
+        || entity.get("buildingId").and_then(Value::as_str)
+            != Some("interstellar_logistics_station")
+        || entity.get("quantumMode").and_then(Value::as_str) != Some("quantum")
+        || number_at(Some(entity), &["stationTier"]) < 2.0
+        || entity
+            .get("recipeId")
+            .is_some_and(|id| !id.is_null() && id.as_str() != Some(""))
+        || entity
+            .get("stationModeTransition")
+            .is_some_and(|transition| !transition.is_null())
+        || entity
+            .get("stationRoutes")
+            .is_some_and(|routes| routes.as_array().is_none_or(|routes| !routes.is_empty()))
+        || number_at(Some(entity), &["stationDrones"]) != 0.0
+        || number_at(Some(entity), &["stationVessels"]) != 0.0
+        || state
+            .catalog
+            .buildings
+            .get("interstellar_logistics_station")
+            .is_none_or(|building| building.kind != "station")
+    {
+        return false;
+    }
+    let Some(slots) = entity.get("stationSlots").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut upload_items = BTreeSet::new();
+    for slot in slots {
+        if !slot.is_object()
+            || slot
+                .get("localMode")
+                .and_then(Value::as_str)
+                .unwrap_or("storage")
+                != "storage"
+        {
+            return false;
+        }
+        let Some(item_id) = slot.get("itemId").and_then(Value::as_str) else {
+            if slot.get("itemId").is_some_and(|item_id| !item_id.is_null())
+                || slot
+                    .get("remoteMode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("storage")
+                    != "storage"
+            {
+                return false;
+            }
+            continue;
+        };
+        if slot.get("remoteMode").and_then(Value::as_str) != Some("supply") {
+            return false;
+        }
+        upload_items.insert(item_id);
+    }
+    !upload_items.is_empty()
+        && ["inputs", "outputs"].into_iter().all(|field| {
+            entity
+                .get(field)
+                .and_then(Value::as_object)
+                .is_some_and(|buffers| {
+                    buffers
+                        .keys()
+                        .all(|item_id| upload_items.contains(item_id.as_str()))
+                })
+        })
+}
+
 fn exclusive_vein_sources(state: &CoreState) -> Result<BTreeSet<String>, String> {
     // Material-fuel generators and charge/discharge stores can make a short
     // window productive by spending a finite cache. Their energy budget is not
@@ -2868,6 +2947,9 @@ fn exclusive_vein_sources(state: &CoreState) -> Result<BTreeSet<String>, String>
         let entity = state
             .parse_entity(entity_index)
             .map_err(|error| format!("ordinary entity decode failed: {error:#}"))?;
+        if is_ordinary_quantum_upload_endpoint(state, &entity) {
+            continue;
+        }
         if let Some(outputs) = entity.get("outputs").and_then(Value::as_object) {
             for item_id in outputs.keys() {
                 sources.remove(item_id);
@@ -4463,6 +4545,9 @@ fn active_ordinary_recipe_ids(
             .parse_entity(entity_index)
             .map_err(|error| format!("ordinary recipe entity decode failed: {error:#}"))?;
         if number_at(Some(&entity), &["machineCount"]) <= EPSILON {
+            continue;
+        }
+        if is_ordinary_quantum_upload_endpoint(state, &entity) {
             continue;
         }
         let entity_output_ids = entity
@@ -8708,6 +8793,94 @@ pub(crate) fn advance(
     advance_bounded_with_runtime(state, request, false, deterministic_runtime())
 }
 
+fn offline_ordinary_boundary_requires_exact(
+    state: &CoreState,
+    certificate: &OrdinaryFlowCertificate,
+    elapsed_before: f64,
+    elapsed_after: f64,
+) -> Result<bool, String> {
+    // This correction owns only the ordinary physical factory. Stateful
+    // terminals/construction retain their separate certificates and horizons.
+    if construction_tail_requested(state)
+        || certificate.research.is_some()
+        || certificate.dyson_rocket.is_some()
+        || certificate.dyson_sail.is_some()
+        || certificate.galactic_export.is_some()
+        || certificate.orbital_contracts.is_some()
+    {
+        return Ok(false);
+    }
+    let before_micros = elapsed_micros(elapsed_before)?;
+    let after_micros = elapsed_micros(elapsed_after)?;
+    let scheduled_seconds = after_micros / MICROS_PER_SECOND - before_micros / MICROS_PER_SECOND;
+    if scheduled_seconds < 0 {
+        return Err("offline ordinary boundary clock regressed".to_owned());
+    }
+    if finite_vein_capacity_seconds(state, certificate)? < scheduled_seconds {
+        return Ok(true);
+    }
+    let quantum = state
+        .base_value()
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum logistics network is missing".to_owned())?;
+    let inventory = quantum
+        .get("inventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum inventory is malformed".to_owned())?;
+    let capacities = quantum
+        .get("itemCapacities")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "quantum capacity ledger is malformed".to_owned())?;
+    let source_only = certificate.recipe_ids.is_empty() && certificate.finite_veins.is_empty();
+    for (item_id, rate) in &certificate.units_per_second {
+        if *rate <= 0 {
+            continue;
+        }
+        let amount = if source_only {
+            let before = rate
+                .checked_mul(before_micros)
+                .and_then(|amount| amount.checked_div(MICROS_PER_SECOND))
+                .ok_or_else(|| "offline source boundary overflowed".to_owned())?;
+            rate.checked_mul(after_micros)
+                .and_then(|amount| amount.checked_div(MICROS_PER_SECOND))
+                .and_then(|after| after.checked_sub(before))
+                .ok_or_else(|| "offline source boundary overflowed".to_owned())?
+        } else {
+            rate.checked_mul(scheduled_seconds)
+                .ok_or_else(|| "offline recipe boundary overflowed".to_owned())?
+        };
+        let current = proof_counter(
+            inventory.get(item_id),
+            &format!("quantum inventory.{item_id}"),
+        )
+        .map_err(|error| error.to_string())?;
+        let capacity = capacities
+            .get(item_id)
+            .map(|value| proof_counter(Some(value), &format!("quantum capacity.{item_id}")))
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or(DEFAULT_QUANTUM_ITEM_CAPACITY);
+        if !(10_000..=DEFAULT_QUANTUM_ITEM_CAPACITY).contains(&capacity) {
+            return Err(format!(
+                "{item_id} quantum capacity is outside the supported range"
+            ));
+        }
+        if amount > capacity.saturating_sub(current) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn offline_boundary_exact_budget(seconds: f64, entity_count: usize, belt_count: usize) -> bool {
+    seconds.is_finite()
+        && (0.0..=OFFLINE_BOUNDARY_EXACT_MAX_SECONDS).contains(&seconds)
+        && (seconds.ceil() as u128)
+            .saturating_mul(entity_count.saturating_add(belt_count).max(1) as u128)
+            <= OFFLINE_BOUNDARY_EXACT_MAX_WORK
+}
+
 /// New wire-distinct macro mode. It retains the deterministic 3x10-second
 /// calibration boundary and settles only independently certified domains:
 /// source/closed-recipe ordinary flow and its research/Dyson sinks, bounded
@@ -9004,6 +9177,7 @@ fn advance_bounded_with_runtime(
     }
 
     let tail_seconds = budget.frozen_tail_seconds;
+    let mut boundary_exact_seconds = 0.0;
     let mut tail_reason = None;
     if tail_seconds > EPSILON {
         let current_elapsed = candidate
@@ -9011,7 +9185,9 @@ fn advance_bounded_with_runtime(
             .get("elapsedSeconds")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
-        let elapsed = checked_elapsed_after_prefix(current_elapsed, tail_seconds)?;
+        let mut elapsed = checked_elapsed_after_prefix(current_elapsed, tail_seconds)?;
+        let mut offline_export_progress = None;
+        let mut offline_state_proofs = None;
         let construction_isolated_receipt_base_revision = candidate.revision;
         let mut handcraft_handled_tail = false;
         if macro_v10 && collection_has_entries(candidate.base_value().get("handcraftQueue")) {
@@ -9064,7 +9240,122 @@ fn advance_bounded_with_runtime(
             let mut allow_construction_quantum_replay =
                 construction_quantum_granted && construction_quantum_replay_remaining_seconds > 0;
             let mut construction_quantum_credit_rates = MaterialTotals::new();
-            if let Some(certificate) = runtime.certificate.as_mut() {
+            let boundary_exact = if offline_macro && runtime.construction_certificate.is_none() {
+                match runtime
+                    .certificate
+                    .as_ref()
+                    .map(|certificate| {
+                        offline_ordinary_boundary_requires_exact(
+                            &candidate,
+                            certificate,
+                            current_elapsed,
+                            elapsed,
+                        )
+                    })
+                    .transpose()
+                {
+                    Ok(required) => required.unwrap_or(false),
+                    Err(reason) => {
+                        return unsupported(
+                            state,
+                            request,
+                            format!("offline-boundary-proof-rejected: {reason}"),
+                        );
+                    }
+                }
+            } else {
+                false
+            };
+            if boundary_exact {
+                if !offline_boundary_exact_budget(
+                    request.simulation_seconds,
+                    candidate.entity_index.len(),
+                    candidate.belt_index.len(),
+                ) {
+                    return unsupported(
+                        state,
+                        request,
+                        "offline-boundary-exact-work-budget-exceeded",
+                    );
+                }
+                // No macro material write has occurred. Continue from the real
+                // prefix with Exact, so existing machine/station buffers and
+                // in-flight recipe progress are consumed once at their actual
+                // boundaries. Never append exact steps to an extrapolated phase.
+                let mut exact = candidate.advance_exact(&exact_request(
+                    candidate.revision,
+                    tail_seconds,
+                    budget.frozen_tail_wall_seconds,
+                ))?;
+                if !exact.supported {
+                    return unsupported(
+                        state,
+                        request,
+                        exact
+                            .reason
+                            .take()
+                            .unwrap_or_else(|| "offline-boundary-exact-unsupported".to_owned()),
+                    );
+                }
+                exact_changed |= exact.changed;
+                if exact.belt_scheduler.is_some() {
+                    belt_scheduler = exact.belt_scheduler.take();
+                }
+                boundary_exact_seconds = tail_seconds;
+                tail_reason = Some("ordinary capacity or finite-reserve horizon required bounded exact fallback from the real prefix; physical buffers and in-progress production settled without macro extrapolation".to_owned());
+            } else if let Some(certificate) = runtime.certificate.as_mut() {
+                let ordinary_state_scope = offline_macro
+                    && runtime.construction_certificate.is_none()
+                    && !construction_tail_requested(&candidate)
+                    && certificate.research.is_none()
+                    && certificate.dyson_rocket.is_none()
+                    && certificate.dyson_sail.is_none()
+                    && certificate.galactic_export.is_none()
+                    && certificate.orbital_contracts.is_none();
+                if offline_macro && current_elapsed.fract() != 0.0 && !ordinary_state_scope {
+                    return unsupported(
+                        state,
+                        request,
+                        "offline-ordinary-macro-source-clock-unsupported",
+                    );
+                }
+                if offline_macro && certificate.galactic_export.is_none() {
+                    offline_export_progress = Some(
+                        match crate::simulation::capture_offline_no_export_progress(&candidate) {
+                            Ok(progress) => progress,
+                            Err(reason) => {
+                                return unsupported(
+                                    state,
+                                    request,
+                                    format!("offline-export-window-proof-rejected: {reason}"),
+                                );
+                            }
+                        },
+                    );
+                }
+                if ordinary_state_scope {
+                    let flow = match offline_flow::prepare(&candidate, certificate, tail_seconds) {
+                        Ok(proof) => proof,
+                        Err(reason) => {
+                            return unsupported(
+                                state,
+                                request,
+                                format!("offline-state-proof-rejected: {reason}"),
+                            );
+                        }
+                    };
+                    let history = match offline_history::prepare(&candidate, &flow, tail_seconds) {
+                        Ok(proof) => proof,
+                        Err(reason) => {
+                            return unsupported(
+                                state,
+                                request,
+                                format!("offline-history-proof-rejected: {reason}"),
+                            );
+                        }
+                    };
+                    offline_state_proofs = Some((flow, history));
+                }
                 let quantum_inventory_before = if allow_construction_quantum_replay {
                     match capture_construction_quantum_inventory(candidate.base_value()) {
                         Ok(inventory) => Some(inventory),
@@ -9219,6 +9510,19 @@ fn advance_bounded_with_runtime(
                     },
                 );
             } else {
+                if offline_macro && runtime.construction_certificate.is_none() {
+                    return unsupported(
+                        state,
+                        request,
+                        format!(
+                            "offline-ordinary-tail-uncertified: {}",
+                            runtime
+                                .rejection_reason
+                                .as_deref()
+                                .unwrap_or("calibration was incomplete"),
+                        ),
+                    );
+                }
                 tail_reason = Some(format!(
                     "ordinary-flow tail froze because no closed three-window certificate was available: {}",
                     runtime
@@ -9294,13 +9598,48 @@ fn advance_bounded_with_runtime(
                 });
             }
         }
-        candidate.base_value_mut().insert(
-            "elapsedSeconds".to_owned(),
-            Value::Number(
-                Number::from_f64(elapsed)
-                    .ok_or_else(|| anyhow!("native pure-idle elapsed time encode failed"))?,
-            ),
-        );
+        if let Some((flow, history)) = offline_state_proofs {
+            if let Err(reason) = offline_flow::apply(&mut candidate, &flow) {
+                return unsupported(
+                    state,
+                    request,
+                    format!("offline-state-apply-rejected: {reason}"),
+                );
+            }
+            if let Err(reason) = offline_history::apply(&mut candidate, &history, tail_seconds) {
+                return unsupported(
+                    state,
+                    request,
+                    format!("offline-history-apply-rejected: {reason}"),
+                );
+            }
+        }
+        if let Some(progress) = offline_export_progress {
+            match crate::simulation::advance_offline_no_export_progress(
+                &mut candidate,
+                &progress,
+                tail_seconds,
+                request.simulation_seconds,
+            ) {
+                Ok(final_elapsed) => elapsed = final_elapsed,
+                Err(reason) => {
+                    return unsupported(
+                        state,
+                        request,
+                        format!("offline-export-window-proof-rejected: {reason}"),
+                    );
+                }
+            }
+        }
+        if boundary_exact_seconds <= EPSILON {
+            candidate.base_value_mut().insert(
+                "elapsedSeconds".to_owned(),
+                Value::Number(
+                    Number::from_f64(elapsed)
+                        .ok_or_else(|| anyhow!("native pure-idle elapsed time encode failed"))?,
+                ),
+            );
+        }
     }
 
     let changed = exact_changed || tail_seconds > EPSILON;
@@ -9377,7 +9716,9 @@ fn advance_bounded_with_runtime(
     *state = candidate;
     Ok(CoreAdvanceResult {
         supported: true,
-        exact_scope: if tail_seconds > EPSILON && offline_macro {
+        exact_scope: if boundary_exact_seconds > EPSILON {
+            "offline-boundary-exact"
+        } else if tail_seconds > EPSILON && offline_macro {
             "offline-macro-v1"
         } else if tail_seconds > EPSILON && macro_v10 {
             "pure-idle-macro-v10"
@@ -9395,8 +9736,8 @@ fn advance_bounded_with_runtime(
             })
         }),
         algorithm_version: Some(algorithm_version(request.advance_mode)),
-        exact_calibration_seconds: Some(exact_seconds),
-        approximated_seconds: Some(tail_seconds),
+        exact_calibration_seconds: Some(exact_seconds + boundary_exact_seconds),
+        approximated_seconds: Some((tail_seconds - boundary_exact_seconds).max(0.0)),
         belt_scheduler,
         summary,
     })
@@ -10486,6 +10827,783 @@ mod tests {
         productive_single_recipe_macro_fixture(multiplier, "iron_ingot", "iron_ingot", false, false)
     }
 
+    pub(super) fn offline_flow_steady_fixture() -> CoreState {
+        let mut state = with_quantum_upload_station(
+            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+            "iron_ingot",
+            "smelter",
+        );
+        let index = *state.entity_index.get("vein").unwrap();
+        let mut vein = state.parse_entity(index).unwrap();
+        vein["minerCount"] = json!(1);
+        state.replace_entity_raw(index, serde_json::to_string(&vein).unwrap().into());
+        let revision = state.revision;
+        assert!(
+            state
+                .advance_exact(&exact_request(revision, 30.0, 30.0))
+                .unwrap()
+                .supported
+        );
+        state
+    }
+
+    fn with_quantum_upload_station(source: CoreState, item_id: &str, source_id: &str) -> CoreState {
+        let mut entities = source.parse_entities_parallel().unwrap();
+        entities.push(json!({
+            "id": "quantum-upload", "kind": "station", "planetId": "home",
+            "powerGridId": "grid-a", "buildingId": "interstellar_logistics_station",
+            "stationTier": 2, "quantumMode": "quantum", "machineCount": 1,
+            "stationSlots": [{
+                "itemId": item_id, "localMode": "storage", "remoteMode": "supply",
+                "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000,
+                "priority": 1, "routePolicy": "direct", "warperBudget": 0
+            }],
+            "stationRoutes": [], "stationDrones": 0, "stationVessels": 0,
+            "stationWarpEnabled": false, "stationWarpers": 0,
+            "stationDispatchCursor": 0, "stationLastSupplyPeerBySlot": {},
+            "stationProgress": 0, "stationCongestion": 0, "stationTrips": 0,
+            "stationLastTransfer": 0, "inputs": { item_id: 0 }, "outputs": { item_id: 0 },
+            "progress": 0, "routingCursor": 0, "utilization": 0, "productionRate": 0
+        }));
+        entities.last_mut().unwrap()["stationSlots"]
+            .as_array_mut()
+            .unwrap()
+            .extend((0..4).map(|_| {
+                json!({
+                    "itemId": null, "localMode": "storage", "remoteMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000,
+                    "priority": 1, "routePolicy": "direct", "warperBudget": 0
+                })
+            }));
+        let mut belts = source.parse_belts_parallel().unwrap();
+        belts.push(json!({
+            "id": "quantum-upload-feed", "planetId": "home", "source": source_id,
+            "target": "quantum-upload", "itemId": item_id, "lanes": 1, "tier": 1,
+            "priority": 1, "progress": 0, "lastFlow": 0, "totalTransferred": 0
+        }));
+        let mut catalog = source.catalog.snapshot.clone();
+        catalog.buildings.push(BuildingDefinition {
+            id: "interstellar_logistics_station".to_owned(),
+            kind: "station".to_owned(),
+            speed: 1.0,
+            input_capacity: 1_000_000.0,
+            output_capacity: 1_000_000.0,
+            power_demand_kw: 0.0,
+            power_generation_kw: 0.0,
+            power_charge_kw: 0.0,
+            energy_capacity_mj: 0.0,
+            fuel_item_ids: Vec::new(),
+            fuel_efficiency: 1.0,
+            family: None,
+            accepts: None,
+        });
+        let catalog = RuntimeCatalog::validate(catalog, "pure-idle-test").unwrap();
+        fixture_state_from_parts_with_belts_and_catalog(
+            Value::Object(source.base_value().clone()),
+            entities,
+            belts,
+            catalog,
+        )
+    }
+
+    #[test]
+    fn quantum_upload_is_a_transfer_endpoint_for_source_and_recipe_certificates() {
+        for (item_id, source_id, source) in [
+            (
+                "iron_ore",
+                "vein",
+                productive_quantum_macro_fixture(1.0, "infinite"),
+            ),
+            (
+                "iron_ingot",
+                "smelter",
+                productive_closed_recipe_macro_fixture(1.0),
+            ),
+        ] {
+            let mut state = with_quantum_upload_station(source, item_id, source_id);
+            let revision = state.revision;
+            let warmup = state
+                .advance_exact(&exact_request(revision, 30.0, 30.0))
+                .unwrap();
+            assert!(warmup.supported, "{:?}", warmup.reason);
+            let request = offline_macro_request(state.revision, 600.0);
+            let snapshots = exact_three_window_probe(&state, &request).unwrap();
+            let certificate = build_ordinary_flow_certificate(&state, &snapshots)
+                .unwrap_or_else(|reason| panic!("{item_id}: {reason}"));
+            assert!(
+                certificate
+                    .produced_units_per_second
+                    .get(item_id)
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            );
+        }
+    }
+
+    #[test]
+    fn offline_macro_quantum_upload_matches_exact_materials_and_repeated_hash() {
+        for resource_mode in ["infinite", "finite"] {
+            for prefilled in [0, 250] {
+                let mut initial = with_quantum_upload_station(
+                    as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+                    "iron_ingot",
+                    "smelter",
+                );
+                initial.base_value_mut()["settings"]["resourceMode"] = json!(resource_mode);
+                // The custom unit catalog mines one item per miner/second.
+                // Match the one-item smelter before proving every physical
+                // second, instead of averaging excess ore over a window.
+                let mut vein = initial.parse_entity(2).unwrap();
+                vein["minerCount"] = json!(1);
+                initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+                let mut tower = initial.parse_entity(4).unwrap();
+                tower["outputs"]["iron_ingot"] = json!(prefilled);
+                initial.replace_entity_raw(4, serde_json::to_string(&tower).unwrap().into());
+                initial.rebuild_indexes().unwrap();
+                let revision = initial.revision;
+                let warmup = initial
+                    .advance_exact(&exact_request(revision, 30.0, 30.0))
+                    .unwrap();
+                assert!(warmup.supported, "{:?}", warmup.reason);
+
+                let mut exact = initial.clone();
+                for _ in 0..60 {
+                    let revision = exact.revision;
+                    let result = exact
+                        .advance_exact(&exact_request(revision, 10.0, 10.0))
+                        .unwrap();
+                    assert!(result.supported, "{:?}", result.reason);
+                }
+                let mut long = initial.clone();
+                let revision = long.revision;
+                let result =
+                    advance_macro_v10(&mut long, &offline_macro_request(revision, 600.0)).unwrap();
+                assert!(result.supported, "{:?}", result.reason);
+                assert!(
+                    !result
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("ordinary-flow tail froze")),
+                    "{:?}",
+                    result.reason
+                );
+                let exact_materials = capture_settlement_snapshot(&exact).unwrap();
+                let long_materials = capture_settlement_snapshot(&long).unwrap();
+                assert_eq!(
+                    long_materials.produced, exact_materials.produced,
+                    "{resource_mode} prefill={prefilled}"
+                );
+                assert_eq!(
+                    long_materials.owned, exact_materials.owned,
+                    "{resource_mode} prefill={prefilled}"
+                );
+                assert_eq!(long_materials.consumed, exact_materials.consumed);
+                assert_eq!(long_materials.granted, exact_materials.granted);
+                assert_eq!(long_materials.finite_veins, exact_materials.finite_veins);
+                assert_eq!(
+                    long.canonical_sha256().unwrap(),
+                    exact.canonical_sha256().unwrap()
+                );
+
+                // OfflineMacroV1 is deliberately one-shot: each call owns a
+                // fresh exact prefix. Repeat the same call for deterministic
+                // state identity; sessioned macro split identity is separate.
+                let mut repeated = initial;
+                let revision = repeated.revision;
+                assert!(
+                    advance_macro_v10(&mut repeated, &offline_macro_request(revision, 600.0))
+                        .unwrap()
+                        .supported
+                );
+                assert_eq!(
+                    repeated.summary().unwrap().canonical_sha256,
+                    long.summary().unwrap().canonical_sha256,
+                    "{resource_mode} prefill={prefilled}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quantum_upload_recognition_preserves_unknown_producer_and_mixed_route_rejections() {
+        let state = with_quantum_upload_station(
+            productive_closed_recipe_macro_fixture(1.0),
+            "iron_ingot",
+            "smelter",
+        );
+        let tower = state.parse_entity(4).unwrap();
+        assert!(is_ordinary_quantum_upload_endpoint(&state, &tower));
+        for (field, value) in [
+            ("kind", json!("machine")),
+            ("buildingId", json!("storage_mk1")),
+            ("quantumMode", json!("legacy")),
+            ("stationTier", json!(1)),
+            ("recipeId", json!("iron_ingot")),
+            (
+                "stationRoutes",
+                json!([{ "itemId": "iron_ingot", "amount": 100 }]),
+            ),
+            ("stationDrones", json!(1)),
+            ("stationVessels", json!(1)),
+            ("stationModeTransition", json!({ "target": "quantum" })),
+            ("outputs", json!({ "iron_ingot": 0, "magnet": 0 })),
+        ] {
+            let mut changed = state.clone();
+            let mut entity = tower.clone();
+            entity[field] = value;
+            assert!(
+                !is_ordinary_quantum_upload_endpoint(&changed, &entity),
+                "{field}"
+            );
+            changed.replace_entity_raw(4, serde_json::to_string(&entity).unwrap().into());
+            changed.rebuild_indexes().unwrap();
+            let hash = changed.summary().unwrap().canonical_sha256;
+            assert!(
+                active_ordinary_recipe_ids(&changed, false, false, false, false, false).is_err(),
+                "{field}"
+            );
+            assert_eq!(changed.summary().unwrap().canonical_sha256, hash);
+        }
+        for (field, mode) in [("remoteMode", "demand"), ("localMode", "supply")] {
+            let mut mixed = tower.clone();
+            mixed["stationSlots"][0][field] = json!(mode);
+            assert!(
+                !is_ordinary_quantum_upload_endpoint(&state, &mixed),
+                "{field}"
+            );
+        }
+        let ore_state = with_quantum_upload_station(
+            productive_quantum_macro_fixture(1.0, "infinite"),
+            "iron_ore",
+            "vein",
+        );
+        assert!(
+            exclusive_vein_sources(&ore_state)
+                .unwrap()
+                .contains("iron_ore")
+        );
+        let mut alternate = ore_state;
+        let mut entity = alternate.parse_entity(3).unwrap();
+        entity["kind"] = json!("machine");
+        alternate.replace_entity_raw(3, serde_json::to_string(&entity).unwrap().into());
+        alternate.rebuild_indexes().unwrap();
+        assert!(exclusive_vein_sources(&alternate).is_err());
+    }
+
+    #[test]
+    fn offline_macro_quantum_upload_does_not_replay_prefilled_material_without_live_sources() {
+        let mut initial = with_quantum_upload_station(
+            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+            "iron_ingot",
+            "smelter",
+        );
+        for index in [2, 3, 4] {
+            let mut entity = initial.parse_entity(index).unwrap();
+            if index == 2 {
+                entity["minerCount"] = json!(0);
+            }
+            if index == 3 {
+                entity["inputs"]["iron_ore"] = json!(10000);
+            }
+            if index == 4 {
+                entity["outputs"]["iron_ingot"] = json!(10000);
+            }
+            initial.replace_entity_raw(index, serde_json::to_string(&entity).unwrap().into());
+        }
+        initial.rebuild_indexes().unwrap();
+        let before = initial.summary().unwrap().canonical_sha256;
+        let mut long = initial;
+        let revision = long.revision;
+        let result = advance_macro_v10(&mut long, &offline_macro_request(revision, 600.0)).unwrap();
+        assert!(!result.supported);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("offline-ordinary-tail-uncertified")),
+            "{:?}",
+            result.reason
+        );
+        assert_eq!(long.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn offline_macro_quantum_upload_preserves_capacity_and_finite_reserve_horizons() {
+        for bounded_inventory in [true, false] {
+            let mut initial = with_quantum_upload_station(
+                as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+                "iron_ingot",
+                "smelter",
+            );
+            let revision = initial.revision;
+            assert!(
+                initial
+                    .advance_exact(&exact_request(revision, 30.0, 30.0))
+                    .unwrap()
+                    .supported
+            );
+            if bounded_inventory {
+                initial.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"] =
+                    json!("9967");
+                initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"] =
+                    json!("10000");
+            } else {
+                initial.base_value_mut()["settings"]["resourceMode"] = json!("finite");
+                let mut vein = initial.parse_entity(2).unwrap();
+                vein["resourceRemaining"] = json!(120);
+                vein["resourceDepletionRemainder"] = json!(0);
+                initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+                initial.rebuild_indexes().unwrap();
+            }
+            let before = capture_settlement_snapshot(&initial).unwrap();
+            let mut oracle = initial.clone();
+            let revision = oracle.revision;
+            assert!(
+                oracle
+                    .advance_exact(&exact_request(revision, 600.0, 600.0))
+                    .unwrap()
+                    .supported
+            );
+            let mut prefix = initial.clone();
+            let revision = prefix.revision;
+            assert!(
+                advance_macro_v10(&mut prefix, &offline_macro_request(revision, 30.0))
+                    .unwrap()
+                    .supported
+            );
+            let mut long = initial.clone();
+            let revision = long.revision;
+            let result =
+                advance_macro_v10(&mut long, &offline_macro_request(revision, 600.0)).unwrap();
+            assert!(result.supported, "{:?}", result.reason);
+            assert!(
+                result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("horizon")),
+                "{:?}",
+                result.reason
+            );
+            let long_snapshot = capture_settlement_snapshot(&long).unwrap();
+            assert_eq!(result.exact_scope, "offline-boundary-exact");
+            assert_eq!(result.exact_calibration_seconds, Some(600.0));
+            assert_eq!(result.approximated_seconds, Some(0.0));
+            assert_eq!(
+                result.algorithm_version,
+                Some(OFFLINE_MACRO_V1_ALGORITHM_VERSION)
+            );
+            assert_eq!(
+                long.summary().unwrap().canonical_sha256,
+                oracle.summary().unwrap().canonical_sha256
+            );
+            let mut repeated = initial;
+            let revision = repeated.revision;
+            assert!(
+                advance_macro_v10(&mut repeated, &offline_macro_request(revision, 600.0))
+                    .unwrap()
+                    .supported
+            );
+            assert_eq!(
+                long.summary().unwrap().canonical_sha256,
+                repeated.summary().unwrap().canonical_sha256
+            );
+            if bounded_inventory {
+                assert_eq!(
+                    long.base_value()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"],
+                    long.base_value()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"]
+                );
+                assert!(
+                    long_snapshot.produced["iron_ingot"]
+                        > capture_settlement_snapshot(&prefix).unwrap().produced["iron_ingot"] + 3
+                );
+            } else {
+                assert_eq!(
+                    long_snapshot.produced["iron_ore"] - before.produced["iron_ore"],
+                    120
+                );
+                assert_eq!(
+                    number_at(Some(&long.parse_entity(2).unwrap()), &["resourceRemaining"]),
+                    0.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn offline_steady_fractional_clock_matches_complete_exact() {
+        let mut state = offline_flow_steady_fixture();
+        let before_elapsed = state.base_value()["elapsedSeconds"].as_f64().unwrap();
+        let shifted = crate::simulation::exact_elapsed_after_step(before_elapsed, 0.0043);
+        state.base_value_mut()["elapsedSeconds"] = json!(shifted);
+        state.base_value_mut()["historyRecordedAt"] = json!(shifted);
+        for sample in state.base_value_mut()["productionHistory"]
+            .as_array_mut()
+            .unwrap()
+        {
+            sample["elapsedSeconds"] = json!(crate::simulation::exact_elapsed_after_step(
+                sample["elapsedSeconds"].as_f64().unwrap(),
+                0.0043
+            ));
+        }
+        let mut exact = state.clone();
+        let exact_revision = exact.revision;
+        assert!(
+            exact
+                .advance_exact(&exact_request(exact_revision, 601.0, 601.0))
+                .unwrap()
+                .supported
+        );
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &offline_macro_request(revision, 601.0)).unwrap();
+        assert!(result.supported, "{:?}", result.reason);
+        assert_eq!(result.approximated_seconds, Some(571.0));
+        assert_eq!(
+            state.summary().unwrap().canonical_sha256,
+            exact.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn offline_boundary_exact_keeps_the_exact_fractional_source_clock() {
+        let mut source = with_quantum_upload_station(
+            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+            "iron_ingot",
+            "smelter",
+        );
+        source.base_value_mut()["elapsedSeconds"] = json!(0.0043);
+        source.base_value_mut()["historyRecordedAt"] = json!(0.0043);
+        source.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"] =
+            json!("9950");
+        source.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"] =
+            json!("10000");
+        let mut exact = source.clone();
+        let revision = exact.revision;
+        assert!(
+            exact
+                .advance_exact(&exact_request(revision, 600.0, 600.0))
+                .unwrap()
+                .supported
+        );
+        let mut boundary = source;
+        let revision = boundary.revision;
+        let result =
+            advance_macro_v10(&mut boundary, &offline_macro_request(revision, 600.0)).unwrap();
+        assert!(result.supported, "{:?}", result.reason);
+        assert_eq!(result.exact_scope, "offline-boundary-exact");
+        assert_eq!(
+            number_at(boundary.base_value().get("elapsedSeconds"), &[]),
+            600.0043
+        );
+        assert_eq!(
+            boundary.summary().unwrap().canonical_sha256,
+            exact.summary().unwrap().canonical_sha256
+        );
+    }
+
+    #[test]
+    fn offline_boundary_exact_budget_is_finite_and_rejection_is_atomic() {
+        assert!(offline_boundary_exact_budget(28_800.0, 110, 2));
+        assert!(!offline_boundary_exact_budget(28_801.0, 110, 2));
+        assert!(!offline_boundary_exact_budget(600.0, 7_000, 1));
+        for seconds in [f64::NAN, f64::INFINITY, -1.0] {
+            assert!(!offline_boundary_exact_budget(seconds, 1, 0));
+        }
+        let mut state = with_quantum_upload_station(
+            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+            "iron_ingot",
+            "smelter",
+        );
+        let revision = state.revision;
+        assert!(
+            state
+                .advance_exact(&exact_request(revision, 30.0, 30.0))
+                .unwrap()
+                .supported
+        );
+        state.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"] =
+            json!("9967");
+        state.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"] =
+            json!("10000");
+        let before = state.summary().unwrap().canonical_sha256;
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &offline_macro_request(revision, 28_801.0)).unwrap();
+        assert!(!result.supported);
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("offline-boundary-exact-work-budget-exceeded")
+        );
+        assert_eq!(state.revision, revision);
+        assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn offline_ordinary_without_a_boundary_keeps_its_certified_macro_path() {
+        let initial = offline_flow_steady_fixture();
+        let mut macro_state = initial.clone();
+        let revision = macro_state.revision;
+        let result =
+            advance_macro_v10(&mut macro_state, &offline_macro_request(revision, 600.0)).unwrap();
+        assert!(result.supported, "{:?}", result.reason);
+        assert_eq!(result.exact_scope, "offline-macro-v1");
+        assert_eq!(result.exact_calibration_seconds, Some(30.0));
+        assert_eq!(result.approximated_seconds, Some(570.0));
+        let mut exact = initial;
+        let revision = exact.revision;
+        assert!(
+            exact
+                .advance_exact(&exact_request(revision, 600.0, 600.0))
+                .unwrap()
+                .supported
+        );
+        assert_eq!(
+            macro_state.canonical_sha256().unwrap(),
+            exact.canonical_sha256().unwrap()
+        );
+    }
+
+    #[test]
+    fn offline_periodic_material_average_without_physical_steady_state_is_rejected() {
+        for mut state in [
+            as_offline_fixture(productive_quantum_macro_fixture(15.0, "infinite")),
+            with_quantum_upload_station(
+                as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+                "iron_ingot",
+                "smelter",
+            ),
+        ] {
+            let before = state.canonical_sha256().unwrap();
+            let revision = state.revision;
+            let result =
+                advance_offline_macro_v1(&mut state, &offline_macro_request(revision, 600.0))
+                    .unwrap();
+            assert!(!result.supported, "{:?}", result.reason);
+            assert!(
+                result
+                    .reason
+                    .unwrap()
+                    .contains("offline-state-proof-rejected")
+            );
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn offline_depleted_factory_with_no_buffers_never_creates_remaining_material() {
+        let mut state = with_quantum_upload_station(
+            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+            "iron_ingot",
+            "smelter",
+        );
+        state.base_value_mut()["settings"]["resourceMode"] = json!("finite");
+        for index in 2..=4 {
+            let mut entity = state.parse_entity(index).unwrap();
+            if index == 2 {
+                entity["resourceRemaining"] = json!(0);
+                entity["resourceDepletionRemainder"] = json!(0);
+            }
+            for field in ["inputs", "outputs"] {
+                for amount in entity[field].as_object_mut().unwrap().values_mut() {
+                    *amount = json!(0);
+                }
+            }
+            entity["progress"] = json!(0);
+            state.replace_entity_raw(index, serde_json::to_string(&entity).unwrap().into());
+        }
+        state.rebuild_indexes().unwrap();
+        let before_hash = state.summary().unwrap().canonical_sha256;
+        let before = capture_settlement_snapshot(&state).unwrap();
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &offline_macro_request(revision, 600.0)).unwrap();
+        assert!(!result.supported, "{:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("offline-ordinary-tail-uncertified"))
+        );
+        assert_eq!(state.summary().unwrap().canonical_sha256, before_hash);
+        let after = capture_settlement_snapshot(&state).unwrap();
+        assert_eq!(before.produced, after.produced);
+        assert_eq!(before.owned, after.owned);
+        assert_eq!(before.finite_veins, after.finite_veins);
+    }
+
+    #[test]
+    fn offline_initial_or_calibration_capacity_boundary_without_certificate_is_rejected() {
+        for room in [0, 5] {
+            let mut state = with_quantum_upload_station(
+                as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+                "iron_ingot",
+                "smelter",
+            );
+            state.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"] =
+                json!("10000");
+            state.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"] =
+                json!("10000");
+            // These are real existing buffers at their catalog limits. With
+            // five free slots the line fills during calibration; with zero it
+            // starts blocked. Neither case proves a sustainable material rate.
+            for index in 2..=4 {
+                let mut entity = state.parse_entity(index).unwrap();
+                if index == 2 {
+                    entity["outputs"]["iron_ore"] = json!(1_000_000 - room);
+                }
+                if index == 3 {
+                    entity["inputs"]["iron_ore"] = json!(1_000_000 - room);
+                    entity["outputs"]["iron_ingot"] = json!(1_000_000 - room);
+                }
+                if index == 4 {
+                    entity["outputs"]["iron_ingot"] = json!(1_000_000 - room);
+                }
+                state.replace_entity_raw(index, serde_json::to_string(&entity).unwrap().into());
+            }
+            state.rebuild_indexes().unwrap();
+            let before = state.summary().unwrap().canonical_sha256;
+            let revision = state.revision;
+            let result =
+                advance_macro_v10(&mut state, &offline_macro_request(revision, 600.0)).unwrap();
+            assert!(!result.supported, "room={room}: {:?}", result.reason);
+            assert!(
+                result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("offline-ordinary-tail-uncertified")),
+                "room={room}: {:?}",
+                result.reason
+            );
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.summary().unwrap().canonical_sha256, before);
+        }
+    }
+
+    #[test]
+    fn macro_v10_quantum_upload_is_segment_invariant_with_capacity_and_finite_bounds() {
+        for bound in ["none", "capacity", "finite"] {
+            let mut initial = with_quantum_upload_station(
+                productive_closed_recipe_macro_fixture(15.0),
+                "iron_ingot",
+                "smelter",
+            );
+            let revision = initial.revision;
+            let warmup = initial
+                .advance_exact(&exact_request(revision, 30.0, 2.0))
+                .unwrap();
+            assert!(warmup.supported, "{:?}", warmup.reason);
+            if bound == "capacity" {
+                initial.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"] =
+                    json!("9967");
+                initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"] =
+                    json!("10000");
+            } else if bound == "finite" {
+                initial.base_value_mut()["settings"]["resourceMode"] = json!("finite");
+                let mut vein = initial.parse_entity(2).unwrap();
+                vein["resourceRemaining"] = json!(120);
+                vein["resourceDepletionRemainder"] = json!(0);
+                initial.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+                initial.rebuild_indexes().unwrap();
+            }
+            let mut long = initial.clone();
+            let revision = long.revision;
+            let result =
+                advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0))
+                    .unwrap();
+            assert!(result.supported, "{bound}: {:?}", result.reason);
+            assert!(
+                !result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("ordinary-flow tail froze")),
+                "{bound}: {:?}",
+                result.reason
+            );
+            let mut segmented = initial;
+            for seconds in [10.0, 20.0, 190.0, 190.0, 190.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+                )
+                .unwrap();
+                assert!(result.supported, "{bound}: {:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "{bound}"
+            );
+        }
+    }
+
+    #[test]
+    fn quantum_upload_does_not_mask_recipe_cycles_or_alternate_producers() {
+        let state = with_quantum_upload_station(
+            productive_closed_recipe_dag_macro_fixture(15.0),
+            "iron_gear",
+            "gear-smelter",
+        );
+        let request = pure_idle_macro_request(state.revision, 600.0, 40.0);
+        let snapshots = exact_three_window_probe(&state, &request).unwrap();
+        let flow = capture_ordinary_window_flow(
+            &snapshots[0],
+            &snapshots[1],
+            false,
+            &MaterialTotals::new(),
+        )
+        .unwrap();
+        for cycle in [true, false] {
+            let mut changed = state.clone();
+            let index = if cycle { 4 } else { 3 };
+            let mut entity = changed.parse_entity(index).unwrap();
+            if cycle {
+                Arc::make_mut(&mut changed.catalog)
+                    .recipes
+                    .get_mut("iron_ingot")
+                    .unwrap()
+                    .inputs = vec![ItemAmount {
+                    item_id: "magnet".to_owned(),
+                    amount: 1.0,
+                }];
+                entity["inputs"] = json!({ "magnet": 1000 });
+            } else {
+                Arc::make_mut(&mut changed.catalog)
+                    .recipes
+                    .get_mut("magnet")
+                    .unwrap()
+                    .outputs = vec![ItemAmount {
+                    item_id: "iron_gear".to_owned(),
+                    amount: 1.0,
+                }];
+                entity["outputs"] = json!({ "iron_gear": 0 });
+            }
+            changed.replace_entity_raw(index, serde_json::to_string(&entity).unwrap().into());
+            changed.rebuild_indexes().unwrap();
+            let hash = changed.summary().unwrap().canonical_sha256;
+            let sources = exclusive_vein_sources(&changed).unwrap();
+            let reason = build_closed_recipe_certificate(
+                &changed,
+                &sources,
+                &flow,
+                Vec::new(),
+                OrdinaryTerminalCertificates::default(),
+            )
+            .unwrap_err();
+            assert!(
+                reason.contains(if cycle {
+                    "dependency cycle"
+                } else {
+                    "alternate active producers"
+                }),
+                "{reason}"
+            );
+            assert_eq!(changed.summary().unwrap().canonical_sha256, hash);
+        }
+    }
+
     fn rebuild_fixture_with_terminal(
         state: CoreState,
         terminal: Value,
@@ -11496,6 +12614,16 @@ mod tests {
         time_warp.insert("effectiveMultiplier".to_owned(), json!(1));
         time_warp.insert("requiredPowerKw".to_owned(), json!(0));
         time_warp.insert("allocatedPowerKw".to_owned(), json!(0));
+        let endgame = state.base_value_mut()["endgame"]
+            .as_object_mut()
+            .expect("fixture endgame object");
+        endgame
+            .entry("exportInputMode")
+            .or_insert(json!("building"));
+        endgame.entry("exportWindowStartedAt").or_insert(json!(0));
+        endgame.entry("exportWindowAmount").or_insert(json!(0));
+        endgame.entry("exportedLastMinute").or_insert(json!(0));
+        endgame.entry("totalExported").or_insert(json!(0));
         state
     }
 
@@ -13082,7 +14210,8 @@ mod tests {
     #[test]
     fn offline_macro_v1_is_productive_at_one_x_without_persisting_time_warp_credit() {
         for resource_mode in ["finite", "infinite"] {
-            let initial = as_offline_fixture(productive_quantum_macro_fixture(15.0, resource_mode));
+            let mut initial = offline_flow_steady_fixture();
+            initial.base_value_mut()["settings"]["resourceMode"] = json!(resource_mode);
             let before = capture_settlement_snapshot(&initial).unwrap();
 
             let mut prefix = initial.clone();
@@ -13158,20 +14287,37 @@ mod tests {
     }
 
     #[test]
-    fn offline_macro_v1_prefilled_rockets_remain_material_funded() {
+    fn offline_macro_v1_prefilled_rockets_require_a_closed_long_tail() {
         let initial = as_offline_fixture(productive_rocket_macro_fixture(
             15.0, "infinite", 2, 1, 10_000,
         ));
         let before = capture_settlement_snapshot(&initial).unwrap();
+        let before_hash = initial.summary().unwrap().canonical_sha256;
+        let mut prefix = initial.clone();
+        let revision = prefix.revision;
+        assert!(
+            advance_offline_macro_v1(&mut prefix, &offline_macro_request(revision, 30.0))
+                .unwrap()
+                .supported
+        );
         let mut settled = initial;
         let revision = settled.revision;
         let result =
             advance_offline_macro_v1(&mut settled, &offline_macro_request(revision, 600.0))
                 .unwrap();
-        assert!(result.supported, "reason={:?}", result.reason);
-        let after = capture_settlement_snapshot(&settled).unwrap();
+        assert!(!result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("offline-ordinary-tail-uncertified"))
+        );
+        assert_eq!(settled.revision, revision);
+        assert_eq!(settled.summary().unwrap().canonical_sha256, before_hash);
+        let after = capture_settlement_snapshot(&prefix).unwrap();
         validate_settlement_proof(&before, &after, &settled.catalog, None).unwrap();
         let launches = after.dyson.rockets_launched - before.dyson.rockets_launched;
+        assert!(launches > 0);
         let produced = material_delta(&before.produced, &after.produced, TERMINAL_ROCKET_ITEM_ID);
         let stock_spent = before
             .owned
@@ -17514,16 +18660,18 @@ mod tests {
 
     #[test]
     fn durable_replay_preserves_offline_macro_mode_without_session_credit() {
-        let initial = as_offline_fixture(productive_quantum_macro_fixture(15.0, "infinite"));
+        let initial = offline_flow_steady_fixture();
+        let revision = initial.revision;
         let mut expected = initial.clone();
         let result =
-            advance_offline_macro_v1(&mut expected, &offline_macro_request(7, 600.0)).unwrap();
+            advance_offline_macro_v1(&mut expected, &offline_macro_request(revision, 600.0))
+                .unwrap();
         assert!(result.supported, "reason={:?}", result.reason);
 
         let mut replayed = initial;
         replayed
             .replay_operation(
-                7,
+                revision,
                 result.revision,
                 None,
                 600.0,

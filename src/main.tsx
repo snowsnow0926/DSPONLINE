@@ -41,6 +41,10 @@ async function mountApplication(): Promise<void> {
     if (applicationRoute.kind === "game") {
       const { initializeLocalSaveStore } = await importWithRecovery(() => import("./game/localSaveStore"), "本地存档模块");
       await initializeLocalSaveStore();
+      if (startupPlatform === "desktop") {
+        const { installDesktopGracefulClose } = await import("./game/desktopGracefulClose");
+        installDesktopGracefulClose();
+      }
     }
   })();
   const applicationReady = applicationRoute.kind === "admin"

@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-02-v1.2.7");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-08-v1.2.7");
     }
   });
 }
@@ -1494,8 +1494,12 @@ test("the production workspace fits a medium desktop", async ({ page }) => {
   const smelter = page.locator(".construction-item-shell").filter({ hasText: "电弧熔炉" });
   await expect(smelter.getByLabel("制造电弧熔炉")).toHaveClass(/construction-item-craft--upstream/);
   await smelter.getByLabel("制造电弧熔炉").click();
-  await expect(smelter.locator(".construction-item > strong")).toHaveText("×4");
-  await expect(page.locator(".interaction-burst")).toContainText("已消耗");
+  // The burst lasts 900 ms while the inventory panel publishes separately.
+  // Observe both outcomes immediately instead of waiting out the short burst.
+  await Promise.all([
+    expect(page.locator(".interaction-burst")).toContainText("已消耗"),
+    expect(smelter.locator(".construction-item > strong")).toHaveText("×4"),
+  ]);
   await page.screenshot({ path: "artifacts/qa/factory-network-1280.png", fullPage: true });
 });
 

@@ -447,6 +447,9 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateStatus>;
   installUpdate: () => Promise<{ accepted: boolean }>;
   confirmUpdateReady: () => Promise<void>;
+  confirmClose?: (result: { token: string; ok: boolean }) => Promise<boolean>;
+  onPrepareClose?: (listener: (request: { token: string; deadline: number }) => void) => () => void;
+  onCancelClose?: (listener: (request: { token: string }) => void) => () => void;
   onPrepareForUpdate: (listener: () => void) => () => void;
   onUpdateStatus: (listener: (status: DesktopUpdateStatus) => void) => () => void;
 }

@@ -952,6 +952,17 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   downloadUpdate: () => ipcRenderer.invoke("desktop:download-update"),
   installUpdate: () => ipcRenderer.invoke("desktop:install-update"),
   confirmUpdateReady: () => ipcRenderer.invoke("desktop:update-ready"),
+  confirmClose: (result) => ipcRenderer.invoke("desktop:close-ready", result),
+  onPrepareClose: (listener) => {
+    const handler = (_event, request) => listener(request);
+    ipcRenderer.on("desktop:prepare-close", handler);
+    return () => ipcRenderer.removeListener("desktop:prepare-close", handler);
+  },
+  onCancelClose: (listener) => {
+    const handler = (_event, request) => listener(request);
+    ipcRenderer.on("desktop:cancel-close", handler);
+    return () => ipcRenderer.removeListener("desktop:cancel-close", handler);
+  },
   onPrepareForUpdate: (listener) => {
     const handler = () => listener();
     ipcRenderer.on("desktop:prepare-for-update", handler);

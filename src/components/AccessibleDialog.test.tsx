@@ -1,13 +1,16 @@
 /** @vitest-environment jsdom */
 
-import { act, useRef, useState, type ReactNode } from "react";
+import { act, StrictMode, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AccessibleDialog,
   collectAccessibleDialogBackgroundElements,
+  useAccessibleModalSurface,
   type AccessibleDialogCloseReason,
 } from "./AccessibleDialog";
+import { WorkspaceFrame } from "./WorkspaceFrame";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -65,6 +68,203 @@ afterEach(() => {
 });
 
 describe("AccessibleDialog", () => {
+  it("keeps the top portal interactive when a workspace and report mount in the same commit", () => {
+    function Harness() {
+      const [workspaceOpen, setWorkspaceOpen] = useState(false);
+      const [reportOpen, setReportOpen] = useState(false);
+      return <>
+        <main className="game-shell">
+          <button data-open-both onClick={() => { setWorkspaceOpen(true); setReportOpen(true); }}>打开</button>
+          <div data-factory><button>工厂操作</button></div>
+          {workspaceOpen ? <WorkspaceFrame ariaLabel="存档工作区" onRequestClose={() => setWorkspaceOpen(false)}>
+            <button data-close-workspace onClick={() => setWorkspaceOpen(false)}>关闭工作区</button>
+          </WorkspaceFrame> : null}
+        </main>
+        <AccessibleDialog open={reportOpen} title="离线结算报告" onRequestClose={() => setReportOpen(false)}>
+          <button data-close-report onClick={() => setReportOpen(false)}>确认结算</button>
+        </AccessibleDialog>
+      </>;
+    }
+    render(<Harness />);
+    const trigger = host.querySelector<HTMLElement>("[data-open-both]")!;
+    trigger.focus();
+    click(trigger);
+    const report = document.querySelector<HTMLElement>("[data-accessible-dialog-boundary]")!;
+    const reportButton = report.querySelector<HTMLElement>("[data-close-report]")!;
+    const workspaceButton = host.querySelector<HTMLElement>("[data-close-workspace]")!;
+    const factory = host.querySelector<HTMLElement>("[data-factory]")!;
+
+    expect(report.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(document.activeElement).toBe(reportButton);
+    expect(workspaceButton.closest("[inert]")).not.toBeNull();
+    expect(factory.closest("[inert]")).not.toBeNull();
+    expect(document.body.style.overflow).toBe("hidden");
+    workspaceButton.focus();
+    expect(document.activeElement).toBe(reportButton);
+
+    click(reportButton);
+    expect(workspaceButton.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(document.activeElement).toBe(workspaceButton);
+    expect(factory.closest("[inert]")).not.toBeNull();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    click(workspaceButton);
+    expect(factory.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(document.body.style.overflow).toBe("scroll");
+    expect(document.documentElement.style.overflow).toBe("visible");
+  });
+
+  it("keeps additional focus roots active without exposing their unrelated ancestor branches", () => {
+    function ExtraRootsHarness() {
+      const headerRef = useRef<HTMLElement>(null);
+      const boundaryRef = useRef<HTMLDivElement>(null);
+      const surfaceRef = useRef<HTMLElement>(null);
+      useAccessibleModalSurface({
+        open: true,
+        boundaryRef,
+        surfaceRef,
+        onRequestClose: () => undefined,
+        getAdditionalFocusRoots: () => headerRef.current ? [headerRef.current] : [],
+      });
+      return <>
+        <main>
+          <header ref={headerRef}><button data-extra-focus>导航</button></header>
+          <div data-unrelated-branch><button data-background-control>背景操作</button></div>
+        </main>
+        {createPortal(<div ref={boundaryRef}>
+          <section ref={surfaceRef} role="dialog" aria-label="外部导航" tabIndex={-1}>
+            <button data-surface-focus>弹窗操作</button>
+          </section>
+        </div>, document.body)}
+      </>;
+    }
+    render(<ExtraRootsHarness />);
+    const extra = document.querySelector<HTMLElement>("[data-extra-focus]")!;
+    const surface = document.querySelector<HTMLElement>("[data-surface-focus]")!;
+    const background = document.querySelector<HTMLElement>("[data-background-control]")!;
+    expect(extra.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(surface.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(background.closest("[inert]")).not.toBeNull();
+    extra.focus();
+    expect(document.activeElement).toBe(extra);
+    background.focus();
+    expect(document.activeElement).toBe(extra);
+    surface.focus();
+    keydown("Tab");
+    expect(document.activeElement).toBe(extra);
+    render(<></>);
+    expect(host.hasAttribute("inert")).toBe(false);
+    expect(document.body.style.overflow).toBe("scroll");
+  });
+
+  it("recomputes nested portal isolation without hiding the remaining modal on top close", () => {
+    const container = document.createElement("div");
+    const lowerTarget = document.createElement("div");
+    const upperTarget = document.createElement("div");
+    const sibling = document.createElement("button");
+    lowerTarget.append(upperTarget, sibling);
+    container.append(lowerTarget);
+    document.body.append(container);
+    const dialogs = (upperOpen: boolean) => <>
+      <AccessibleDialog open title="下层" portalTarget={lowerTarget} onRequestClose={() => undefined}>
+        <button data-nested-lower>下层操作</button>
+      </AccessibleDialog>
+      <AccessibleDialog open={upperOpen} title="上层" portalTarget={upperTarget} onRequestClose={() => undefined}>
+        <button data-nested-upper>上层操作</button>
+      </AccessibleDialog>
+    </>;
+    render(dialogs(true));
+    const lower = document.querySelector<HTMLElement>("[data-nested-lower]")!;
+    const upper = document.querySelector<HTMLElement>("[data-nested-upper]")!;
+    expect(upper.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(lower.closest("[inert]")).not.toBeNull();
+    expect(sibling.closest("[inert]")).not.toBeNull();
+    expect(host.closest("[inert]")).not.toBeNull();
+    render(dialogs(false));
+    expect(lower.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(document.activeElement).toBe(lower);
+    expect(sibling.closest("[inert]")).not.toBeNull();
+    render(<></>);
+    expect(sibling.hasAttribute("inert")).toBe(false);
+    expect(host.hasAttribute("inert")).toBe(false);
+    container.remove();
+  });
+
+  it("preserves the focus return chain when a lower modal unmounts before the top modal", () => {
+    const existing = document.createElement("aside");
+    existing.setAttribute("inert", "original");
+    existing.setAttribute("aria-hidden", "false");
+    document.body.append(existing);
+    const trigger = document.createElement("button");
+    host.before(trigger);
+    trigger.focus();
+    const dialogs = (lowerOpen: boolean, upperOpen: boolean) => <>
+      <AccessibleDialog open={lowerOpen} title="下层" onRequestClose={() => undefined}><button data-return-lower>下层操作</button></AccessibleDialog>
+      <AccessibleDialog open={upperOpen} title="上层" onRequestClose={() => undefined}><button data-return-upper>上层操作</button></AccessibleDialog>
+    </>;
+    render(dialogs(true, true));
+    const upper = document.querySelector<HTMLElement>("[data-return-upper]")!;
+    render(dialogs(false, true));
+    expect(upper.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(document.activeElement).toBe(upper);
+    expect(host.hasAttribute("inert")).toBe(true);
+    expect(existing.getAttribute("aria-hidden")).toBe("true");
+    render(dialogs(false, false));
+    expect(document.activeElement).toBe(trigger);
+    expect(existing.getAttribute("inert")).toBe("original");
+    expect(existing.getAttribute("aria-hidden")).toBe("false");
+    expect(document.body.style.overflow).toBe("scroll");
+    existing.remove();
+    trigger.remove();
+  });
+
+  it("restores original isolation and scroll styles after StrictMode lifecycle replays", () => {
+    const existing = document.createElement("aside");
+    existing.inert = true;
+    existing.setAttribute("inert", "before");
+    existing.setAttribute("aria-hidden", "false");
+    document.body.append(existing);
+    document.body.style.overscrollBehavior = "contain";
+    document.documentElement.style.overscrollBehavior = "auto";
+    render(<StrictMode>
+      <AccessibleDialog open title="下层" onRequestClose={() => undefined}><button>下层</button></AccessibleDialog>
+      <AccessibleDialog open title="上层" onRequestClose={() => undefined}><button data-strict-top>上层</button></AccessibleDialog>
+    </StrictMode>);
+    const top = document.querySelector<HTMLElement>("[data-strict-top]")!;
+    expect(top.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(document.activeElement).toBe(top);
+    expect(host.hasAttribute("inert")).toBe(true);
+    render(<></>);
+    expect(existing.inert).toBe(true);
+    expect(existing.getAttribute("inert")).toBe("before");
+    expect(existing.getAttribute("aria-hidden")).toBe("false");
+    expect(host.hasAttribute("inert")).toBe(false);
+    expect(document.body.style.overflow).toBe("scroll");
+    expect(document.documentElement.style.overflow).toBe("visible");
+    expect(document.body.style.overscrollBehavior).toBe("contain");
+    expect(document.documentElement.style.overscrollBehavior).toBe("auto");
+    existing.remove();
+  });
+
+  it("returns focus inside the remaining modal when the original return target was removed", () => {
+    const dialogs = (replacement: boolean, upperOpen: boolean) => <>
+      <AccessibleDialog open title="下层" onRequestClose={() => undefined}>
+        {replacement ? <input key="replacement" data-replacement aria-label="替换控件" /> : <button key="original">原始控件</button>}
+      </AccessibleDialog>
+      <AccessibleDialog open={upperOpen} title="上层" onRequestClose={() => undefined}><button data-temporary-top>上层操作</button></AccessibleDialog>
+    </>;
+    render(dialogs(false, true));
+    const top = document.querySelector<HTMLElement>("[data-temporary-top]")!;
+    render(dialogs(true, true));
+    expect(document.activeElement).toBe(top);
+    render(dialogs(true, false));
+    const replacement = document.querySelector<HTMLElement>("[data-replacement]")!;
+    expect(replacement.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(document.activeElement).toBe(replacement);
+    expect(host.hasAttribute("inert")).toBe(true);
+  });
+
   it("exposes named dialog semantics, moves focus in, inerts the background, and restores lifecycle state", () => {
     const reasons: AccessibleDialogCloseReason[] = [];
 
@@ -178,7 +378,7 @@ describe("AccessibleDialog", () => {
     expect(document.querySelector("[role='alertdialog']")).not.toBeNull();
   });
 
-  it("keeps nested modal inert and focus state reference-counted", () => {
+  it("restores nested modal isolation and focus without releasing the factory background", () => {
     function NestedHarness() {
       const [outerOpen, setOuterOpen] = useState(false);
       const [innerOpen, setInnerOpen] = useState(false);

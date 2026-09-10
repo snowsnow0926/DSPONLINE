@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-09-02-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-08-v1.2.7";
 
 async function seedV106Factory(page: Page, mobileUi: "legacy" | "next" = "legacy") {
   await page.addInitScript(({ releaseNoteId, selectedMobileUi }) => {
@@ -142,4 +142,3 @@ test("classic mobile keeps batch controls reachable at 200 percent text", async 
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/v106-mobile-classic-font200-390x844.png", fullPage: true });
 });
-

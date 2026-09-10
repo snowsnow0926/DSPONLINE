@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { createPackage, extractFile } = require("@electron/asar");
+const { writeFixture, context } = require("../tests/fixtures/desktop-release.cjs");
 const { validateConfiguration } = require("app-builder-lib/out/util/config/config.js");
 const { DebugLogger } = require("builder-util");
 const {
@@ -81,8 +82,8 @@ function performancePackageFixture() {
   return value;
 }
 
-test("source package is a 1.2.7 native candidate and retains an isolated performance build path", () => {
-  assert.equal(packageMetadata.version, "1.2.7");
+test("source package has a release version and retains an isolated performance build path", () => {
+  assert.match(packageMetadata.version, /^\d+\.\d+\.\d+$/);
   assert.equal(validateStablePackageIdentity(packageMetadata, {
     requireBuildConfiguration: true,
     requireOfflineDefaults: true,
@@ -315,12 +316,8 @@ test("packaging outputs are fixed per stable or isolated performance identity", 
   assert.match(packSource, /verifyPackagedDesktopEditionIdentity/);
 });
 
-function writeCompleteReleaseOutput(root, relativeDirectory, channel) {
-  const directory = path.join(root, relativeDirectory);
-  fs.mkdirSync(path.join(directory, "update-feed", "desktop", channel), { recursive: true });
-  fs.writeFileSync(path.join(directory, "latest.yml"), "version: 1.2.7\npath: dsp-idle-1.2.7-x64-setup.exe\n");
-  fs.writeFileSync(path.join(directory, "update-feed", "desktop", channel, "release.json"), "{}\n");
-  return directory;
+async function writeCompleteReleaseOutput(root, relativeDirectory, channel) {
+  return (await writeFixture(root, relativeDirectory, channel)).directory;
 }
 
 test("standard and fallback output directories stay edition-scoped and reject the other edition", () => {
@@ -353,12 +350,12 @@ test("standard and fallback output directories stay edition-scoped and reject th
   );
 });
 
-test("release output selection requires exactly one complete candidate for the selected edition", (t) => {
+test("release output selection requires exactly one complete candidate for the selected edition", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-desktop-release-select-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  writeCompleteReleaseOutput(root, "release-performance-edition", "stable");
-  writeCompleteReleaseOutput(root, "release-performance-edition-fallback", "beta");
-  writeCompleteReleaseOutput(root, "release-fallback", "beta");
+  await writeCompleteReleaseOutput(root, "release-performance-edition", "stable");
+  await writeCompleteReleaseOutput(root, "release-performance-edition-fallback", "beta");
+  await writeCompleteReleaseOutput(root, "release-fallback", "beta");
 
   assert.throws(
     () => selectCompleteDesktopReleaseOutput({
@@ -369,21 +366,23 @@ test("release output selection requires exactly one complete candidate for the s
     /found 0/,
   );
 
-  writeCompleteReleaseOutput(root, "release", "stable");
+  await writeCompleteReleaseOutput(root, "release", "stable");
   const selected = selectCompleteDesktopReleaseOutput({
     repositoryRoot: root,
     identity: STABLE_IDENTITY,
     channel: "stable",
+    expected: context(),
   });
   assert.equal(selected.relativeOutputDirectory, "release");
   assert.equal(selected.identity.editionId, STABLE_IDENTITY.editionId);
 
-  writeCompleteReleaseOutput(root, "release-fallback", "stable");
+  await writeCompleteReleaseOutput(root, "release-fallback", "stable");
   assert.throws(
     () => selectCompleteDesktopReleaseOutput({
       repositoryRoot: root,
       identity: STABLE_IDENTITY,
       channel: "stable",
+      expected: context(),
     }),
     /found 2/,
   );
@@ -392,16 +391,17 @@ test("release output selection requires exactly one complete candidate for the s
     repositoryRoot: root,
     identity: PERFORMANCE_EDITION_IDENTITY,
     channel: "stable",
+    expected: context(PERFORMANCE_EDITION_IDENTITY),
   });
   assert.equal(performance.relativeOutputDirectory, "release-performance-edition");
 });
 
 test("release output selection rejects redirected edition directories", {
   skip: process.platform === "win32" ? false : "Windows junction semantics",
-}, (t) => {
+}, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-desktop-release-junction-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const outside = writeCompleteReleaseOutput(root, "outside-complete", "stable");
+  const outside = await writeCompleteReleaseOutput(root, "outside-complete", "stable");
   const redirected = path.join(root, "release");
   try {
     fs.symlinkSync(outside, redirected, "junction");

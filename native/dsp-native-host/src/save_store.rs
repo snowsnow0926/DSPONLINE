@@ -1929,8 +1929,17 @@ impl SaveStore {
         generation: u64,
         root_hash: &str,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let manifest = self
-            .recover_manifest(slot)?
+        validate_slot(slot)?;
+        // Renderer recovery pulls records separately. Cloning the complete
+        // manifest per pull copied N squared metadata entries. Borrow the
+        // already verified immutable identity, but still verify each chunk
+        // from disk on every read. A commit replaces the cached generation.
+        if !self.verified_manifests.borrow().contains_key(slot) {
+            self.recover_manifest(slot)?;
+        }
+        let manifests = self.verified_manifests.borrow();
+        let manifest = manifests
+            .get(slot)
             .ok_or_else(|| anyhow!("native save slot is missing"))?;
         if manifest.generation != generation || manifest.root_hash != root_hash {
             bail!("native save generation changed during readback");
@@ -4277,6 +4286,42 @@ mod tests {
                     first.generation,
                     &first.root_hash,
                 )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pinned_record_reads_recheck_generation_and_disk_bytes_with_a_warm_manifest() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let tx = begin(&mut store, 1);
+        store.put(&tx, "base", Some("original bytes")).unwrap();
+        let first = store.commit(&tx).unwrap();
+        assert_eq!(
+            store
+                .read_record_at("normal-main", "base", first.generation, &first.root_hash)
+                .unwrap()
+                .unwrap(),
+            b"original bytes"
+        );
+        let tx = begin(&mut store, 2);
+        store.put(&tx, "base", Some("new bytes")).unwrap();
+        let second = store.commit(&tx).unwrap();
+        assert!(
+            store
+                .read_record_at("normal-main", "base", first.generation, &first.root_hash)
+                .is_err()
+        );
+        let chunk_hash = store.verified_manifests.borrow()["normal-main"].records["base"]
+            .hash
+            .clone();
+        let chunk_path = store.chunk_path("normal-main", &chunk_hash).unwrap();
+        let mut bytes = fs::read(&chunk_path).unwrap();
+        bytes[0] ^= 1;
+        fs::write(chunk_path, bytes).unwrap();
+        assert!(
+            store
+                .read_record_at("normal-main", "base", second.generation, &second.root_hash)
                 .is_err()
         );
     }

@@ -1,0 +1,25 @@
+.recovery-data-export {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 12px;
+  line-height: 1.5;
+}
+
+.recovery-data-export > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.recovery-data-export > button:disabled { opacity: .65; cursor: wait; }
+.recovery-data-export > small, .recovery-data-export > p { margin: 0; overflow-wrap: anywhere; }

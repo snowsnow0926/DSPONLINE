@@ -1,5 +1,5 @@
 import { getDesktopBridge } from "../desktop";
-import { restoreChunkedSavePayloadFromRecords, type RestoredChunkedSave } from "./chunkedSaveJournal";
+import { restoreChunkedSavePayloadWithReader, type RestoredChunkedSave } from "./chunkedSaveJournal";
 import type { SaveMode } from "./types";
 import { markWindowsNativeSaveSeeded } from "./nativeSave";
 
@@ -21,9 +21,12 @@ export async function restoreWindowsNativeSavePayload(
     recovery.recordKeys.length < 1 || recovery.recordKeys.length > MAX_NATIVE_RECORD_COUNT ||
     new Set(recovery.recordKeys).size !== recovery.recordKeys.length) return null;
   markWindowsNativeSaveSeeded(mode);
-  const records = new Map<string, string>();
   for (const key of recovery.recordKeys) {
     if (typeof key !== "string" || key.length < 1 || key.length > 512 || key.includes("..") || /[\\/\0]/.test(key)) return null;
+  }
+  const keys = new Set(recovery.recordKeys);
+  return restoreChunkedSavePayloadWithReader(baseRaw, mode, async (key) => {
+    if (!keys.has(key)) return null;
     const read = await desktop.readNativeSave({
       slot,
       key,
@@ -32,7 +35,6 @@ export async function restoreWindowsNativeSavePayload(
     }).catch(() => null);
     if (!read || read.slot !== slot || read.key !== key || read.generation !== recovery.generation ||
       read.rootHash !== recovery.rootHash || typeof read.value !== "string") return null;
-    records.set(key, read.value);
-  }
-  return restoreChunkedSavePayloadFromRecords(baseRaw, mode, records);
+    return read.value;
+  });
 }

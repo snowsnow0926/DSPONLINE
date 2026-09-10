@@ -1,10 +1,12 @@
 import type { AppLocale } from "./locale";
 
+export const CURRENT_RELEASE_ID = "2026-09-10-v1.2.9";
+
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const en = locale === "en";
   return {
-    id: "2026-09-10-v1.2.9",
+    id: CURRENT_RELEASE_ID,
     date: en ? "September 10, 2026" : "2026年9月10日",
     version: "1.2.9",
     title: en ? "Shared Performance and Canvas Controls" : "多端性能优化与画布操作更新",

@@ -19,6 +19,7 @@ const {
   identityBuilderArgs,
 } = require("./pack.cjs");
 const { selectDesktopReleaseOutputFromEnvironment } = require("./select-desktop-release-output.cjs");
+const { writeFixture, context } = require("../tests/fixtures/desktop-release.cjs");
 
 const repositoryRoot = path.resolve(__dirname, "..");
 const HTTPS_BASE = "https://updates.example.test/desktop";
@@ -156,6 +157,7 @@ test("pack finalize does not create a release feed", async () => {
   let called = 0;
   const code = await finalizePackagedOutput(path.join(repositoryRoot, "release"), {
     verify() {},
+    recordEvidence() {},
     releaseMode: false,
     createUpdateFeed: async () => {
       called += 1;
@@ -171,6 +173,7 @@ test("release finalize calls the production feed-argument builder and propagates
   let received;
   const success = await finalizePackagedOutput(standard, {
     verify() {},
+    recordEvidence() {},
     releaseMode: true,
     createUpdateFeed: async (directory) => {
       received = createDesktopUpdateFeedArguments(directory, {
@@ -185,6 +188,7 @@ test("release finalize calls the production feed-argument builder and propagates
 
   const failed = await finalizePackagedOutput(standard, {
     verify() {},
+    recordEvidence() {},
     releaseMode: true,
     createUpdateFeed: async () => 9,
   });
@@ -223,7 +227,7 @@ test("builder identity arguments keep appId, EXE and uninstall policy isolated a
   assert.equal(performance.includes(`--config.win.executableName=${STABLE_IDENTITY.executableName}`), false);
 });
 
-test("workflow selector defaults to the official stable edition and ignores a complete performance tree", (t) => {
+test("workflow selector defaults to the official stable edition and ignores a complete performance tree", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-desktop-release-cli-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const performanceFeed = path.join(root, "release-performance-edition", "update-feed", "desktop", "stable");
@@ -234,17 +238,16 @@ test("workflow selector defaults to the official stable edition and ignores a co
     () => selectDesktopReleaseOutputFromEnvironment({
       repositoryRoot: root,
       environment: { DSP_RELEASE_CHANNEL: "stable" },
+      expected: context(),
     }),
     /found 0/,
   );
 
-  const stableFeed = path.join(root, "release", "update-feed", "desktop", "beta");
-  fs.mkdirSync(stableFeed, { recursive: true });
-  fs.writeFileSync(path.join(root, "release", "latest.yml"), "version: 1.2.7\n");
-  fs.writeFileSync(path.join(stableFeed, "release.json"), "{}\n");
+  await writeFixture(root, "release", "beta");
   const selected = selectDesktopReleaseOutputFromEnvironment({
     repositoryRoot: root,
     environment: { DSP_RELEASE_CHANNEL: "beta" },
+    expected: context(STABLE_IDENTITY, "beta"),
   });
   assert.equal(selected.relativeOutputDirectory, "release");
   assert.equal(selected.identity.editionId, STABLE_IDENTITY.editionId);
@@ -254,12 +257,7 @@ test("real feed generator and identity selector agree on a synthetic stable rele
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-desktop-feed-integration-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = path.join(root, "release");
-  fs.mkdirSync(source, { recursive: true });
-  fs.writeFileSync(path.join(source, "dsp-idle-1.2.7-x64-setup.exe"), Buffer.from("desktop fixture"));
-  fs.writeFileSync(
-    path.join(source, "latest.yml"),
-    "version: 1.2.7\npath: dsp-idle-1.2.7-x64-setup.exe\nsha512: fixture\n",
-  );
+  await writeFixture(root, "release", "beta");
   const args = createDesktopUpdateFeedArguments(source, {
     repositoryRoot: root,
     identity: STABLE_IDENTITY,
@@ -270,15 +268,17 @@ test("real feed generator and identity selector agree on a synthetic stable rele
   assert.equal(args[4], "https://updates.example.invalid/desktop/");
   assert.equal(args[6], source);
   await execFileAsync(process.execPath, args, { cwd: repositoryRoot });
+  require("./desktop-artifact-evidence.cjs").writeDesktopBuildEvidence(source, { expected: context(STABLE_IDENTITY, "beta"), identity: STABLE_IDENTITY, release: true });
   const selected = selectCompleteDesktopReleaseOutput({
     repositoryRoot: root,
     identity: STABLE_IDENTITY,
     channel: "beta",
+    expected: context(STABLE_IDENTITY, "beta"),
   });
   assert.equal(selected.relativeOutputDirectory, "release");
   const feed = JSON.parse(fs.readFileSync(path.join(source, "update-feed", "desktop", "beta", "release.json"), "utf8"));
   assert.equal(feed.channel, "beta");
-  assert.equal(feed.files[1].name, "dsp-idle-1.2.7-x64-setup.exe");
+  assert.equal(feed.files[1].name, `dsp-idle-${context().version}-x64-setup.exe`);
   assert.throws(
     () => selectCompleteDesktopReleaseOutput({
       repositoryRoot: root,

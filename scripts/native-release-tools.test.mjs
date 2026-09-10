@@ -18,6 +18,40 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+async function downloadPageFixture(temporary, {
+  webVersion = packageVersion,
+  androidVersion = webVersion,
+  androidCode = Number(nativeVersionProperties.VERSION_CODE),
+  desktopVersion = webVersion,
+} = {}) {
+  const androidDirectory = path.join(temporary, "downloads", "android");
+  const desktopDirectory = path.join(temporary, "downloads", "desktop", "stable");
+  await mkdir(androidDirectory, { recursive: true });
+  await mkdir(desktopDirectory, { recursive: true });
+  const apk = Buffer.from("apk fixture");
+  const installer = Buffer.from("windows installer fixture");
+  const installerName = `dsp-idle-${desktopVersion}-x64-setup.exe`;
+  const apkName = `dsp-idle-${androidVersion}-${androidCode}.apk`;
+  const desktopFeed = `version: ${desktopVersion}\npath: ${installerName}\n`;
+  const android = {
+    versionName: androidVersion,
+    versionCode: androidCode,
+    apk: { url: `https://download.example.test/downloads/android/${apkName}`, sha256: sha256(apk), size: apk.byteLength },
+  };
+  const desktop = {
+    version: desktopVersion,
+    files: [{ name: "latest.yml", sha256: sha256(Buffer.from(desktopFeed)), size: Buffer.byteLength(desktopFeed) },
+      { name: installerName, sha256: sha256(installer), size: installer.byteLength }],
+  };
+  await writeFile(path.join(androidDirectory, apkName), apk);
+  await writeFile(path.join(desktopDirectory, installerName), installer);
+  await writeFile(path.join(desktopDirectory, "latest.yml"), desktopFeed);
+  await writeFile(path.join(temporary, "version.json"), JSON.stringify({ version: webVersion, buildId: "test-build" }));
+  await writeFile(path.join(androidDirectory, "stable.json"), JSON.stringify(android));
+  await writeFile(path.join(desktopDirectory, "release.json"), JSON.stringify(desktop));
+  return { androidDirectory, desktopDirectory, android, desktop, desktopFeed, apk, installer, apkName, installerName };
+}
+
 test("native feed generator creates bounded Android and desktop update feeds", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "dsp-native-feed-"));
   try {
@@ -90,28 +124,7 @@ test("native feed generator requires an explicit update base URL", async () => {
 test("static download page generator validates manifests and renders current packages", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "dsp-download-page-"));
   try {
-    const androidDirectory = path.join(temporary, "downloads", "android");
-    const desktopDirectory = path.join(temporary, "downloads", "desktop", "stable");
-    await mkdir(androidDirectory, { recursive: true });
-    await mkdir(desktopDirectory, { recursive: true });
-
-    const apk = Buffer.from("apk fixture");
-    const installer = Buffer.from("windows installer fixture");
-    const installerName = `dsp-idle-${packageVersion}-x64-setup.exe`;
-    const apkName = `dsp-idle-${packageVersion}-${nativeVersionProperties.VERSION_CODE}.apk`;
-    await writeFile(path.join(androidDirectory, apkName), apk);
-    await writeFile(path.join(desktopDirectory, installerName), installer);
-    await writeFile(path.join(desktopDirectory, "latest.yml"), `version: ${packageVersion}\npath: ${installerName}\n`);
-    await writeFile(path.join(temporary, "version.json"), JSON.stringify({ version: packageVersion, buildId: "test-build" }));
-    await writeFile(path.join(androidDirectory, "stable.json"), JSON.stringify({
-      versionName: packageVersion,
-      versionCode: Number(nativeVersionProperties.VERSION_CODE),
-      apk: { url: `https://download.example.test/downloads/android/${apkName}`, sha256: sha256(apk), size: apk.byteLength },
-    }));
-    await writeFile(path.join(desktopDirectory, "release.json"), JSON.stringify({
-      files: [{ name: "latest.yml", sha256: sha256(Buffer.from(`version: ${packageVersion}\npath: ${installerName}\n`)), size: Buffer.byteLength(`version: ${packageVersion}\npath: ${installerName}\n`) },
-        { name: installerName, sha256: sha256(installer), size: installer.byteLength }],
-    }));
+    const { desktopDirectory, apk, installer } = await downloadPageFixture(temporary);
 
     const releaseSummary = `${packageVersion} 测试摘要：普通与速通存档保持隔离`;
     await execFileAsync(process.execPath, [
@@ -138,6 +151,81 @@ test("static download page generator validates manifests and renders current pac
       path.join(root, "scripts", "create-download-site.mjs"),
       "--release", temporary,
     ], { cwd: root }), /Desktop manifest SHA-256 does not match installer/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("static download page renders independent platform versions without rewriting packages or feeds", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "dsp-download-platform-versions-"));
+  try {
+    const fixture = await downloadPageFixture(temporary, {
+      webVersion: "1.2.7", androidVersion: "1.2.7", androidCode: 1002007, desktopVersion: "1.2.6",
+    });
+    const protectedFiles = [
+      path.join(fixture.desktopDirectory, fixture.installerName),
+      path.join(fixture.desktopDirectory, "latest.yml"),
+      path.join(fixture.desktopDirectory, "release.json"),
+      path.join(fixture.androidDirectory, fixture.apkName),
+      path.join(fixture.androidDirectory, "stable.json"),
+    ];
+    const before = await Promise.all(protectedFiles.map((file) => readFile(file)));
+    await execFileAsync(process.execPath, [
+      path.join(root, "scripts", "create-download-site.mjs"), "--release", temporary,
+    ], { cwd: root });
+    const page = await readFile(path.join(temporary, "index.html"), "utf8");
+    assert.match(page, /网页版当前版本 <strong>1\.2\.7<\/strong>/);
+    assert.match(page, /<dt>版本<\/dt><dd>1\.2\.6<\/dd>/);
+    assert.match(page, /下载 Windows 1\.2\.6/);
+    assert.doesNotMatch(page, /下载 Windows 1\.2\.7/);
+    assert.match(page, /<dt>版本<\/dt><dd>1\.2\.7（1002007）<\/dd>/);
+    assert.match(page, /下载 Android 1\.2\.7/);
+    assert.match(page, /href="\/downloads\/desktop\/stable\/dsp-idle-1\.2\.6-x64-setup\.exe"/);
+    assert.match(page, /href="\/downloads\/android\/dsp-idle-1\.2\.7-1002007\.apk"/);
+    assert.deepEqual(await Promise.all(protectedFiles.map((file) => readFile(file))), before);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("static download page rejects missing, invalid or inconsistent manifest versions before replacing the page", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "dsp-download-invalid-versions-"));
+  try {
+    const fixture = await downloadPageFixture(temporary);
+    const androidPath = path.join(fixture.androidDirectory, "stable.json");
+    const desktopPath = path.join(fixture.desktopDirectory, "release.json");
+    const feedPath = path.join(fixture.desktopDirectory, "latest.yml");
+    const pagePath = path.join(temporary, "index.html");
+    await writeFile(pagePath, "previous generated page");
+    const cases = [
+      { target: "desktop", field: "version", value: undefined, error: /Desktop release manifest version must contain a valid version/ },
+      { target: "desktop", field: "version", value: "not-a-version", error: /Desktop release manifest version must contain a valid version/ },
+      { feed: `path: ${fixture.installerName}\n`, error: /latest.yml must contain exactly one version/ },
+      { feed: `version: 9.9.9\npath: ${fixture.installerName}\n`, error: /latest.yml version does not match release manifest version/ },
+      { feed: `version: ${packageVersion}\nversion: 9.9.9\npath: ${fixture.installerName}\n`, error: /latest.yml must contain exactly one version/ },
+      ...[undefined, "", "1.2", "<script>", 127].map((value) => ({
+        target: "android", field: "versionName", value, error: /Android manifest versionName must contain a valid version/,
+      })),
+      ...[undefined, "1002007", 0, -1, 1.5, 2_100_000_001].map((value) => ({
+        target: "android", field: "versionCode", value, error: /Android manifest versionCode must be a positive Android-compatible integer/,
+      })),
+    ];
+    for (const scenario of cases) {
+      const android = structuredClone(fixture.android);
+      const desktop = structuredClone(fixture.desktop);
+      if (scenario.target) {
+        const manifest = scenario.target === "android" ? android : desktop;
+        if (scenario.value === undefined) delete manifest[scenario.field];
+        else manifest[scenario.field] = scenario.value;
+      }
+      await writeFile(androidPath, JSON.stringify(android));
+      await writeFile(desktopPath, JSON.stringify(desktop));
+      await writeFile(feedPath, scenario.feed ?? fixture.desktopFeed);
+      await assert.rejects(execFileAsync(process.execPath, [
+        path.join(root, "scripts", "create-download-site.mjs"), "--release", temporary,
+      ], { cwd: root }), scenario.error);
+      assert.equal(await readFile(pagePath, "utf8"), "previous generated page");
+    }
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

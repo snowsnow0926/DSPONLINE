@@ -1,6 +1,34 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const test = require("node:test");
+const { createGracefulClose } = require("./graceful-close.cjs");
+
+test("close waits for the matching successful ACK and coalesces repeated clicks", () => {
+  const messages = []; let closed = 0; let failed = 0;
+  const close = createGracefulClose({ send: (...args) => messages.push(args), close: () => closed++, failure: () => failed++ });
+  close.request(); close.request();
+  assert.equal(messages.length, 1);
+  assert.equal(closed, 0);
+  assert.equal(close.acknowledge({ token: "stale", ok: true }), false);
+  assert.equal(close.acknowledge({ token: messages[0][1].token, ok: false }), true);
+  assert.equal(closed, 0); assert.equal(failed, 1);
+  close.request();
+  assert.notEqual(messages[0][1].token, messages[1][1].token);
+  close.acknowledge({ token: messages[1][1].token, ok: true });
+  assert.equal(closed, 1); assert.equal(close.approved, true);
+});
+
+test("close timeout cancels the request and refuses its late success ACK", async () => {
+  const messages = []; let closed = 0; let failure;
+  const timedOut = new Promise((resolve) => { failure = resolve; });
+  const close = createGracefulClose({ send: (...args) => messages.push(args), close: () => closed++, failure, timeoutMs: 10 });
+  close.request();
+  await timedOut;
+  assert.equal(messages[1][0], "desktop:cancel-close");
+  assert.equal(close.acknowledge({ token: messages[0][1].token, ok: true }), false);
+  assert.equal(closed, 0);
+  close.dispose();
+});
 const {
   finishCommittedNativeV47Import,
   registerWindowClosedCleanup,

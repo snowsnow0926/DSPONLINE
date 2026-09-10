@@ -4790,6 +4790,23 @@ impl CoreRegistry {
         self.session_mut(session_id)?.apply_command(command)
     }
 
+    /// Legacy shadow RPCs may mutate only an unowned slot. Player ticks and
+    /// commands must instead pass through their staged WAL/checkpoint/lease
+    /// transaction, even if main accidentally dispatches an old shadow call.
+    pub(crate) fn require_unowned_legacy_rpc_mutation(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let slot = &self.session(session_id)?.identity.slot;
+        if let Some(lease) = store.exact_realtime_lease_for_mutation(slot)?
+            && lease.purpose()? == ExactRealtimeLeasePurpose::PlayerAuthority
+        {
+            bail!("native player-authority lease fences legacy core mutation");
+        }
+        Ok(())
+    }
+
     pub fn advance(
         &mut self,
         session_id: &str,
@@ -10761,6 +10778,126 @@ mod tests {
         assert_eq!(after.generation, before.generation);
         assert_eq!(after.root_hash, before.root_hash);
         assert_eq!(after.revision, before.revision);
+    }
+
+    #[test]
+    fn legacy_rpc_mutation_checks_durable_player_ownership_before_any_state_change() {
+        use crate::exact_realtime_lease::ExactRealtimeLeaseRequest;
+        for phase in ["absent", "experiment", "prepared", "active", "corrupt"] {
+            let root = tempdir().unwrap();
+            let mut store = SaveStore::open(root.path()).unwrap();
+            let mut registry = CoreRegistry::default();
+            let bytes = import_envelope();
+            let imported = registry
+                .import_v47(
+                    &mut store,
+                    Cursor::new(&bytes),
+                    bytes.len() as u64,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    player_authority_catalog(),
+                )
+                .unwrap();
+            let id = &imported.session_id;
+            let summary = registry.status(id).unwrap();
+            let checkpoint = ExactRealtimeCheckpoint {
+                generation: imported.checkpoint.generation,
+                root_hash: imported.checkpoint.root_hash,
+                revision: imported.checkpoint.revision,
+            };
+            let proof = ExactRealtimeStateProof {
+                revision: summary.revision,
+                canonical_sha256: summary.canonical_sha256.clone(),
+                domain_sha256: summary.domain_sha256.clone(),
+            };
+            let run = "legacy-rpc-guard".to_owned();
+            match phase {
+                "experiment" => {
+                    store
+                        .exact_realtime_lease(ExactRealtimeLeaseRequest::Prepare {
+                            run_id: run,
+                            registry_fingerprint: summary.registry_fingerprint.clone(),
+                            checkpoint,
+                            proof,
+                            settled_deadline_ms: 42_000,
+                        })
+                        .unwrap();
+                }
+                "prepared" | "active" => {
+                    let binding = store.player_authority_session_binding(id).unwrap();
+                    store
+                        .prepare_player_authority_lease(
+                            binding.clone(),
+                            run.clone(),
+                            summary.registry_fingerprint.clone(),
+                            checkpoint,
+                            proof,
+                            42_000,
+                        )
+                        .unwrap();
+                    if phase == "active" {
+                        store
+                            .activate_player_authority_lease(
+                                &binding,
+                                &run,
+                                &summary.registry_fingerprint,
+                            )
+                            .unwrap();
+                    }
+                }
+                "corrupt" => {
+                    std::fs::create_dir_all(root.path().join("authority/normal-main")).unwrap();
+                    std::fs::write(
+                        root.path()
+                            .join("authority/normal-main/exact-realtime-lease-v2.json"),
+                        b"broken lease",
+                    )
+                    .unwrap();
+                }
+                "absent" => {}
+                _ => unreachable!(),
+            }
+            let before = serde_json::to_value(&summary).unwrap();
+            let checkpoint_before =
+                serde_json::to_value(store.recover("normal-main").unwrap()).unwrap();
+            let result = registry.require_unowned_legacy_rpc_mutation(&store, id);
+            assert_eq!(
+                result.is_ok(),
+                matches!(phase, "absent" | "experiment"),
+                "{phase}"
+            );
+            // Opening the same checkpoint under a fresh session ID must not
+            // evade the normal-main slot fence.
+            let saved = store.recover("normal-main").unwrap().unwrap();
+            let alias = registry
+                .open(
+                    &store,
+                    "normal-main",
+                    saved.generation,
+                    &saved.root_hash,
+                    saved.revision,
+                    &saved.registry_fingerprint,
+                    player_authority_catalog(),
+                )
+                .unwrap();
+            assert_ne!(alias.session_id, *id);
+            assert_eq!(
+                registry
+                    .require_unowned_legacy_rpc_mutation(&store, &alias.session_id)
+                    .is_ok(),
+                matches!(phase, "absent" | "experiment"),
+                "alias {phase}"
+            );
+            assert_eq!(
+                serde_json::to_value(registry.status(id).unwrap()).unwrap(),
+                before,
+                "{phase}"
+            );
+            assert_eq!(
+                serde_json::to_value(store.recover("normal-main").unwrap()).unwrap(),
+                checkpoint_before,
+                "{phase}"
+            );
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@ use crate::core_runtime::{
 };
 use crate::exact_realtime_lease::{
     EXACT_REALTIME_LEASE_CAPABILITY, EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
+    ExactRealtimeLeasePurpose,
 };
 use crate::frame::{Frame, FrameKind, read_frame, write_frame};
 use crate::protocol::{ControlRequest, ControlResponse, HelloResponse};
@@ -64,6 +65,25 @@ fn handle_request(
     request_id: u64,
     request: ControlRequest,
 ) -> anyhow::Result<HostAction> {
+    // The main registry's renderer ownership check is not the durable fence.
+    // Check the real lease before either in-memory legacy mutation can run.
+    match &request {
+        ControlRequest::CoreApplyCommand { session_id, .. }
+        | ControlRequest::CoreAdvance { session_id, .. } => {
+            cores.require_unowned_legacy_rpc_mutation(store, session_id)?;
+        }
+        ControlRequest::CoreClose { .. } => {
+            // Closing even an unrelated/missing session clears process-wide
+            // pending history. Only process shutdown may discard that context
+            // while a player lease exists; shutdown retains durable recovery.
+            if let Some(lease) = store.read_exact_realtime_lease()?
+                && lease.purpose()? == ExactRealtimeLeasePurpose::PlayerAuthority
+            {
+                bail!("native player-authority lease fences legacy core close");
+            }
+        }
+        _ => {}
+    }
     let value = match request {
         ControlRequest::Hello { client_version } => {
             if client_version.is_empty() || client_version.len() > 64 {

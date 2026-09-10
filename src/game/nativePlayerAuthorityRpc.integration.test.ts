@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -46,6 +47,7 @@ it.skipIf(!binary)("TEST_ONLY admission: desktop handoff and Rust RPC preserve f
   let client: any, registry: any, authority: any;
   let now = 10_000;
   let exportNumber = 0;
+  let legacyRejectionChecks = 0;
   let stage = "initial";
   let loseNextCommandReply = false;
   const rendererOwner = 7;
@@ -174,6 +176,52 @@ it.skipIf(!binary)("TEST_ONLY admission: desktop handoff and Rust RPC preserve f
       rustLease: { state: "unknown" }, releaseAuthorized: false }).action).toBe("fail-closed");
   }
 
+  async function assertLegacyWriterRejected() {
+    stage = `reject-legacy-writer-${authority.snapshot().phase}-process-${children.length}`;
+    const identity = authority.snapshot();
+    const legacyAdvance = { sessionId: identity.sessionId, baseRevision: identity.revision,
+      simulationSeconds: 1, wallSeconds: 1, advanceMode: "exact", includeDiagnostics: false };
+    const beforeRejectedRenderer = requests.length;
+    expect(() => registry.advance(rendererOwner, legacyAdvance)).toThrow("not owned by this caller");
+    expect(requests).toHaveLength(beforeRejectedRenderer);
+    function diskFiles(directory = root): Record<string, string> {
+      return Object.fromEntries(fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
+        .filter(entry => directory !== root || entry.name !== "exports").flatMap(entry => {
+          const target = path.join(directory, entry.name);
+          if (entry.isSymbolicLink()) throw new Error("unexpected synthetic profile link");
+          // Windows holds this empty OS lock exclusively; it contains no save
+          // bytes. Still check its presence/size while hashing every data file.
+          if (directory === root && entry.name === ".dsp-native-save-store.lock") {
+            expect(fs.statSync(target).size).toBe(0);
+            return [[entry.name, "exclusive-empty-root-lock"]];
+          }
+          return entry.isDirectory() ? Object.entries(diskFiles(target))
+            : [[path.relative(root, target), createHash("sha256").update(fs.readFileSync(target)).digest("hex")]];
+        }));
+    }
+    const beforeDisk = diskFiles();
+    const beforeRecovery = await client.request({ operation: "saveRecover", slot: "normal-main" });
+    const command = createSimulationCommandPatch(expected, { ...expected, paused: !expected.paused }, identity.revision);
+    expect(command).not.toBeNull();
+    const { sessionId, ...request } = legacyAdvance;
+    const attempts = [
+      ...["exact", "pure-idle-conservative-v2", "pure-idle-macro-v10", "offline-macro-v1"].map(advanceMode =>
+        ({ operation: "coreAdvance", sessionId, request: { ...request, advanceMode } })),
+      { operation: "coreApplyCommand", sessionId, command },
+      { operation: "coreClose", sessionId },
+      { operation: "coreClose", sessionId: "missing-legacy-session" },
+    ];
+    for (const attempt of attempts) {
+      await expect(client.request(attempt)).rejects.toMatchObject({
+        code: "NATIVE_OPERATION_FAILED", message: expect.stringContaining("player-authority lease fences legacy core"),
+      });
+      legacyRejectionChecks++;
+    }
+    expect(await client.request({ operation: "saveRecover", slot: "normal-main" })).toEqual(beforeRecovery);
+    expect(diskFiles()).toEqual(beforeDisk);
+    await assertCompleteState();
+  }
+
   async function stop(abrupt = false) {
     authority?.shutdownForProcessExit();
     const child = children.at(-1)!;
@@ -289,7 +337,7 @@ it.skipIf(!binary)("TEST_ONLY admission: desktop handoff and Rust RPC preserve f
     const opened = await registry.open(rendererOwner, { slot: "normal-main", generation: saved.generation,
       rootHash: saved.rootHash, revision: 1, registryFingerprint: content.fingerprint, catalog });
     await handoff(opened, { generation: saved.generation, rootHash: saved.rootHash, revision: 1 });
-    await assertCompleteState();
+    await assertLegacyWriterRejected();
 
     const built = placeBuilding(expected, "wind_turbine", { x: 4_000, y: 4_000 });
     expect(built.entities.length).toBe(expected.entities.length + 1);
@@ -314,7 +362,7 @@ it.skipIf(!binary)("TEST_ONLY admission: desktop handoff and Rust RPC preserve f
     await authority.setPaused(true); // Drains the two due simulation seconds.
     simulate(2);
     expected = { ...expected, paused: true };
-    await assertCompleteState();
+    await assertLegacyWriterRejected();
     now += 3_600_000;
     await authority.settleDue();
     await assertCompleteState();
@@ -346,7 +394,7 @@ it.skipIf(!binary)("TEST_ONLY admission: desktop handoff and Rust RPC preserve f
       assertBrowserRecovery(recovery);
       authority.resumeFromStartupRecovery(recovery);
       expect(authority.snapshot().revision).toBe(expectedRevision);
-      await assertCompleteState();
+      await assertLegacyWriterRejected();
       now += 1_000;
       await authority.settleDue();
       simulate(1);
@@ -410,9 +458,10 @@ it.skipIf(!binary)("TEST_ONLY admission: desktop handoff and Rust RPC preserve f
     assertBrowserRecovery(factoryRecovery);
     authority.resumeFromStartupRecovery(factoryRecovery);
     expect(authority.snapshot().revision).toBe(finalRevision);
-    await assertCompleteState();
+    await assertLegacyWriterRejected();
     await runSeconds(1);
     expect(expected.elapsedSeconds - initialElapsed).toBe(62);
+    expect(legacyRejectionChecks).toBe(35);
     expect(children).toHaveLength(4);
     await stop();
   } catch (error) {

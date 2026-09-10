@@ -1,6 +1,6 @@
 # 系统架构
 
-> **main 交接消息边界（2026-09-10）**：协调器的回调合同为 revision/checkpoint/ownerId，IPC 适配函数原样绑定这些字段，并使用 main 持有的原 15 秒期限；仅从已校验的 browser-fenced 回复生成确认。普通入口与实际 Rust RPC 集成共用该适配函数，旧 renderer 在转移后不能访问 Native 会话。浏览器真实落盘、完整界面和可信准入仍待验收，见[当前报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)。Rust 物品选择继续通过 ID 意图及原持久命令路径计算退款，配方定义顺序和安全整数语义不变。
+> **Rust 旧写入接口边界（2026-09-10）**：main 转移会话后，Host 对 coreAdvance/coreApplyCommand 额外校验该存档的实际持久玩家租约，覆盖新开别名；租约损坏或无法读取也返回错误。coreClose 会清理进程级历史，因此玩家租约存在时拒绝关闭，即使目标会话不存在。正常 Shutdown 保留恢复；玩家 tick/command/pause/macro 继续使用原 WAL、检查点和租约确认链。此前交接适配固定使用协调器 revision/checkpoint/ownerId 和 main 15 秒期限。真实浏览器落盘、完整界面和可信准入仍待验收，见[当前报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)。
 
 > **main runtime 终止屏障（2026-09-10）**：shutdown 为终态，迟到 transition 不得恢复 active；registry 调用在真实派发前统一检查停止标记。准备/激活、恢复及历史回复更新前检查，已派发持久操作保留 Rust 恢复权威。会话 broker 从真实 token 提供 stop-only AbortSignal，runtime 可订阅并立即取消时钟/拒绝后续操作；实际准入、云隔离与 profile 切换仍未启用，见[修复与证据](./reviews/rust-windows-runtime-lifetime-2026-09-10.md)。
 

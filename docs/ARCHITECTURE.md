@@ -1,6 +1,6 @@
 # 系统架构
 
-> **Windows 内置目录身份（2026-09-10）**：构建从独立前端模块图和空扩展包注册表生成完整 Native 目录，编入 Host 并随 ASAR 打包。main 有界读入自身成员、Host 使用编译字节和实际 RuntimeCatalog 解析器，两端独立计算 canonical 摘要；`inspect-builtin-catalog` 不打开 SaveStore。构建检查目录漂移；该事实及匹配器尚未接入正文或权威门禁，不代替规则/矩阵/发布者/会话资格，见[实现与验证](./reviews/rust-windows-builtin-catalog-2026-09-10.md)。
+> **Windows 内置目录身份（2026-09-10）**：构建从独立前端模块图和空扩展包注册表生成完整 Native 目录，编入 Host 并随 ASAR 打包。main 有界读入自身成员、Host 使用编译字节和实际 RuntimeCatalog 解析器，两端独立计算 canonical 摘要；`inspect-builtin-catalog` 不打开 SaveStore。441 冻结包内实际 main/Host/父进程已核对一致。构建检查目录漂移；该事实及匹配器尚未接入正文或权威门禁，不代替规则/矩阵/发布者/会话资格，见[实现与验证](./reviews/rust-windows-builtin-catalog-2026-09-10.md)。
 
 > **短瞬态候选边界（2026-09-10，已实包验证）**：`advance_offline_candidate` 仅供临时启动候选；旧宏观拒绝后，在 31–60 整秒及原成本/模式门槛内，从原状态执行真实 Exact 并通过完整结算证明。独立 `offline-transient-exact` / `native-offline-transient-exact-v1` 与 Host 能力、双端时间账及摘要校验同时成立才可采用。持久 OfflineMacroV1/WAL 不调用新入口，失败不改变源。68 实包短瞬态实际 32 秒成功/取消及原六组长离线、落盘/重开均通过；实时权威仍关闭。见[完整验证](./reviews/rust-windows-short-transient-2026-09-10.md)。
 

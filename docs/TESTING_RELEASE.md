@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **Windows 内置目录验证（2026-09-10）**：新增真实 Host/main 目录对照；完整 Host 275/4 ignored、两个入口各 3、Native 915/1 skip、前端目录/摘要 7/7、严格 Clippy、类型及生成漂移检查通过，守护正常退出。新冻结包另行验证；现有浏览器失败与完整实时资格仍未解决，不复用旧包通过作为本批实包结果。见[本批记录](./reviews/rust-windows-builtin-catalog-2026-09-10.md)。
+> **Windows 内置目录验证（2026-09-10）**：完整 Host 275/4 ignored、两个入口各 3、Native 915/1 skip、前端目录/摘要 7/7、严格 Clippy、类型及漂移检查通过。441 同源新冻结包 76 制品/79 文件与实际双端目录/程序核对通过，零窗口/聚焦/弹窗、正常退出。现有浏览器失败与完整实时资格仍未解决，不复用旧离线/核心结果作为本批重测；见[本批记录](./reviews/rust-windows-builtin-catalog-2026-09-10.md)。
 
 > **68 短瞬态最终验证（2026-09-10，未发布）**：最终正常优化核心 1,118/6 ignored、Host 272/4 ignored、Native 900/1 权限 skip、长差分 14/2 benchmark skip、游戏 3,220/39 skip、类型/严格 Clippy/构建均通过；实际 Host 公共产线 30 个完整 JS 对照通过。新包 84 项实际进程检查、76 制品/79 文件、八组成功/取消与保存重开通过，32 次隐藏静音正常退出。云端 Windows 全部 SUCCESS；全浏览器 466/33 skip/3 fail/1 flaky，原门槛保留、发布条件未满足。初轮编译与旧摘要驱动失败分别保留；后台、BelowNormal、6/2 GiB 守护，见[准确证据](./reviews/rust-windows-short-transient-2026-09-10.md)。以下为此前时点记录。
 

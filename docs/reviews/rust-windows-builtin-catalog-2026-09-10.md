@@ -24,7 +24,17 @@ Role: develop。完整 Windows Rust Goal 的实时接管前置工作；不授予
 
 `artifacts/rust-rp1-loop/builtin-catalog-validate-v1/report.json` 为 PASS，12 项源码/生成文件在验证前后摘要一致。正常 release Host SHA-256 为 `13a6ead150f80e22ad82dd7741312948229cbf4ff516847149a60d2577f0eb4a`；助手为 `9ed039c1285212b2a37f3f149366526c2ee98a5378497c8e525226a77fdd4400`。目录 canonical SHA-256 为 `3cc51a3f95dba83113d57a40e1ad367a4c695d71e72958af451342e3c0e038a8`，包装 JSON 文件摘要另为 `fc2313dca70771e899d4d3b2c0bd04396e488eb5149c72082f5f48721c7c653a`，两者含义不同。
 
-守护正常 exit 0、无停止原因，393.11 秒，最低可用内存 8,478,568 KiB；6 GiB 启动/2 GiB 停止、BelowNormal、重任务串行。源码尚未变更游戏规则，因此本批未重跑整个核心/游戏或浏览器矩阵，上一批结果不作为本批重测。新冻结包在代码提交后另行构建验证。
+守护正常 exit 0、无停止原因，393.11 秒，最低可用内存 8,478,568 KiB；6 GiB 启动/2 GiB 停止、BelowNormal、重任务串行。源码尚未变更游戏规则，因此本批未重跑整个核心/游戏或浏览器矩阵，上一批结果不作为本批重测。
+
+## 同源冻结包
+
+源码 `441ac195df955969d83358419f9cd46ab9ac9919` 提交后从干净工作区构建 **1.2.7+441ac195df95**，performance development / beta / win32 x64。`package-441ac195-receipt.json` 为 BUILD_AND_FREEZE_PASS；76 项制品、79 个文件，Host/助手与上述验证摘要完全相同。ASAR SHA-256 为 `a7f387f388b7ccd85fda2aaac9246f5d4f5a6f9955493886b20095e575be7aae`，EXE 当前 **NotSigned**，未公开发布。原 68 冻结包仍逐文件一致。
+
+构建串行执行正常 Host 构建、实际进程/身份集成检查、类型、Vite、启动预算、thin UI、coverage、平台和 pack；守护正常 exit 0、118.79 秒，最低可用内存 8,850,840 KiB。构建回执记录命令与绑定摘要，本批没有保留构建探针各命令的原始终端输出，不另报其断言数量；完整 Native 原始日志另在上述 validate-v1 目录。
+
+`package-builtin-catalog-smoke-v1.json` 为 PASS：实际 Electron ASAR 加载器取得 main 模块，main/独立 Host/父进程九字段程序身份及内置目录一致，registry `7df8cf3a`，实际助手仍拒绝缺失 carrier。全程 **0 BrowserWindow、0 show、0 focus、0 系统弹窗**，正常 exit 0、无强制清理，隔离 profile 已清理，冻结文件前后不变；守护 2.49 秒、最低可用内存 10,188,048 KiB。此为零窗口身份/目录验证，不计为实际玩家实时接管、签名信任或本批完整离线游戏重测。
+
+源码提交前的 metadata-v1 检查通过：Skill、378 个有效文档链接、0 个新增缺失、源码语法与 whitespace；历史 1.0.46 缺失链接保留。包后报告更新另行检查。云端检查与本机结果分开记录，不继承旧 HEAD 的通过。
 
 ## 仍需完成
 

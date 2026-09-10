@@ -10,6 +10,8 @@
 
 ## 开发与验收顺序
 
+运行终止增量：891e87fa 修复退出后的迟到激活/恢复与 microtask 派发，runtime 可订阅持续会话的 stop-only 信号。完整 Native 981/1 skip，实包 227 项打包前检查和 idle 停止连接通过，零窗口/焦点/弹窗；真实助手联动的活跃状态使用 TEST_ONLY registry，不计为 Rust 实时玩法验收。完整准入与以下剩余项继续，见[当前记录](../reviews/rust-windows-runtime-lifetime-2026-09-10.md)。
+
 最新增量：持续验证会话的真实 Host/助手入口及 main 心跳/退出管理已通过源码和 5c801a83 新冻结包验证，实际 15 秒失联与跨 17 秒自动续期通过。该 token 仍未接入实际模拟、云网络隔离或单写者准入；下表此前的目录身份工作已向持续持有推进，实际 ASAR 零窗口/聚焦/弹窗验证通过。见[本批记录](../reviews/rust-windows-validation-lease-2026-09-10.md)。
 
 | 阶段 | 当前状态 | 完成后玩家得到什么 |

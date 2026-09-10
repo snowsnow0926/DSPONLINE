@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **当前生产基线（2026-09-11，1.2.9）**：香港/新上海 Web current 为 `1.2.9-0521eb63f179`；previous 分别为 `1.2.7-fccaa35e6b41` / `1.2.7-dab2ff5066b7`。API current/previous 保持 `api-1.2.6-df828869e276`，green/4322；generation/proxy 为 51/192、34/92，原 API/proxy PID 和 `NRestarts=0` 保留，health/ready 200、无 pending switch。下载 current/previous 为 `download-site-1.2.9-0521eb63f179-r2` / `download-site-1.2.8-aa1f970a677b`；Android stable 1002009，Windows 1.2.6。香港 previous-stable 为不可变 `1.2.7-fccaa35e6b41`，独立 Nginx 备份和恢复次序必须遵循 [1.2.9 发布记录](./releases/1.2.9.md)。新上海仍由 `DSP_SH_NEW_*` 在子进程内映射；旧机停写。本次只更新静态 Web/下载，未切换 API 或数据库，无新增生产数据库快照。磁盘约 73%/45%；一次香港 health 9.17 秒后五次恢复到 3 ms 以下。下方带日期的旧基线仅作历史记录。
+
 > **当前生产基线（2026-09-08，1.2.7 发布后）**：香港/新上海 Web current 均为目录 `1.2.7-dab2ff5066b7`，Web 回退目录为 `web-1.2.6-df828869e276`；API current 与 switch-state previous 都保持 `api-1.2.6-df828869e276`。generation/proxy 分别 49/192、33/92，green/4322，health/ready 200、API/proxy PID 未变、重启数 0。新上海下载 current/previous 为 `download-site-1.2.7-dab2ff5066b7` / `download-site-1.2.6-df828869e276`；安卓 1002007，Windows 1.2.6。香港 fallback 为不可变 1.2.6，回退根 Web 前须先恢复其独立 Nginx 备份。新上海继续受保护 `DSP_SH_NEW_*` 子进程映射并保留迁移 validator/drop-in；旧机停写。本次未动 API/数据库，无新生产快照，磁盘最终约 67%/44%。详情及验证限制见 [1.2.7 发布记录](./releases/1.2.7.md)；下方带日期的旧状态按历史解读。
 
 > 公开仓库脱敏说明：本文及 `deploy/` 模板中的节点地址、证书主机名和对象存储标识均使用示例占位符。实际值只应从受保护的运维环境注入，不能提交到 Git。

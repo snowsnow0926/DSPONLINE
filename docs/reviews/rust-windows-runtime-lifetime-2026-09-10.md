@@ -26,7 +26,7 @@ Rust/core/前端游戏源码未改；正常重建 Host 和助手与 5c801a83 验
 
 探针正常 exit 0、无强制清理，20.35 秒、最低空闲 9,223,912 KiB；hidden-no-focus-offscreen-v2 为零窗口/show/focus/dialog。临时 session 与 Electron profile 已清理，冻结文件未变。包内 Host/助手仍为 5c801a83 原字节，ASAR SHA-256：`62951ad9976baf48071838baa1cd9e7e2765f363d650d58a38193ae097a0c548`。
 
-证据：`artifacts/rust-rp1-loop/runtime-lifetime-validate-v1/`、`package-891e87fa-frozen/`、`package-891e87fa-receipt.json`、`build-desktop-runtime-lifetime-v1-logs/`、`package-runtime-lifetime-smoke-v1.json`。上一 4f3f9280 的 Windows/浏览器/服务 Native 云端任务仍确认运行，单元与构建成功；本批先保留本地提交，避免新推送取消尚未完成的旧检查，待收齐后一起推送。未将进行中或旧包计为当前通过。
+证据：`artifacts/rust-rp1-loop/runtime-lifetime-validate-v1/`、`package-891e87fa-frozen/`、`package-891e87fa-receipt.json`、`build-desktop-runtime-lifetime-v1-logs/`、`package-runtime-lifetime-smoke-v1.json`。上一 4f3f9280 的 Windows/浏览器/服务 Native 云端任务仍确认运行，单元与构建成功。本批源码和记录已推送 GitHub 暂存开发分支 `codex/rust-runtime-lifetime`；PR 31 的 `codex/rust-rp1-after-1.2.7` 暂保持 4f3f9280，避免取消旧检查，待终态收齐后再快进同步。本批新源码尚未执行云端完整矩阵；暂存分支没有另建 PR，不把进行中或旧包计为当前通过。
 
 完整目标仍包括真正 Rust 单写者准入、可信资格/时间/撤销/证据来源与完整矩阵、云网络和 profile 隔离、复杂终局长离线及更多瞬态、完整玩法/模式/内容包、数据往返和异常恢复，以及性能/内存、30 分钟/24 小时、硬件/签名/安装升级回退。当前修复不能替代这些验收，也不构成发布许可。
 

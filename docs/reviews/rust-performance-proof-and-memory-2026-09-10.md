@@ -1,6 +1,6 @@
 # Windows 性能循环：完整包、内存与前端摘要
 
-2026-09-10，Role: develop。Windows 性能 Goal 继续 active，完整 Rust 引擎替换暂停，没有部署。
+2026-09-10，Role: develop。本文为此前 8a5 包与摘要微测记录。最新 1b5 包、未完成的完整 UI 对照及用户要求暂停见[本轮收口报告](./rust-performance-ui-round-pause-2026-09-10.md)；下文 active 与下一步描述保留其历史语境，此时不再自动续跑。完整 Rust 引擎替换暂停，没有部署。
 
 ## 玩家能理解的进度
 

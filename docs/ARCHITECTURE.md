@@ -1,6 +1,6 @@
 # 系统架构
 
-> **Rust 物品选择与数值语义（2026-09-10）**：entityLogisticsItem 提交实体/物品 ID，与配方命令共用 Rust 退款、拆线和持久回放；同时重现 JS 状态拷贝的空映射初始化和退款前行星托盘快照。Native 配方目录保留游戏定义顺序，安全整数按数值校验，接受整数形式的浮点表示并拒绝小数和超限。普通 Host 与测试进程仍共用 RPC 实现，测试授权不能启用玩家接管；完整边界见[当前报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)。
+> **main 交接消息边界（2026-09-10）**：协调器的回调合同为 revision/checkpoint/ownerId，IPC 适配函数原样绑定这些字段，并使用 main 持有的原 15 秒期限；仅从已校验的 browser-fenced 回复生成确认。普通入口与实际 Rust RPC 集成共用该适配函数，旧 renderer 在转移后不能访问 Native 会话。浏览器真实落盘、完整界面和可信准入仍待验收，见[当前报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)。Rust 物品选择继续通过 ID 意图及原持久命令路径计算退款，配方定义顺序和安全整数语义不变。
 
 > **main runtime 终止屏障（2026-09-10）**：shutdown 为终态，迟到 transition 不得恢复 active；registry 调用在真实派发前统一检查停止标记。准备/激活、恢复及历史回复更新前检查，已派发持久操作保留 Rust 恢复权威。会话 broker 从真实 token 提供 stop-only AbortSignal，runtime 可订阅并立即取消时钟/拒绝后续操作；实际准入、云隔离与 profile 切换仍未启用，见[修复与证据](./reviews/rust-windows-runtime-lifetime-2026-09-10.md)。
 

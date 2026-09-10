@@ -43,11 +43,9 @@ const {
 const { NativePlayerAuthorityRuntime } = require("./native-player-authority-runtime.cjs");
 const {
   NativePlayerAuthorityHandoffCoordinator,
-  QUIESCENCE_ACK_KIND,
 } = require("./native-player-authority-handoff.cjs");
 const {
   CANCEL_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_CANCEL_REQUEST_KIND,
-  COMMIT_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMMIT_REQUEST_KIND,
   COMPLETE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETE_REQUEST_KIND,
   NativePlayerAuthorityBoundedRetryCoordinator,
   NativePlayerAuthorityHandoffIpcBridge,
@@ -58,6 +56,7 @@ const {
   RESPONSE_CHANNEL: NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL,
   STARTUP_RECONCILE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_STARTUP_RECONCILE_REQUEST_KIND,
   startupReconciliationIsTerminalResolved,
+  requestNativePlayerAuthorityQuiescence,
 } = require("./native-player-authority-handoff-ipc.cjs");
 const {
   NativePlayerAuthorityCommandBroker,
@@ -517,30 +516,11 @@ async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
         runtime: nativePlayerAuthorityRuntime,
         mainOwnerId: "main-player-authority",
         requestQuiescence: async (request) => {
-          const fenced = await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
-            kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMMIT_REQUEST_KIND,
-            handoffId: request.handoffId,
-            sessionId: request.sessionId,
-            runId: request.runId,
-            revision: request.expectedRevision,
-            checkpoint: request.expectedCheckpoint,
-            publicWriterFence: request.publicWriterFence,
-            settledDeadlineMs: request.settledDeadlineMs,
-          }, request.timeoutMs);
-          browserFence = fenced;
-          return Object.freeze({
-            kind: QUIESCENCE_ACK_KIND,
-            handoffId: request.handoffId,
-            sessionId: request.sessionId,
-            runId: request.runId,
-            ownerId: request.rendererOwnerId,
-            revision: request.expectedRevision,
-            checkpoint: request.expectedCheckpoint,
-            publicWriterFence: request.publicWriterFence,
-            settledDeadlineMs: request.settledDeadlineMs,
-            rendererInFlightCoreOperations: fenced.rendererInFlightCoreOperations,
-            workerInFlightCoreOperations: fenced.workerInFlightCoreOperations,
-          });
+          const result = await requestNativePlayerAuthorityQuiescence(
+            nativePlayerAuthorityHandoffIpcBridge, request, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
+          );
+          browserFence = result.browserFence;
+          return result.acknowledgement;
         },
         releaseQuiescence: async (request) => {
           if (!browserFence || request.releaseAuthorized !== true) {

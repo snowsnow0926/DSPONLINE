@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -21,17 +21,24 @@ import type { BuildingId, GameState, ItemId, RecipeId } from "./types";
 import type { SimulationCommandPatch } from "./simulationRuntimeProtocol";
 import { canonicalNativeCoreSha256 } from "./nativeCoreProof";
 import { createSimulationCommandPatch } from "./simulationRuntimeProtocol";
+import { acquireLocalSaveNativeAuthorityHandoff, reconcileLocalSaveNativeAuthorityHandoff,
+  type LocalSaveNativeAuthorityBrowserFencedJournal } from "./localSaveAuthorityLease";
+import type { LocalSaveWriterLease } from "./localSaveCoordination";
 
 const require = createRequire(import.meta.url);
 const { NativeHostClient, NativeSaveSessionRegistry, NativeCoreSessionRegistry } = require("../../desktop/native-host.cjs");
 const { NativePlayerAuthorityRuntime } = require("../../desktop/native-player-authority-runtime.cjs");
+const { NativePlayerAuthorityHandoffCoordinator } = require("../../desktop/native-player-authority-handoff.cjs");
+const { NativePlayerAuthorityHandoffIpcBridge, requestNativePlayerAuthorityQuiescence,
+  subscribeRendererToNativePlayerAuthorityHandoff, RESPONSE_CHANNEL, COMMIT_REQUEST_KIND,
+} = require("../../desktop/native-player-authority-handoff-ipc.cjs");
 const binary = process.env.DSP_NATIVE_AUTHORITY_RPC_TEST_BINARY;
 const owner = "main-player-authority";
 
 // Admission alone uses the cfg(test) override. Every gameplay reply is produced
 // by a separate Rust process through the same dispatcher as the normal Host.
 // This opt-in test cannot qualify or enable an installed player build.
-it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC preserve factory production, research and refunds across three process restarts", async () => {
+it.skipIf(!binary)("TEST_ONLY admission: desktop handoff and Rust RPC preserve factory production, research and refunds across three process restarts", async () => {
   if (!binary || !path.isAbsolute(binary) || !fs.statSync(binary).isFile()) throw new Error("test binary missing");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-authority-rpc-test-"));
   fs.writeFileSync(path.join(root, "TEST_ONLY"), "rpc-integration-v1");
@@ -41,6 +48,10 @@ it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC pre
   let exportNumber = 0;
   let stage = "initial";
   let loseNextCommandReply = false;
+  const rendererOwner = 7;
+  let browserLease: LocalSaveWriterLease = { schemaVersion: 1, ownerId: "rpc-browser-primary",
+    fencingToken: 1, heartbeatAt: now, expiresAt: now + 15_000 };
+  let browserJournal: LocalSaveNativeAuthorityBrowserFencedJournal | null = null;
   let expected = createPublicCatalogOfflineQualificationFixture("finite-reserve");
   // The offline fixture prebuilds its factory; interactive placement must also
   // satisfy the public construction technology gate.
@@ -111,6 +122,56 @@ it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC pre
     registry = new NativeCoreSessionRegistry(client);
     authority = new NativePlayerAuthorityRuntime({ registry, ownerId: owner, now: () => now,
       schedule: () => ({}), cancel: () => {} });
+  }
+
+  async function handoff(opened: any, checkpoint: any) {
+    stage = "renderer-to-main-handoff";
+    // Electron event transport and the drained browser are synthetic here.
+    // Coordinator, IPC validation, preload subscription, browser lease policy,
+    // session transfer and all Rust prepare/activation/persistence are real.
+    const rendererIpc = new EventEmitter() as EventEmitter & { send: (channel: string, value: any) => void };
+    const renderer = { id: rendererOwner, isDestroyed: () => false,
+      send: (channel: string, request: any) => rendererIpc.emit(channel, {}, structuredClone(request)) };
+    const bridge = new NativePlayerAuthorityHandoffIpcBridge({ getRenderer: (id: number) => id === rendererOwner ? renderer : null });
+    rendererIpc.send = (channel, value) => {
+      if (channel === RESPONSE_CHANNEL) expect(bridge.accept({ sender: renderer }, structuredClone(value))).toBe(true);
+    };
+    const unsubscribe = subscribeRendererToNativePlayerAuthorityHandoff(rendererIpc, (request: any) => {
+      expect(request.kind).toBe(COMMIT_REQUEST_KIND);
+      expect(request.revision).toBe(checkpoint.revision);
+      expect(request.checkpoint).toEqual(checkpoint);
+      expect(request.settledDeadlineMs).toBe(now);
+      const acquired = acquireLocalSaveNativeAuthorityHandoff({ currentLease: browserLease, currentJournal: browserJournal,
+        expectedWriterFence: request.publicWriterFence, runId: request.runId, sessionId: request.sessionId,
+        checkpoint: request.checkpoint, now });
+      if (!acquired.ok) throw new Error(`browser fence rejected: ${acquired.reason}`);
+      browserLease = acquired.lease;
+      browserJournal = acquired.journal;
+      return { kind: "native-player-authority-browser-fenced-v1", leaseReceipt: acquired.receipt,
+        journal: acquired.journal, rendererInFlightCoreOperations: 0, workerInFlightCoreOperations: 0 };
+    });
+    const coordinator = new NativePlayerAuthorityHandoffCoordinator({ registry, runtime: authority, mainOwnerId: owner,
+      requestQuiescence: async (request: any) => (await requestNativePlayerAuthorityQuiescence(bridge, request, 15_000)).acknowledgement });
+    try {
+      const result = await coordinator.handoff({ handoffId: "rpc-handoff", sessionId: opened.sessionId, runId: "rpc-chain",
+        rendererOwnerId: rendererOwner, expectedRevision: checkpoint.revision, expectedCheckpoint: checkpoint,
+        publicWriterFence: { ownerId: browserLease.ownerId, fencingToken: browserLease.fencingToken },
+        settledDeadlineMs: now, timeoutMs: 15_000 });
+      expect(result.phase).toBe("active");
+      expect(registry.inspectSession(owner, opened.sessionId)).toMatchObject({ ownerId: owner, ownerEpoch: 2, state: "owned" });
+      expect(() => registry.inspectSession(rendererOwner, opened.sessionId)).toThrow();
+      expect(browserJournal?.checkpoint).toEqual(checkpoint);
+    } finally { unsubscribe(); bridge.cancelOwner(rendererOwner); }
+  }
+
+  function assertBrowserRecovery(recovered: any) {
+    const decision = reconcileLocalSaveNativeAuthorityHandoff({ journal: browserJournal, currentLease: browserLease,
+      rustLease: { state: "active", runId: recovered.runId, sessionId: recovered.sessionId,
+        stateVersion: recovered.summary.stateVersion, mode: recovered.summary.mode, checkpoint: recovered.entryCheckpoint },
+      releaseAuthorized: false });
+    expect(decision.action).toBe("resume-native");
+    expect(reconcileLocalSaveNativeAuthorityHandoff({ journal: browserJournal, currentLease: browserLease,
+      rustLease: { state: "unknown" }, releaseAuthorized: false }).action).toBe("fail-closed");
   }
 
   async function stop(abrupt = false) {
@@ -225,10 +286,9 @@ it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC pre
       baseChecksum: "01234567", registryFingerprint: content.fingerprint, revision: 1, savedAtMs: 1 });
     for (let index = 0; index < records.length; index += 8) await saves.write(1, transaction.transactionId, records.slice(index, index + 8));
     const saved = await saves.commit(1, transaction.transactionId);
-    const opened = await registry.open(owner, { slot: "normal-main", generation: saved.generation,
+    const opened = await registry.open(rendererOwner, { slot: "normal-main", generation: saved.generation,
       rootHash: saved.rootHash, revision: 1, registryFingerprint: content.fingerprint, catalog });
-    await authority.activate({ sessionId: opened.sessionId, runId: "rpc-chain", settledDeadlineMs: now,
-      expectedCheckpoint: { generation: saved.generation, rootHash: saved.rootHash, revision: 1 } });
+    await handoff(opened, { generation: saved.generation, rootHash: saved.rootHash, revision: 1 });
     await assertCompleteState();
 
     const built = placeBuilding(expected, "wind_turbine", { x: 4_000, y: 4_000 });
@@ -283,6 +343,7 @@ it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC pre
       await start();
       const recovery = registry.takePlayerAuthorityStartupRecovery(owner);
       expect(recovery).not.toBeNull();
+      assertBrowserRecovery(recovery);
       authority.resumeFromStartupRecovery(recovery);
       expect(authority.snapshot().revision).toBe(expectedRevision);
       await assertCompleteState();
@@ -346,6 +407,7 @@ it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC pre
     await start();
     const factoryRecovery = registry.takePlayerAuthorityStartupRecovery(owner);
     expect(factoryRecovery).not.toBeNull();
+    assertBrowserRecovery(factoryRecovery);
     authority.resumeFromStartupRecovery(factoryRecovery);
     expect(authority.snapshot().revision).toBe(finalRevision);
     await assertCompleteState();

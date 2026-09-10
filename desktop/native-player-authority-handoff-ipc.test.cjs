@@ -16,6 +16,7 @@ const {
   RESPONSE_CHANNEL,
   STARTUP_RECONCILE_REQUEST_KIND,
   startupReconciliationIsTerminalResolved,
+  requestNativePlayerAuthorityQuiescence,
   subscribeRendererToNativePlayerAuthorityHandoff,
 } = require("./native-player-authority-handoff-ipc.cjs");
 
@@ -146,6 +147,43 @@ function bridgeFixture() {
     }),
   };
 }
+
+test("main quiescence adapter preserves the coordinator boundary and validates the browser reply", async () => {
+  const { bridge, sent } = bridgeFixture();
+  const request = { ...commitRequest(), ownerId: 7 };
+  const pending = requestNativePlayerAuthorityQuiescence(bridge, request, 5_000);
+  assert.deepEqual(sent, [{ channel: REQUEST_CHANNEL, value: commitRequest() }]);
+  assert.equal(bridge.accept({ sender: { id: 8 } }, response(commitRequest(), browserFencedResult())), false);
+  assert.equal(bridge.accept({ sender: { id: 7 } }, response(commitRequest(), browserFencedResult())), true);
+  assert.deepEqual(await pending, { browserFence: browserFencedResult(), acknowledgement: {
+    ...request, kind: "native-player-authority-quiescence-ack-v1",
+    rendererInFlightCoreOperations: 0, workerInFlightCoreOperations: 0,
+  } });
+});
+
+test("main quiescence adapter never returns an ACK for a stale journal or non-drained Worker", async () => {
+  for (const value of [browserFencedResult({ workerInFlightCoreOperations: 1 }), browserFencedResult({
+    journal: { ...browserFencedResult().journal, checkpoint: { ...CHECKPOINT, revision: 18 } },
+  })]) {
+    const { bridge } = bridgeFixture();
+    const pending = requestNativePlayerAuthorityQuiescence(bridge, { ...commitRequest(), ownerId: 7 }, 5_000);
+    bridge.accept({ sender: { id: 7 } }, response(commitRequest(), value));
+    await assert.rejects(pending, { code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_IPC_INVALID" });
+  }
+});
+
+test("main quiescence adapter uses the main deadline and leaves lost replies uncertain", async () => {
+  let expired;
+  const bridge = new NativePlayerAuthorityHandoffIpcBridge({
+    getRenderer: () => ({ id: 7, send() {}, isDestroyed: () => false }),
+    schedule: (callback, milliseconds) => { assert.equal(milliseconds, 15_000); expired = callback; return 1; },
+    cancel() {},
+  });
+  const pending = requestNativePlayerAuthorityQuiescence(bridge, { ...commitRequest(), ownerId: 7 }, 15_000);
+  expired();
+  await assert.rejects(pending, { code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_IPC_TIMEOUT" });
+  assert.equal(bridge.accept({ sender: { id: 7 } }, response(commitRequest(), browserFencedResult())), false);
+});
 
 test("main challenge accepts only the exact WebContents, handoff ID, and request kind", async () => {
   const { bridge, sent } = bridgeFixture();

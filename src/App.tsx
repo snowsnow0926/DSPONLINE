@@ -17329,12 +17329,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     for (const belt of canvasTopology.belts) {
       const sourceHandle = getCanvasHandleEndpoint(lookup, belt.source, `out:${belt.itemId}`, "source");
       const targetHandle = getCanvasHandleEndpoint(lookup, belt.target, getFactoryBeltTargetHandleId(belt, canvasEntityBuildingById.get(belt.target)), "target");
-      if (!sourceHandle || !targetHandle) continue;
+      if (!sourceHandle && !targetHandle) continue;
       next.set(belt.id, {
-        sourceX: sourceHandle.x,
-        sourceY: sourceHandle.y,
-        targetX: targetHandle.x,
-        targetY: targetHandle.y,
+        sourceX: sourceHandle?.x,
+        sourceY: sourceHandle?.y,
+        targetX: targetHandle?.x,
+        targetY: targetHandle?.y,
       });
     }
     return next;

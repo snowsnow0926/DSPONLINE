@@ -89,7 +89,7 @@ async function seedCanvas(page: Page, options: { count: number; exactStack?: num
   });
   await page.addInitScript(({ save, detail, canvasOverlap, interactionDetail, detailKey, canvasOverlapKey, interactionDetailKey, blueprintOverlapKey }) => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-08-v1.2.7");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.ui.show-run-log.v1", "true");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
@@ -864,8 +864,25 @@ test("an exact 50-card stack paints one leader and glow while retaining hidden e
   await expect(beltCanvas).toHaveAttribute("data-segments", "3");
   await expect(beltCanvas).toHaveAttribute("data-first-source-x", "96");
   await expect(beltCanvas).toHaveAttribute("data-first-source-y", "16");
-  await expect(beltCanvas).toHaveAttribute("data-first-target-x", "0");
-  await expect(beltCanvas).toHaveAttribute("data-first-target-y", "96");
+  // The leader retains its measured full-card input port. Compare world
+  // coordinates against the actual input handle, including its inset.
+  const leaderInput = page.locator('.react-flow__node[data-id="anonymous-node-0"] .react-flow__handle[data-handleid="in:iron_ore"]');
+  await expect(leaderInput).toBeVisible();
+  await expect.poll(async () => leaderInput.evaluate((handle) => {
+    const node = handle.closest<HTMLElement>(".react-flow__node")!;
+    const viewport = document.querySelector<HTMLElement>(".react-flow__viewport")!;
+    const canvas = document.querySelector<HTMLCanvasElement>("canvas.canvas-belt-layer")!;
+    const zoom = new DOMMatrixReadOnly(getComputedStyle(viewport).transform).a;
+    const nodeBox = node.getBoundingClientRect();
+    const handleBox = handle.getBoundingClientRect();
+    // anonymous-node-0 is fixed at world (0, 0) in this fixture.
+    const expectedTargetX = (handleBox.left - nodeBox.left) / zoom;
+    const expectedTargetY = (handleBox.top - nodeBox.top + handleBox.height / 2) / zoom;
+    return Math.max(
+      Math.abs(Number(canvas.dataset.firstTargetX) - expectedTargetX),
+      Math.abs(Number(canvas.dataset.firstTargetY) - expectedTargetY),
+    );
+  })).toBeCloseTo(0, 1);
   await expect(beltCanvas).toHaveAttribute("data-first-route-mode", "1");
   await expect(beltCanvas).toHaveAttribute("data-first-route-center", "256");
   await expect(page.locator(".react-flow__edge")).toHaveCount(0);

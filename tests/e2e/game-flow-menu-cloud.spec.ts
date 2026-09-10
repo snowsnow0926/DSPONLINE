@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-08-v1.2.7");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
     }
   });
 }
@@ -1602,19 +1602,19 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "网页版与安卓版：保存及离线准备优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.7");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
-  await expect(releaseNotes).toContainText("保存与导入减少重复处理");
-  await expect(releaseNotes).toContainText("自动快照减少重复处理");
-  await expect(releaseNotes).toContainText("离线准备更轻量");
-  await expect(releaseNotes).toContainText("挂机停止与恢复更可靠");
-  await expect(releaseNotes).toContainText("保留 1.2.6 玩法与旧存档");
-  await expect(releaseNotes).toContainText("本次更新范围");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "多端性能优化与画布操作更新");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.9");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes).toContainText("保存与自动快照减少重复处理");
+  await expect(releaseNotes).toContainText("多星球模拟减少无效扫描");
+  await expect(releaseNotes).toContainText("WASD 平移画布视野");
+  await expect(releaseNotes).toContainText("生产区域与节点一起移动");
+  await expect(releaseNotes).toContainText("保留安卓云连接并改善重启恢复");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
   await expect(releaseHistory).toBeVisible();
+  await releaseNotes.getByRole("button", { name: "下一页版本" }).click();
   await releaseNotes.getByRole("button", { name: "下一页版本" }).click();
   await releaseNotes.getByRole("button", { name: "下一页版本" }).click();
   await releaseNotes.getByRole("button", { name: "下一页版本" }).click();
@@ -1637,15 +1637,15 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "网页版与安卓版：保存及离线准备优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.7");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-09-08-v127-1440.png", fullPage: true });
+  await expect(releaseNotes).toHaveAttribute("aria-label", "多端性能优化与画布操作更新");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.9");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-09-10-v129-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await releaseNotes.locator(".release-notes-scroll li").last().scrollIntoViewIfNeeded();
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-09-08-v127-390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-09-10-v129-390.png", fullPage: true });
 
   await page.setViewportSize({ width: 360, height: 480 });
   await page.evaluate(() => {
@@ -1668,7 +1668,7 @@ test("dated release notes appear once and remain available from both settings sc
     return Boolean(scroll && summary && firstItem && footer && summary.bottom <= firstItem.top + 1 && scroll.bottom <= footer.top + 1);
   })).toBe(true);
   await expect.poll(() => releaseNotes.locator(".release-notes-scroll").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-09-08-v127-360x480-font200.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-09-10-v129-360x480-font200.png", fullPage: true });
   await page.evaluate(() => {
     document.documentElement.dataset.uiFontScale = "100";
     document.documentElement.style.setProperty("--ui-font-scale", "1");
@@ -1677,16 +1677,16 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-09-08-v1.2.7");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-09-10-v1.2.9");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
-  await page.getByRole("button", { name: "查看2026年9月8日版本更新记录" }).click();
+  await page.getByRole("button", { name: "查看2026年9月10日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "网页版与安卓版：保存及离线准备优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.7");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "多端性能优化与画布操作更新");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.9");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1696,12 +1696,12 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "网页版与安卓版：保存及离线准备优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.7");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "多端性能优化与画布操作更新");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.9");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-09-08-v127-844x390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-09-10-v129-844x390.png", fullPage: true });
   await releaseNotes.getByLabel("关闭版本更新记录").click();
   await expect(operations).toBeVisible();
 });

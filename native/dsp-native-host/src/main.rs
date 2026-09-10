@@ -153,6 +153,7 @@ fn handle_request(
                     "native-core-offline-candidate-export-v1",
                     "native-core-offline-runtime-source-export-v1",
                     "native-core-offline-complete-candidate-v1",
+                    "native-core-offline-transient-exact-v1",
                     EXACT_REALTIME_LEASE_CAPABILITY,
                     EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
                     PLAYER_AUTHORITY_GATE_CAPABILITY,

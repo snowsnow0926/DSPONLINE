@@ -204,6 +204,46 @@ describe("Windows native offline startup", () => {
     expect(current.cancel).toHaveBeenCalled();
   });
 
+  async function transientSourceFixture(seconds = 31) {
+    const current = await longSourceFixture(seconds, true);
+    const status = await current.desktop.getNativePerformanceStatus();
+    current.desktop.getNativePerformanceStatus = vi.fn(async () => ({ ...status,
+      capabilities: [...status.capabilities, "native-core-offline-transient-exact-v1"] }));
+    Object.assign(current.candidate.advance, { exactScope: "offline-transient-exact",
+      algorithmVersion: "native-offline-transient-exact-v1" });
+    return current;
+  }
+
+  it.each([31, 32, 35, 60])("adopts a separately versioned %s-second Exact transient without changing the source", async seconds => {
+    const current = await transientSourceFixture(seconds);
+    const original = JSON.stringify(current.loaded);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") throw new Error("expected Exact transient candidate");
+    expect(result.state).toEqual(current.candidateState);
+    expect(result.approximation).toMatchObject({ mode: "exact", calibrationWindowSeconds: seconds,
+      approximatedSeconds: 0, algorithmVersion: "native-offline-transient-exact-v1" });
+    expect(JSON.stringify(current.loaded)).toBe(original);
+    expect(current.cancel).toHaveBeenCalled();
+  });
+
+  it.each(["capability", "algorithm", "partial", "approximation", "too-short", "too-long"])(
+    "rejects a transient with invalid %s evidence and preserves its source", async invalid => {
+      const current = await transientSourceFixture(invalid === "too-short" ? 30 : invalid === "too-long" ? 61 : 31);
+      const original = JSON.stringify(current.loaded);
+      if (invalid === "capability") {
+        const status = await current.desktop.getNativePerformanceStatus();
+        current.desktop.getNativePerformanceStatus = vi.fn(async () => ({ ...status,
+          capabilities: status.capabilities.filter(value => value !== "native-core-offline-transient-exact-v1") }));
+      } else if (invalid === "algorithm") current.candidate.advance.algorithmVersion = "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity";
+      else if (invalid === "partial") current.candidate.advance.exactCalibrationSeconds = 30;
+      else if (invalid === "approximation") current.candidate.advance.approximatedSeconds = 1;
+      const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+      expect(result.status).toBe("fallback");
+      expect(JSON.stringify(current.loaded)).toBe(original);
+      expect(current.cancel).toHaveBeenCalled();
+    });
+
   it.each([
     { exactScope: "offline-macro-v1" as const },
     { algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1" },

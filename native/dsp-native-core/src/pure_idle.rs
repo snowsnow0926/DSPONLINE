@@ -8914,6 +8914,64 @@ pub(crate) fn advance_offline_macro_v1(
     advance_bounded_with_runtime(state, request, true, deterministic_runtime())
 }
 
+pub(crate) const OFFLINE_TRANSIENT_EXACT_ALGORITHM_VERSION: &str =
+    "native-offline-transient-exact-v1";
+
+/// Recover a short transient rejected by the unchanged macro proof using the
+/// actual Exact engine, never an unproved extrapolation. This candidate-only
+/// entry is deliberately absent from the durable operation / WAL dispatcher.
+pub(crate) fn advance_offline_candidate(
+    state: &mut CoreState,
+    request: &CoreAdvanceRequest,
+) -> anyhow::Result<CoreAdvanceResult> {
+    if request.advance_mode != CoreAdvanceMode::OfflineMacroV1 {
+        bail!("native offline candidate requires the offline mode");
+    }
+    let macro_result = advance_offline_macro_v1(state, request)?;
+    let seconds = request.simulation_seconds;
+    // At most twice the existing 30-second calibration, under the same
+    // 2,000-record and memory admission. Longer transients need a separately
+    // qualified budget; failed proof text is never used as authorization.
+    if macro_result.supported
+        || !(31.0..=60.0).contains(&seconds)
+        || seconds.fract() != 0.0
+        || request.wall_seconds != seconds
+        || !fits_long_offline_candidate_budget(state, seconds as u64)
+        || admission_reason(state, request).is_some()
+        || budget_attestation_reason(state, request).is_some()
+    {
+        return Ok(macro_result);
+    }
+    let before = match capture_settlement_snapshot(state) {
+        Ok(before) => before,
+        Err(_) => return Ok(macro_result),
+    };
+    let mut candidate = state.clone();
+    let mut exact = candidate.advance_exact(&exact_request(state.revision, seconds, seconds))?;
+    if !exact.supported || !exact.changed {
+        return Ok(macro_result);
+    }
+    let mut candidate = match prove_internal_exact_settlement_candidate_with_runtime(
+        &before,
+        candidate,
+        deterministic_runtime(),
+    ) {
+        Ok(candidate) => candidate,
+        Err(_) => return Ok(macro_result),
+    };
+    candidate.clear_pure_idle_private_session();
+    exact.exact_scope = "offline-transient-exact";
+    exact.algorithm_version = Some(OFFLINE_TRANSIENT_EXACT_ALGORITHM_VERSION);
+    exact.exact_calibration_seconds = Some(seconds);
+    exact.approximated_seconds = Some(0.0);
+    exact.summary = request
+        .include_diagnostics
+        .then(|| candidate.summary())
+        .transpose()?;
+    *state = candidate;
+    Ok(exact)
+}
+
 fn advance_bounded_with_runtime(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -11140,6 +11198,107 @@ mod tests {
             result.reason
         );
         assert_eq!(long.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn offline_candidate_exact_transient_preserves_legacy_macro_and_matches_full_exact() {
+        let mut initial = with_quantum_upload_station(
+            as_offline_fixture(productive_closed_recipe_macro_fixture(1.0)),
+            "iron_ingot",
+            "smelter",
+        );
+        let revision = initial.revision;
+        assert!(
+            initial
+                .advance_exact(&exact_request(revision, 30.0, 30.0))
+                .unwrap()
+                .supported
+        );
+        initial.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ingot"] =
+            json!("9950");
+        initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ingot"] =
+            json!("10000");
+        let source_hash = initial.summary().unwrap().canonical_sha256;
+        let mut transient_count = 0;
+        for seconds in [31.0, 32.0, 35.0, 59.0, 60.0] {
+            let revision = initial.revision;
+            let request = offline_macro_request(revision, seconds);
+            let mut legacy = initial.clone();
+            let legacy_result = advance_offline_macro_v1(&mut legacy, &request).unwrap();
+            let mut actual = initial.clone();
+            let result = advance_offline_candidate(&mut actual, &request).unwrap();
+            assert!(result.supported, "{seconds}: {:?}", result.reason);
+            if !legacy_result.supported {
+                transient_count += 1;
+                assert_eq!(legacy.summary().unwrap().canonical_sha256, source_hash);
+                assert_eq!(result.exact_scope, "offline-transient-exact");
+                assert_eq!(
+                    result.algorithm_version,
+                    Some(OFFLINE_TRANSIENT_EXACT_ALGORITHM_VERSION)
+                );
+                assert_eq!(result.exact_calibration_seconds, Some(seconds));
+                assert_eq!(result.approximated_seconds, Some(0.0));
+            } else {
+                assert_eq!(result.exact_scope, legacy_result.exact_scope);
+                assert_eq!(
+                    result.algorithm_version,
+                    Some(OFFLINE_MACRO_V1_ALGORITHM_VERSION)
+                );
+            }
+            let mut oracle = initial.clone();
+            assert!(
+                oracle
+                    .advance_exact(&exact_request(revision, seconds, seconds))
+                    .unwrap()
+                    .supported
+            );
+            assert_eq!(
+                actual.summary().unwrap().canonical_sha256,
+                oracle.summary().unwrap().canonical_sha256
+            );
+        }
+        assert!(
+            transient_count > 0,
+            "fixture must exercise a real rejected legacy macro"
+        );
+        assert_eq!(initial.summary().unwrap().canonical_sha256, source_hash);
+    }
+
+    #[test]
+    fn offline_candidate_exact_transient_preserves_admission_and_atomic_rejection() {
+        let initial = as_offline_fixture(productive_closed_recipe_macro_fixture(1.0));
+        for gate in [
+            "paused",
+            "time-warp",
+            "pending",
+            "wall",
+            "wrong-mode",
+            "revision",
+        ] {
+            let mut candidate = initial.clone();
+            let mut request = offline_macro_request(candidate.revision, 31.0);
+            match gate {
+                "paused" => candidate.base_value_mut()["paused"] = json!(true),
+                "time-warp" => candidate.base_value_mut()["timeWarp"]["enabled"] = json!(true),
+                "pending" => {
+                    candidate.base_value_mut()["timeWarp"]["pendingSimulationSeconds"] = json!(1)
+                }
+                "wall" => request.wall_seconds = 1.0,
+                "wrong-mode" => request.advance_mode = CoreAdvanceMode::Exact,
+                "revision" => request.base_revision += 1,
+                _ => unreachable!(),
+            }
+            let before = candidate.summary().unwrap();
+            let result = advance_offline_candidate(&mut candidate, &request);
+            if matches!(gate, "wrong-mode" | "revision") {
+                assert!(result.is_err(), "{gate}");
+            } else {
+                assert!(!result.unwrap().supported, "{gate}");
+            }
+            let after = candidate.summary().unwrap();
+            assert_eq!(after.canonical_sha256, before.canonical_sha256, "{gate}");
+            assert_eq!(after.revision, before.revision, "{gate}");
+        }
     }
 
     #[test]

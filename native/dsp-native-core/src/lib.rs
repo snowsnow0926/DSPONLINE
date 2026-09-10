@@ -87,6 +87,19 @@ pub fn fits_long_offline_candidate_budget(state: &CoreState, seconds: u64) -> bo
     pure_idle::fits_long_offline_candidate_budget(state, seconds)
 }
 
+/// Disposable startup candidate only. Durable offline operations must keep
+/// using `CoreState::advance` and their persisted macro algorithm identity.
+pub fn advance_offline_candidate(
+    state: &mut CoreState,
+    request: &CoreAdvanceRequest,
+) -> anyhow::Result<CoreAdvanceResult> {
+    pure_idle::advance_offline_candidate(state, request)
+}
+
+pub fn offline_transient_exact_algorithm_version() -> &'static str {
+    pure_idle::OFFLINE_TRANSIENT_EXACT_ALGORITHM_VERSION
+}
+
 pub use catalog::{
     BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,
     ItemDefinition, PlanetDefinition, ProliferatorDefinition, RecipeDefinition,

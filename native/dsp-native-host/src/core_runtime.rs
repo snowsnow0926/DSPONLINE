@@ -4994,15 +4994,24 @@ impl CoreRegistry {
             });
         }
         let mut candidate = source_state.into_owned();
-        let advance = candidate.advance(&CoreAdvanceRequest {
-            base_revision: source_summary.revision,
-            simulation_seconds: settled_seconds as f64,
-            wall_seconds: settled_seconds as f64,
-            advance_mode: CoreAdvanceMode::OfflineMacroV1,
-            include_diagnostics: true,
-        })?;
+        let advance = dsp_native_core::advance_offline_candidate(
+            &mut candidate,
+            &CoreAdvanceRequest {
+                base_revision: source_summary.revision,
+                simulation_seconds: settled_seconds as f64,
+                wall_seconds: settled_seconds as f64,
+                advance_mode: CoreAdvanceMode::OfflineMacroV1,
+                include_diagnostics: true,
+            },
+        )?;
         let complete_time_ledger = if settled_seconds <= 30 {
             advance.exact_scope == "pure-idle-bounded-exact"
+                && advance.exact_calibration_seconds == Some(settled_seconds as f64)
+                && advance.approximated_seconds == Some(0.0)
+        } else if advance.exact_scope == "offline-transient-exact" {
+            settled_seconds <= 60
+                && advance.algorithm_version
+                    == Some(dsp_native_core::offline_transient_exact_algorithm_version())
                 && advance.exact_calibration_seconds == Some(settled_seconds as f64)
                 && advance.approximated_seconds == Some(0.0)
         } else {
@@ -9397,7 +9406,7 @@ mod tests {
         let registry = CoreRegistry::default();
         let bytes = import_envelope();
         let files = offline_source_persistent_files(root.path());
-        for milliseconds in [0, 999, 31_000, 600_000, 28_800_000] {
+        for milliseconds in [0, 999, 31_000, 61_000, 600_000, 28_800_000] {
             let result = registry
                 .prepare_offline_source_export(
                     &store,
@@ -9406,6 +9415,22 @@ mod tests {
                     offline_source_request(&bytes, 42 + milliseconds),
                 )
                 .unwrap();
+            if milliseconds == 31_000 {
+                assert!(result.prepared, "{:?}", result.reason);
+                let advance = result.advance.unwrap();
+                assert_eq!(advance.exact_scope, "offline-transient-exact");
+                assert_eq!(
+                    advance.algorithm_version,
+                    Some(dsp_native_core::offline_transient_exact_algorithm_version())
+                );
+                assert_eq!(advance.exact_calibration_seconds, Some(31.0));
+                assert_eq!(advance.approximated_seconds, Some(0.0));
+                assert!(result.export.is_some());
+                assert!(result.candidate_summary.is_some());
+                assert_eq!(offline_source_persistent_files(root.path()), files);
+                std::fs::remove_file(root.path().join("exports/ephemeral-candidate.json")).unwrap();
+                continue;
+            }
             assert!(!result.prepared);
             assert_eq!(result.settled_seconds, milliseconds / 1_000);
             if milliseconds < 1_000 {
@@ -9497,7 +9522,7 @@ mod tests {
         let (root, store, registry, imported, _catalog) = offline_settlement_fixture();
         let source = store.recover("normal-main").unwrap().unwrap();
         let before = registry.status(&imported.session_id).unwrap();
-        for seconds in [31, 600, 28_800] {
+        for seconds in [61, 600, 28_800] {
             let result = registry
                 .prepare_offline_settlement_export(
                     &store,

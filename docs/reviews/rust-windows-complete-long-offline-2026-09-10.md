@@ -72,7 +72,11 @@ ASAR SHA-256：`c23063ad6af2ab50ae5658889f445d9f59bb57f98be5222c5a4ed7eba05a5980
 
 驱动首例 `public-long-packaged-infinite-600-complete-v1` 漏点长离线选择，等待 90 秒后失败，零 Native 请求；两次游戏均正常退出，源未变，守护 exit 1/无停止原因/94.28 秒。修正仅在驱动增加真实点击，不改游戏代码、测试时限或准入。最终 `probe-public-long-packaged-entry-v2.mjs` 六例成功记录及摘要见 `long-offline-package-audit-v1.json`；审计再次验证六份完整回执、两份包各 79 文件及 Host/助手字节相同。最终审计正常 exit 0，2.36 秒，最低可用 8,693,840 KiB。
 
-源码提交前 Skill、语法、377 条文档链接和 whitespace 通过，0 新缺失；既有 `PROJECT_STATUS` 的 1.0.46 缺失链接单列保留。本次包后记录只更新文档，与 `a96250b0` 的运行代码区分；新源码云端 Windows `34416081633` / CI `34416081653` 正在进行，当前已观察生产构建成功，完整结果待终态。
+源码提交前 Skill、语法、377 条文档链接和 whitespace 通过，0 新缺失；既有 `PROJECT_STATUS` 的 1.0.46 缺失链接单列保留。包后记录与 `a96250b0` 的运行代码区分。
+
+该源码云端已全部终态：[Windows `34416081633`](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34416081633) SUCCESS，正常核心 1,116/6 ignored、Host 272/4 ignored、两个入口各 3、Native 885/1 skip、游戏 3,210/39 skip，均零失败。完整签名、身份和上载步骤亦成功。不能据此继承给后续短瞬态新源码。
+
+[完整 CI `34416081653`](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34416081653) 构建、类型/单元、Server/Ops/Native SUCCESS；Linux 游戏 3,207/42 skip，Server 390/2 skip 加站点 4/4，Ops 60/2 skip，Native 868/18 skip。浏览器两片为 241+226 pass、11+22 skip、1+1 fail，另 1 flaky，即 **467 pass / 33 skip / 2 fail / 1 flaky**。失败仍为暂停画布峰值（833.3/816.7 ms，原门槛 <800）和冷菜单（708/757 ms，原门槛 ≤500）；手动挖矿供电冶炼重试后通过，计 flaky。全浏览器发布门禁未通过，没有调宽时限或性能阈值。
 
 上一提交 `3f1b37c76d0a6e942635a1b9820ecafa66d0b28b` 的云端现已全部终态：Windows run `34410009399` 成功，核心 1,116/6 ignored、Host 272/4 ignored、两个入口各 3、Native 879/1 skip、游戏 3,201/39 skip。CI run `34410009418` 的构建、类型/单元、Server/Ops/Native 成功；两片浏览器共 **466 pass / 33 skip / 4 fail / 0 flaky**。失败为手动挖矿供电冶炼、星图前置离线秒数、暂停帧峰值与冷菜单 500 ms 门槛。该提交不含本轮长离线修改，不能继承其通过。[Windows 作业](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34410009399) · [完整 CI](https://github.com/snowsnow0926/DSPONLINE/actions/runs/34410009418)
 

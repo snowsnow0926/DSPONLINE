@@ -997,6 +997,26 @@ test("offline candidate export binds source, one-shot advance, and envelope proo
     advance: { ...bounded.advance, exactCalibrationSeconds: 31 },
     export: { ...bounded.export, result: { ...bounded.export.result, savedAtMs: 32_000 } },
   }), /prepared binding is invalid/);
+  for (const seconds of [31, 32, 35, 60]) {
+    const transient = { ...bounded, settledSeconds: seconds, settledAtMs: 1_000 + seconds * 1_000,
+      advance: { ...bounded.advance, exactScope: "offline-transient-exact",
+        algorithmVersion: "native-offline-transient-exact-v1", exactCalibrationSeconds: seconds },
+      export: { ...bounded.export, result: { ...bounded.export.result, savedAtMs: 1_000 + seconds * 1_000 } } };
+    assert.equal(normalizeRendererNativeResult("coreOfflineCandidateExport", transient).prepared, true);
+    for (const change of [{ approximatedSeconds: 1 }, { exactCalibrationSeconds: seconds - 1 },
+      { algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity" }]) {
+      assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+        ...transient, advance: { ...transient.advance, ...change },
+      }), /prepared binding is invalid/);
+    }
+    for (const outside of [30, 61]) {
+      assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+        ...transient, settledSeconds: outside, settledAtMs: 1_000 + outside * 1_000,
+        advance: { ...transient.advance, exactCalibrationSeconds: outside },
+        export: { ...transient.export, result: { ...transient.export.result, savedAtMs: 1_000 + outside * 1_000 } },
+      }), /prepared binding is invalid/);
+    }
+  }
   const unavailable = {
     prepared: false, strategy: "macro-v1", sourceSavedAtMs: 1_000,
     settledAtMs: 32_000, settledSeconds: 31, sourceSummary,

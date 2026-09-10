@@ -8774,7 +8774,7 @@ function normalizeCoreAdvance(value) {
   const source = objectWithKeys(value, ["supported", "exactScope", "changed", "previousRevision", "revision"], ["reason", "algorithmVersion", "exactCalibrationSeconds", "approximatedSeconds", "beltScheduler", "summary"], "native core advance result");
   const result = {
     supported: boolean(source.supported, "native advance supported flag"),
-    exactScope: oneOf(source.exactScope, ["no-change", "clock-only", "simple-factory-v1", "pure-idle-bounded-exact", "pure-idle-conservative-v2", "pure-idle-macro-v10", "offline-macro-v1", "offline-state-proven", "offline-boundary-exact", "unsupported-domain"], "native advance exact scope"),
+    exactScope: oneOf(source.exactScope, ["no-change", "clock-only", "simple-factory-v1", "pure-idle-bounded-exact", "pure-idle-conservative-v2", "pure-idle-macro-v10", "offline-macro-v1", "offline-state-proven", "offline-boundary-exact", "offline-transient-exact", "unsupported-domain"], "native advance exact scope"),
     changed: boolean(source.changed, "native advance changed flag"),
     previousRevision: safeInteger(source.previousRevision, "native advance previous revision"),
     revision: safeInteger(source.revision, "native advance revision"),
@@ -8920,9 +8920,13 @@ function normalizeCoreOfflineCandidateExport(value) {
         result.advance.exactCalibrationSeconds === 30 && result.advance.approximatedSeconds === result.settledSeconds - 30 ||
       result.advance.exactScope === "offline-boundary-exact" &&
         result.advance.exactCalibrationSeconds === result.settledSeconds && result.advance.approximatedSeconds === 0);
+    const transientExact = result.settledSeconds >= 31 && result.settledSeconds <= 60 &&
+      result.advance?.exactScope === "offline-transient-exact" &&
+      result.advance.algorithmVersion === "native-offline-transient-exact-v1" &&
+      result.advance.exactCalibrationSeconds === result.settledSeconds && result.advance.approximatedSeconds === 0;
     if (result.settledSeconds < 1 || result.reason !== undefined || !result.advance || !result.export ||
         !result.candidateSummary || !result.advance.supported ||
-        (!boundedExact && !completeTail) ||
+        (!boundedExact && !completeTail && !transientExact) ||
         result.advance.previousRevision !== result.sourceSummary.revision ||
         result.advance.revision !== result.candidateSummary.revision ||
         result.export.mode !== "normal" ||

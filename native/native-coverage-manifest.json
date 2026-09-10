@@ -103,6 +103,7 @@
     "native-core-offline-complete-candidate-v1",
     "native-core-offline-macro-v1",
     "native-core-offline-runtime-source-export-v1",
+    "native-core-offline-transient-exact-v1",
     "native-core-operations-workspace-projection-v1",
     "native-core-orbital-contract-workspace-projection-v1",
     "native-core-player-authority-command-v1",

@@ -1,5 +1,7 @@
 # 系统架构
 
+> **短瞬态候选边界（2026-09-10，验证中）**：新增 `advance_offline_candidate` 仅供临时启动候选；旧宏观拒绝后，在 31–60 整秒及原成本/模式门槛内，从原状态执行真实 Exact 并通过完整结算证明。独立 `offline-transient-exact` / `native-offline-transient-exact-v1` 与 Host 能力、双端时间账及摘要校验同时成立才可采用。持久 OfflineMacroV1/WAL 不调用新入口；失败不发布候选或更改源。见[实现和验证范围](./reviews/rust-windows-short-transient-2026-09-10.md)。
+
 > **Windows 有界长离线候选（2026-09-10）**：Host 只把私有物理状态/历史证明均成功并通过最终结算证明的尾段标为 `offline-state-proven`；容量/矿量从真实前缀逐秒推进的尾段保留 `offline-boundary-exact`。main/renderer 同时核对 v3 算法、完整时间账本、源和候选摘要，长候选还需新 capability 与 8 小时/2,000 记录预算。成本准入不授予状态资格；通用宏观或冻结尾段不采用。a962 实包六组成功/取消、保存与重开已通过；源会话、检查点、WAL、存档版本和实时权威保持原合同，见[完整边界与验证](./reviews/rust-windows-complete-long-offline-2026-09-10.md)。
 
 > **Windows 安装程序身份（2026-09-10）**：packer 将源码 SHA/Build ID 嵌入自身 ASAR；main 使用 `original-fs` 读取容器、ASAR 接口读取成员，交叉核对 renderer 版本并分块计算 Host/ASAR 摘要。Host 从自己的 OS 可执行路径独立定位资源，锁定祖先和文件，从同一组句柄验证有界 ASAR 元数据、完整 UTF-8 与摘要；只读 `inspect-program` 不创建存档或模拟。两端输出九字段文件事实，未连接准入；内容/规则/矩阵、时效/撤销、生产者和其他可信上下文仍待实现，见[双端合同](./rust/windows-installed-program-identity.md)及[实际验证](./reviews/rust-windows-host-installed-program-2026-09-10.md)。

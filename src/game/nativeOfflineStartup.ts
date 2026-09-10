@@ -21,6 +21,8 @@ const NATIVE_OFFLINE_CANDIDATE_CAPABILITY =
   "native-core-offline-candidate-export-v1";
 const COMPLETE_CANDIDATE_CAPABILITY = "native-core-offline-complete-candidate-v1";
 const COMPLETE_OFFLINE_ALGORITHM = "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity";
+const TRANSIENT_EXACT_CAPABILITY = "native-core-offline-transient-exact-v1";
+const TRANSIENT_EXACT_ALGORITHM = "native-offline-transient-exact-v1";
 const MAX_LONG_OFFLINE_SECONDS = 8 * 60 * 60;
 const MAX_LONG_OFFLINE_RECORDS = 2_000;
 
@@ -260,7 +262,11 @@ export async function tryNativeOfflineStartupSettlement(input: {
           result.advance.approximatedSeconds === result.settledSeconds - 30 ||
         result.advance.exactScope === "offline-boundary-exact" && result.advance.exactCalibrationSeconds === result.settledSeconds &&
           result.advance.approximatedSeconds === 0);
-      if (!result.advance.supported || (!boundedExact && !completeTail) ||
+      const transientExact = hasCompleteCandidate && status.capabilities.includes(TRANSIENT_EXACT_CAPABILITY) &&
+        result.settledSeconds >= 31 && result.settledSeconds <= 60 &&
+        result.advance.exactScope === "offline-transient-exact" && result.advance.algorithmVersion === TRANSIENT_EXACT_ALGORITHM &&
+        result.advance.exactCalibrationSeconds === result.settledSeconds && result.advance.approximatedSeconds === 0;
+      if (!result.advance.supported || (!boundedExact && !completeTail && !transientExact) ||
           result.sourceSavedAtMs !== loaded.savedAt || result.settledSeconds < 1 ||
           result.settledSeconds > maximumOfflineSeconds ||
           result.settledAtMs !== result.sourceSavedAtMs + result.settledSeconds * 1_000 ||

@@ -1421,7 +1421,7 @@ test("real Rust host prepares a read-only offline candidate export without advan
   assert.equal(sourceAfter.domainSha256, sourceBefore.domainSha256);
   await assertSourceUnchanged();
 
-  for (const seconds of [31, 600, 28_800]) {
+  for (const seconds of [61, 600, 28_800]) {
     await t.test(`rejects ${seconds} seconds without exporting or changing source checkpoint, WAL or session`, async () => {
       const rejectedExportId = `offlinecandidaterejected${seconds}`;
       const rejected = await registry.prepareOfflineSettlementExport(
@@ -1540,31 +1540,21 @@ test("real Rust host computes a temporary runtime source without native checkpoi
   };
   for (const variant of ["infinite", "finite-reserve", "quantum-capacity"]) {
     const state = fixture.createPublicCatalogOfflineQualificationFixture(variant);
-    for (const seconds of [1, 5, 30, 31, 600]) {
-      // At 31s this almost-full quantum chain changes physical phase inside
-      // the 30-step proof probe. It has no steady-tail receipt; the existing
-      // JS path must remain responsible until that transient is qualified.
-      const unprovedTransient = variant === "quantum-capacity" && seconds === 31;
-      await t.test(unprovedTransient ? "quantum-capacity 31s rejects its unproved transient without publishing" :
-        `${variant} ${seconds}s matches the complete JavaScript state`, async () => {
+    for (const seconds of [1, 5, 30, 31, 32, 35, 59, 60, 61, 600]) {
+      const transientExact = variant === "quantum-capacity" && [31, 32, 35].includes(seconds);
+      await t.test(`${variant} ${seconds}s matches the complete JavaScript state`, async () => {
         const request = createRequest(state, seconds);
         const response = await client.request(request);
         const result = normalizeRendererNativeResult("coreOfflineCandidateExport", response);
-        if (unprovedTransient) {
-          assert.equal(result.prepared, false);
-          assert.equal(result.settledSeconds, seconds);
-          assert.equal(result.advance.supported, false);
-          assert.match(response.reason, /offline-state-proof-rejected: offline flow has no one-second physical steady state/);
-          assert.equal(result.reason, "native-domain-unavailable");
-          assert.equal(Object.hasOwn(result, "export"), false);
-          assert.equal(Object.hasOwn(result, "candidateSummary"), false);
-          assert.equal(fs.existsSync(path.join(nativeRoot, "exports", `${request.request.exportId}.json`)), false);
-          await unchanged(request.request.sourceSha256);
-          return;
-        }
         assert.equal(result.prepared, true, response.reason);
         assert.equal(result.settledSeconds, seconds);
-        if (seconds > 30) {
+        if (transientExact) {
+          assert.ok(hello.capabilities.includes("native-core-offline-transient-exact-v1"));
+          assert.equal(result.advance.exactScope, "offline-transient-exact");
+          assert.equal(result.advance.algorithmVersion, "native-offline-transient-exact-v1");
+          assert.equal(result.advance.exactCalibrationSeconds, seconds);
+          assert.equal(result.advance.approximatedSeconds, 0);
+        } else if (seconds > 30) {
           assert.equal(result.advance.algorithmVersion, "native-offline-macro-v1-closed-ledger-one-shot-v3-state-parity");
           assert.ok(["offline-state-proven", "offline-boundary-exact"].includes(result.advance.exactScope));
           assert.equal(result.advance.exactCalibrationSeconds + result.advance.approximatedSeconds, seconds);

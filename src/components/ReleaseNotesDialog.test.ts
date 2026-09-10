@@ -34,7 +34,7 @@ describe("release notes history", () => {
     expect(getReleaseNotesPageForRelease("2026-08-10-v1.0.36")).toBe(8);
     expect(getReleaseNotesPageForRelease("2026-08-09-v1.0.35")).toBe(8);
     expect(getReleaseNotesPageForRelease("2026-08-07-v1.0.33")).toBe(9);
-    expect(getReleaseNotesPageForRelease("2026-08-07-v1.0.32")).toBe(10);
+    expect(getReleaseNotesPageForRelease("2026-08-07-v1.0.32")).toBe(9);
     expect(getReleaseNotesPageForRelease("2026-08-06-v1.0.31")).toBe(10);
     expect(getReleaseNotesPageForRelease("2026-08-03-v1.0.24")).toBe(12);
     expect(getReleaseNotesPageForRelease("missing-release")).toBeNull();

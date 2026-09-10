@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> **当前正式下载（2026-09-08）**：Android stable 已发布 `1.2.7 / 1002007`（`cn.dsponline.network`），沿用历史证书，v2/v3、zipalign、APK/AAB 证书连续性和公网 APK 完整哈希通过，minimumSupportedVersionCode 保持 1000002。共享保存、导入及挂机恢复修复已包含；正式 APK 的模拟器保存/后台/重开通过，实体设备及最终直接从 1.2.6 升级仍未验证。Windows stable 保持 1.2.6 `NotSigned`；下方 1.2.7 Windows 包是开发候选。Rust 跨端接入留待后续，详情见 [1.2.7 发布记录](./releases/1.2.7.md)。
+
 > **1.2.7 第三轮本地验证候选（2026-09-07）**：目录打包生成内部 `desktop-build-evidence.json`，绑定源码 SHA、Build ID、edition/channel 及 app.asar、Host 和目录文件摘要；正式收集入口进一步验证安装器、YAML 和 feed 引用。`npm run test:desktop-package` 先验证 clean source 对应的离线性能包，缺包/错包退出 2，并为每次运行建立独立证据目录。该内部清单不是签名或发布许可；冻结新包 1.2.7+27c4f15fd621 的真实桌面旅程已 8/8 通过，见 [第三轮开发记录](./reviews/1.2.7-round3-development-2026-09-07.md)。
 
 > **Campaign / Galaxy 原生玩家壳边界（2026-09-01，开发候选）**：当前 Windows Host 新增 `native-core-campaign-workspace-projection-v1` 与 `native-core-galaxy-account-workspace-projection-v1` capability。preload 只接受 exact-key `{sessionId,runId,expectedRevision,expectedRegistryFingerprint}`；main 只把请求路由到当前 normal-main 玩家权威 broker，不允许回落到 renderer shadow 会话。返回分别受 256 KiB 与 64 KiB 硬预算，renderer boundary 拒绝截断、额外键、重复 ID、计数漂移和 lineage 漂移。
@@ -32,7 +34,7 @@
 > 当前稳定版 Windows 包名：`com.dspidle.network`；本工作树性能开发版使用上方独立身份。
 > Android applicationId：`cn.dsponline.network`
 > 1.2.6 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；产率复制终端直结和星球工厂重置不改变旧档迁移边界。
-> 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
+> 公开下载入口：`https://download.dsponline.cn/`，2026-09-08 已迁至新上海，安装包与稳定清单保持 1.2.6，文件完整哈希和 Range 206 复验通过；不消耗香港游戏节点流量。主机与后续运维入口见 [上海迁移记录](./releases/ops-shanghai-vps-migration-2026-09-08.md)。
 
 > 冻结 APK：5,394,620 B，SHA-256 `671a6acb3579c175fc8ea87d8e4f921f5f63f9c36116956e9970a0c187367886`；AAB：5,183,622 B，SHA-256 `7f422c4df00ef56b05d70ff28a6eafd0f657751ab5c813c6af1431171e0ea0e1`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；实体 Android 设备门禁由用户只针对本 Release ID 明确豁免，未创建新证书。
 
@@ -213,15 +215,3 @@ node scripts/create-native-update-manifests.mjs `
 - GitHub Android/Desktop Release 工作流已具备签名门禁，但 GitHub Actions Secrets 尚未配置；本机 Android SDK 和长期 keystore 已恢复并记录在受保护 vault 中。后续配置 CI 时只能导入同一 Android 密钥，不能新建证书替代覆盖升级链。Windows 继续沿用历史未签名测试包策略。
 - Android 系统浏览器安装 APK 时，玩家设备可能要求允许该来源安装应用；正式商店分发可作为后续渠道，但不改变包名和签名连续性要求。
 - Windows 可信代码签名、iOS 壳层、App Store/Google Play 发布、崩溃收集和物理 Android/iPhone 30 分钟温度耗电测试仍在后续范围。
-
-## 2026-09-09 Android 1.2.8 cloud configuration hotfix
-
-The protected official signing helper now sets `DSP_ANDROID_BUILD_PROFILE=official`.
-Its build requires explicit HTTPS `DSP_ANDROID_API_BASE_URL`,
-`DSP_ANDROID_UPDATE_BASE_URL` and origin-only `DSP_ANDROID_PUBLIC_ORIGIN`.
-Missing endpoints fail before compilation; the completed JavaScript must contain
-all three configured addresses. Community offline builds retain their existing default.
-The candidate is Android-only, version 1.2.8 / 1002008, based on the released
-1.2.7 source plus the approved Hong Kong historical display adjustment.
-It does not change app identity, storage origin, save format or signing identity.
-Publication and device evidence must be recorded separately after verification.

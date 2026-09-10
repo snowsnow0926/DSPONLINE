@@ -30,9 +30,9 @@ jobs:
       - run: npm run licenses:check
       - run: npm run typecheck
       - run: npm run native:build-host
-      # Vitest 并行试跑（Ubuntu）：若出现 OOM/稳定性问题，回退为 --maxWorkers=1。
-      # 本地 Windows 仍保持 maxWorkers=1（vitest.config.ts），两者不冲突。
-      - run: npm test -- --maxWorkers=4
+      # Full simulation fixtures share a constrained runner; preserve their
+      # original timing thresholds and serialize file workers.
+      - run: npm test -- --maxWorkers=1
 
   server-ops-native:
     name: Server + Ops + Native
@@ -51,6 +51,12 @@ jobs:
       - run: npm ci
       - run: npm --prefix server ci
       - run: npm run test:server
+      - name: Provide the production Node entry point for Linux service tests
+        run: |
+          if [ ! -e /usr/bin/node ]; then
+            sudo ln -s "$(command -v node)" /usr/bin/node
+          fi
+          /usr/bin/node --version
       - run: npm run test:ops
       - run: npm run test:native-core:serial
       - run: npm run native:build-host
@@ -83,6 +89,7 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
+      - run: npm --prefix server ci
       - name: Cache Playwright browsers
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:
@@ -120,6 +127,7 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
+      - run: npm --prefix server ci
       - name: Cache Playwright browsers
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
         with:

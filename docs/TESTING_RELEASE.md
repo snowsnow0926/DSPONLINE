@@ -1,5 +1,17 @@
 # 测试与发布基线
 
+> **1.2.7 最终验收与发布（2026-09-08）**：冻结 `dab2ff5066b7` 的本地单元 **3,137/35 跳过/0 失败**，完整 Chromium **451/33 跳过/0 失败/0 flaky**，Chrome/Edge 各 30 分钟保存与重载通过；停止恢复 9/9、大档派生场景、旧 API 合成兼容 11 项、双站切换及 PWA 根缓存隔离通过。云端 CI 的失败记录保留，不标成全绿；Android 为模拟器多候选升级链，未验证实体设备及最终直接升级；8 个下载文件完整公网字节相同，未变 Windows 安装器完整公网传输超时，服务器完整哈希和公网三处 Range 通过。不可变 bundle 和实际线上证据见 [1.2.7 发布记录](./releases/1.2.7.md)。下方未完成事项是先前时点的记录。
+
+> 2026-09-08 上海迁机补充：恢复演练需区分正常过期会话清理与保护数据丢失。新上海的独立演练校验器仅允许确认已经过期的原会话被清理，剩余会话身份/到期时间以及账号、存档等保护计数继续严格检查；本地与 Linux 合成验证覆盖过期、有效、有效会话丢失、身份变化、异常新增、账号丢失及备份篡改。完整实库复跑和现役 helper/drop-in 边界以 [上海迁移记录](./releases/ops-shanghai-vps-migration-2026-09-08.md) 为准，不能把该专项当作一次完整游戏发布测试。
+
+> **1.2.7 测试夹具修正（2026-09-08，未发布）**：原生保存预算测试改用当前系统的绝对路径，修复 Linux 拒绝 Windows 路径；Windows Job Object 超时清理夹具为冷 PowerShell 启动及 Add-Type 编译保留 8 秒启动窗口，仍检查真实超时、6 个子进程全部退出及私有目录清理。两文件本机 **48/48** 通过。游戏与发布制品未变化。云端字节比较复验通过，原有限矿脉 2,000 ms 检查实测 2,119.9 ms；正在同一 runner 对照线上 1.2.6 的原断言以区分机器耗时和回归，未放宽阈值。原 CI 浏览器两分片分别 149/11/66 失败/21 flaky、182/22/25 失败/8 flaky，本机完整同断言复验尚在运行。
+
+> 串行云端全量为 **3,134 通过 / 36 跳过 / 2 失败**：2 MiB 字节相等断言的通用对象遍历超时，以及原 2,000 ms 阈值实测 2,095.6 ms。字节断言改用完整 Buffer 字节及长度比较，覆盖不变；两文件在独立进程复验，保留原耗时阈值。此提交仅影响测试与 CI，冻结游戏制品仍为 `dab2ff5066b7`；复验结果待完成。
+
+> **1.2.7 CI 并发复验（2026-09-08，未发布）**：云端 4 worker 单元测试出现 11 项超时及 1 项原有耗时阈值失败；相同源码本地单 worker 全量通过。CI 改为单 worker，保持所有断言、超时和性能阈值；独立验证分支执行串行全量，避免中断正在执行的浏览器分片。临时分支触发文件在收口时移除。原失败记录保留，串行结果仍待实际完成。
+
+> **1.2.7 云端回归环境补齐（2026-09-08，未发布）**：草稿 PR 的首轮 CI 中，两个 E2E 分片在收集用例时缺少服务端 `better-sqlite3`，Linux 运维检查遇到 `/usr/bin/node` 缺失及入口脚本不可执行。两个分片增加服务端锁定安装；Linux job 仅在路径不存在时为已安装 Node 建立预期入口；`api-active-entry.sh` 与 `api-writer-lock.sh` 的 Git 执行位恢复为 100755，正文不变。游戏 runtime 继续冻结于 `dab2ff5066b7bc37bfbaa534628e1f7bc51bdceb`，CI 修订只改变工作流、脚本权限元数据及本说明，不重建或替换该 runtime 制品；云端实际复验结果待完成。
+
 > **1.2.7 完整检查点内存补修（2026-09-08，未发布）**：ae5b 生产 Web 的 Chrome 30 分钟及最终保存通过，Edge 在 30 分钟后的手动保存阶段发生 Worker OOM，旧主档有效，新主档未提交；原长测记录保留为失败，未执行生产切换。分批 transfer 编码补修已通过协议 **13/13**、完整 Vitest **3,137/35/0** 和类型检查；126.5 MB 公开合成输出与旧编码逐字相同。新制品完整浏览器及 Chrome/Edge 长测仍须重做，不复用旧制品结果；详见[补修与验证记录](./reviews/1.2.7-checkpoint-memory-2026-09-08.md)。
 
 > **1.2.7 Rust 完整状态候选新鲜证据（2026-09-07）**：运行/桌面驱动 `e9db8de40fec` 的完整 Rust **1,343 通过 / 3 ignored**、Vitest **3,117/35**、Native Node **628/1**，类型、fmt、strict Clippy、Web/Desktop 构建及预算/边界/许可证检查通过。最终 Host 公共专项 **14/14**（含 12 项完整状态），性能专项两时长各三对全状态相同，Windows 实包 **8/8**，ZIP 独立解压后 75 件制品摘要通过。首次 Chromium **360/27/82 失败**，原样单 worker **75/7 失败**，Web 驱动 `268faa9a` 修正保存完成屏障和报告遮挡后原 7 项 **7/7**；保留所有原断言及首次日志，不伪称一次全绿。增量验证、精确来源和制品见 [阶段记录](./reviews/1.2.7-rust-offline-state-parity-2026-09-07.md)。`NotSigned` 离线开发候选，未公开发布；旧门禁和未跑范围不转记为当前通过。
@@ -1396,7 +1408,3 @@ production-preview Chrome 的匿名活动行星为 106 节点，默认与 expand
 匿名 byte-shape 性能夹具分别为 31,142,707 和 62,285,414 bytes；后者低于 64 MiB 云正文边界，但两者只用于 catalog/惰性读取性能，不是第 54 节的玩家同形容量证据。Chromium 各冷重载五轮并等待真实“继续游戏”摘要可见的合并 p95 为 220 ms：catalog-backed 两种尺寸均为 payload get 0、`getAll` 0、主线程大正文 `JSON.parse` 0、raw cache 0；35 MiB legacy 建索引为严格串行两次 payload get（Worker 输入与提交前精确复核）、主线程大正文解析 0、同步 fallback 0。损坏 primary 只读一次后按原顺序读取 backup 并选中正确状态；冷启动槽位/快照摘要不读正文，玩家选择后各只读对应 payload 一次且 raw cache 仍为 0。
 
 开发侧门禁为 catalog/store/preview/mode/transfer Vitest 31/31、完整 storage/mode Vitest 107/107、catalog Chromium 4/4、既有 IndexedDB v1→v2、lease/fencing/CAS/conflict/35 MiB readback Chromium 18/18、速通云恢复 7/7，以及既有快照批量管理 1/1；typecheck、启动长任务门禁与生产 build 全部通过。catalog key 明确位于 1.0.43 精确 payload key 命名空间之外；回滚客户端的旧 `isSaveKey` 对 primary/backup/slot/snapshot/conflict catalog 均返回 false，旧版不会将 side-record 误当存档、槽位、快照或正文缓存。最终菜单静态闭包为 267,852 gzip bytes，低于 286,720-byte 预算 18,868 bytes；无 budget 放宽。测试仅使用匿名运行时夹具和浏览器临时 IndexedDB，未部署、未写入玩家数据。
-
-Android configuration regression coverage: `node --test scripts/native-build-config.test.mjs`.
-It checks missing and malformed official endpoints, offline/desktop isolation,
-release profile propagation, and rejection of bundles missing the API/update URLs.

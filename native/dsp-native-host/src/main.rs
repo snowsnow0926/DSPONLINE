@@ -1050,6 +1050,25 @@ fn main() {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     if arguments
         .first()
+        .is_some_and(|a| a == "inspect-validation-session")
+    {
+        let snapshot = arguments
+            .get(1)
+            .and_then(|id| id.to_str())
+            .filter(|_| arguments.len() == 2)
+            .ok_or(dsp_native_host::validation_session::ValidationSessionError)
+            .and_then(dsp_native_host::validation_session::inspect_validation_session);
+        match snapshot {
+            Ok(snapshot) => println!("{}", serde_json::to_string(&snapshot).unwrap()),
+            Err(_) => {
+                eprintln!("dsp-native-host: validation-session-rejected");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if arguments
+        .first()
         .is_some_and(|a| a == "inspect-validation-candidate")
     {
         let candidate = if arguments.len() == 1 {

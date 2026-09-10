@@ -127,7 +127,7 @@ pub(crate) mod windows {
     use windows_sys::Win32::Security::WinTrust::*;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
         GetFileInformationByHandle,
     };
     use windows_sys::Win32::System::LibraryLoader::{
@@ -299,7 +299,10 @@ pub(crate) mod windows {
                 _ => return Err(CatalogVerificationError::UnsafePath),
             }
             let directory = OpenOptions::new()
-                .access_mode(FILE_READ_ATTRIBUTES)
+                // Attribute-only handles do not participate in the sharing
+                // checks needed to pin an empty directory against rename.
+                // Directory read access makes the deny-delete share effective.
+                .access_mode(FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
                 .share_mode(FILE_SHARE_READ)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                 .open(&path)?;
@@ -556,6 +559,20 @@ pub(crate) mod windows {
             drop(locks);
             std::fs::write(path, b"replacement").unwrap();
             std::fs::rename(root, temp.path().join("moved")).unwrap();
+        }
+
+        #[test]
+        fn directory_locks_block_rename_before_any_member_is_opened() {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("empty");
+            std::fs::create_dir(&root).unwrap();
+            let first = lock_directories(&root).unwrap();
+            let second = lock_directories(&root).unwrap();
+            assert!(std::fs::rename(&root, temp.path().join("moved")).is_err());
+            drop(first);
+            assert!(std::fs::rename(&root, temp.path().join("moved")).is_err());
+            drop(second);
+            std::fs::rename(&root, temp.path().join("moved")).unwrap();
         }
 
         #[test]

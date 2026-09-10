@@ -132,6 +132,28 @@ fn run(reader: impl Read, mut writer: impl Write) -> Result<(), ()> {
 }
 
 fn main() -> ExitCode {
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|a| a == "inspect-validation-session")
+    {
+        let snapshot = arguments
+            .get(1)
+            .and_then(|id| id.to_str())
+            .filter(|_| arguments.len() == 2)
+            .ok_or(dsp_native_host::validation_session::ValidationSessionError)
+            .and_then(dsp_native_host::validation_session::inspect_validation_session);
+        return match snapshot {
+            Ok(snapshot) => {
+                println!("{}", serde_json::to_string(&snapshot).unwrap());
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!("VALIDATION_SESSION_REJECTED");
+                ExitCode::from(2)
+            }
+        };
+    }
     if std::env::args_os().len() != 1
         || run(std::io::stdin().lock(), std::io::stdout().lock()).is_err()
     {

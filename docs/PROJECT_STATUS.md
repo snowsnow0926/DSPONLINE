@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows 验证会话身份（2026-09-10，未发布）**：新增固定公开 v47 夹具、main 隔离目录准备器、Windows 目录/文件锁，以及实际 Host/main 独立助手会话身份检查。复制目录、更换 profile、夹具变化和路径重定向不能沿用原身份；只读快照不授予运行权威，持续租约与实际接管仍待完成。执行证据与限制见[本批记录](./reviews/rust-windows-validation-session-2026-09-10.md)，完整 Goal active。下方是此前候选的历史证据。
+
 > **Windows Rust 十二字段候选已通过实包核对（2026-09-10，未发布）**：运行源码 `0d7e1e01`，main/Host 独立计算程序、目录、规则和基础矩阵身份。最终 Native 931/1 skip、相关检查 161、前端摘要 7/7、类型通过；Rust 源码/二进制未变，保留同批 Host 278/4 ignored、两入口各 3 及严格 Clippy 证据。新冻结包 76 制品/79 文件，打包前 115/115，实际三方十二字段相同、零窗口/聚焦/弹窗、正常退出；初版定位失败与修复记录保留。矩阵仍为 TEST_ONLY 基础合同，完整可信上下文和实时权威尚未开放，Goal active；见[本批记录](./reviews/rust-windows-validation-candidate-2026-09-10.md)。以下保留此前证据。
 
 > **Windows Rust 独立内置目录已通过实包核对（2026-09-10，未发布）**：源码 `441ac195` 从真实前端定义生成公开目录，分别编入 Host 和 ASAR；双端计算完整 canonical 摘要，构建拒绝过期目录。完整 Host 275/4 ignored、两入口各 3、Native 915/1 skip、前端目录/摘要 7/7、严格检查和类型通过。新冻结包 76 制品/79 文件、NotSigned，main/Host/父进程程序及目录一致，零窗口/焦点/弹窗、正常退出；原 68 冻结文件未变。匹配器尚未接入玩家准入，实时权威仍关闭，完整 Goal active；见[本批记录](./reviews/rust-windows-builtin-catalog-2026-09-10.md)。以下保留此前实包与历史验证。

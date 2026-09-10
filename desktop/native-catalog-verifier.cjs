@@ -189,4 +189,5 @@ function createPackagedWindowsCatalogVerifier({ resourcesPath = process.resource
     executableSha256: metadata.nativeCatalogVerifierSha256, publisherCertificateSha256 });
 }
 
-module.exports = { createWindowsCatalogVerifier, createPackagedWindowsCatalogVerifier, readAuthenticatedCatalogMember };
+module.exports = { createWindowsCatalogVerifier, createPackagedWindowsCatalogVerifier, readAuthenticatedCatalogMember,
+  validateCatalogVerifierExecutable: validateExecutable };

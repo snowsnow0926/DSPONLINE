@@ -154,6 +154,7 @@ function identityBuilderArgs(identity, targetOutputDirectory) {
 async function main() {
   if (!["pack", "dist", "release"].includes(mode)) throw new Error(`Unsupported desktop build mode: ${mode}`);
   await (await import("../scripts/native-builtin-catalog.mjs")).verifyBuiltinCatalog();
+  await (await import("../scripts/native-validation-fixture.mjs")).verifyValidationFixture();
   require("./native-validation-candidate.cjs").collectValidationMatrixIdentity();
   await (await import("../scripts/build-desktop-preload.mjs")).buildDesktopPreload();
   // Freeze the helper identity before either builder attempt. It is embedded

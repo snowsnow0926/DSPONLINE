@@ -1048,6 +1048,29 @@ fn main() {
     // Readonly inspection starts from this executable's OS path. It opens no
     // SaveStore or simulation registry and accepts no caller installation root.
     let arguments: Vec<_> = env::args_os().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|a| a == "inspect-builtin-catalog")
+    {
+        match arguments.len() == 1 {
+            true => match dsp_native_host::builtin_catalog::builtin_catalog_identity() {
+                Ok(content) => println!(
+                    "{}",
+                    json!({"schemaVersion": 1,
+                    "kind": "builtin-catalog-identity-v1", "content": content, "authorityEligible": false})
+                ),
+                Err(_) => {
+                    eprintln!("dsp-native-host: builtin-catalog-invalid");
+                    std::process::exit(1);
+                }
+            },
+            false => {
+                eprintln!("dsp-native-host: builtin-catalog-arguments");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if arguments.first().is_some_and(|a| a == "inspect-program") {
         let identity = if arguments.len() == 1 {
             dsp_native_host::installed_program::collect_installed_windows_program_identity()

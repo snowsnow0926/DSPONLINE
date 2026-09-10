@@ -1,6 +1,10 @@
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
+import { verifyBuiltinCatalog } from "./native-builtin-catalog.mjs";
+
+// A stale generated directory must not be silently shipped or regenerated.
+await verifyBuiltinCatalog();
 
 const manifestPath = resolve("native", "Cargo.toml");
 const binaryPaths = ["dsp-native-host", "dsp-catalog-verifier"].map((name) =>

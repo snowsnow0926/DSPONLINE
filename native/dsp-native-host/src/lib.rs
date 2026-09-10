@@ -1,3 +1,4 @@
+pub mod builtin_catalog;
 pub mod core_runtime;
 mod disk_budget;
 pub mod exact_realtime_lease;

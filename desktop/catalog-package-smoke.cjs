@@ -26,9 +26,9 @@ process.on("uncaughtException", fail);
 process.on("unhandledRejection", fail);
 dialog.showErrorBox = () => fail(new Error("Unexpected native error dialog"));
 
-async function inspectInstalledHost(resources, expected) {
+async function inspectInstalledHost(resources, expected, command = "inspect-program") {
   const result = await new Promise((resolve, reject) => {
-    const child = spawn(path.join(resources, "native", "dsp-native-host.exe"), ["inspect-program"], {
+    const child = spawn(path.join(resources, "native", "dsp-native-host.exe"), [command], {
       cwd: resources, windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"],
       env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR },
     });
@@ -53,9 +53,12 @@ async function inspectInstalledHost(resources, expected) {
     });
   });
   const receipt = JSON.parse(result);
-  if (JSON.stringify(receipt) + "\n" !== result || !isDeepStrictEqual(receipt, {
-    schemaVersion: 1, kind: "installed-program-identity-v1", program: expected, authorityEligible: false,
-  })) throw new Error("Independent installed Host identity differs from main");
+  const expectedReceipt = command === "inspect-program"
+    ? { schemaVersion: 1, kind: "installed-program-identity-v1", program: expected, authorityEligible: false }
+    : { schemaVersion: 1, kind: "builtin-catalog-identity-v1", content: expected, authorityEligible: false };
+  if (JSON.stringify(receipt) + "\n" !== result || !isDeepStrictEqual(receipt, expectedReceipt)) {
+    throw new Error("Independent installed Host identity differs from main");
+  }
   return receipt;
 }
 
@@ -87,6 +90,9 @@ async function run() {
   const { collectPackagedWindowsProgramIdentity } = require(path.join(resources, "app.asar", "desktop", "native-installed-program.cjs"));
   const programIdentity = await collectPackagedWindowsProgramIdentity({ resourcesPath: resources });
   const hostProgramIdentity = await inspectInstalledHost(resources, programIdentity);
+  const { collectBuiltinCatalogIdentity } = require(path.join(resources, "app.asar", "desktop", "native-builtin-catalog.cjs"));
+  const builtinContentIdentity = collectBuiltinCatalogIdentity();
+  const hostBuiltinContentIdentity = await inspectInstalledHost(resources, builtinContentIdentity, "inspect-builtin-catalog");
   // Electron's real ASAR loader supplies this module and its own package.json.
   const modulePath = path.join(resources, "app.asar", "desktop", "native-catalog-verifier.cjs");
   const { createPackagedWindowsCatalogVerifier } = require(modulePath);
@@ -98,7 +104,7 @@ async function run() {
   if (audit.windowsCreated !== 0 || audit.initiallyVisible !== 0 || audit.showEvents !== 0 || audit.focusEvents !== 0
       || Object.keys(audit.dialogs).length) throw new Error("Package probe violated its no-window contract");
   finish({ status: "PASS", kind: "CATALOG_PACKAGE_SMOKE", actualHelperSha256, rejection, programIdentity, hostProgramIdentity,
-    authorityEligible: false, backgroundAudit: audit }, 0);
+    builtinContentIdentity, hostBuiltinContentIdentity, authorityEligible: false, backgroundAudit: audit }, 0);
 }
 
 setTimeout(() => fail(new Error("Package probe deadline exceeded")), 30_000).unref();

@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> **平台投入策略（2026-09-11）**：按用户决定，网页版/PWA 为主产品，Android 复用共享玩法、画布与优化并独立验证壳层；Windows 保留既有代码、下载及必要兼容修复，完整原生接管不再作为当前主线目标。Rust 历史候选与验证资产保留，不自动重启其开发或打包循环。详见 [网页版优先计划](./WEB_FIRST_DEVELOPMENT_PLAN_2026-09-11.md)。以下已发布版本事实不因策略调整而改变。
+
 > **当前正式下载（2026-09-11）**：Android stable 为 **1.2.9 / 1002009**，包名 `cn.dsponline.network`，APK 5,672,736 B、SHA-256 `06d0043a542faab0f7e3e2be2fad18b7d2da43c672e66da88ccf7255fe953bf7`；APK v2/v3、zipalign 与 APK/AAB 长期证书连续性通过，最低支持代码仍为 1000002。正式 1.2.8 直接覆盖、旧档进入、新进度明确保存与冷重开通过，设备为后台匿名模拟器，实体手机和长时门禁未计作通过。下载 current 为 `download-site-1.2.9-0521eb63f179-r2`，previous 为 1.2.8；Windows 安装器/4 个更新文件保持 1.2.6 原字节，API 也保持 1.2.6。网页与安卓使用共享优化，不包含 Rust 跨端接入。见 [1.2.9 发布记录](./releases/1.2.9.md)；以下带日期的旧包与旧门禁均为历史。
 
 > **当前正式下载（2026-09-08）**：Android stable 已发布 `1.2.7 / 1002007`（`cn.dsponline.network`），沿用历史证书，v2/v3、zipalign、APK/AAB 证书连续性和公网 APK 完整哈希通过，minimumSupportedVersionCode 保持 1000002。共享保存、导入及挂机恢复修复已包含；正式 APK 的模拟器保存/后台/重开通过，实体设备及最终直接从 1.2.6 升级仍未验证。Windows stable 保持 1.2.6 `NotSigned`；下方 1.2.7 Windows 包是开发候选。Rust 跨端接入留待后续，详情见 [1.2.7 发布记录](./releases/1.2.7.md)。

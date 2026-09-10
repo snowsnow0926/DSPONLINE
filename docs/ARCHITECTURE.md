@@ -1,6 +1,6 @@
 # 系统架构
 
-> **Host 请求处理共用实现（2026-09-10）**：rpc.rs 统一普通 CLI 与库测试进程的协议处理、启动恢复和存储生命周期，main 保留入口参数与只读检查；请求分派和错误编码语义不变。只有 cfg(test) 模块可合成授权跑实际 RPC，普通 serve(root) 不接受资格布尔值或测试参数。桌面连接区分 shutdown 回复和 close，在五秒期限内等待正常关闭，强制终止仍须确认；未确认的连接禁止重启。见[当前报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)。
+> **Rust 物品选择与数值语义（2026-09-10）**：entityLogisticsItem 提交实体/物品 ID，与配方命令共用 Rust 退款、拆线和持久回放；同时重现 JS 状态拷贝的空映射初始化和退款前行星托盘快照。Native 配方目录保留游戏定义顺序，安全整数按数值校验，接受整数形式的浮点表示并拒绝小数和超限。普通 Host 与测试进程仍共用 RPC 实现，测试授权不能启用玩家接管；完整边界见[当前报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)。
 
 > **main runtime 终止屏障（2026-09-10）**：shutdown 为终态，迟到 transition 不得恢复 active；registry 调用在真实派发前统一检查停止标记。准备/激活、恢复及历史回复更新前检查，已派发持久操作保留 Rust 恢复权威。会话 broker 从真实 token 提供 stop-only AbortSignal，runtime 可订阅并立即取消时钟/拒绝后续操作；实际准入、云隔离与 profile 切换仍未启用，见[修复与证据](./reviews/rust-windows-runtime-lifetime-2026-09-10.md)。
 

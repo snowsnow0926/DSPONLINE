@@ -8,7 +8,17 @@ import { Transform } from "node:stream";
 import { expect, it } from "vitest";
 import { catalog, runtime as content, createPublicCatalogOfflineQualificationFixture } from "../../tests/fixtures/rust-offline-performance";
 import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
-import { advanceSimulationBudget, placeBuilding } from "./engine";
+import { advanceSimulationBudget, placeBuilding, connectBeltWithResult, setEntityRecipe, setLogisticsItem,
+  selectTechnology, pauseCurrentResearch, resumePausedResearch, moveTrayItemToEntity } from "./engine";
+import { createNativeProjectedOrdinaryBuildingPlacementCommand } from "./nativeConstructionPlacement";
+import { createNativeProjectedOrdinaryBeltPlacementCommand } from "./nativeConstructionBeltPlacement";
+import { createNativeProjectedEntityRecipeCommand } from "./nativeProjectedEntityRecipeCommands";
+import { createNativeProjectedLogisticsItemCommand } from "./nativeProjectedLogisticsItemCommands";
+import { createNativeProjectedSelectTechnologyCommand, createNativeProjectedPauseResearchCommand,
+  createNativeProjectedResumeResearchCommand } from "./nativeProjectedTechnologyCommands";
+import { createNativeProjectedTrayToEntityInputCommand } from "./nativeProjectedFactoryInventoryCommands";
+import type { BuildingId, GameState, ItemId, RecipeId } from "./types";
+import type { SimulationCommandPatch } from "./simulationRuntimeProtocol";
 import { canonicalNativeCoreSha256 } from "./nativeCoreProof";
 import { createSimulationCommandPatch } from "./simulationRuntimeProtocol";
 
@@ -21,7 +31,7 @@ const owner = "main-player-authority";
 // Admission alone uses the cfg(test) override. Every gameplay reply is produced
 // by a separate Rust process through the same dispatcher as the normal Host.
 // This opt-in test cannot qualify or enable an installed player build.
-it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC preserve gameplay across pause, save and two process restarts", async () => {
+it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC preserve factory production, research and refunds across three process restarts", async () => {
   if (!binary || !path.isAbsolute(binary) || !fs.statSync(binary).isFile()) throw new Error("test binary missing");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-authority-rpc-test-"));
   fs.writeFileSync(path.join(root, "TEST_ONLY"), "rpc-integration-v1");
@@ -29,12 +39,18 @@ it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC pre
   let client: any, registry: any, authority: any;
   let now = 10_000;
   let exportNumber = 0;
+  let stage = "initial";
   let loseNextCommandReply = false;
   let expected = createPublicCatalogOfflineQualificationFixture("finite-reserve");
   // The offline fixture prebuilds its factory; interactive placement must also
   // satisfy the public construction technology gate.
-  expected.research.completedTechIds.push("electromagnetic_matrix", "electromagnetism");
+  expected.research.completedTechIds.push("electromagnetic_matrix", "electromagnetism", "basic_logistics");
   expected.construction.wind_turbine = 5;
+  expected.construction.arc_smelter = 1;
+  expected.construction.storage_mk1 = 1;
+  expected.construction.matrix_lab = 1;
+  expected.construction.conveyor_belt_mk1 = 40;
+  expected.tray.electromagnetic_matrix = 20;
   const initialElapsed = expected.elapsedSeconds;
   const requests: string[] = [];
 
@@ -110,19 +126,92 @@ it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC pre
   async function assertCompleteState() {
     const snapshot = authority.snapshot();
     const summary = await registry.status(owner, snapshot.sessionId);
-    expect(summary.canonicalSha256).toBe(canonicalNativeCoreSha256(expected));
     const exported = await authority.withSettledPersistenceBoundary(async (boundary: any) => {
       const exportId = `rpc-chain-${++exportNumber}`;
       await client.request({ operation: "coreExportV47", sessionId: boundary.sessionId, exportId, savedAtMs: now });
       return JSON.parse(fs.readFileSync(path.join(root, "exports", `${exportId}.json`), "utf8")).state;
     });
-    expect(canonicalNativeCoreSha256(exported)).toBe(canonicalNativeCoreSha256(expected));
-    expect(exported).toEqual(JSON.parse(JSON.stringify(expected)));
+    const oracle = JSON.parse(JSON.stringify(expected));
+    const differences: string[] = [];
+    function compare(actual: any, wanted: any, at: string) {
+      if (differences.length >= 12 || Object.is(actual, wanted)) return;
+      if (actual && wanted && typeof actual === "object" && typeof wanted === "object") {
+        for (const key of new Set([...Object.keys(actual), ...Object.keys(wanted)])) compare(actual[key], wanted[key], `${at}.${key}`);
+      } else differences.push(`${at}: Rust=${JSON.stringify(actual)} JS=${JSON.stringify(wanted)}`);
+    }
+    compare(exported, oracle, "state");
+    expect(differences, `${stage}: ${differences.join("; ")}`).toEqual([]);
+    expect(exported).toEqual(oracle);
+    expect(canonicalNativeCoreSha256(exported), stage).toBe(canonicalNativeCoreSha256(expected));
+    expect(summary.canonicalSha256, stage).toBe(canonicalNativeCoreSha256(expected));
     expect(summary.revision).toBe(snapshot.revision);
   }
 
   function simulate(seconds: number) {
     for (let i = 0; i < seconds; i++) expected = advanceSimulationBudget(expected, 1, 1);
+  }
+
+  async function commitProjected(command: SimulationCommandPatch | null, next: GameState, label: string) {
+    stage = label;
+    expect(command, label).not.toBeNull();
+    await authority.commitCommand({ commandId: `rpc-${label}`, baseRevision: authority.snapshot().revision, command });
+    expected = next;
+    await assertCompleteState();
+  }
+
+  async function entityBinding(entityId: string) {
+    const identity = authority.snapshot();
+    const projection = await registry.projection(owner, { sessionId: identity.sessionId,
+      baseFields: ["activePlanetId"], entityIds: [entityId], beltIds: [] });
+    expect(projection.revision).toBe(identity.revision);
+    expect(projection.entities).toHaveLength(1);
+    return { ...identity, registryFingerprint: content.fingerprint,
+      activePlanetId: projection.base.activePlanetId, entity: projection.entities[0] };
+  }
+
+  async function build(buildingId: BuildingId, position: { x: number; y: number }) {
+    const identity = authority.snapshot();
+    const context = await registry.constructionPlacementContext(owner, { sessionId: identity.sessionId,
+      expectedRevision: identity.revision, expectedRegistryFingerprint: content.fingerprint, buildingId });
+    const next = placeBuilding(expected, buildingId, position);
+    expect(next.entities.length).toBe(expected.entities.length + 1);
+    await commitProjected(createNativeProjectedOrdinaryBuildingPlacementCommand(context, position), next, `place-${buildingId}`);
+    return next.entities.at(-1)!.id;
+  }
+
+  async function recipe(entityId: string, recipeId: RecipeId) {
+    await commitProjected(createNativeProjectedEntityRecipeCommand(await entityBinding(entityId), recipeId),
+      setEntityRecipe(expected, entityId, recipeId), `recipe-${recipeId}`);
+  }
+
+  async function logistics(entityId: string, itemId: ItemId) {
+    await commitProjected(createNativeProjectedLogisticsItemCommand(await entityBinding(entityId), itemId),
+      setLogisticsItem(expected, entityId, itemId), `logistics-${itemId}`);
+  }
+
+  async function connect(sourceId: string, targetId: string, itemId: ItemId, label: string) {
+    const identity = authority.snapshot();
+    const context = await registry.constructionBeltPlacementContext(owner, { sessionId: identity.sessionId,
+      expectedRevision: identity.revision, expectedRegistryFingerprint: content.fingerprint,
+      sourceId, targetId, itemId, tier: 1, lanes: 1 });
+    expect(context.support, label).toMatchObject({ supported: true });
+    const next = connectBeltWithResult(expected, sourceId, targetId, itemId).state;
+    expect(next.belts.length).toBe(expected.belts.length + 1);
+    await commitProjected(createNativeProjectedOrdinaryBeltPlacementCommand(context), next, label);
+  }
+
+  async function runSeconds(seconds: number) {
+    stage = `run-${seconds}-after-${stage}`;
+    now += seconds * 1_000;
+    await authority.settleDue();
+    simulate(seconds);
+    await assertCompleteState();
+  }
+
+  async function researchProjection() {
+    const identity = authority.snapshot();
+    return { baseRevision: identity.revision, projection: await registry.technologyProjection(owner,
+      { sessionId: identity.sessionId, expectedRevision: identity.revision }) };
   }
 
   try {
@@ -207,13 +296,69 @@ it.skipIf(!binary)("TEST_ONLY admission: actual desktop runtime and Rust RPC pre
       "coreCommitPlayerAuthorityTick", "coreCommitPlayerAuthorityPause", "coreExportV47"]) expect(requests).toContain(operation);
     expect(children).toHaveLength(3);
     expect(expected.construction.wind_turbine).toBe(3);
+
+    // Continue the same durable game using the command builders used by the UI.
+    const smelterId = await build("arc_smelter", { x: 4_400, y: 4_000 });
+    const storageId = await build("storage_mk1", { x: 4_800, y: 4_000 });
+    const labId = await build("matrix_lab", { x: 5_200, y: 4_000 });
+    await logistics(storageId, "iron_ingot");
+    const veinId = expected.entities.find(entity => entity.kind === "vein" && (entity.minerCount ?? 0) > 0)!.id;
+    await connect(veinId, smelterId, "iron_ore", "ore-belt");
+    await connect(smelterId, storageId, "iron_ingot", "ingot-belt");
+    await runSeconds(12);
+    const storage = expected.entities.find(entity => entity.id === storageId)!;
+    expect((storage.inputs.iron_ingot ?? 0) + (storage.outputs.iron_ingot ?? 0)).toBeGreaterThan(0);
+    const constructionBeforeSwitch = expected.construction.conveyor_belt_mk1!;
+    const trayBeforeSwitch = expected.tray.iron_ingot ?? 0;
+    const buffered = (storage.inputs.iron_ingot ?? 0) + (storage.outputs.iron_ingot ?? 0);
+    await logistics(storageId, "magnet");
+    expect(expected.construction.conveyor_belt_mk1).toBe(constructionBeforeSwitch + 1);
+    expect(expected.tray.iron_ingot).toBe(trayBeforeSwitch + buffered);
+    await recipe(smelterId, "magnet");
+    await connect(veinId, smelterId, "iron_ore", "replacement-ore-belt");
+    await connect(smelterId, storageId, "magnet", "magnet-belt");
+    await runSeconds(12);
+    const magnetStorage = expected.entities.find(entity => entity.id === storageId)!;
+    expect((magnetStorage.inputs.magnet ?? 0) + (magnetStorage.outputs.magnet ?? 0)).toBeGreaterThan(0);
+
+    await recipe(labId, "matrix_research");
+    await commitProjected(createNativeProjectedSelectTechnologyCommand({ ...await researchProjection(), techId: "thermal_power" }),
+      selectTechnology(expected, "thermal_power"), "research-select");
+    const labBinding = await entityBinding(labId);
+    const inventory = await registry.factoryInventoryProjection(owner, { sessionId: labBinding.sessionId,
+      expectedRevision: labBinding.revision, cursor: 0, limit: 256 });
+    expect(inventory.truncated).toBe(false);
+    const frame = { ...inventory, sessionId: labBinding.sessionId, runId: labBinding.runId,
+      rowsByItemId: new Map(inventory.rows.map((row: any) => [row.itemId, row])) };
+    await commitProjected(createNativeProjectedTrayToEntityInputCommand(frame, labBinding.entity, "electromagnetic_matrix"),
+      moveTrayItemToEntity(expected, labId, "electromagnetic_matrix"), "research-feed");
+    await runSeconds(3);
+    expect(expected.research.progressByTech.thermal_power?.electromagnetic_matrix).toBeGreaterThan(0);
+    await commitProjected(createNativeProjectedPauseResearchCommand(await researchProjection()), pauseCurrentResearch(expected), "research-pause");
+    const researchBeforePause = structuredClone(expected.research.progressByTech);
+    await runSeconds(3);
+    expect(expected.research.progressByTech).toEqual(researchBeforePause);
+    await commitProjected(createNativeProjectedResumeResearchCommand(await researchProjection()), resumePausedResearch(expected), "research-resume");
+    await runSeconds(24);
+    expect(expected.research.completedTechIds).toContain("thermal_power");
+    const finalRevision = authority.snapshot().revision;
+    await stop();
+    await start();
+    const factoryRecovery = registry.takePlayerAuthorityStartupRecovery(owner);
+    expect(factoryRecovery).not.toBeNull();
+    authority.resumeFromStartupRecovery(factoryRecovery);
+    expect(authority.snapshot().revision).toBe(finalRevision);
+    await assertCompleteState();
+    await runSeconds(1);
+    expect(expected.elapsedSeconds - initialElapsed).toBe(62);
+    expect(children).toHaveLength(4);
     await stop();
   } catch (error) {
     const chain: string[] = [];
     for (let cause: any = error; cause && chain.length < 8; cause = cause.cause) {
       chain.push(`${cause.code ?? cause.name}: ${cause.message}`);
     }
-    throw new Error(chain.join("\n"), { cause: error });
+    throw new Error([stage, ...chain].join("\n"), { cause: error });
   } finally {
     authority?.shutdownForProcessExit();
     const live = children.filter(child => child.exitCode === null && child.signalCode === null);

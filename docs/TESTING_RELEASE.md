@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **实际 RPC 连续回归（2026-09-10）**：新增 `npm run native:realtime-rpc -- artifacts/<fresh-directory>`，Windows CI 在库基础检查后执行。实际 Rust 请求处理与桌面 runtime/连接/注册器验证建造、重试、计时/暂停、导出、退出、已持久命令丢失确认和两次重开，全状态与独立 JS 相比。授权为 cfg(test) 合成输入，报告始终 TEST_ONLY/不可发布，不能当作普通已获资格 Host。专项 1/1、客户端 36/36、Rust 坐标 2/2、Host 库 289/5 ignored、完整 Native 984/1 skip、类型、普通 Host 构建与严格 Clippy 通过；详情见[进度报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)，完整玩家资格、云端全矩阵和原发布门槛保留。
+> **连续产线专项（2026-09-10）**：native:realtime-rpc 使用正常优化库测试程序，通过实际桌面 runtime 与独立 Rust 进程验证建造、矿脉连线、铁锭/磁铁生产、仓储退款、科研投入/暂停/恢复/完成、导出与三次重开；保留原建造重试、暂停计时和已持久动作丢失确认场景，共 62 个模拟秒。每个阶段比较完整 JSON 和摘要，报告保持 TEST_ONLY/不可发布。调试定位、优化验证和最终提交绑定分别记录，实际结果与原发布缺口见[进度报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)。
 
 > **Windows runtime 生命周期回归（2026-09-10）**：三个未修复产品负例失败，修复后专项 90、相关 202、完整 Native 981/1 skip 通过；实际助手释放/被终止与 main 类联动通过，但 registry 为 TEST_ONLY，不能计为 Native 活跃模拟。Rust 源码与重建字节保持 5c801a83 已验证值，类型通过；891e87fa 新包 227/227 打包前检查、76 制品/79 文件一致，包内 idle 停止连接及原持续会话通过，零窗口/焦点/弹窗、正常退出；范围见[本批记录](./reviews/rust-windows-runtime-lifetime-2026-09-10.md)，不改原门槛。
 

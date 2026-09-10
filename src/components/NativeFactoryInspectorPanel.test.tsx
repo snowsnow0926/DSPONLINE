@@ -226,6 +226,41 @@ describe("NativeFactoryInspectorPanel", () => {
     expect(host.querySelector("[data-native-entity-recipe]")).toBeNull();
   });
 
+  it("selects warehouse items only from the current unlocked projection", () => {
+    const onChange = vi.fn();
+    const render = (pending = false, revision = 8, locked = false, projectedItem = "iron_ore") => {
+      const storage = projectedEntity({ kind: "storage", buildingId: "storage_mk1", recipeId: undefined,
+        storedItemId: "iron_ore", interactionLocked: locked });
+      const summary = projectedSummary(storage);
+      act(() => root.render(<NativeFactoryInspectorPanel
+        inspector={inspector({ revision: 8, entity: summary })}
+        multiSelection={multi({ revision: 8, projectionIdentity: { sessionId: "s", runId: "r", revision: 8, planetId: "home" },
+          entityRows: { rows: [summary], totalCount: 1, truncated: false } })}
+        entityConfiguration={configuration(storage)}
+        entityRecipeBinding={recipeBinding({ ...storage, storedItemId: projectedItem as FactoryEntity["storedItemId"] }, { revision })}
+        pending={pending} onLogisticsItemChange={onChange}
+        onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()} onFuelItemChange={vi.fn()} onBlackHolePausedChange={vi.fn()}
+        onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()}
+      />));
+    };
+    render();
+    const select = host.querySelector<HTMLSelectElement>('[aria-label="储运物品"]')!;
+    expect(select).not.toBeNull();
+    expect(select.querySelector('option[value="water"]')).toBeNull();
+    act(() => { select.value = "iron_ingot"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("smelter-a", "iron_ingot");
+    render(true);
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="储运物品"]')!.disabled).toBe(true);
+    render(false, 7);
+    expect(host.querySelector('[aria-label="储运物品"]')).toBeNull();
+    render(false, 8, true);
+    expect(host.querySelector('[aria-label="储运物品"]')).toBeNull();
+    render(false, 8, false, "iron_ingot");
+    expect(host.querySelector('[aria-label="储运物品"]')).toBeNull();
+  });
+
   it("requires explicit confirmation before switching one exact-lineage built-in recipe", () => {
     const onRecipeChange = vi.fn();
     const render = (

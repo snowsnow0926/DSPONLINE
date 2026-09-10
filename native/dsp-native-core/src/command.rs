@@ -668,8 +668,14 @@ fn station_progress_value(progress: f64) -> Value {
 
 fn safe_json_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
     value
-        .and_then(Value::as_u64)
-        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .and_then(Value::as_f64)
+        .filter(|value| {
+            value.is_finite()
+                && *value >= 0.0
+                && *value <= MAX_JAVASCRIPT_SAFE_INTEGER as f64
+                && value.fract() == 0.0
+        })
+        .map(|value| value as u64)
         .ok_or_else(|| anyhow!("native player-authority {label} is not a safe integer"))
 }
 
@@ -12602,6 +12608,33 @@ mod tests {
             },
         ];
         command
+    }
+
+    #[test]
+    fn safe_json_integer_accepts_native_integral_floats_without_rounding_fractions() {
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(1),
+            Value::from(1.0),
+            Value::from(-0.0),
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER),
+        ] {
+            assert_eq!(
+                safe_json_integer(Some(&value), "test").unwrap(),
+                value.as_f64().unwrap() as u64
+            );
+        }
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(0.5),
+            serde_json::json!("1"),
+            serde_json::json!(true),
+            Value::Null,
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER + 1),
+        ] {
+            assert!(safe_json_integer(Some(&value), "test").is_err());
+        }
+        assert!(safe_json_integer(None, "test").is_err());
     }
 
     fn empty_player_command(revision: u64) -> SimulationCommandPatch {

@@ -682,6 +682,7 @@ import {
   type NativeProjectedEntityRecipeBinding,
 } from "./game/nativeProjectedEntityRecipeCommands";
 import { useNativeEntityRecipeCommandTransaction } from "./game/useNativeEntityRecipeCommandTransaction";
+import { createNativeProjectedLogisticsItemCommand } from "./game/nativeProjectedLogisticsItemCommands";
 import {
   createNativeProjectedEjectorOrbitCommand,
   createNativeProjectedTimeWarpRequestedMultiplierCommand,
@@ -20583,6 +20584,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     commitNativeEntityRecipeCommand(binding, targetRecipeId);
   }, [commitNativeEntityRecipeCommand, nativeEntityRecipeProjectionBinding]);
+  const changeNativeLogisticsItem = useCallback((entityId: string, itemId: ItemId): void => {
+    const binding = nativeEntityRecipeProjectionBinding;
+    const route = nativeFactoryProjectionIdentityRef.current;
+    const source = nativePlayerAuthorityCommandBindingRef.current?.source;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current ||
+        !binding || binding.entity.id !== entityId || !route || !source ||
+        binding.sessionId !== route.sessionId || binding.runId !== route.runId ||
+        binding.revision !== route.revision || binding.activePlanetId !== route.planetId ||
+        source.sessionId !== binding.sessionId || source.runId !== binding.runId ||
+        source.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("建筑状态已变化，请重新选择物流物品");
+      return;
+    }
+    commitNativeProjectedCommand(binding.revision, revision => revision === binding.revision
+      ? createNativeProjectedLogisticsItemCommand(binding, itemId) : null,
+    () => setNotice("物流物品已更新，原缓存和传送带已返还"));
+  }, [commitNativeProjectedCommand, nativeEntityRecipeProjectionBinding]);
   const changeNativeBlackHolePaused = useCallback((
     entityId: string,
     paused: boolean,
@@ -23206,6 +23226,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onEnergyExchangerModeChange={changeNativeEnergyExchangerMode}
           onFuelItemChange={changeNativeFuelItem}
           onEntityRecipeChange={changeNativeEntityRecipe}
+          onLogisticsItemChange={changeNativeLogisticsItem}
           onBlackHolePausedChange={changeNativeBlackHolePaused}
           onGalacticExporterPausedChange={changeNativeGalacticExporterPaused}
           onMaterialDeliverySlotChange={changeNativeMaterialDeliverySlot}

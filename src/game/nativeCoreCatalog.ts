@@ -89,7 +89,9 @@ export function createNativeCoreCatalog(
       capabilities: [...(building.capabilities ?? [])].sort(),
       scripted: Boolean(building.scripted),
     }))),
-    recipes: byId(Object.values(RECIPES).map((recipe) => ({
+    // Placement chooses the first unlocked recipe, as getRecipesForBuilding()
+    // does. Sorting these rows changes gameplay (e.g. iron into copper).
+    recipes: Object.values(RECIPES).map((recipe) => ({
       id: recipe.id,
       name: recipe.name,
       buildingId: recipe.buildingId,
@@ -99,7 +101,7 @@ export function createNativeCoreCatalog(
       recursiveManufacturing: isRecursiveManufacturingRecipe(recipe.id),
       inputs: recipe.inputs.map((input) => ({ ...input })),
       outputs: recipe.outputs.map((output) => ({ ...output })),
-    }))),
+    })),
     constructions: byId(CONSTRUCTION.map((definition, automationOrder) => ({
       id: definition.buildingId,
       outputAmount: definition.outputAmount,

@@ -27,8 +27,16 @@ Host SHA-256：`2758a630c6a9309563be49f8b26b51884515580fcad657d564724db320083927
 
 ## 制品与剩余门禁
 
-本源码的冻结包及实际 ASAR 入口验证待提交后构建；此前 491 冻结包保留，不能当作本源码实包通过。未发布、未签发资格、未新增性能结论。
+运行源码 **5c801a839601d9af878f7a006f3442dfd94a1b5b**，新冻结包 **1.2.7+5c801a839601**，performance development/beta/win32 x64，实际 Authenticode **NotSigned**。150/150 打包前检查及九阶段构建通过，76 制品/79 文件全部复验一致，原 491 冻结文件前后未变。正常构建 155.95 秒，最低空闲 7,895,820 KiB。
 
-上一提交 **4cac3db7** 云端浏览器已全部结束：468 pass/33 skip/2 fail/0 flaky。冷菜单两次 P95 为 956/945 ms，原门槛 500 ms；字号矩阵整例两次超过原 30 秒，定位在 v32-buffer-settings.spec.ts:221 的点击。此前失败的 v120 暂停画布、v103 启动辅助和 v101 点击本次通过，仅是本次观测，并未修改这些 UI/测试或宣称根因修复。构建、游戏单元 3217/42 skip、服务 390/2、station 4/0、Ops 60/2、Linux Native 926/21 通过；Windows 专项仍运行，当前新源码云端尚未开始。
+实际 Electron 用零窗口入口加载新 ASAR，自身定位的 main broker 与独立包内 Host 核对相同会话；main 在没有手动 probe 的实际 17 秒内自动续期。主助手释放后 Host 仍阻止 profile 改名/夹具改写，双端正常释放后可以替换目录，新身份重新接入成功。程序九字段、十二字段候选及固定会话核对也通过，缺少资格载体仍返回 carrier-io，不授予 authority。
+
+探针正常 exit 0、无强制清理，20.67 秒、最低空闲 9,100,812 KiB；`hidden-no-focus-offscreen-v2` 审计为零 BrowserWindow/show/focus/dialog。临时会话和 Electron profile 已清理，冻结包未变。本批没有打开游戏界面或执行新的玩法/离线性能验证。
+
+ASAR SHA-256：`8b70d57537e66bb8d9dfbc0082ae37f51f3e481106377073a2a492f6ef74ec19`。实包证据：`artifacts/rust-rp1-loop/package-5c801a83-frozen/`、`package-5c801a83-receipt.json`、`build-desktop-validation-lease-v1-logs/`、`package-validation-lease-smoke-v1.json`。未发布、未签发资格、未新增性能结论。
+
+上一提交 **4cac3db7** 云端全部结束后才推送本批：浏览器 468 pass/33 skip/2 fail/0 flaky。冷菜单两次 P95 为 956/945 ms，原门槛 500 ms；字号矩阵整例两次超过原 30 秒，定位在 v32-buffer-settings.spec.ts:221 的点击。此前失败的 v120 暂停画布、v103 启动辅助和 v101 点击本次通过，仅是本次观测，并未修改这些 UI/测试或宣称根因修复。
+
+4cac 的 Windows 专项成功：核心 1118/6 ignored、Host 284/4 ignored、两个入口各 3、Native 946/1 skip、游戏 3220/39 skip；签名 TEST_ONLY 和八项基础证据步骤成功。常规构建、Linux 游戏 3217/42 skip、服务 390/2、station 4/0、Ops 60/2、Linux 核心 1118/6 ignored、Host 269/1 ignored、两入口各 3、Native 926/21 skip 均通过。这是上一提交的云端结果，本批新 HEAD 独立触发检查，不继承为完整发布全绿。
 
 后续仍须把持续失效通知接到真实 tick/命令/持久边界，落实 profile 与云网络隔离、可信正文、时间/撤销、证据生产者与完整矩阵；复杂终局长离线、完整玩法/模式/内容包、性能/内存和长测/硬件/安装回退维持完整 Goal。不能把该测试会话 token 当作单写者权限。

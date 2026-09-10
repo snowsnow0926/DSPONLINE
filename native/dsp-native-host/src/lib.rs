@@ -11,6 +11,7 @@ pub mod save_store;
 pub mod v47_import;
 pub mod validation_candidate;
 pub mod validation_session;
+pub mod validation_session_process;
 
 pub const NATIVE_FORMAT_VERSION: u16 = 1;
 pub const NATIVE_PROTOCOL_VERSION: u16 = 1;

@@ -1,5 +1,7 @@
 # 系统架构
 
+> **Windows 持续验证会话（2026-09-10）**：Host/助手专用 hold-validation-session 入口实际持有原目录/夹具锁，严格有界递增序号与 challenge；15 秒无完整请求退出。main 自身 ASAR 定位助手，保留真实进程与 opaque token，5 秒心跳、响应期限、失效通知及确认释放；启动失败须确认退出或明确报告终止未确认。仅用于合成验证会话，尚未接到普通 serve/tick、renderer IPC 或云网络隔离，不授予玩法权限；见[持续合同](./rust/windows-validation-lease-v1.md)。
+
 > **Windows 会话身份（2026-09-10）**：公开 normal/main v47 初始夹具分别编入 Rust 和自身 ASAR，构建验证漂移；main 排他创建独立目录，Host 与独立平台助手只接受 32 位 selector，以 Windows 句柄核对实际目录与固定夹具。共享目录锁增加 FILE_LIST_DIRECTORY，补齐空目录/首次打开成员前的防重命名。491 新包已核对两端身份与替换失效；Rust lease 保持目录/文件锁，但只读快照不保持锁，不等于运行租约。持续 main 租约、网络隔离、正文绑定及实际接管尚未接入，见[合同](./rust/windows-validation-session-v1.md)。
 
 > **Windows 完整验证候选身份（2026-09-10）**：main 从自身 ASAR、Host 从自身 OS 可执行路径，无外部参数地独立取得程序九字段、内置目录、规则与基础矩阵摘要，形成正文所需十二字段；0d7 实包三方已核对一致。规则摘要在冻结后绑定实际 Host/ASAR/目录，避免自引用；矩阵仍为既有 TEST_ONLY 基础检查合同，构建和检查器拒绝漂移。只读 `inspect-validation-candidate` 不创建存档或模拟，不授予权威；完整可信上下文、生产矩阵及真实接管仍待完成，见[精确合同](./rust/windows-validation-candidate-v1.md)。

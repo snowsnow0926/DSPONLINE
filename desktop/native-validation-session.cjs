@@ -130,4 +130,4 @@ function createPackagedWindowsValidationSessionInspector() {
 }
 
 module.exports = { createValidationSessionDirectory, createWindowsValidationSessionInspector,
-  createPackagedWindowsValidationSessionInspector };
+  createPackagedWindowsValidationSessionInspector, validateValidationSessionSnapshot: acceptSnapshot };

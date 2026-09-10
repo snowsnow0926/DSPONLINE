@@ -135,6 +135,31 @@ fn main() -> ExitCode {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     if arguments
         .first()
+        .is_some_and(|a| a == "hold-validation-session")
+    {
+        let result = if arguments.len() == 3 {
+            arguments[1]
+                .to_str()
+                .zip(arguments[2].to_str())
+                .ok_or(dsp_native_host::validation_session::ValidationSessionError)
+                .and_then(|(id, challenge)| {
+                    dsp_native_host::validation_session_process::run_validation_session_process(
+                        id, challenge,
+                    )
+                })
+        } else {
+            Err(dsp_native_host::validation_session::ValidationSessionError)
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => {
+                eprintln!("VALIDATION_SESSION_LEASE_REJECTED");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments
+        .first()
         .is_some_and(|a| a == "inspect-validation-session")
     {
         let snapshot = arguments

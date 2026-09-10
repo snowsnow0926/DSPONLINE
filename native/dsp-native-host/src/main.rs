@@ -1050,6 +1050,29 @@ fn main() {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     if arguments
         .first()
+        .is_some_and(|a| a == "hold-validation-session")
+    {
+        let result = if arguments.len() == 3 {
+            arguments[1]
+                .to_str()
+                .zip(arguments[2].to_str())
+                .ok_or(dsp_native_host::validation_session::ValidationSessionError)
+                .and_then(|(id, challenge)| {
+                    dsp_native_host::validation_session_process::run_validation_session_process(
+                        id, challenge,
+                    )
+                })
+        } else {
+            Err(dsp_native_host::validation_session::ValidationSessionError)
+        };
+        if result.is_err() {
+            eprintln!("dsp-native-host: validation-session-lease-rejected");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if arguments
+        .first()
         .is_some_and(|a| a == "inspect-validation-session")
     {
         let snapshot = arguments

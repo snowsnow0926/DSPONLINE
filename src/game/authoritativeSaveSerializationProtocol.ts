@@ -41,6 +41,15 @@ export interface AuthoritativeSaveEnvelopeTransfer extends SaveTransferVerificat
   buffer: WorkerBinaryPayload;
 }
 
+/** Exact primary payload returned after its durable commit. A due snapshot
+ * changes only the envelope header, without rebuilding the runtime state. */
+export interface AuthoritativePrimarySnapshotSource {
+  bytes: ArrayBuffer;
+  proof: AuthoritativeSavePayloadProof;
+  catalogSeed: AuthoritativeSaveCatalogSeed;
+  summary: AuthoritativeSaveSerializationSummary;
+}
+
 interface AuthoritativeSaveSerializationRequestCommon {
   id: number;
   formatVersion: number;
@@ -53,12 +62,14 @@ interface AuthoritativeSaveSerializationRequestCommon {
   includeAuthoritativeProof?: boolean;
   expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
+  includeSourceStateTransfer?: false;
 }
 
 export type AuthoritativeSaveSerializationRequest = AuthoritativeSaveSerializationRequestCommon & (
-  | { state: GameState; stateTransfer?: never; envelopeTransfer?: never }
-  | { state?: never; stateTransfer: SimulationStateTransfer; envelopeTransfer?: never }
-  | { state?: never; stateTransfer?: never; envelopeTransfer: AuthoritativeSaveEnvelopeTransfer }
+  | { state: GameState; stateTransfer?: never; envelopeTransfer?: never; snapshotSource?: never }
+  | { state?: never; stateTransfer: SimulationStateTransfer; envelopeTransfer?: never; snapshotSource?: never }
+  | { state?: never; stateTransfer?: never; envelopeTransfer: AuthoritativeSaveEnvelopeTransfer; snapshotSource?: never }
+  | { state?: never; stateTransfer?: never; envelopeTransfer?: never; snapshotSource: AuthoritativePrimarySnapshotSource }
 );
 
 export interface AuthoritativeSaveSerializationSummary {

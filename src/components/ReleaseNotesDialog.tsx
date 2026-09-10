@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
 import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotes118, getReleaseNotes119, getReleaseNotes120, getReleaseNotes121, getReleaseNotes122, getReleaseNotes123, getReleaseNotes124, getReleaseNotes125, getReleaseNotes126, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
+import { getReleaseNotes127, getReleaseNotes128 } from "../i18n/releaseNotes";
 import { AccessibleDialog } from "./AccessibleDialog";
 export { hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen, RELEASE_NOTES_SEEN_KEY } from "./releaseNotesSeen";
 
@@ -195,6 +196,8 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  getReleaseNotes128("zh-CN"),
+  getReleaseNotes127("zh-CN"),
   RELEASE_NOTES_1_2_6,
   RELEASE_NOTES_1_2_5,
   RELEASE_NOTES_1_2_4,
@@ -590,6 +593,8 @@ export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: 
   const selectedReleaseRecord = RELEASE_NOTES_HISTORY.find((release) => release.id === selectedReleaseId) ?? CURRENT_RELEASE_NOTES;
   const selectedRelease = selectedReleaseRecord.id === CURRENT_RELEASE_NOTES.id
     ? localizedCurrentRelease
+    : selectedReleaseRecord.version === "1.2.8" ? getReleaseNotes128(locale)
+    : selectedReleaseRecord.version === "1.2.7" ? getReleaseNotes127(locale)
     : selectedReleaseRecord.id === RELEASE_NOTES_1_2_6.id ? localizedRelease126
     : selectedReleaseRecord.id === RELEASE_NOTES_1_2_5.id ? localizedRelease125
     : selectedReleaseRecord.id === RELEASE_NOTES_1_1_8.id ? localizedRelease118

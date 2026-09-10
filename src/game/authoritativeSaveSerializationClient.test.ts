@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AuthoritativeSaveSerializationClientError,
+  serializeAuthoritativeSaveStateInWorker,
+  serializeAuthoritativePrimarySaveInWorker,
   serializeAuthoritativeSaveStateTransferInWorker,
 } from "./authoritativeSaveSerializationClient";
+import { createInitialState } from "./engine";
 import type {
   AuthoritativeSaveSerializationRequest,
   AuthoritativeSaveSerializationResponse,
@@ -45,6 +48,30 @@ afterEach(() => {
 });
 
 describe("authoritative save serialization transfer ownership", () => {
+  for (const serialize of [serializeAuthoritativeSaveStateInWorker, serializeAuthoritativePrimarySaveInWorker]) {
+  it(`retains the caller state on ${serialize.name} failure and permits a fresh retry`, async () => {
+    const state = createInitialState(44_127);
+    state.entities[0].inputs.iron_ore = 137;
+    const original = structuredClone(state);
+    for (const failure of ["crash", "abort"] as const) {
+      const worker = new FakeWorker();
+      installWorker(worker);
+      const controller = new AbortController();
+      const pending = serialize(state, { signal: controller.signal });
+      expect(worker.request?.state).toEqual(original);
+      expect(worker.request?.state).not.toBe(state);
+      worker.request!.state!.entities[0].inputs.iron_ore = 999;
+      if (failure === "crash") worker.onerror?.({ message: "controlled crash" } as ErrorEvent);
+      else controller.abort();
+      await expect(pending).rejects.toMatchObject({
+        code: failure === "crash" ? "worker-crash" : "aborted", ownershipLost: false,
+      });
+      expect(state).toEqual(original);
+      expect(worker.terminateCount).toBe(1);
+    }
+  });
+  }
+
   it("marks a transferred source as lost when the Worker times out", async () => {
     vi.useFakeTimers();
     const worker = new FakeWorker();

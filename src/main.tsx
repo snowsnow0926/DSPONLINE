@@ -37,15 +37,20 @@ const applicationRoute = resolveApplicationRoute(window.location.pathname);
 if (applicationRoute.kind !== "admin") installAnalytics();
 
 async function mountApplication(): Promise<void> {
-  if (applicationRoute.kind === "game") {
-    const { initializeLocalSaveStore } = await importWithRecovery(() => import("./game/localSaveStore"), "本地存档模块");
-    await initializeLocalSaveStore();
-  }
-  const application = applicationRoute.kind === "admin"
-    ? await importWithRecovery(() => import("./components/AdminDashboard"), "管理后台模块").then(({ AdminDashboard }) => <AdminDashboard />)
+  const storageReady = (async () => {
+    if (applicationRoute.kind === "game") {
+      const { initializeLocalSaveStore } = await importWithRecovery(() => import("./game/localSaveStore"), "本地存档模块");
+      await initializeLocalSaveStore();
+    }
+  })();
+  const applicationReady = applicationRoute.kind === "admin"
+    ? importWithRecovery(() => import("./components/AdminDashboard"), "管理后台模块").then(({ AdminDashboard }) => <AdminDashboard />)
     : applicationRoute.kind === "public-station" && isSpaceStationFeatureEnabled()
-      ? await importWithRecovery(() => import("./components/PublicStationPage"), "公开空间站页面").then(({ PublicStationPage }) => <PublicStationPage publicId={applicationRoute.publicId} />)
-      : await importWithRecovery(() => import("./GameLauncher"), "游戏启动模块").then(({ App }) => <App />);
+      ? importWithRecovery(() => import("./components/PublicStationPage"), "公开空间站页面").then(({ PublicStationPage }) => <PublicStationPage publicId={applicationRoute.publicId} />)
+      : importWithRecovery(() => import("./GameLauncher"), "游戏启动模块").then(({ App }) => <App />);
+  // Module loading can overlap the catalog initialization. React must still
+  // mount only after the durable store and desktop close barrier are ready.
+  const [application] = await Promise.all([applicationReady, storageReady]);
   createRoot(document.getElementById("root")!).render(<StrictMode><AppLocaleProvider>{application}</AppLocaleProvider></StrictMode>);
   await nativeInitialization.catch(() => undefined);
   await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));

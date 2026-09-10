@@ -571,11 +571,11 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         candidate: loaded.runtimeRecoveryCandidate,
         mode: state.mode === "speedrun" ? "speedrun" : "normal",
         registry,
-        saveGameVerified: (nextState) => activeStorage.saveGameVerified(nextState),
+        saveGameVerified: (nextState) => activeStorage.saveGameVerified(nextState, undefined, undefined, { preferWorkerProof: true }),
         onProgress: onRecoveryProgress,
       });
     } else {
-      const saveResult = await activeStorage.saveGameVerified(state);
+      const saveResult = await activeStorage.saveGameVerified(state, undefined, undefined, { preferWorkerProof: true });
       if (!saveResult.success) throw new Error(saveResult.message);
       if (durableRuntimeEnabled) {
         const registry = startupModules.contentPacks.createContentPackRuntimeSnapshot(
@@ -956,7 +956,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         ? storage.loadInspectedGameDeferredOffline(resolved.inspection, mode, resolved.save.source)
         : null;
       if (!loaded) throw new Error("本地存档不可用");
-      if (resolved) retainLocalSavePayload(resolved.save.key, resolved.raw);
+      if (resolved) retainLocalSavePayload(resolved.save.key, resolved.primaryRaw);
       if (resolved) mode === "normal" ? setContinueSave(resolved.save) : setSpeedrunContinueSave(resolved.save);
       if (resolved?.save.source === "primary" && isDurableSimulationRuntimeEnabled()) {
         const startupModules = await loadFactoryStartupModules();

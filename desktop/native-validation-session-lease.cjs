@@ -31,6 +31,7 @@ function createWindowsValidationSessionLeaseBroker({ installationRoot, executabl
   function stop(state, code) {
     if (state.failure || state.phase === "closed") return;
     state.failure = fail(code); state.phase = "stopping";
+    state.lifetime.abort();
     clearTimeout(state.deadline); clearTimeout(state.heartbeat);
     // A failed acquisition has no token with which to observe closed(). Do not
     // return its failure until close is confirmed or explicitly unconfirmed.
@@ -44,10 +45,13 @@ function createWindowsValidationSessionLeaseBroker({ installationRoot, executabl
     try { state.child.kill(); } catch { /* The termination deadline remains authoritative. */ }
   }
   function send(state, command) {
-    if (state.phase !== "live" || state.failure) return Promise.reject(fail("validation-lease-not-live"));
+    if (state.phase !== "live" || state.failure || state.releaseRequested) return Promise.reject(fail("validation-lease-not-live"));
     if (state.pending) return command === "probe" && state.pending.command === "probe"
       ? state.pending.promise : Promise.reject(fail("validation-lease-request-busy"));
     clearTimeout(state.heartbeat);
+    // Releasing the pin immediately ends any dependent runtime's admission.
+    // The release result still waits for the helper's confirmed process close.
+    if (command === "release") { state.releaseRequested = true; state.lifetime.abort(); }
     const sequence = state.sequence + 1;
     if (!Number.isSafeInteger(sequence)) { stop(state, "validation-lease-sequence-exhausted"); return Promise.reject(state.failure); }
     const pending = { ...deferred(), sequence, challenge: randomBytes(32).toString("hex"), command };
@@ -103,7 +107,7 @@ function createWindowsValidationSessionLeaseBroker({ installationRoot, executabl
       const executable = validateCatalogVerifierExecutable(installationRoot, executableSha256);
       const token = Object.freeze(Object.create(null));
       const state = { token, sessionId, challenge: randomBytes(32).toString("hex"), sequence: 0,
-        phase: "starting", ready: deferred(), closed: deferred(), buffer: Buffer.alloc(0) };
+        phase: "starting", ready: deferred(), closed: deferred(), buffer: Buffer.alloc(0), lifetime: new AbortController() };
       tokens.set(token, state); active = state;
       try {
         state.child = spawn(executable, ["hold-validation-session", sessionId, state.challenge], {
@@ -135,6 +139,7 @@ function createWindowsValidationSessionLeaseBroker({ installationRoot, executabl
         const released = state.releaseAcknowledged === true && !state.failure && code === 0 && signal === null && state.buffer.length === 0;
         state.failure ??= released ? undefined : fail("validation-lease-lost");
         state.phase = "closed"; if (active === state) active = undefined;
+        state.lifetime.abort();
         state.ready.reject(state.failure ?? fail("validation-lease-closed"));
         state.pending?.reject(state.failure ?? fail("validation-lease-closed")); state.pending = undefined;
         state.closed.resolve(Object.freeze(released ? { released: true } : { released: false, errorCode: state.failure.code }));
@@ -152,6 +157,7 @@ function createWindowsValidationSessionLeaseBroker({ installationRoot, executabl
       return snapshot;
     },
     closed(token) { return requireToken(token).closed.promise; },
+    signal(token) { return requireToken(token).lifetime.signal; },
     async release(token) {
       const state = requireToken(token);
       if (state.releasePromise) return state.releasePromise;

@@ -18,7 +18,7 @@ function harness(t, options = {}) {
   const module = { exports: {} }, timers = new Map(), trace = { spawns: 0, kills: 0, requests: [], children: [] };
   let timerId = 0;
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "native-validation-session-lease.cjs"), "utf8"), {
-    module, Buffer, TextDecoder, process: { platform: "win32", env: {} },
+    module, Buffer, TextDecoder, AbortController, process: { platform: "win32", env: {} },
     __dirname: options.packaged ? root + "\\app.asar\\desktop" : __dirname,
     setTimeout: (fn, ms) => { timers.set(++timerId, { fn, ms }); return timerId; }, clearTimeout: timer => timers.delete(timer),
     require(name) {
@@ -173,4 +173,28 @@ test("release ACK without process close cannot be accepted as successful release
   const rejected = assert.rejects(broker.release(token), /termination-unconfirmed/);
   await flush(); h.tick(5000); h.tick(2000); await rejected;
   await assert.rejects(broker.acquire(id), /helper-unavailable/);
+});
+
+test("lifetime signal aborts immediately on lost output while helper close is still unconfirmed", async t => {
+  const h = harness(t, { neverClose: true }), broker = h.createWindowsValidationSessionLeaseBroker(h.policy);
+  const token = await broker.acquire(id), signal = broker.signal(token);
+  assert.ok(signal instanceof AbortSignal); assert.equal(signal.aborted, false);
+  assert.equal(broker.signal(token), signal); assert.throws(() => broker.signal({}), /token-rejected/);
+  h.trace.children[0].emit("partial"); assert.equal(signal.aborted, true);
+  let closed = false; const completion = broker.closed(token).then(() => { closed = true; });
+  await flush(); assert.equal(closed, false); h.tick(2000); await completion;
+  assert.equal(signal.aborted, true);
+});
+
+test("release ends lifetime before ACK and a reentrant probe cannot displace the release", async t => {
+  const h = harness(t, { delayClose: true }), broker = h.createWindowsValidationSessionLeaseBroker(h.policy);
+  const token = await broker.acquire(id), signal = broker.signal(token);
+  let probeRejected;
+  signal.addEventListener("abort", () => { probeRejected = assert.rejects(broker.probe(token), /not-live/); }, { once: true });
+  const releasing = broker.release(token); assert.equal(signal.aborted, true);
+  await probeRejected; await flush();
+  assert.deepEqual(h.trace.requests.map(r => r.command), ["release"]);
+  h.trace.children[0].close(); await releasing;
+  const fresh = await broker.acquire(id); assert.equal(broker.signal(fresh).aborted, false); assert.equal(signal.aborted, true);
+  const finish = broker.release(fresh); await flush(); h.trace.children[1].close(); await finish;
 });

@@ -22,4 +22,6 @@ main 核对 ready 的启动 challenge 与实际固定夹具、profile 身份；�
 
 ## 接入边界
 
+后续运行生命周期修复新增 broker.signal(token)，只返回属于该实际 token 的 AbortSignal；失败、退出和释放都会立即结束信号，不能由旧 snapshot 还原。NativePlayerAuthorityRuntime 接收可选 lifetimeSignal，终止后取消时钟并拒绝新的 registry 派发，晚到回复不能恢复 active；已派发操作保留 Rust 持久恢复。这个连接只限制生命周期，不授予资格，普通 main 启动的完整准入尚未启用，见[运行终止修复](../reviews/rust-windows-runtime-lifetime-2026-09-10.md)。
+
 这是持续锁与进程生命周期基础。实际 runtime 仍须把失效信号连接到 tick/命令准入，在每个持久边界遵守原恢复规则，并具备可信正文、签名发布者、时效/撤销、证据生产者和完整矩阵。main 的 profile 切换、云请求拦截及已持久进度恢复也仍需接入；本批不把正常玩家目录、当前云档或已有恢复镜像当作合成初始输入。

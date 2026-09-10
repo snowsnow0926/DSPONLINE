@@ -6,13 +6,16 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createHash, randomBytes } = require("node:crypto");
+const vm = require("node:vm");
+const { createRequire } = require("node:module");
+const { NativePlayerAuthorityRuntime } = require("./native-player-authority-runtime.cjs");
 const { createValidationSessionDirectory } = require("./native-validation-session.cjs");
 const { createWindowsValidationSessionLeaseBroker } = require("./native-validation-session-lease.cjs");
 const host = path.resolve("native/target/release/dsp-native-host.exe");
 const helper = path.resolve("native/target/release/dsp-catalog-verifier.exe");
 const sha = file => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 
-function scope(t) {
+function scope(t, createBroker = createWindowsValidationSessionLeaseBroker) {
   const session = createValidationSessionDirectory(), cleanup = [];
   t.after(async () => {
     for (const close of cleanup.reverse()) await close();
@@ -23,7 +26,39 @@ function scope(t) {
   });
   fs.mkdirSync(path.join(session.directory, "native"));
   fs.copyFileSync(helper, path.join(session.directory, "native", "dsp-catalog-verifier.exe"));
-  return { ...session, cleanup, broker: createWindowsValidationSessionLeaseBroker({ installationRoot: session.directory, executableSha256: sha(helper) }) };
+  return { ...session, cleanup, broker: createBroker({ installationRoot: session.directory, executableSha256: sha(helper) }) };
+}
+
+// The process under test is the real, digest-checked helper. Capture only its
+// owned ChildProcess for fault injection; forward every spawn argument intact.
+function brokerWithOwnedChild() {
+  const module = { exports: {} }, children = [], realRequire = createRequire(__filename);
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "native-validation-session-lease.cjs"), "utf8"), {
+    module, __dirname, Buffer, TextDecoder, AbortController, process, setTimeout, clearTimeout,
+    require(name) { return name === "node:child_process" ? { spawn(...args) {
+      const child = spawn(...args); children.push(child); return child;
+    } } : realRequire(name); },
+  });
+  return { create: module.exports.createWindowsValidationSessionLeaseBroker, children };
+}
+
+// TEST_ONLY registry receipts exercise the real main scheduler's loss path.
+// They never reach a gameplay Host and do not constitute Native authority.
+function testOnlyMainRuntime(signal) {
+  const checkpoint = { generation: 3, rootHash: "aa".repeat(32), revision: 7 }, calls = [], timers = [];
+  const receipt = phase => ({ lease: { kind: "native-core-exact-realtime-player-authority-lease-v1", phase,
+    runId: "validation-runtime", mode: "normal", slot: "normal-main", checkpoint,
+    acknowledged: { sequence: 0, revision: 7, checkpoint, settledDeadlineMs: 10000 }, pendingTick: null },
+    summary: { revision: 7, stateVersion: 47, mode: "normal", paused: false,
+      canonicalSha256: "bb".repeat(32), domainSha256: "cc".repeat(32), coverage: { authorityEligible: true } } });
+  const deny = () => { calls.push("unexpected-write"); throw Error("No Native gameplay permission in this test"); };
+  const runtime = new NativePlayerAuthorityRuntime({ lifetimeSignal: signal, now: () => 10000,
+    schedule(callback) { const timer = { callback, cancelled: false }; timers.push(timer); return timer; },
+    cancel(timer) { timer.cancelled = true; },
+    registry: { preparePlayerAuthority: async () => receipt("prepared"), activatePlayerAuthority: async () => receipt("active"),
+      commitPlayerAuthorityTick: deny, commitPlayerAuthorityCommand: deny, commitPlayerAuthorityPause: deny, recoverPlayerAuthorityCommand: deny },
+  });
+  return { runtime, checkpoint, calls, timers };
 }
 
 function startRaw(session, executable = host) {
@@ -136,3 +171,24 @@ test("actual held session rejects replayed sequence and malformed control withou
     assert.equal(sha(file), before);
   }
 });
+
+for (const cause of ["release", "helper-death"]) {
+  test(`actual helper ${cause} stops the real main runtime with TEST_ONLY registry receipts`, { skip: process.platform !== "win32" }, async t => {
+    const captured = brokerWithOwnedChild(), s = scope(t, captured.create), token = await s.broker.acquire(s.sessionId);
+    s.cleanup.push(async () => { await s.broker.release(token).catch(() => {}); await s.broker.closed(token); });
+    const signal = s.broker.signal(token), value = testOnlyMainRuntime(signal);
+    await value.runtime.activate({ sessionId: "validation-core", runId: "validation-runtime",
+      expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10000 });
+    assert.equal(value.runtime.snapshot().phase, "active"); assertLocked(s);
+    assert.equal(captured.children.length, 1);
+    const aborted = new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+    if (cause === "release") await s.broker.release(token); else captured.children[0].kill();
+    await aborted; const closed = await s.broker.closed(token);
+    assert.equal(closed.released, cause === "release");
+    assert.equal(value.runtime.snapshot().phase, "shutdown"); assert.equal(value.timers[0].cancelled, true);
+    assert.equal(value.runtime.snapshot().revision, 7); assert.deepEqual(value.runtime.context.checkpoint, value.checkpoint);
+    value.timers[0].callback(); await value.runtime.settleDue();
+    assert.deepEqual(value.calls, []); assert.equal(value.runtime.snapshot().phase, "shutdown");
+    fs.renameSync(s.userDataPath, path.join(s.directory, "moved"));
+  });
+}

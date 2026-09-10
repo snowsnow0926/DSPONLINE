@@ -1,6 +1,6 @@
 # 测试与发布基线
 
-> **短瞬态候选回归（2026-09-10，执行中）**：初轮 Node 边界/传输 42/42、Vitest 启动 31/31 与类型通过；本源码仍需正常优化 Rust/Host、真实 Host 完整 JS 差分、全部游戏及新实包验证。短场景增加 32/35/59/60/61 秒，保留原 1/5/30/31/600 秒及 8 小时场景，不改变既有失败门槛。后台静音、低优先级、6/2 GiB 守护，见[当前证据](./reviews/rust-windows-short-transient-2026-09-10.md)。
+> **68 短瞬态最终验证（2026-09-10，未发布）**：最终正常优化核心 1,118/6 ignored、Host 272/4 ignored、Native 900/1 权限 skip、长差分 14/2 benchmark skip、游戏 3,220/39 skip、类型/严格 Clippy/构建均通过；实际 Host 公共产线 30 个完整 JS 对照通过。新包 84 项实际进程检查、76 制品/79 文件、八组成功/取消与保存重开通过，32 次隐藏静音正常退出。云端 Windows 全部 SUCCESS；全浏览器 466/33 skip/3 fail/1 flaky，原门槛保留、发布条件未满足。初轮编译与旧摘要驱动失败分别保留；后台、BelowNormal、6/2 GiB 守护，见[准确证据](./reviews/rust-windows-short-transient-2026-09-10.md)。以下为此前时点记录。
 
 > **Windows Rust 长候选实包验证（2026-09-10）**：a962 冻结包六组成功/取消、实际 Native、完整 JS/持久保存/两次重开均通过，24 次隐藏离屏静音正常退出；包内身份、76 项制品/79 文件及最终读回通过。正常优化核心 1,116/6 ignored、Host 272/4 ignored、Clippy/构建、完整 Native 885/1 skip、显式 8 小时差分 14/2 benchmark skip、游戏 3,210/39 skip 与类型通过。最终守护全部正常 exit 0，原 6/2 GiB 和用例时限保持；首轮总超时、过宽测试预期/清单及实包驱动漏点选择的失败保留。上一 3f1 全浏览器 466/33 skip/4 fail，新源码云端待终态。尚未满足完整发布条件，见[源码与实包证据](./reviews/rust-windows-complete-long-offline-2026-09-10.md)。
 

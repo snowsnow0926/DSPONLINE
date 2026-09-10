@@ -78,6 +78,7 @@
     "android:release": "node scripts/verify-android-signing-env.mjs && npm run android:release:unsigned",
     "native:assets": "node scripts/generate-native-assets.mjs",
     "native:build-host": "node scripts/build-native-host.mjs",
+    "native:realtime-rpc": "node scripts/native-player-authority-rpc.mjs",
     "native:manifests": "node scripts/create-native-update-manifests.mjs",
     "licenses:generate": "node scripts/generate-third-party-notices.mjs",
     "licenses:check": "node scripts/generate-third-party-notices.mjs --check"

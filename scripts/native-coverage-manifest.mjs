@@ -6,7 +6,7 @@ import ts from "typescript";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const STATE_PATH = path.join(ROOT, "native/dsp-native-core/src/state.rs");
-const HOST_PATH = path.join(ROOT, "native/dsp-native-host/src/main.rs");
+const HOST_PATH = path.join(ROOT, "native/dsp-native-host/src/rpc.rs");
 const HOST_RUNTIME_PATH = path.join(ROOT, "native/dsp-native-host/src/core_runtime.rs");
 const HOST_LEASE_PATH = path.join(ROOT, "native/dsp-native-host/src/exact_realtime_lease.rs");
 const APP_PATH = path.join(ROOT, "src/App.tsx");
@@ -124,7 +124,7 @@ export async function buildNativeCoverageManifest() {
     schemaVersion: 1,
     generatedFrom: [
       "native/dsp-native-core/src/state.rs",
-      "native/dsp-native-host/src/main.rs",
+      "native/dsp-native-host/src/rpc.rs",
       "native/dsp-native-host/src/core_runtime.rs",
       "native/dsp-native-host/src/exact_realtime_lease.rs",
       "src/App.tsx",

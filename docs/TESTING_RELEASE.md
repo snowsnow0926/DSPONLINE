@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **实际 RPC 连续回归（2026-09-10）**：新增 `npm run native:realtime-rpc -- artifacts/<fresh-directory>`，Windows CI 在库基础检查后执行。实际 Rust 请求处理与桌面 runtime/连接/注册器验证建造、重试、计时/暂停、导出、退出、已持久命令丢失确认和两次重开，全状态与独立 JS 相比。授权为 cfg(test) 合成输入，报告始终 TEST_ONLY/不可发布，不能当作普通已获资格 Host。专项 1/1、客户端 36/36、Rust 坐标 2/2、Host 库 289/5 ignored、完整 Native 984/1 skip、类型、普通 Host 构建与严格 Clippy 通过；详情见[进度报告](./RUST_WINDOWS_FULL_PROGRESS_2026-09-10.md)，完整玩家资格、云端全矩阵和原发布门槛保留。
+
 > **Windows runtime 生命周期回归（2026-09-10）**：三个未修复产品负例失败，修复后专项 90、相关 202、完整 Native 981/1 skip 通过；实际助手释放/被终止与 main 类联动通过，但 registry 为 TEST_ONLY，不能计为 Native 活跃模拟。Rust 源码与重建字节保持 5c801a83 已验证值，类型通过；891e87fa 新包 227/227 打包前检查、76 制品/79 文件一致，包内 idle 停止连接及原持续会话通过，零窗口/焦点/弹窗、正常退出；范围见[本批记录](./reviews/rust-windows-runtime-lifetime-2026-09-10.md)，不改原门槛。
 
 > **Windows 持续会话最终验证（2026-09-10）**：V1 正常优化 Host 286/4 ignored、两个入口各 3 与严格 Clippy；客户端退出修复后 V2 重新验证 Node 189、Native 966/1 skip、前端 7/类型及格式，逐文件及重建字节确认 Rust 未变。原 15 秒失联与真实 17 秒自动续期均通过，产品负例修复前失败/修复后通过。5c801a83 冻结包 76 制品/79 文件、150/150 打包前检查；实际 ASAR 持续会话、独立 Host、跨 17 秒自动续期/双释放/重新接入通过，零窗口/焦点/弹窗、正常退出，旧 491 冻结文件未变；原始失败、完整发布缺口均保留，见[本批记录](./reviews/rust-windows-validation-lease-2026-09-10.md)。

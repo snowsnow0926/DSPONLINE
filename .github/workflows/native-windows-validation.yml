@@ -114,6 +114,12 @@ jobs:
         run: |
           node scripts/native-realtime-foundation.mjs artifacts/native-windows-validation/realtime-foundation
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify TEST_ONLY desktop and Rust RPC gameplay chain
+        # Separate actual RPC coverage from library-only foundation receipts.
+        # This uses synthetic test admission and cannot qualify a player build.
+        run: |
+          npm run native:realtime-rpc -- artifacts/native-windows-validation/realtime-rpc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build optimized Windows Host
         run: |
           npm run native:build-host 2>&1 | Tee-Object artifacts/native-windows-validation/host-build.log

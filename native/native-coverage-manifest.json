@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "generatedFrom": [
     "native/dsp-native-core/src/state.rs",
-    "native/dsp-native-host/src/main.rs",
+    "native/dsp-native-host/src/rpc.rs",
     "native/dsp-native-host/src/core_runtime.rs",
     "native/dsp-native-host/src/exact_realtime_lease.rs",
     "src/App.tsx",

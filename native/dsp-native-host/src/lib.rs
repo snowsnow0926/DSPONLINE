@@ -7,6 +7,7 @@ pub mod installed_program;
 pub mod protocol;
 pub mod qualification_binding;
 pub mod qualification_catalog;
+pub mod rpc;
 pub mod save_store;
 pub mod v47_import;
 pub mod validation_candidate;

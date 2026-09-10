@@ -1169,7 +1169,7 @@ impl CoreRegistry {
     }
 
     #[cfg(test)]
-    fn enable_player_authority_coverage_for_test(&mut self) {
+    pub(crate) fn enable_player_authority_coverage_for_test(&mut self) {
         self.player_authority_coverage_override = true;
     }
 

@@ -26,7 +26,7 @@ test("renderer-facing v47 import exposes no path or byte payload", () => {
 });
 
 test("Rust host advertises import only beside the bounded parser and direct-file guard", () => {
-  const main = fs.readFileSync(path.join(root, "native", "dsp-native-host", "src", "main.rs"), "utf8");
+  const main = fs.readFileSync(path.join(root, "native", "dsp-native-host", "src", "rpc.rs"), "utf8");
   const parser = fs.readFileSync(path.join(root, "native", "dsp-native-core", "src", "v47_import.rs"), "utf8");
   const fileGuard = fs.readFileSync(path.join(root, "native", "dsp-native-host", "src", "v47_import.rs"), "utf8");
   assert.match(main, /"native-core-v47-stream-import-v1"/);

@@ -292,7 +292,7 @@ test("desktop direct and transfer paths route Dyson reads without a renderer Gam
   const main = readFileSync("desktop/main.cjs", "utf8");
   const preload = readFileSync("desktop/preload.cjs", "utf8");
   const host = readFileSync("desktop/native-host.cjs", "utf8");
-  const rustHost = readFileSync("native/dsp-native-host/src/main.rs", "utf8");
+  const rustHost = readFileSync("native/dsp-native-host/src/rpc.rs", "utf8");
   assert.match(main, /desktop:native-core-dyson-workspace-projection/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\(ownerId, "dyson-workspace-v1", request\)/);
   assert.match(main, /nativeCoreSessions\.dysonWorkspaceProjection\(ownerId, normalizedRequest\)/);

@@ -1,0 +1,25 @@
+# Windows Rust 十二字段候选身份｜2026-09-10
+
+Role: develop。完整 Windows Rust Goal 的实时接管前置增量。沿用 Electron/React 界面、已有 Host 和签名边界，未变更 GameState、存档/云格式、游戏规则或玩家准入。
+
+## 实现
+
+此前已经独立取得程序九字段和内置目录，但正文中的规则/矩阵摘要还依赖调用者提供。本批明确[规则和矩阵身份合同](../rust/windows-validation-candidate-v1.md)，增加 main/Host 无外部参数的完整候选提供者及实际只读 Host 入口。资格正文的既有十二字段形状保持不变。
+
+规则摘要保守绑定实际 Host、ASAR 与内置目录；固定矩阵把已有十二项 TEST_ONLY 开发证据检查、报告类型及零失败/跳过/flaky 要求绑定成独立摘要。两端分别解析矩阵，实际证据检查器核对固定名单，构建/打包也验证。不得把这个基础矩阵误认为完整生产资格或运行授权。
+
+实包探针新增实际主进程、独立 Host 和父进程的完整候选比较。它仍不创建 BrowserWindow、存档或模拟，也不运行玩家实时会话。
+
+## 本批验证
+
+`artifacts/rust-rp1-loop/validation-candidate-validate-v1/report.json` 为 PASS。160 项相关 Node 检查、正常 release workspace/all-targets 严格 Clippy、Host **278 passed/4 ignored**（43.54 秒，编译另计）、助手/主入口各 **3/3**、正常构建、完整 Native **930 passed/1 Windows 符号链接权限 skip/0 failed**（82.64 秒）、前端目录与摘要 **7/7**、类型与目录漂移验证全部通过。
+
+实际 Host 在隔离安装夹具内独立生成十二字段，与 Node 独立计算一致；额外路径参数拒绝，伪造 cwd 矩阵不影响结果，未创建 SaveStore 或模拟。夹具是公开合成安装元数据，实际冻结应用内验证另列，不能互相代替。
+
+验证前后 12 项源码/生成文件摘要一致。正常 release Host SHA-256 `adb20ed537e55eedd7756166e205db3c8c319a9cd49bb23acbc9ab1410ce8cf8`，助手 `873953fd1bb39a870b8b6f81fdc07d0cf9e732b40a0bb175bf0aefc015917db7`。守护正常 exit 0、无停止原因，401.93 秒，最低可用内存 7,981,652 KiB；6 GiB 启动/2 GiB 停止、BelowNormal 串行。完整核心/游戏/浏览器矩阵未在本批重跑，未改变对应规则或门槛，不将上一批结果作为当前重测。
+
+代码提交后再从干净源码构建冻结包，验证实际 ASAR/main、Host 和父进程的十二字段一致性。新构建驱动保存每条命令的 stdout/stderr、结果与摘要，避免上一批只保留命令回执的日志缺口。
+
+## 后续
+
+独立候选字段齐全之后，仍需补 profile/夹具绑定、可信时间与撤销防回退、生产者认证、完整验收矩阵、验证会话准入和实际单所有者交接。旧终局长离线、浏览器失败、性能/内存、30 分钟/24 小时长测及安装升级回退仍按[完整目标](../rust/windows-full-development.md)推进，不削减完成条件。

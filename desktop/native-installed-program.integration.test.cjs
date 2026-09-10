@@ -43,6 +43,31 @@ function inspect(executable, cwd, args = ["inspect-program"]) {
   });
 }
 
+test("actual installed Host derives all twelve validation candidate fields independently", { skip: process.platform !== "win32", timeout: 60_000 }, async (t) => {
+  assert.ok(fs.existsSync(binary), "Build the actual release Host before integration tests");
+  const root = temporary(t); const resources = path.join(root, "resources");
+  const native = path.join(resources, "native"); fs.mkdirSync(native, { recursive: true });
+  const executable = path.join(native, "dsp-native-host.exe"); fs.copyFileSync(binary, executable);
+  fs.writeFileSync(path.join(resources, "app.asar"), Buffer.from(fixture.asarHex, "hex"));
+  const unrelated = path.join(root, "unrelated"); fs.mkdirSync(unrelated);
+  fs.writeFileSync(path.join(unrelated, "native-validation-matrix-v1.json"), "forged");
+  const { collectBuiltinCatalogIdentity } = require("./native-builtin-catalog.cjs");
+  const { collectValidationMatrixIdentity, deriveValidationRulesSha256 } = require("./native-validation-candidate.cjs");
+  const program = { ...fixture.program, hostSha256: sha(fs.readFileSync(executable)), asarSha256: fixture.asarSha256 };
+  const catalogSha256 = collectBuiltinCatalogIdentity().catalogSha256;
+  const candidate = { ...program, catalogSha256, rulesSha256: deriveValidationRulesSha256(program, catalogSha256),
+    matrixSha256: collectValidationMatrixIdentity().matrixSha256 };
+  const result = await inspect(executable, unrelated, ["inspect-validation-candidate"]);
+  assert.equal(result.code, 0, result.stderr); assert.equal(result.signal, null); assert.equal(result.stderr, "");
+  assert.deepEqual(JSON.parse(result.stdout), { schemaVersion: 1, kind: "installed-validation-candidate-v1",
+    candidate, authorityEligible: false, releaseAllowed: false });
+  const rejected = await inspect(executable, unrelated, ["inspect-validation-candidate", "--root", root]);
+  assert.equal(rejected.code, 1); assert.equal(rejected.stdout, "");
+  assert.equal(rejected.stderr.trim(), "dsp-native-host: validation-candidate-rejected");
+  assert.deepEqual(fs.readdirSync(unrelated), ["native-validation-matrix-v1.json"]);
+  assert.deepEqual(fs.readdirSync(resources).sort(), ["app.asar", "native"]);
+});
+
 test("shared synthetic archive is accepted by the independent Electron ASAR reader", (t) => {
   const root = temporary(t); const file = path.join(root, "app.asar");
   const bytes = Buffer.from(fixture.asarHex, "hex"); fs.writeFileSync(file, bytes);

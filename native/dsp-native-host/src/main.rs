@@ -1050,6 +1050,29 @@ fn main() {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     if arguments
         .first()
+        .is_some_and(|a| a == "inspect-validation-candidate")
+    {
+        let candidate = if arguments.len() == 1 {
+            dsp_native_host::validation_candidate::collect_installed_windows_validation_candidate()
+        } else {
+            Err(dsp_native_host::validation_candidate::ValidationCandidateError)
+        };
+        match candidate {
+            Ok(candidate) => println!(
+                "{}",
+                json!({"schemaVersion": 1,
+                "kind": "installed-validation-candidate-v1", "candidate": candidate,
+                "authorityEligible": false, "releaseAllowed": false})
+            ),
+            Err(_) => {
+                eprintln!("dsp-native-host: validation-candidate-rejected");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if arguments
+        .first()
         .is_some_and(|a| a == "inspect-builtin-catalog")
     {
         match arguments.len() == 1 {

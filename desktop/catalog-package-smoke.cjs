@@ -55,7 +55,9 @@ async function inspectInstalledHost(resources, expected, command = "inspect-prog
   const receipt = JSON.parse(result);
   const expectedReceipt = command === "inspect-program"
     ? { schemaVersion: 1, kind: "installed-program-identity-v1", program: expected, authorityEligible: false }
-    : { schemaVersion: 1, kind: "builtin-catalog-identity-v1", content: expected, authorityEligible: false };
+    : command === "inspect-builtin-catalog"
+      ? { schemaVersion: 1, kind: "builtin-catalog-identity-v1", content: expected, authorityEligible: false }
+      : { schemaVersion: 1, kind: "installed-validation-candidate-v1", candidate: expected, authorityEligible: false, releaseAllowed: false };
   if (JSON.stringify(receipt) + "\n" !== result || !isDeepStrictEqual(receipt, expectedReceipt)) {
     throw new Error("Independent installed Host identity differs from main");
   }
@@ -93,6 +95,9 @@ async function run() {
   const { collectBuiltinCatalogIdentity } = require(path.join(resources, "app.asar", "desktop", "native-builtin-catalog.cjs"));
   const builtinContentIdentity = collectBuiltinCatalogIdentity();
   const hostBuiltinContentIdentity = await inspectInstalledHost(resources, builtinContentIdentity, "inspect-builtin-catalog");
+  const { collectPackagedWindowsValidationCandidate } = require(path.join(resources, "app.asar", "desktop", "native-validation-candidate.cjs"));
+  const validationCandidate = await collectPackagedWindowsValidationCandidate();
+  const hostValidationCandidate = await inspectInstalledHost(resources, validationCandidate, "inspect-validation-candidate");
   // Electron's real ASAR loader supplies this module and its own package.json.
   const modulePath = path.join(resources, "app.asar", "desktop", "native-catalog-verifier.cjs");
   const { createPackagedWindowsCatalogVerifier } = require(modulePath);
@@ -104,7 +109,8 @@ async function run() {
   if (audit.windowsCreated !== 0 || audit.initiallyVisible !== 0 || audit.showEvents !== 0 || audit.focusEvents !== 0
       || Object.keys(audit.dialogs).length) throw new Error("Package probe violated its no-window contract");
   finish({ status: "PASS", kind: "CATALOG_PACKAGE_SMOKE", actualHelperSha256, rejection, programIdentity, hostProgramIdentity,
-    builtinContentIdentity, hostBuiltinContentIdentity, authorityEligible: false, backgroundAudit: audit }, 0);
+    builtinContentIdentity, hostBuiltinContentIdentity, validationCandidate, hostValidationCandidate,
+    authorityEligible: false, backgroundAudit: audit }, 0);
 }
 
 setTimeout(() => fail(new Error("Package probe deadline exceeded")), 30_000).unref();

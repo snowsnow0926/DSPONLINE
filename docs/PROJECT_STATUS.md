@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 十二字段候选已实现（2026-09-10，未发布）**：main/Host 从独立程序与内置目录提供者计算完整候选，规则摘要绑定 Host/ASAR/目录，矩阵摘要绑定原有十二项 TEST_ONLY 检查及严格结果合同。当前 Host 278/4 ignored、两入口各 3、Native 930/1 skip、前端摘要 7/7、严格检查和类型通过；新冻结包在提交后验证。它不是完整可信上下文或运行资格，实时权威仍关闭，完整 Goal active；见[本批记录](./reviews/rust-windows-validation-candidate-2026-09-10.md)。以下保留此前证据。
+
 > **Windows Rust 独立内置目录已通过实包核对（2026-09-10，未发布）**：源码 `441ac195` 从真实前端定义生成公开目录，分别编入 Host 和 ASAR；双端计算完整 canonical 摘要，构建拒绝过期目录。完整 Host 275/4 ignored、两入口各 3、Native 915/1 skip、前端目录/摘要 7/7、严格检查和类型通过。新冻结包 76 制品/79 文件、NotSigned，main/Host/父进程程序及目录一致，零窗口/焦点/弹窗、正常退出；原 68 冻结文件未变。匹配器尚未接入玩家准入，实时权威仍关闭，完整 Goal active；见[本批记录](./reviews/rust-windows-builtin-catalog-2026-09-10.md)。以下保留此前实包与历史验证。
 
 > **Windows Rust 短瞬态已通过实包验收（2026-09-10，未发布）**：源码 `68e87775` 已推送，独立 31–60 秒真实 Exact 候选补齐容量临界短离线；旧宏观与 WAL 保留。最终核心 1,118/6 ignored、Host 272/4 ignored、Native 900/1 skip、长差分 14/2 benchmark skip、游戏 3,220/39 skip、严格检查及构建通过；同源云端 Windows 全部成功。新冻结包 76 制品/79 文件，短瞬态及原六组长离线共八组实际成功/取消、完整 JS/落盘/重进/两次重开通过，32 次隐藏静音正常退出、零显示/焦点/弹窗。完整浏览器 466/33 skip/3 fail/1 flaky，发布门禁未过；完整 Goal active，实时权威关闭，见[完整记录](./reviews/rust-windows-short-transient-2026-09-10.md)。以下各段为此前时点记录。

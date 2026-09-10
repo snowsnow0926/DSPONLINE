@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 
 const require = createRequire(import.meta.url);
 const { requireDirect } = require("../desktop/desktop-artifact-evidence.cjs");
+const { collectValidationMatrixIdentity } = require("../desktop/native-validation-candidate.cjs");
 
 // Offline evidence consistency only. This module does not authenticate a
 // producer, promote a Host, or issue a release/player-authority capability.
@@ -15,6 +16,12 @@ export const QUALIFICATION_CHECKS = Object.freeze([
   "persist-reopen", "exit-inflight", "lost-ack-retry", "host-restart",
   "threaded-determinism", "compatibility-roundtrip", "realtime-throughput", "process-tree-memory",
 ]);
+// Keep the installed matrix identity and this actual auditor's fixed roster
+// synchronized. The matrix remains TEST_ONLY, never a runtime grant.
+const matrix = collectValidationMatrixIdentity();
+if (matrix.scope !== QUALIFICATION_SCOPE || JSON.stringify(matrix.requiredChecks) !== JSON.stringify(QUALIFICATION_CHECKS)) {
+  throw new Error("qualification-matrix-drift");
+}
 const IDENTITY_KEYS = [
   "version", "sourceSha", "buildId", "editionId", "channel", "platform", "arch",
   "hostSha256", "asarSha256", "catalogSha256", "rulesSha256", "matrixSha256",

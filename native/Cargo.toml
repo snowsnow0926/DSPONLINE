@@ -14,7 +14,7 @@ hex = "0.4.3"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0.145", features = ["float_roundtrip", "raw_value"] }
+serde_json = { version = "1.0.145", features = ["float_roundtrip", "raw_value", "preserve_order"] }
 ryu-js = "1.0.3"
 sha2 = "0.10.9"
 thiserror = "2.0.17"

@@ -505,6 +505,29 @@ describe("NativeBlueprintWorkspace", () => {
     expect(onSubmitRenameIntent).toHaveBeenCalledOnce();
   });
 
+  it("audit: keeps a temporarily hidden draft cancelable while documenting focus replacement", () => {
+    renderWorkspace(frame(), "ready");
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")!.click());
+    const input = host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")!;
+    act(() => {
+      replaceInputValue(input, "隐藏后仍可取消");
+      input.focus();
+    });
+    expect(document.activeElement).toBe(input);
+
+    renderWorkspace(frame(), "ready", { open: false });
+    renderWorkspace(frame(), "ready", { open: true });
+
+    const restored = host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")!;
+    expect(restored).not.toBe(input);
+    expect(restored.value).toBe("隐藏后仍可取消");
+    expect(document.activeElement).not.toBe(restored);
+    const cancel = host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='cancel-rename']")!;
+    expect(cancel.disabled).toBe(false);
+    act(() => cancel.click());
+    expect(host.querySelector("[data-native-blueprint-rename-form]")).toBeNull();
+  });
+
   it.each([
     ["lineage", frame({ runId: "other-run", revision: 48 }), "session / run / registry 已变化"],
     ["row", frame({

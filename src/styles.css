@@ -18123,6 +18123,26 @@ select {
   font-size: 20px;
 }
 
+.offline-runtime > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.offline-runtime small {
+  color: var(--text-soft);
+  font-size: 8px;
+}
+
+.offline-runtime em {
+  max-width: 520px;
+  color: #e8bd77;
+  font-size: 8px;
+  font-style: normal;
+  line-height: 1.45;
+}
+
 .offline-report-body {
   display: grid;
   min-height: 0;

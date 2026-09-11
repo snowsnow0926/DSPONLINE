@@ -1,9 +1,15 @@
 import type { GameSettings, GameState } from "./types";
 import { OFFLINE_PERFORMANCE_SESSION_KEY } from "./performanceMonitor";
 import { createContentPackRuntimeSnapshot, loadContentPackRegistry, type ContentPackRuntimeSnapshot } from "./contentPacks";
+import type { OfflineSettlementDiagnostics, OfflineSettlementPhase, OfflineSettlementTransportDiagnostics } from "./offlineExperiment";
+import {
+  deserializeOfflineSimulationState,
+  serializeOfflineSimulationState,
+  type OfflineSimulationStatePayload,
+} from "./offlineSimulationProtocol";
 
 export type OfflineSimulationWorkerRequest =
-  | { type: "start"; id: number; state: GameState; seconds: number; registry: ContentPackRuntimeSnapshot }
+  | { type: "start"; id: number; statePayload: OfflineSimulationStatePayload; seconds: number; approximate?: boolean; registry: ContentPackRuntimeSnapshot }
   | {
     type: "prepare-upload";
     id: number;
@@ -17,8 +23,15 @@ export type OfflineSimulationWorkerRequest =
   | { type: "cancel"; id: number };
 
 export type OfflineSimulationWorkerResponse =
-  | { type: "progress"; id: number; completedSeconds: number; totalSeconds: number; progress: number }
-  | { type: "complete"; id: number; state: GameState; totalSeconds: number }
+  | { type: "progress"; id: number; completedSeconds: number; totalSeconds: number; progress: number; phase?: OfflineSettlementPhase; approximateSeconds?: number; estimatedError?: number }
+  | {
+    type: "complete";
+    id: number;
+    statePayload: OfflineSimulationStatePayload;
+    totalSeconds: number;
+    diagnostics?: OfflineSettlementDiagnostics;
+    transport: Pick<OfflineSettlementTransportDiagnostics, "inputBytes" | "outputBytes" | "workerDecodeMs" | "workerEncodeMs">;
+  }
   | { type: "upload-complete"; id: number; payload: string; summary: CloudUploadSummary; offlineSeconds: number; returningReward: Array<{ itemId: string; amount: number }> }
   | { type: "cancelled"; id: number }
   | { type: "error"; id: number; message: string };
@@ -27,6 +40,14 @@ export interface OfflineSimulationProgress {
   completedSeconds: number;
   totalSeconds: number;
   progress: number;
+  phase?: OfflineSettlementPhase;
+  approximateSeconds?: number;
+  estimatedError?: number;
+}
+
+export interface OfflineSimulationSettlementResult {
+  state: GameState;
+  diagnostics: OfflineSettlementDiagnostics;
 }
 
 export interface CloudUploadSummary {
@@ -43,16 +64,32 @@ export interface CloudUploadSummary {
   integrity?: "valid" | "invalid";
 }
 
-export function runOfflineSimulationInWorker(
+export interface OfflineSettlementWorkerOptions {
+  signal?: AbortSignal;
+  onProgress?: (progress: OfflineSimulationProgress) => void;
+  registry?: ContentPackRuntimeSnapshot;
+  approximate?: boolean;
+}
+
+export function runOfflineSettlementInWorker(
   state: GameState,
   seconds: number,
-  options: { signal?: AbortSignal; onProgress?: (progress: OfflineSimulationProgress) => void; registry?: ContentPackRuntimeSnapshot } = {},
-): Promise<GameState> {
+  options: OfflineSettlementWorkerOptions = {},
+): Promise<OfflineSimulationSettlementResult> {
   if (typeof Worker === "undefined") return Promise.reject(new Error("当前浏览器不支持离线计算 Worker"));
   const worker = new Worker(new URL("./offlineSimulation.worker.ts", import.meta.url), { type: "module", name: "offline-simulation" });
   const id = Date.now() + Math.floor(Math.random() * 1_000_000);
   const startedAt = performance.now();
-  return new Promise<GameState>((resolve, reject) => {
+  const encodeStartedAt = performance.now();
+  let statePayload: OfflineSimulationStatePayload;
+  try {
+    statePayload = serializeOfflineSimulationState(state);
+  } catch (error) {
+    worker.terminate();
+    return Promise.reject(error instanceof Error ? error : new Error("离线状态无法安全交给 Worker"));
+  }
+  const mainThreadEncodeMs = Math.max(0, performance.now() - encodeStartedAt);
+  return new Promise<OfflineSimulationSettlementResult>((resolve, reject) => {
     let settled = false;
     const finish = (callback: () => void) => {
       if (settled) return;
@@ -78,8 +115,47 @@ export function runOfflineSimulationInWorker(
         return;
       }
       if (message.type === "complete") {
+        const decodeStartedAt = performance.now();
+        let completedState: GameState;
+        try {
+          completedState = deserializeOfflineSimulationState(message.statePayload);
+        } catch (error) {
+          finish(() => reject(error instanceof Error ? error : new Error("离线 Worker 返回状态解析失败")));
+          return;
+        }
+        const mainThreadDecodeMs = Math.max(0, performance.now() - decodeStartedAt);
         try { window.sessionStorage.setItem(OFFLINE_PERFORMANCE_SESSION_KEY, String(Math.max(0, performance.now() - startedAt))); } catch { /* optional diagnostics */ }
-        finish(() => resolve(message.state));
+        const calculationMs = Math.max(0, performance.now() - startedAt);
+        const workerCalculationMs = message.diagnostics?.calculationMs ?? 0;
+        const transport: OfflineSettlementTransportDiagnostics = {
+          ...message.transport,
+          mainThreadEncodeMs,
+          workerCalculationMs,
+          mainThreadDecodeMs,
+        };
+        finish(() => resolve({
+          state: completedState,
+          diagnostics: message.diagnostics ? {
+            ...message.diagnostics,
+            calculationMs,
+            softTimeoutExceeded: message.diagnostics.softTimeoutExceeded || calculationMs > 30_000,
+            transport,
+          } : {
+            mode: "exact",
+            calibrationWindowSeconds: 0,
+            approximateSeconds: 0,
+            attemptedApproximateSeconds: 0,
+            exactSeconds: seconds,
+            maximumEstimatedError: 0,
+            fellBack: false,
+            calculationMs,
+            incomplete: false,
+            conservationVerified: true,
+            softTimeoutExceeded: calculationMs > 30_000,
+            workerMessageCount: 0,
+            transport,
+          },
+        }));
         return;
       }
       if (message.type === "cancelled") {
@@ -90,8 +166,20 @@ export function runOfflineSimulationInWorker(
     };
     worker.onerror = () => finish(() => reject(new Error("离线计算 Worker 运行失败，未保存任何半成品")));
     const registry = options.registry ?? createContentPackRuntimeSnapshot(loadContentPackRegistry());
-    worker.postMessage({ type: "start", id, state, seconds, registry } satisfies OfflineSimulationWorkerRequest);
+    try {
+      worker.postMessage({ type: "start", id, statePayload, seconds, approximate: options.approximate === true, registry } satisfies OfflineSimulationWorkerRequest, [statePayload.bytes]);
+    } catch {
+      finish(() => reject(new Error("离线状态无法转移到 Worker，原存档未修改")));
+    }
   });
+}
+
+export function runOfflineSimulationInWorker(
+  state: GameState,
+  seconds: number,
+  options: Omit<OfflineSettlementWorkerOptions, "approximate"> = {},
+): Promise<GameState> {
+  return runOfflineSettlementInWorker(state, seconds, options).then((result) => result.state);
 }
 
 /**

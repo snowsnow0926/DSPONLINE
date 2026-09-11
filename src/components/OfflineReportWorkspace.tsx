@@ -3,22 +3,30 @@ import { getItem, getTechnology } from "../game/content";
 import type { OfflineReport } from "../game/storage";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { QuantityValue } from "./QuantityValue";
+import { useAppLocale } from "../i18n/locale";
 
-function formatDuration(seconds: number): string {
+function formatDuration(seconds: number, locale: "zh-CN" | "en"): string {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor(seconds % 3600 / 60);
   const remainingSeconds = Math.floor(seconds % 60);
+  if (locale === "en") {
+    if (hours > 0) return `${hours} h ${minutes} min`;
+    if (minutes > 0) return `${minutes} min ${remainingSeconds} sec`;
+    return `${remainingSeconds} sec`;
+  }
   if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
   if (minutes > 0) return `${minutes} 分钟 ${remainingSeconds} 秒`;
   return `${remainingSeconds} 秒`;
 }
 
 export function OfflineReportWorkspace({ report, onClose }: { report: OfflineReport | null; onClose: () => void }) {
+  const { locale } = useAppLocale();
   if (!report) return null;
   const infiniteResearchLevels = report.infiniteResearchLevels ?? [];
   const exported = report.exported ?? [];
   const galacticCreditsAdded = report.galacticCreditsAdded ?? 0;
   const returningReward = report.returningReward ?? [];
+  const settlement = report.settlement;
   const hasChanges = report.produced.length > 0 || report.completedTechIds.length > 0 ||
     report.structurePointsAdded > 0 || report.shellSailsAdded > 0 || infiniteResearchLevels.length > 0 ||
     exported.length > 0 || galacticCreditsAdded > 0 || returningReward.length > 0;
@@ -29,7 +37,19 @@ export function OfflineReportWorkspace({ report, onClose }: { report: OfflineRep
         <button type="button" onClick={onClose} title="关闭离线结算报告" aria-label="关闭离线结算报告"><X size={18} /></button>
       </header>
       <div className="offline-runtime">
-        <span>离线时长</span><strong>{formatDuration(report.seconds)}</strong>
+        <div>
+          <span>{locale === "en" ? "Offline duration" : "离线时长"} · {locale === "en" ? settlement?.mode === "approximate" ? "Approximate settlement (experimental)" : "Exact settlement" : settlement?.mode === "approximate" ? "近似结算（实验）" : "精确结算"}</span>
+          {settlement ? <small>
+            {locale === "en" ? "Calibration" : "校准"} 2 × {settlement.calibrationWindowSeconds || 0} {locale === "en" ? "sec" : "秒"} ·
+            {locale === "en" ? " Approximate coverage" : " 近似覆盖"} {formatDuration(settlement.approximateSeconds, locale)} ·
+            {locale === "en" ? " Max estimated error" : " 最大估计误差"} {(settlement.maximumEstimatedError * 100).toFixed(2)}% ·
+            {locale === "en" ? settlement.conservationVerified ? " Conservation verified" : " Conservation failed" : ` 守恒${settlement.conservationVerified ? "已验证" : "未通过"}`} ·
+            {locale === "en" ? " Compute" : " 计算"} {(settlement.calculationMs / 1000).toFixed(2)} {locale === "en" ? "sec" : "秒"}
+          </small> : null}
+          {settlement?.fellBack ? <em>{locale === "en" ? "Approximation did not meet the safety conditions. Exact settlement was used automatically" : "本次近似未满足安全条件，已自动使用精确结算"}：{settlement.fallbackReason ?? (locale === "en" ? "Safety preflight failed" : "安全检查未通过")}</em> : null}
+          {settlement?.incomplete ? <em>{locale === "en" ? "Calculation is incomplete; unsettled time was not committed" : "本次计算未完成，未提交未结算时间"}</em> : null}
+        </div>
+        <strong>{formatDuration(report.seconds, locale)}</strong>
       </div>
       {hasChanges ? (
         <div className="offline-report-body">

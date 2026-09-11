@@ -77,11 +77,26 @@ import { useResolvedTheme } from "../hooks/useResolvedTheme";
 import { isSecureCloudClient } from "../nativeApp";
 import { useAppLocale } from "../i18n/locale";
 import { exportTextFile } from "../game/fileExport";
+import {
+  isApproximateOfflineExperimentEnabled,
+  offlineSettlementPhaseLabel,
+  setApproximateOfflineExperimentEnabled,
+  type OfflineSettlementDiagnostics,
+  type OfflineSettlementPhase,
+} from "../game/offlineExperiment";
 
 type StartMenuView = "overview" | "saves" | "cloud" | "import" | "settings" | "new";
 type CloudAuthMode = "login" | "register" | "forgot" | "reset";
 type MenuMessage = { tone: "busy" | "ready" | "warning" | "error"; text: string } | null;
-type OfflineLoadProgress = { label: string; completedSeconds: number; totalSeconds: number; progress: number };
+type OfflineLoadProgress = {
+  label: string;
+  completedSeconds: number;
+  totalSeconds: number;
+  progress: number;
+  phase?: OfflineSettlementPhase;
+  approximateSeconds?: number;
+  estimatedError?: number;
+};
 
 function cloudUploadStageLabel(stage: CloudUploadStage): string {
   if (stage === "compressing") return "压缩存档";
@@ -274,6 +289,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
   const [slots, setSlots] = useState(getMenuSlotSummaries);
   const [snapshots, setSnapshots] = useState(getMenuSnapshotSummaries);
   const [settings, setSettings] = useState<GameSettings>(() => readMenuSettings(defaultSettings));
+  const [approximateOfflineExperiment, setApproximateOfflineExperiment] = useState(isApproximateOfflineExperimentEnabled);
   useResolvedTheme(settings.theme);
   const [cloudSession, setCloudSession] = useState<CloudSession>({ status: "checking", user: null, cloudSave: null, mailAvailable: false, message: null });
   const initialCloudAction = useMemo(() => {
@@ -431,16 +447,20 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
     storage: StorageModule,
   ) => {
     let completed = loaded.state;
+    let settlement: OfflineSettlementDiagnostics | undefined;
     if (loaded.offlineSeconds >= 1) {
       const controller = new AbortController();
       offlineAbortRef.current = controller;
       setOfflineProgress({ label, completedSeconds: 0, totalSeconds: loaded.offlineSeconds, progress: 0 });
-      const { runOfflineSimulationInWorker } = await importWithRecovery(() => import("../game/offlineSimulation"), "离线结算模块");
+      const { runOfflineSettlementInWorker } = await importWithRecovery(() => import("../game/offlineSimulation"), "离线结算模块");
       try {
-        completed = await runOfflineSimulationInWorker(loaded.state, loaded.offlineSeconds, {
+        const result = await runOfflineSettlementInWorker(loaded.state, loaded.offlineSeconds, {
           signal: controller.signal,
+          approximate: approximateOfflineExperiment,
           onProgress: (progress) => setOfflineProgress({ label, ...progress }),
         });
+        completed = result.state;
+        settlement = result.diagnostics;
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) throw error;
         const skipped = storage.cancelDeferredOfflineGame(loaded);
@@ -448,7 +468,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         return;
       }
     }
-    const finalized = storage.finalizeDeferredOfflineGame(loaded, completed);
+    const finalized = storage.finalizeDeferredOfflineGame(loaded, completed, settlement);
     await enterLoadedGame(finalized, preserveReason, storage);
   };
 
@@ -995,7 +1015,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
           <Activity size={22} />
           <span>
             <strong id="offline-progress-title">正在进行离线运算</strong>
-            <small>{offlineProgress.label} · {Math.floor(offlineProgress.completedSeconds).toLocaleString("zh-CN")} / {Math.floor(offlineProgress.totalSeconds).toLocaleString("zh-CN")} 秒</small>
+            <small>{offlineProgress.label} · {offlineSettlementPhaseLabel(offlineProgress.phase ?? "exact", locale)} · {Math.floor(offlineProgress.completedSeconds).toLocaleString(locale)} / {Math.floor(offlineProgress.totalSeconds).toLocaleString(locale)} {locale === "en" ? "sec" : "秒"}</small>
           </span>
         </div>
         <progress max={1} value={Math.max(0, Math.min(1, offlineProgress.progress))} />
@@ -1124,7 +1144,7 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
             <section><header><Factory size={15} /><strong>科技树布局</strong><small>{settings.technologyLayout === "compact" ? "精简" : "标准"}</small></header><div className="start-menu-segments">{(["standard", "compact"] as const).map((technologyLayout) => <button className={settings.technologyLayout === technologyLayout ? "active" : ""} type="button" key={technologyLayout} onClick={() => updateMenuSettings({ technologyLayout })}>{technologyLayout === "compact" ? "精简模式" : "标准模式"}</button>)}</div></section>
             <section><header><Zap size={15} /><strong>模拟速度</strong><small>{settings.simulationSpeed}×</small></header><div className="start-menu-segments">{SIMULATION_SPEEDS.map((speed) => <button className={settings.simulationSpeed === speed ? "active" : ""} type="button" key={speed} onClick={() => updateMenuSettings({ simulationSpeed: speed })}>{speed}×</button>)}</div></section>
             <section><header><Clock3 size={15} /><strong>自动保存</strong><small>{settings.autosaveIntervalSeconds} 秒</small></header><div className="start-menu-segments">{AUTOSAVE_INTERVALS.map((seconds) => <button className={settings.autosaveIntervalSeconds === seconds ? "active" : ""} type="button" key={seconds} onClick={() => updateMenuSettings({ autosaveIntervalSeconds: seconds })}>{seconds} 秒</button>)}</div></section>
-            <section className="start-menu-setting-toggles"><ToggleRow checked={settings.performanceMode} label="性能模式" value={settings.performanceMode ? "低频渲染" : "完整渲染"} icon={<Cpu size={16} />} onChange={(performanceMode) => updateMenuSettings({ performanceMode })} /><ToggleRow checked={settings.reducedMotion} label="减少动态效果" value={settings.reducedMotion ? "动态已精简" : "完整动态"} icon={<Gauge size={16} />} onChange={(reducedMotion) => updateMenuSettings({ reducedMotion })} /><ToggleRow checked={settings.soundEnabled} label="操作音效" value={settings.soundEnabled ? "已开启" : "已关闭"} icon={settings.soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />} onChange={(soundEnabled) => updateMenuSettings({ soundEnabled })} /><ToggleRow checked={settings.allowDoubleClickZoom} label="允许双击缩放" value={settings.allowDoubleClickZoom ? "双击聚焦画布" : "连续点击不缩放"} icon={<MousePointer2 size={16} />} onChange={(allowDoubleClickZoom) => updateMenuSettings({ allowDoubleClickZoom })} /></section>
+            <section className="start-menu-setting-toggles"><ToggleRow checked={settings.performanceMode} label="性能模式" value={settings.performanceMode ? "低频渲染" : "完整渲染"} icon={<Cpu size={16} />} onChange={(performanceMode) => updateMenuSettings({ performanceMode })} /><ToggleRow checked={settings.reducedMotion} label="减少动态效果" value={settings.reducedMotion ? "动态已精简" : "完整动态"} icon={<Gauge size={16} />} onChange={(reducedMotion) => updateMenuSettings({ reducedMotion })} /><ToggleRow checked={approximateOfflineExperiment} label={locale === "en" ? "Approximate offline settlement (experimental)" : "近似离线结算（实验）"} value={locale === "en" ? approximateOfflineExperiment ? "Two-window calibration with automatic exact fallback" : "Off · Full exact settlement" : approximateOfflineExperiment ? "双窗口校准，失败自动精确回退" : "关闭 · 使用完整精确结算"} icon={<Clock3 size={16} />} onChange={(enabled) => { setApproximateOfflineExperiment(enabled); setApproximateOfflineExperimentEnabled(enabled); }} /><ToggleRow checked={settings.soundEnabled} label="操作音效" value={settings.soundEnabled ? "已开启" : "已关闭"} icon={settings.soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />} onChange={(soundEnabled) => updateMenuSettings({ soundEnabled })} /><ToggleRow checked={settings.allowDoubleClickZoom} label="允许双击缩放" value={settings.allowDoubleClickZoom ? "双击聚焦画布" : "连续点击不缩放"} icon={<MousePointer2 size={16} />} onChange={(allowDoubleClickZoom) => updateMenuSettings({ allowDoubleClickZoom })} /></section>
             <NativeUpdateCard className="start-menu-native-update" />
             <section className="start-menu-release-notes"><header><History size={15} /><strong>版本更新记录</strong><small>{CURRENT_RELEASE_NOTES.date}</small></header><button type="button" onClick={onOpenReleaseNotes} aria-label={`查看${CURRENT_RELEASE_NOTES.date}版本更新记录`}><span><strong>{CURRENT_RELEASE_NOTES.title}</strong><small>{CURRENT_RELEASE_NOTES.items.length} 项体验更新</small></span><ArrowRight size={15} /></button></section>
             <section className="start-menu-community"><header><MessageCircle size={15} /><strong>QQ 交流群</strong><small>意见、建议与问题反馈</small></header><p>群号 <strong>1076757280</strong></p></section>

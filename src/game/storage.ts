@@ -30,6 +30,7 @@ import { createEmptyGalacticHubNetwork, createEmptySystemSpaceStations } from ".
 import { normalizeHubInteger, SYSTEM_HUB_MAX_DIGITS } from "./systemHubLogistics";
 import { createEmptyQuantumLogisticsNetworkState, normalizeQuantumInteger, normalizeQuantumLogisticsNetworkState, QUANTUM_MAX_INTEGER_DIGITS } from "./quantumLogisticsNetwork";
 import { getActiveContentPackReferences, getMissingContentPackRequirements, loadContentPackRegistry, type ContentPackRegistry } from "./contentPacks";
+import type { OfflineSettlementDiagnostics } from "./offlineExperiment";
 import {
   clearPrimarySaveEmergencyMirror,
   flushLocalSaveWrites,
@@ -102,6 +103,7 @@ export interface OfflineReport {
   exported?: Array<{ projectId: GalacticExportProjectId; amount: number }>;
   galacticCreditsAdded?: number;
   returningReward?: Array<{ itemId: ItemId; amount: number }>;
+  settlement?: OfflineSettlementDiagnostics;
 }
 
 export interface SaveSlotSummary {
@@ -2084,7 +2086,7 @@ export function prepareSaveStateForBackground(state: GameState): GameState {
   return prepared;
 }
 
-function buildOfflineReport(before: GameState, after: GameState, seconds: number): OfflineReport {
+function buildOfflineReport(before: GameState, after: GameState, seconds: number, settlement?: OfflineSettlementDiagnostics): OfflineReport {
   const produced = (Object.keys(ITEMS) as ItemId[]).flatMap((itemId) => {
     const amount = Math.max(0, Math.floor((after.totalProduced[itemId] ?? 0) - (before.totalProduced[itemId] ?? 0)));
     return amount > 0 ? [{ itemId, amount }] : [];
@@ -2109,6 +2111,7 @@ function buildOfflineReport(before: GameState, after: GameState, seconds: number
     infiniteResearchLevels,
     exported,
     galacticCreditsAdded: Math.max(0, after.endgame.galacticCredits - before.endgame.galacticCredits),
+    settlement,
   };
 }
 
@@ -2368,12 +2371,16 @@ function parseDeferredEnvelope(raw: string): DeferredLoadedGame | null {
   return { state, savedAt, offlineSeconds, offlineReport: null };
 }
 
-export function finalizeDeferredOfflineGame(loaded: DeferredLoadedGame, advancedState: GameState): LoadedGame {
+export function finalizeDeferredOfflineGame(
+  loaded: DeferredLoadedGame,
+  advancedState: GameState,
+  settlement?: OfflineSettlementDiagnostics,
+): LoadedGame {
   if (loaded.offlineSeconds < 1) {
     return { state: loaded.state, offlineSeconds: 0, offlineReport: null, recovery: loaded.recovery };
   }
   const returning = applyReturningReward(advancedState, loaded.savedAt, loaded.offlineSeconds);
-  const report = buildOfflineReport(loaded.state, returning.state, loaded.offlineSeconds);
+  const report = buildOfflineReport(loaded.state, returning.state, loaded.offlineSeconds, settlement);
   if (returning.reward.length > 0) report.returningReward = returning.reward;
   return { state: returning.state, offlineSeconds: loaded.offlineSeconds, offlineReport: report, recovery: loaded.recovery };
 }

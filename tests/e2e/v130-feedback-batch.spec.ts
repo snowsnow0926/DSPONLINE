@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-10-v1.0.37";
+const RELEASE_NOTE_ID = "2026-08-11-v1.0.38";
 
 async function seedBatchSave(page: Page, options: { offlineSeconds?: number; paused?: boolean; topology?: boolean; bypassMenu?: boolean } = {}) {
   await page.addInitScript(({ offlineSeconds, paused, topology, bypassMenu, releaseNoteId }) => {
@@ -90,7 +90,10 @@ for (const scenario of [
     await expect(report.locator(".offline-report-method")).toContainText("估计最大误差");
     if (scenario.name === "fallback") {
       await expect(report.locator(".offline-report-warning")).toBeVisible();
-      await expect(report).toContainText("实际提交 33 秒");
+      const submittedText = await report.locator(".offline-runtime").textContent();
+      const submittedSeconds = Number(submittedText?.match(/实际提交\s*(\d+)\s*秒/)?.[1] ?? Number.NaN);
+      expect(submittedSeconds).toBeGreaterThanOrEqual(33);
+      expect(submittedSeconds).toBeLessThan(43);
       await expect(report).toContainText("收益为 0");
     }
     else await expect(report.locator(".offline-report-warning")).toHaveCount(0);

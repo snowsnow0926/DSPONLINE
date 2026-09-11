@@ -4,7 +4,7 @@ async function prepare(page: import("@playwright/test").Page) {
   await page.addInitScript(() => {
     // Match the current release-note id so the announcement dialog cannot
     // intercept the new-factory controls during this feature test.
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-10-v1.0.37");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-11-v1.0.38");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.mobile-ui.v1", "next");
     window.localStorage.removeItem("dsp-idle-network.ui.speedrun-panel-collapsed.v1");

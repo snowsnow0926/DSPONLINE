@@ -137,7 +137,7 @@ async function seedManagementFixture(page: Page, options: FixtureOptions = {}) {
       paused: true,
     };
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-10-v1.0.37");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-11-v1.0.38");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     if (mobileUi) window.localStorage.setItem("dsp-idle-network.mobile-ui.v1", mobileUi);
@@ -310,12 +310,21 @@ test("item hover actions remain interactive across the portal and open locate an
   await expect(card).toBeVisible();
   await card.getByRole("button", { name: "定位铁块生产线" }).click();
   await expect(page.getByRole("status")).toContainText("已定位");
+  await expect(card).toBeHidden();
+  // Locating schedules a 260 ms React Flow viewport animation after 50 ms.
+  // Wait until the reference has stopped moving before opening its portal again;
+  // otherwise a slow runner can emit mouseleave while Playwright crosses to the card.
+  await page.waitForTimeout(400);
 
   await reference.hover();
   card = page.getByRole("dialog", { name: "铁块快捷操作" });
-  await card.getByRole("button", { name: "打开铁块图鉴" }).click();
+  await expect(card).toBeVisible();
+  const openCodex = card.getByRole("button", { name: "打开铁块图鉴" });
+  await expect(openCodex).toBeEnabled();
+  await openCodex.click();
   const codex = page.getByRole("dialog", { name: "生产资料库" });
-  await expect(codex.locator(".recipe-item-header").getByText("铁块", { exact: true })).toBeVisible();
+  await expect(codex).toBeVisible({ timeout: 15_000 });
+  await expect(codex.locator(".recipe-item-header").getByText("铁块", { exact: true })).toBeVisible({ timeout: 15_000 });
 });
 
 test.describe("touch and responsive management", () => {

@@ -4,10 +4,10 @@
 > 候选源码：`853ecdb12795844c484b1415f8e72967a25e343d`
 > Build ID：`1.0.37+853ecdb12795`
 > 开发分支：`codex/1.0.37-monopole-tech-offline`
-> 当前生产：`1.0.37+853ecdb12795`
-> 直接回滚：完整 1.0.36
+> 当前生产：`1.0.38+351c649af9ee`
+> 当前 previous-stable：完整 1.0.37
 
-> **发布状态（2026-08-11）**：用户已对固定候选明确豁免 Android 真机、低配 Windows、覆盖升级和约一小时后台门禁，并接受本文性能残余风险。香港、上海 Web/API、上海下载页及正式 Android/Windows stable 制品均已发布；当前生产为 `1.0.37+853ecdb12795`，直接回滚和香港 previous-stable 均为完整 1.0.36。备份、隔离启动、切换、下载、PWA、运维异常恢复和回滚证据见 [1.0.37 正式发布记录](./releases/1.0.37.md)。本文以下内容保留开发交接时点的原始门禁与条件，不应再解读为“尚未发布”。
+> **发布状态（2026-08-11）**：1.0.37 已完成正式发布，随后在 1.0.38 发布中成为两地 Web/API、上海下载页和香港 Web-only previous-stable 的完整直接回滚。备份、隔离启动、切换、下载、PWA 和回滚证据见 [1.0.37 正式发布记录](./releases/1.0.37.md) 与 [1.0.38 正式发布记录](./releases/1.0.38.md)。本文以下内容保留开发交接时点的原始门禁与条件，不应再解读为“尚未发布”。
 
 ## 1. 交接结论
 
@@ -48,7 +48,7 @@
 
 - clean source commit：`853ecdb12795844c484b1415f8e72967a25e343d`
 - Build ID：`1.0.37+853ecdb12795`
-- source manifest：[1.0.37-853ecdb12795.json](../artifacts/release-manifests/1.0.37-853ecdb12795.json)
+- 本地 source manifest：`artifacts/release-manifests/1.0.37-853ecdb12795.json`
 - source 文件：160
 - aggregate SHA-256：`25b31f5b0ab500b67ac3d3f436d1c8fc8696f50672f627314587f52bdea86fba`
 - manifest SHA-256：`1fb186700f24796205730a3366571a1112767bc0556508f8f66be1b864c6c2e8`
@@ -56,7 +56,7 @@
 
 ### 候选目录
 
-[artifacts/release-packages/1.0.37-853ecdb12795](../artifacts/release-packages/1.0.37-853ecdb12795)
+本地候选目录：`artifacts/release-packages/1.0.37-853ecdb12795`
 
 | 文件 | 字节 | SHA-256 | 策略 |
 | --- | ---: | --- | --- |
@@ -66,7 +66,7 @@
 | `1.0.37-853ecdb12795-android-unsigned.apk` | 4,822,679 | `751c89fd8669d0f977e96b643b31497880fd10c15bd1f6fac43e73e7a890fa01` | 诊断；未签名；禁止 stable |
 | `1.0.37-853ecdb12795-android-unsigned.aab` | 4,637,964 | `82848a7ae4a0d1c7fc22c6f30a405303517c179bd41a67e94f5848b8cc1e74fc` | 诊断；未签名；禁止 stable |
 
-聚合记录：[candidate-artifacts.json](../artifacts/release-packages/1.0.37-853ecdb12795/candidate-artifacts.json)，SHA-256 `f02c6e30149dd6c43bca5d84d26207e60b6b031cdad8695d666e27afe2a3449f`，5/5 文件大小与哈希复验通过。
+本地聚合记录：`artifacts/release-packages/1.0.37-853ecdb12795/candidate-artifacts.json`，SHA-256 `f02c6e30149dd6c43bca5d84d26207e60b6b031cdad8695d666e27afe2a3449f`，5/5 文件大小与哈希复验通过。
 
 Windows 包内 `package.json` 与 `dist/version.json` 分别确认版本 `1.0.37`、Build ID `1.0.37+853ecdb12795`；文件版本 `1.0.37`、产品版本 `1.0.37.0`。独立 profile 启动 10 秒时主进程及 3 个子进程保持运行，之后只终止该 profile 的 4 个进程。Authenticode 为 `NotSigned`。
 

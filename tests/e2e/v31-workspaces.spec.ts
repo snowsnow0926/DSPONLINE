@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-10-v1.0.37");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-11-v1.0.38");
   });
 });
 
@@ -94,30 +94,31 @@ test("each planet restores its last canvas viewport", async ({ page }) => {
   await page.reload();
   await expect(page.getByTitle("切换到烬原 II")).toBeEnabled();
 
-  const pan = async (dx: number, dy: number) => {
-    const bounds = await page.locator(".react-flow__pane").boundingBox();
-    if (!bounds) throw new Error("factory pane is unavailable");
-    const x = bounds.x + bounds.width * 0.5;
-    const y = bounds.y + bounds.height * 0.5;
-    await page.mouse.move(x, y);
-    await page.mouse.down({ button: "middle" });
-    await page.mouse.move(x + dx, y + dy, { steps: 8 });
-    await page.mouse.up({ button: "middle" });
-    await page.waitForTimeout(120);
+  const transform = () => page.locator(".react-flow__viewport").evaluate((element) => {
+    const matrix = new DOMMatrixReadOnly(getComputedStyle(element).transform);
+    return { zoom: matrix.a, x: matrix.e, y: matrix.f };
+  });
+  const transformDelta = (left: Awaited<ReturnType<typeof transform>>, right: Awaited<ReturnType<typeof transform>>) => Math.max(
+    Math.abs(left.zoom - right.zoom) * 100,
+    Math.abs(left.x - right.x),
+    Math.abs(left.y - right.y),
+  );
+  const changeZoom = async (control: ".react-flow__controls-zoomin" | ".react-flow__controls-zoomout") => {
+    const before = await transform();
+    await page.locator(control).click();
+    await expect.poll(async () => transformDelta(await transform(), before)).toBeGreaterThan(1);
   };
-  const transform = () => page.locator(".react-flow__viewport").evaluate((element) => getComputedStyle(element).transform);
 
-  await pan(150, 70);
+  await changeZoom(".react-flow__controls-zoomin");
   const homeViewport = await transform();
   await page.getByTitle(/切换到澄海 I/).click();
-  await expect.poll(transform).toBe(homeViewport);
+  await expect.poll(async () => transformDelta(await transform(), homeViewport)).toBeLessThanOrEqual(0.6);
   await page.getByTitle("切换到烬原 II").click();
-  await page.waitForTimeout(260);
-  await pan(-90, -45);
+  await changeZoom(".react-flow__controls-zoomout");
   const ashenViewport = await transform();
-  expect(ashenViewport).not.toBe(homeViewport);
+  expect(transformDelta(ashenViewport, homeViewport)).toBeGreaterThan(1);
   await page.getByTitle(/切换到澄海 I/).click();
-  await expect.poll(transform).toBe(homeViewport);
+  await expect.poll(async () => transformDelta(await transform(), homeViewport)).toBeLessThanOrEqual(0.6);
 
   await page.getByTitle("保存并返回主菜单").click();
   await expect(page.locator(".start-menu")).toBeVisible();

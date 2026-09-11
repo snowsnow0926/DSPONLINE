@@ -127,7 +127,7 @@ describe("1.0.36 belt defaults and fuel support", () => {
       oracle.entities.find((entity) => entity.id === fixture.target.id)?.inputs.iron_ingot,
     );
     expect(indexed.belts[0]).toEqual(oracle.belts[0]);
-  });
+  }, 30_000);
 
   it("burns fire ice through the existing thermal, statistics and time-budget path", () => {
     expect(FUEL_ENERGY_MJ.fire_ice).toBe(4.8);

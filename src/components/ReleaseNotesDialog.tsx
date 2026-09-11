@@ -5,47 +5,62 @@ import { NATIVE_BACK_EVENT } from "../nativeApp";
 export const RELEASE_NOTES_SEEN_KEY = "dsp-idle-network.release-notes.seen.v1";
 
 export const CURRENT_RELEASE_NOTES = {
+  id: "2026-08-11-v1.0.38",
+  date: "2026年8月11日",
+  version: "1.0.38",
+  title: "终局性能、存档瘦身与矿脉扩容更新",
+  summary: "1.0.38 减少大存档在主线程与 Worker 间的重复复制，复用传送带、生产、电力和量子物流批处理，并安全压缩可重建的默认存档字段；普通模式中仅有一个单极磁石矿脉的存档可在备份与双重确认后补到硬上限两个。GameState v46、存档 envelope v2、云 schema v7 与 SQLite layout v2 不变。",
+  items: [
+    {
+      id: "worker-transfer",
+      title: "大存档只做一次权威序列化",
+      description: "保存、云上传、离线和纯挂机 Worker 返回带长度、哈希与状态校验的可转移缓冲区；槽位和快照也走后台序列化，失败仍保留原始状态和精确重试能力。",
+    },
+    {
+      id: "exact-batching",
+      title: "终局结算复用稳定批次",
+      description: "传送带候选与容量账本、配方静态量、戴森接收与电网拓扑、量子供需索引在结构未变化时复用；完整状态、缓存、在途物资和稳定排序继续与既有 oracle 对照。",
+    },
+    {
+      id: "save-compaction",
+      title: "存档默认字段可安全瘦身",
+      description: "仅省略 v46 迁移可精确重建的实体和传送带零值默认字段，运行时拓扑与历史诊断不落盘；旧版未压缩 v46 存档仍可直接读取并保留失败回滚路径。",
+    },
+    {
+      id: "second-unipolar-vein",
+      title: "单矿脉存档可受控补到两个",
+      description: "仅普通模式、恰好一个健康单极磁石矿脉且暂停时可操作；先创建持久快照并双重确认，只新增零缓存、零矿机的有限矿脉，不增加库存、产量或既有矿脉储量，重复执行会被硬上限阻止。",
+    },
+    {
+      id: "canvas-compatibility",
+      title: "高密度画布减少无效刷新",
+      description: "线路颜色与物品映射只在拓扑变化时重建，并新增暂停/运行拖动、缩放、建筑/线路选择、检查器、200% 字号和移动窗口的有界矩阵；不会承诺未经真机验证的统一 60 FPS。",
+    },
+  ],
+} as const;
+
+const RELEASE_NOTE_ICONS: Record<(typeof CURRENT_RELEASE_NOTES.items)[number]["id"], LucideIcon> = {
+  "worker-transfer": CloudUpload,
+  "exact-batching": Gauge,
+  "save-compaction": History,
+  "second-unipolar-vein": Link2,
+  "canvas-compatibility": Check,
+};
+
+const RELEASE_NOTES_1_0_37 = {
   id: "2026-08-10-v1.0.37",
   date: "2026年8月10日",
   version: "1.0.37",
   title: "单极磁石、离线决策与星图批量操作更新",
   summary: "1.0.37 修复旧存档资源目录迁移边界，重排横向科技树导航，并让不可靠的离线近似先由玩家决策；星图批量物流操作同步收紧布局并支持轨道收集器一键接入量子网络。GameState v46、存档 envelope v2、云 schema v7 与 SQLite layout v2 不变。",
   items: [
-    {
-      id: "unipolar-integrity",
-      title: "单极磁石资源边界可审计",
-      description: "旧存档迁移只恢复其星球资源目录明确声明的稳定资源点，不再从重新生成的目录引入幽灵矿脉；人工修复工具提供预览、备份摘要、确认令牌、回滚和速通复核门禁。",
-    },
-    {
-      id: "technology-navigation",
-      title: "科技树横向浏览更稳定",
-      description: "桌面科技树按层级横向排列，滚轮、触控板、Shift 滚轮、拖动与键盘均只移动科技区域；100%～200% 字号和紧凑布局不会带动页面纵向跳动，手机仍使用纵向列表。",
-    },
-    {
-      id: "offline-decision",
-      title: "不可靠离线近似不再自动落盘",
-      description: "零校准、Worker 异常、内存风险和边界失败会保留原存档并进入决策界面；可从原状态精确重试、返回菜单，或在普通模式双重确认后按零收益推进时钟，速通模式只允许精确结算。",
-    },
-    {
-      id: "star-map-batch",
-      title: "星图批量物流操作更集中",
-      description: "升级全部星际物流站与切换全部量子物流站保持同排，并新增轨道收集器一键接入量子网络；批量操作会确认影响范围并显示成功数、跳过数和分组原因。",
-    },
-    {
-      id: "save-compatibility",
-      title: "存档与在线协议保持兼容",
-      description: "本批不升级 GameState、存档封装、云服务或 SQLite 版本；不会自动修改排行榜历史、批量增加资源或提交未确认的离线候选状态。",
-    },
+    { id: "unipolar-integrity", title: "单极磁石资源边界可审计", description: "旧存档迁移只恢复其星球资源目录明确声明的稳定资源点，不再从重新生成的目录引入幽灵矿脉；人工修复工具提供预览、备份摘要、确认令牌、回滚和速通复核门禁。" },
+    { id: "technology-navigation", title: "科技树横向浏览更稳定", description: "桌面科技树按层级横向排列，滚轮、触控板、Shift 滚轮、拖动与键盘均只移动科技区域；100%～200% 字号和紧凑布局不会带动页面纵向跳动，手机仍使用纵向列表。" },
+    { id: "offline-decision", title: "不可靠离线近似不再自动落盘", description: "零校准、Worker 异常、内存风险和边界失败会保留原存档并进入决策界面；可从原状态精确重试、返回菜单，或在普通模式双重确认后按零收益推进时钟，速通模式只允许精确结算。" },
+    { id: "star-map-batch", title: "星图批量物流操作更集中", description: "升级全部星际物流站与切换全部量子物流站保持同排，并新增轨道收集器一键接入量子网络；批量操作会确认影响范围并显示成功数、跳过数和分组原因。" },
+    { id: "save-compatibility", title: "存档与在线协议保持兼容", description: "本批不升级 GameState、存档封装、云服务或 SQLite 版本；不会自动修改排行榜历史、批量增加资源或提交未确认的离线候选状态。" },
   ],
 } as const;
-
-const RELEASE_NOTE_ICONS: Record<(typeof CURRENT_RELEASE_NOTES.items)[number]["id"], LucideIcon> = {
-  "unipolar-integrity": Check,
-  "technology-navigation": Link2,
-  "offline-decision": Gauge,
-  "star-map-batch": CloudUpload,
-  "save-compatibility": Check,
-};
 
 const RELEASE_NOTES_1_0_36 = {
   id: "2026-08-10-v1.0.36",
@@ -75,6 +90,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  RELEASE_NOTES_1_0_37,
   RELEASE_NOTES_1_0_36,
   {
     id: "2026-08-09-v1.0.35", date: "2026年8月9日", version: "1.0.35", title: "终局结算、云端安全与速通恢复更新",

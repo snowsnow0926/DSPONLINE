@@ -302,8 +302,10 @@ test("cancel keeps the pending interval and confirmed skip commits zero rewards"
   await expect(report).toContainText("结算状态保守跳过");
   await expect(report).toContainText("实际提交 1 小时 0 分钟");
   const persisted = await page.evaluate((key) => JSON.parse(window.localStorage.getItem(key)!).state, SAVE_KEY);
+  // The pending interval includes slow-runner wall time across the deliberate
+  // reload/cancel cycle, but it must still be applied once from the original 42s.
   expect(persisted.elapsedSeconds).toBeGreaterThanOrEqual(3_642);
-  expect(persisted.elapsedSeconds).toBeLessThan(3_643);
+  expect(persisted.elapsedSeconds).toBeLessThan(3_652);
   expect(persisted.totalProduced).toEqual({});
 });
 

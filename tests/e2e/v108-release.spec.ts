@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-10-v1.0.37";
+const RELEASE_NOTE_ID = "2026-08-11-v1.0.38";
 
 async function seedV108Factory(page: Page, options: { mobileUi?: "legacy" | "next"; theme?: "dark" | "light"; fontScale?: number } = {}) {
   await page.addInitScript(({ releaseNoteId, mobileUi, theme, fontScale }) => {
@@ -53,7 +53,7 @@ async function seedV108Factory(page: Page, options: { mobileUi?: "legacy" | "nex
 async function openFactory(page: Page, path = "/") {
   const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
   await page.addLocatorHandler(offlineReport, async () => {
-    await offlineReport.getByRole("button", { name: "确认结算" }).click();
+    await offlineReport.getByRole("button", { name: "确认结算" }).click({ force: true });
   });
   await page.goto(path);
   const acknowledgeRelease = page.getByRole("button", { name: "我知道了" });
@@ -176,6 +176,11 @@ test("next-mobile delivery controls remain reachable at 200 percent text", async
   await seedV108Factory(page, { mobileUi: "next", fontScale: 2 });
   await page.setViewportSize({ width: 390, height: 844 });
   await openFactory(page, "/?mobileUi=next");
+  const unexpectedExit = page.getByRole("alertdialog", { name: "保存并返回主菜单" });
+  if (await unexpectedExit.count()) {
+    await unexpectedExit.getByRole("button", { name: "继续游戏" }).click({ force: true });
+    await expect(unexpectedExit).toHaveCount(0);
+  }
   await page.locator('.react-flow__node[data-id="v108_hub"]').click();
   const sheet = page.locator(".mobile-inspector-sheet");
   await sheet.getByRole("button", { name: /^展开/ }).click();

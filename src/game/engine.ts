@@ -129,12 +129,14 @@ import {
   beginQuantumAttachment,
   beginQuantumAttachments,
   getQuantumBandwidthSummary,
+  getQuantumLogisticsMultiplier,
   getQuantumItemCapacity,
   normalizeQuantumInteger,
   setQuantumNetworkItemCapacity,
   settleQuantumAttachments,
   settleQuantumLogisticsNetwork,
   QUANTUM_SETTLEMENT_SECONDS,
+  QUANTUM_UNIT_CAP_PER_MINUTE,
 } from "./quantumLogisticsNetwork";
 import type { QuantumSettlementInput, QuantumSettlementOutput } from "./quantumLogisticsNetwork";
 import {
@@ -1234,13 +1236,14 @@ function getEntityProliferatorPowerMultiplierForStep(
   entity: FactoryEntity,
   seconds: number,
   runtime?: IndexedMachineRuntime,
+  preparedRecipeSpeedMultiplier?: number,
 ): number {
   const recipe = runtime?.recipe ?? getRecipe(entity.recipeId);
   if (!recipe || !entity.buildingId || !proliferatorApplies(entity, recipe)) return 1;
-  const sprayedCycles = availableFullProliferatorCycles(entity, recipe);
+  const sprayedCycles = availableFullProliferatorCycles(entity, recipe, runtime?.sprayCost);
   if (sprayedCycles < 1) return 1;
   const baseCyclesPerSecond = runtime
-    ? runtime.baseSpeedProduct * getRecipeSpeedMultiplier(state, recipe.id) * runtime.planetSpeed / runtime.recipeDuration
+    ? runtime.baseSpeedProduct * (preparedRecipeSpeedMultiplier ?? getRecipeSpeedMultiplier(state, recipe.id)) * runtime.planetSpeed / runtime.recipeDuration
     : (() => {
         const building = getBuilding(entity.buildingId!);
         const profile = getPlanetIndustrialProfile(state, entity.planetId);
@@ -1276,14 +1279,14 @@ function availableProliferatorPoints(entity: FactoryEntity): number {
     Math.floor((entity.inputs[definition.itemId] ?? 0) + EPSILON) * definition.sprayPoints;
 }
 
-function availableProliferatorCycles(entity: FactoryEntity, recipe: RecipeDefinition): number {
+function availableProliferatorCycles(entity: FactoryEntity, recipe: RecipeDefinition, sprayCost = getProliferatorSprayCost(recipe)): number {
   if (!proliferatorApplies(entity, recipe)) return Number.POSITIVE_INFINITY;
-  return availableProliferatorPoints(entity) / getProliferatorSprayCost(recipe);
+  return availableProliferatorPoints(entity) / sprayCost;
 }
 
-function availableFullProliferatorCycles(entity: FactoryEntity, recipe: RecipeDefinition): number {
+function availableFullProliferatorCycles(entity: FactoryEntity, recipe: RecipeDefinition, sprayCost = getProliferatorSprayCost(recipe)): number {
   if (!proliferatorApplies(entity, recipe)) return 0;
-  return Math.max(0, Math.floor(availableProliferatorCycles(entity, recipe) + EPSILON));
+  return Math.max(0, Math.floor(availableProliferatorCycles(entity, recipe, sprayCost) + EPSILON));
 }
 
 function availableInputCyclesForRecipe(state: GameState, entity: FactoryEntity, recipe: RecipeDefinition): number {
@@ -1316,12 +1319,14 @@ function availableOutputCycles(
   credits?: OutputCapacityCredits,
   runtime?: IndexedMachineRuntime,
   maximumCycles = Number.POSITIVE_INFINITY,
+  preparedProliferator?: { extraProductBonus: number; sprayedCycleLimit: number },
 ): number {
   const recipe = runtime?.recipe ?? getRecipe(entity.recipeId);
   if (!recipe || !entity.buildingId) return 0;
   const capacity = runtime?.outputCapacity ?? getEntityOutputCapacity(state, entity);
-  const extraProductBonus = getEntityExtraProductBonusForRecipe(entity, recipe);
-  const sprayedCycleLimit = availableFullProliferatorCycles(entity, recipe);
+  const extraProductBonus = preparedProliferator?.extraProductBonus ?? getEntityExtraProductBonusForRecipe(entity, recipe);
+  const sprayedCycleLimit = preparedProliferator?.sprayedCycleLimit ??
+    availableFullProliferatorCycles(entity, recipe, runtime?.sprayCost);
   let available = Number.POSITIVE_INFINITY;
   for (let outputIndex = 0; outputIndex < recipe.outputs.length; outputIndex += 1) {
     const output = recipe.outputs[outputIndex];
@@ -1804,10 +1809,14 @@ interface IndexedBeltRoute {
   compatible: boolean;
   targetCapacityIndex?: number;
   sourceGroupIndex?: number;
+  /** Stable locale order inside one source/item group for deterministic batching. */
+  stableSourceOrder?: number;
   targetInputCapacity?: number;
   /** Per-call exact-settlement scratch; runtime-only and never serialized. */
   runtimeTargetCapacity?: { free: number };
   runtimeAllowance?: number;
+  runtimeCandidate?: BeltTransferCandidate;
+  runtimeEpoch?: number;
 }
 
 interface IndexedBeltRouteGroup {
@@ -1818,6 +1827,8 @@ interface IndexedBeltRouteGroup {
   itemId: ItemId;
   routes: IndexedBeltRoute[];
   potentiallyProduces: boolean;
+  runtimeEpoch?: number;
+  runtimeGroup?: RuntimeBeltTransferGroup;
 }
 
 export interface SimulationBeltPlanetRuntimeIndex {
@@ -1843,6 +1854,11 @@ export interface SimulationBeltRuntimeIndex {
   activeQueueEnabled: boolean;
   initiallyDormantRouteCount: number;
   targetCapacityGroupCount: number;
+  /** Per-topology scratch reused by every exact belt phase. */
+  settlementEpoch: number;
+  sourceAvailabilityLedgers: RuntimeSourceAvailabilityLedger[];
+  targetCapacityLedgers: RuntimeTargetCapacityLedger[];
+  settlementEntries: Array<IndexedBeltRoute | RuntimeBeltTransferGroup>;
 }
 
 interface StationDispatchSlotResult {
@@ -1865,12 +1881,24 @@ interface IndexedMachineRuntime {
   outputCapacity: number;
   outputCreditKeys: string[];
   powerDemandProduct: number;
+  sprayCost: number;
+  baseUnitsPerCycle: number;
+  launchEnergyPerCycle: number;
+  matrixResearch: boolean;
 }
 
 interface IndexedLogisticsBufferRuntime {
   entity: FactoryEntity;
   itemId: ItemId;
   capacity: number;
+}
+
+interface IndexedQuantumSlotPlan {
+  endpoint: FactoryEntity;
+  itemId: ItemId;
+  key: string;
+  priority: number;
+  slot: StationSlot;
 }
 
 interface BlockedStationDispatchCache {
@@ -1886,11 +1914,19 @@ export interface SimulationLookupContext {
   entitiesByPlanetGrid: Map<string, FactoryEntity[]>;
   /** Stable entity-kind views reused by every exact simulation step. */
   machinesByPlanet: Map<PlanetId, FactoryEntity[]>;
+  rayReceivers: FactoryEntity[];
   machineRuntimesByPlanet: Map<PlanetId, IndexedMachineRuntime[]>;
   machineRuntimeById: Map<string, IndexedMachineRuntime>;
   veinsByPlanet: Map<PlanetId, FactoryEntity[]>;
   stations: FactoryEntity[];
   orbitalCollectors: FactoryEntity[];
+  /** Static quantum endpoints/slot intents, rebuilt only with the topology lookup. */
+  quantumStations: FactoryEntity[];
+  quantumEndpoints: FactoryEntity[];
+  quantumDownloadSlots: IndexedQuantumSlotPlan[];
+  quantumUploadSlots: IndexedQuantumSlotPlan[];
+  quantumTowerStacks: number;
+  quantumCollectorStacks: number;
   logisticsBufferEntities: FactoryEntity[];
   logisticsBufferRuntimes: IndexedLogisticsBufferRuntime[];
   materialDeliveryHubs: FactoryEntity[];
@@ -1985,11 +2021,18 @@ export function createSimulationLookupContext(
     entitiesByPlanet: new Map(),
     entitiesByPlanetGrid: new Map(),
     machinesByPlanet: new Map(),
+    rayReceivers: [],
     machineRuntimesByPlanet: new Map(),
     machineRuntimeById: new Map(),
     veinsByPlanet: new Map(),
     stations: [],
     orbitalCollectors: [],
+    quantumStations: [],
+    quantumEndpoints: [],
+    quantumDownloadSlots: [],
+    quantumUploadSlots: [],
+    quantumTowerStacks: 0,
+    quantumCollectorStacks: 0,
     logisticsBufferEntities: [],
     logisticsBufferRuntimes: [],
     materialDeliveryHubs: [],
@@ -2012,6 +2055,10 @@ export function createSimulationLookupContext(
       activeQueueEnabled: false,
       initiallyDormantRouteCount: 0,
       targetCapacityGroupCount: 0,
+      settlementEpoch: 0,
+      sourceAvailabilityLedgers: [],
+      targetCapacityLedgers: [],
+      settlementEntries: [],
     },
     powerSourcesByPlanetGrid: new Map(),
     stationSlotsByKey: new Map(),
@@ -2062,6 +2109,12 @@ export function createSimulationLookupContext(
             outputCapacity: getEntityOutputCapacity(state, entity),
             outputCreditKeys: recipe.outputs.map((output) => outputCapacityCreditKey(entity.id, output.itemId)),
             powerDemandProduct: (building.powerDemandKw ?? 0) * entity.machineCount,
+            sprayCost: getProliferatorSprayCost(recipe),
+            baseUnitsPerCycle: recipe.id === "matrix_research" || recipe.id === "solar_sail_launch" || recipe.id === "carrier_rocket_launch"
+              ? 1
+              : recipe.outputs.reduce((sum, output) => sum + output.amount, 0),
+            launchEnergyPerCycle: dysonLaunchEnergyPerCycle(recipe.id),
+            matrixResearch: recipe.id === "matrix_research",
           } satisfies IndexedMachineRuntime;
           context.machineRuntimeById.set(entity.id, runtime);
           const runtimes = context.machineRuntimesByPlanet.get(entity.planetId);
@@ -2069,6 +2122,7 @@ export function createSimulationLookupContext(
           else context.machineRuntimesByPlanet.set(entity.planetId, [runtime]);
         }
       }
+      if (entity.buildingId === "ray_receiver") context.rayReceivers.push(entity);
     }
     if (entity.kind === "vein") {
       const veins = context.veinsByPlanet.get(entity.planetId);
@@ -2165,6 +2219,9 @@ export function createSimulationLookupContext(
   }
   let initiallyDormantRouteCount = 0;
   for (const group of context.beltRuntime.routeGroups) {
+    [...group.routes]
+      .sort((left, right) => left.belt.id.localeCompare(right.belt.id))
+      .forEach((route, index) => { route.stableSourceOrder = index; });
     const sourceAmount = group.source?.outputs[group.itemId] ?? 0;
     const active = group.potentiallyProduces || sourceAmount > EPSILON || context.beltRuntime.activeGroupKeys.has(group.key);
     const planetRuntime = context.beltRuntime.byPlanet.get(group.planetId);
@@ -2178,6 +2235,43 @@ export function createSimulationLookupContext(
   }
   context.beltRuntime.initiallyDormantRouteCount = initiallyDormantRouteCount;
   context.beltRuntime.activeQueueEnabled = initiallyDormantRouteCount >= Math.max(64, Math.ceil(context.beltRoutes.length * 0.1));
+  for (const group of context.beltRuntime.routeGroups) {
+    if (group.routes.length === 1) {
+      context.beltRuntime.settlementEntries.push(group.routes[0]);
+    } else if (group.source) {
+      const runtimeGroup: RuntimeBeltTransferGroup = {
+        source: group.source,
+        itemId: group.itemId,
+        available: 0,
+        reserved: 0,
+        candidates: [],
+        runtimeEpoch: 0,
+      };
+      group.runtimeGroup = runtimeGroup;
+      context.beltRuntime.settlementEntries.push(runtimeGroup);
+    }
+  }
+  context.quantumStations = context.stations.filter(isQuantumStation);
+  context.quantumEndpoints = context.stations.filter((entity) => isQuantumStation(entity) || isQuantumCollector(entity));
+  const quantumDownloadByKey = new Map<string, IndexedQuantumSlotPlan>();
+  const quantumUploadByKey = new Map<string, IndexedQuantumSlotPlan>();
+  for (const endpoint of context.quantumStations) {
+    for (const slot of getStationSlots(endpoint)) {
+      if (!slot.itemId || (slot.remoteMode !== "demand" && slot.remoteMode !== "supply")) continue;
+      const key = `${endpoint.id}:${slot.itemId}`;
+      const target = slot.remoteMode === "demand" ? quantumDownloadByKey : quantumUploadByKey;
+      const existing = target.get(key);
+      if (!existing || (slot.priority ?? 1) > existing.priority) {
+        target.set(key, { endpoint, itemId: slot.itemId, key, priority: slot.priority ?? 1, slot });
+      }
+    }
+  }
+  context.quantumDownloadSlots = [...quantumDownloadByKey.values()];
+  context.quantumUploadSlots = [...quantumUploadByKey.values()];
+  context.quantumTowerStacks = context.quantumStations.reduce((sum, entity) =>
+    sum + Math.max(0, Math.floor(entity.machineCount)), 0);
+  context.quantumCollectorStacks = context.quantumEndpoints.reduce((sum, entity) =>
+    sum + (isQuantumCollector(entity) ? Math.max(0, Math.floor(entity.machineCount)) : 0), 0);
   const add = (key: string, value: IndexedStationSlot) => {
     const existing = context.stationSlotsByKey.get(key);
     if (existing) existing.push(value);
@@ -3411,8 +3505,8 @@ function dysonGenerationForSystem(state: GameState, systemId: StarSystemId): num
   return swarm + sphere;
 }
 
-function calculateDysonReception(state: GameState): DysonReceptionPlan {
-  const receivers = state.entities.filter((entity) =>
+function calculateDysonReception(state: GameState, lookup?: SimulationLookupContext): DysonReceptionPlan {
+  const receivers = (lookup?.rayReceivers ?? state.entities).filter((entity) =>
     entity.kind === "machine" && entity.buildingId === "ray_receiver" && entity.machineCount > 0 &&
     (entity.recipeId === "ray_power" || entity.recipeId === "critical_photon") && canMachineRun(state, entity));
   const ratedCapacityKw = getRayReceiverCapacityKw(state);
@@ -3425,7 +3519,7 @@ function calculateDysonReception(state: GameState): DysonReceptionPlan {
   const capacityBySystem = new Map<StarSystemId, number>();
   for (const receiver of receivers) {
     const systemId = getPlanet(receiver.planetId).systemId;
-    generationBySystem.set(systemId, dysonGenerationForSystem(state, systemId));
+    if (!generationBySystem.has(systemId)) generationBySystem.set(systemId, dysonGenerationForSystem(state, systemId));
     capacityBySystem.set(systemId, (capacityBySystem.get(systemId) ?? 0) + ratedCapacityKw * receiver.machineCount);
   }
   const efficiencyBySystem = new Map<StarSystemId, number>();
@@ -3554,9 +3648,12 @@ function defaultGenerationPriority(entity: FactoryEntity): PowerPriority {
 function allocatePowerByPriority(candidates: PowerCandidate[], requestedKw: number, outputs: Map<string, number>): number {
   let remaining = Math.max(0, requestedKw);
   let allocated = 0;
+  const groups: [PowerCandidate[], PowerCandidate[], PowerCandidate[], PowerCandidate[]] = [[], [], [], []];
+  for (const candidate of candidates) {
+    groups[candidate.entity.generationPriority ?? defaultGenerationPriority(candidate.entity)].push(candidate);
+  }
   for (const priority of [3, 2, 1] as PowerPriority[]) {
-    const group = candidates.filter((candidate) => (candidate.entity.generationPriority ?? defaultGenerationPriority(candidate.entity)) === priority);
-    const supplied = allocatePower(group, remaining, outputs);
+    const supplied = allocatePower(groups[priority], remaining, outputs);
     allocated += supplied;
     remaining -= supplied;
     if (remaining <= EPSILON) break;
@@ -3592,8 +3689,10 @@ interface PowerConsumer {
 function allocateConsumerPower(consumers: PowerConsumer[], availableKw: number): Map<string, number> {
   const factors = new Map<string, number>();
   let remaining = Math.max(0, availableKw);
+  const groups: [PowerConsumer[], PowerConsumer[], PowerConsumer[], PowerConsumer[]] = [[], [], [], []];
+  for (const consumer of consumers) groups[consumer.entity.powerPriority ?? 2].push(consumer);
   for (const priority of [3, 2, 1] as PowerPriority[]) {
-    const group = consumers.filter((consumer) => (consumer.entity.powerPriority ?? 2) === priority);
+    const group = groups[priority];
     const demand = group.reduce((sum, consumer) => sum + consumer.demandKw, 0);
     const factor = demand <= EPSILON ? 1 : Math.min(1, remaining / demand);
     for (const consumer of group) factors.set(consumer.entity.id, factor);
@@ -3613,6 +3712,8 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
   let generatorCount = 0;
   const profile = getPlanetIndustrialProfile(state, planetId);
   const difficultyPowerMultiplier = getDifficultyDefinition(state.settings?.difficulty).powerDemandMultiplier;
+  const industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
+  const matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
   const consumers: PowerConsumer[] = [];
   const fuelCandidates: PowerCandidate[] = [];
   const accumulatorCandidates: PowerCandidate[] = [];
@@ -3625,6 +3726,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
   const entities = lookup
     ? (lookup.entitiesByPlanetGrid.get(`${planetId}|${gridId}`) ?? [])
     : state.entities;
+  const gridCovered = gridPowerSources(state, planetId, gridId, lookup).length > 0;
 
   for (const entity of entities) {
     if (entity.planetId !== planetId || getEntityPowerGridId(entity) !== gridId) continue;
@@ -3663,7 +3765,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
       }
       continue;
     } else if (entity.kind === "vein" && entity.minerCount > 0) {
-      if (!isEntityInPowerCoverage(state, entity, lookup)) {
+      if (!gridCovered) {
         disconnectedEntities += 1;
         factorByEntity.set(entity.id, 0);
         const extractor = extractorFor(entity);
@@ -3681,7 +3783,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
       }
     } else if (entity.buildingId === "galactic_material_exporter" && entity.galacticExporterPaused === false &&
       Object.keys(ACTIVITY_PROJECT_BY_ITEM).some((itemId) => (entity.inputs[itemId as ItemId] ?? 0) >= 1)) {
-      if (!isEntityInPowerCoverage(state, entity, lookup)) {
+      if (!gridCovered) {
         disconnectedEntities += 1;
         factorByEntity.set(entity.id, 0);
         disconnectedDemandKw += (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier;
@@ -3690,7 +3792,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
       connectedEntities += 1;
       consumers.push({ entity, demandKw: (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
     } else if (entity.buildingId === "construction_center" && constructionAutomationHasDeficit(state)) {
-      if (!isEntityInPowerCoverage(state, entity, lookup)) {
+      if (!gridCovered) {
         disconnectedEntities += 1;
         factorByEntity.set(entity.id, 0);
         disconnectedDemandKw += (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier;
@@ -3700,7 +3802,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
       consumers.push({ entity, demandKw: (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
     } else if (entity.buildingId === "space_station_construction_launcher" &&
       state.systemSpaceStations[getPlanet(entity.planetId).systemId]?.status === "building") {
-      if (!isEntityInPowerCoverage(state, entity, lookup)) {
+      if (!gridCovered) {
         disconnectedEntities += 1;
         factorByEntity.set(entity.id, 0);
         disconnectedDemandKw += (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier;
@@ -3710,7 +3812,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
       consumers.push({ entity, demandKw: (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
     } else if (entity.kind === "station" && (isQuantumStation(entity) ||
       isElevatorStation(entity) && state.systemSpaceStations[getPlanet(entity.planetId).systemId]?.status === "operational")) {
-      if (!isEntityInPowerCoverage(state, entity, lookup)) {
+      if (!gridCovered) {
         disconnectedEntities += 1;
         factorByEntity.set(entity.id, 0);
         disconnectedDemandKw += (getBuilding(entity.buildingId!).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier;
@@ -3719,21 +3821,33 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
       connectedEntities += 1;
       consumers.push({ entity, demandKw: (getBuilding(entity.buildingId!).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier });
     } else if (canMachineRun(state, entity, machineRuntime) && entity.buildingId) {
-      if (!isEntityInPowerCoverage(state, entity, lookup)) {
+      if (!gridCovered) {
         disconnectedEntities += 1;
         factorByEntity.set(entity.id, 0);
         disconnectedDemandKw += (machineRuntime?.powerDemandProduct ?? (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount) *
-          getEntityProliferatorPowerMultiplierForStep(state, entity, seconds, machineRuntime) * difficultyPowerMultiplier;
+          getEntityProliferatorPowerMultiplierForStep(
+            state,
+            entity,
+            seconds,
+            machineRuntime,
+            machineRuntime?.matrixResearch ? matrixResearchSpeed : industrialRecipeSpeed,
+          ) * difficultyPowerMultiplier;
         continue;
       }
       connectedEntities += 1;
       consumers.push({
         entity,
         demandKw: (machineRuntime?.powerDemandProduct ?? (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount) *
-          getEntityProliferatorPowerMultiplierForStep(state, entity, seconds, machineRuntime) * difficultyPowerMultiplier,
+          getEntityProliferatorPowerMultiplierForStep(
+            state,
+            entity,
+            seconds,
+            machineRuntime,
+            machineRuntime?.matrixResearch ? matrixResearchSpeed : industrialRecipeSpeed,
+          ) * difficultyPowerMultiplier,
       });
     } else if (entity.kind === "station" && entity.buildingId && stationRouteReady(state, entity, lookup, profiler)) {
-      if (!isEntityInPowerCoverage(state, entity, lookup)) {
+      if (!gridCovered) {
         disconnectedEntities += 1;
         factorByEntity.set(entity.id, 0);
         disconnectedDemandKw += (getBuilding(entity.buildingId).powerDemandKw ?? 0) * entity.machineCount * difficultyPowerMultiplier;
@@ -3775,7 +3889,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
     controller.productionRate = 0;
     factorByEntity.set(controller.id, timeWarpDemandKw > EPSILON ? Math.min(1, timeWarpAllocatedKw / timeWarpDemandKw) : 0);
     powerInputByEntity.set(controller.id, timeWarpAllocatedKw);
-    if (isEntityInPowerCoverage(state, controller)) connectedEntities += 1;
+    if (gridCovered) connectedEntities += 1;
     else disconnectedEntities += 1;
   }
   const demandKw = connectedDemandKw + disconnectedDemandKw + timeWarpDemandKw;
@@ -4126,6 +4240,19 @@ interface BeltTransferCandidate {
   allowance: number;
   moved: number;
   capacity: number;
+  stableSourceOrder: number;
+  runtimeEpoch: number;
+}
+
+interface RuntimeSourceAvailabilityLedger {
+  epoch: number;
+  available: number;
+  reserved: number;
+}
+
+interface RuntimeTargetCapacityLedger {
+  epoch: number;
+  free: number;
 }
 
 interface RuntimeBeltTransferGroup {
@@ -4134,6 +4261,7 @@ interface RuntimeBeltTransferGroup {
   available: number;
   reserved: number;
   candidates: BeltTransferCandidate[];
+  runtimeEpoch?: number;
 }
 
 function beltHasRuntimeSignal(belt: BeltConnection): boolean {
@@ -4242,32 +4370,31 @@ function transferBelts(
   skippedBeltIds?: ReadonlySet<string>,
   profiler?: SimulationProfiler,
 ): void {
-  const distributionEntries: Array<IndexedBeltRoute | RuntimeBeltTransferGroup> = [];
-  const indexedGroups: Array<RuntimeBeltTransferGroup | undefined> = lookup
-    ? new Array(lookup.beltRuntime.routeGroups.length)
+  const runtimeEpoch = lookup ? ++lookup.beltRuntime.settlementEpoch : 0;
+  const distributionEntries: Array<IndexedBeltRoute | RuntimeBeltTransferGroup> = lookup
+    ? lookup.beltRuntime.settlementEntries
     : [];
+  if (!lookup) distributionEntries.length = 0;
   const fallbackGroups = new Map<string, RuntimeBeltTransferGroup>();
-  const indexedSourceAvailability: Array<{ available: number; reserved: number } | undefined> = lookup
-    ? new Array(lookup.beltRuntime.routeGroups.length)
-    : [];
+  const indexedSourceAvailability = lookup?.beltRuntime.sourceAvailabilityLedgers ?? [];
   // A candidate reads its capacity ledger many times during fair routing.
   // Resolve the target once, then share the mutable ledger between belts that
   // feed the same slot. This avoids millions of capacity calls without doing
   // a Map lookup in the inner distribution loop.
-  const indexedTargetCapacityLedgers: Array<{ free: number } | undefined> = lookup
-    ? new Array(lookup.beltRuntime.targetCapacityGroupCount)
-    : [];
+  const indexedTargetCapacityLedgers = lookup?.beltRuntime.targetCapacityLedgers ?? [];
   const fallbackTargetCapacityLedgers = new Map<string, { free: number }>();
   const targetCapacity = (route: IndexedBeltRoute, target: FactoryEntity, itemId: ItemId, portIndex?: 0 | 1 | 2): { free: number } => {
     if (profiler) profiler.beltTargetChecks += 1;
     const index = route.targetCapacityIndex;
     if (index !== undefined) {
       const cached = indexedTargetCapacityLedgers[index];
-      if (cached) return cached;
+      if (cached?.epoch === runtimeEpoch) return cached;
       const free = route.targetInputCapacity === undefined
         ? targetFreeCapacity(state, target, itemId, portIndex, lookup)
         : Math.floor(Math.max(0, route.targetInputCapacity - (target.inputs[itemId] ?? 0)) + EPSILON);
-      const ledger = { free: Math.max(0, free) };
+      const ledger = cached ?? { epoch: runtimeEpoch, free: 0 };
+      ledger.epoch = runtimeEpoch;
+      ledger.free = Math.max(0, free);
       indexedTargetCapacityLedgers[index] = ledger;
       return ledger;
     }
@@ -4330,12 +4457,12 @@ function transferBelts(
     }
     const groupIndex = route.sourceGroupIndex;
     let sourceAvailability = groupIndex === undefined ? undefined : indexedSourceAvailability[groupIndex];
-    if (!sourceAvailability) {
+    if (!sourceAvailability || sourceAvailability.epoch !== runtimeEpoch) {
       const reserved = stationReservedOutgoing(state, source.id, belt.itemId, lookup);
-      sourceAvailability = {
-        available: Math.floor((source.outputs[belt.itemId] ?? 0) - reserved + EPSILON),
-        reserved,
-      };
+      sourceAvailability ??= { epoch: runtimeEpoch, available: 0, reserved: 0 };
+      sourceAvailability.epoch = runtimeEpoch;
+      sourceAvailability.available = Math.floor((source.outputs[belt.itemId] ?? 0) - reserved + EPSILON);
+      sourceAvailability.reserved = reserved;
       if (groupIndex !== undefined) indexedSourceAvailability[groupIndex] = sourceAvailability;
     }
     const available = sourceAvailability.available;
@@ -4356,25 +4483,55 @@ function transferBelts(
     if (lookup && groupIndex !== undefined && lookup.beltRuntime.routeGroups[groupIndex]?.routes.length === 1) {
       route.runtimeTargetCapacity = remainingTarget;
       route.runtimeAllowance = allowance;
-      distributionEntries.push(route);
+      route.runtimeEpoch = runtimeEpoch;
       continue;
     }
-    let group = groupIndex === undefined ? undefined : indexedGroups[groupIndex];
-    if (!group && groupIndex === undefined) group = fallbackGroups.get(`${belt.source}:${belt.itemId}`);
-    if (!group) {
-      group = { source, itemId: belt.itemId, available, reserved: sourceAvailability.reserved, candidates: [] };
-      distributionEntries.push(group);
-      if (groupIndex !== undefined) indexedGroups[groupIndex] = group;
-      else fallbackGroups.set(`${belt.source}:${belt.itemId}`, group);
+    let group: RuntimeBeltTransferGroup | undefined;
+    if (groupIndex !== undefined && lookup) {
+      const indexedGroup = lookup.beltRuntime.routeGroups[groupIndex];
+      group = indexedGroup.runtimeGroup;
+      if (!group) {
+        group = { source, itemId: belt.itemId, available, reserved: sourceAvailability.reserved, candidates: [] };
+        indexedGroup.runtimeGroup = group;
+      }
+      if (indexedGroup.runtimeEpoch !== runtimeEpoch) {
+        indexedGroup.runtimeEpoch = runtimeEpoch;
+        group.source = source;
+        group.itemId = belt.itemId;
+        group.available = available;
+        group.reserved = sourceAvailability.reserved;
+        group.candidates.length = 0;
+        group.runtimeEpoch = runtimeEpoch;
+      }
+    } else {
+      group = fallbackGroups.get(`${belt.source}:${belt.itemId}`);
+      if (!group) {
+        group = { source, itemId: belt.itemId, available, reserved: sourceAvailability.reserved, candidates: [], runtimeEpoch };
+        fallbackGroups.set(`${belt.source}:${belt.itemId}`, group);
+        distributionEntries.push(group);
+      }
     }
-    group.candidates.push({
-      belt,
-      target,
-      targetCapacity: remainingTarget,
-      allowance,
-      moved: 0,
-      capacity,
-    });
+    let candidate = route.runtimeCandidate;
+    if (!candidate) {
+      candidate = {
+        belt,
+        target,
+        targetCapacity: remainingTarget,
+        allowance,
+        moved: 0,
+        capacity,
+        stableSourceOrder: route.stableSourceOrder ?? 0,
+        runtimeEpoch,
+      };
+      if (lookup) route.runtimeCandidate = candidate;
+    } else {
+      candidate.target = target;
+      candidate.targetCapacity = remainingTarget;
+      candidate.allowance = allowance;
+      candidate.moved = 0;
+      candidate.runtimeEpoch = runtimeEpoch;
+    }
+    group.candidates.push(candidate);
   }
   if (profiler) profiler.beltScanMs += profileNow() - scanStartedAt;
 
@@ -4405,7 +4562,7 @@ function transferBelts(
 
   const candidateUsable = (candidate: BeltTransferCandidate) => candidate.allowance > 0 &&
     candidate.targetCapacity.free > 0;
-  const distributeFair = (
+  const distributeFairLegacy = (
     group: RuntimeBeltTransferGroup,
     requestedCandidates: BeltTransferCandidate[],
     startingAvailable: number,
@@ -4456,9 +4613,60 @@ function transferBelts(
     return available;
   };
 
+  /** Indexed equivalent of the legacy fair allocator with one reusable round buffer. */
+  const distributeFairIndexed = (
+    group: RuntimeBeltTransferGroup,
+    orderedCandidates: BeltTransferCandidate[],
+    startingAvailable: number,
+  ): number => {
+    let available = startingAvailable;
+    const candidates = orderedCandidates.filter(candidateUsable);
+    if (candidates.length === 0 || available <= 0) return available;
+    if (candidates.length === 1) {
+      const candidate = candidates[0];
+      const requested = Math.min(available, candidate.allowance, candidate.targetCapacity.free);
+      const moved = receive(candidate, group.itemId, requested);
+      if (moved <= 0) return available;
+      candidate.targetCapacity.free = Math.max(0, candidate.targetCapacity.free - moved);
+      candidate.allowance -= moved;
+      candidate.moved += moved;
+      group.source.routingCursor = 0;
+      return available - moved;
+    }
+    let cursor = group.source.routingCursor % candidates.length;
+    const active: BeltTransferCandidate[] = [];
+    while (available > 0) {
+      active.length = 0;
+      for (const candidate of candidates) if (candidateUsable(candidate)) active.push(candidate);
+      if (active.length === 0) break;
+      const start = cursor % active.length;
+      const fairShare = Math.max(1, Math.floor(available / active.length));
+      let successful = 0;
+      // Legacy uses a rotated snapshot. Shared target ledgers may become full
+      // during the round, but the iteration order itself must not change.
+      for (let offset = 0; offset < active.length; offset += 1) {
+        if (available <= 0) break;
+        const candidate = active[(start + offset) % active.length];
+        const requested = Math.min(available, fairShare, candidate.allowance, candidate.targetCapacity.free);
+        const moved = receive(candidate, group.itemId, requested);
+        if (moved <= 0) continue;
+        candidate.targetCapacity.free = Math.max(0, candidate.targetCapacity.free - moved);
+        candidate.allowance -= moved;
+        candidate.moved += moved;
+        available -= moved;
+        successful += 1;
+        cursor = (cursor + 1) % candidates.length;
+      }
+      if (successful === 0) break;
+    }
+    group.source.routingCursor = cursor;
+    return available;
+  };
+
   for (const entry of distributionEntries) {
     if ("belt" in entry) {
       const route = entry;
+      if (lookup && route.runtimeEpoch !== runtimeEpoch) continue;
       const belt = route.belt;
       const source = route.source!;
       const target = route.target!;
@@ -4496,16 +4704,29 @@ function transferBelts(
       continue;
     }
     const group = entry;
+    if (lookup && group.runtimeEpoch !== runtimeEpoch) continue;
     const reserved = group.reserved;
     let available = group.available;
 
-    if (group.candidates.length === 1) {
-      available = distributeFair(group, group.candidates, available);
+    if (lookup) {
+      group.candidates.sort((left, right) => left.stableSourceOrder - right.stableSourceOrder || left.belt.id.localeCompare(right.belt.id));
+      if (group.candidates.length === 1 || group.source.kind === "splitter" && group.source.distributionMode !== "priority") {
+        available = distributeFairIndexed(group, group.candidates, available);
+      } else {
+        const byPriority: [BeltTransferCandidate[], BeltTransferCandidate[], BeltTransferCandidate[]] = [[], [], []];
+        for (const candidate of group.candidates) byPriority[candidate.belt.priority].push(candidate);
+        for (const priority of [2, 1, 0] as const) {
+          available = distributeFairIndexed(group, byPriority[priority], available);
+          if (available <= 0) break;
+        }
+      }
+    } else if (group.candidates.length === 1) {
+      available = distributeFairLegacy(group, group.candidates, available);
     } else if (group.source.kind === "splitter" && group.source.distributionMode !== "priority") {
-      available = distributeFair(group, group.candidates, available);
+      available = distributeFairLegacy(group, group.candidates, available);
     } else {
       for (const priority of [2, 1, 0] as const) {
-        available = distributeFair(group, group.candidates.filter((candidate) => candidate.belt.priority === priority), available);
+        available = distributeFairLegacy(group, group.candidates.filter((candidate) => candidate.belt.priority === priority), available);
         if (available <= 0) break;
       }
     }
@@ -4629,10 +4850,10 @@ function runMiners(
   }
 }
 
-function consumeProliferatorPoints(entity: FactoryEntity, recipe: RecipeDefinition, cycles: number): void {
+function consumeProliferatorPoints(entity: FactoryEntity, recipe: RecipeDefinition, cycles: number, sprayCost = getProliferatorSprayCost(recipe)): void {
   if (!proliferatorApplies(entity, recipe) || cycles < 1) return;
   const definition = getProliferator(entity.proliferatorTier!);
-  const requiredPoints = getProliferatorSprayCost(recipe) * cycles;
+  const requiredPoints = sprayCost * cycles;
   let points = Math.max(0, entity.proliferatorPoints ?? 0);
   if (points < requiredPoints) {
     const requiredItems = Math.ceil((requiredPoints - points) / definition.sprayPoints);
@@ -4713,8 +4934,20 @@ function runMachines(
       outputCapacity: getEntityOutputCapacity(state, entity),
       outputCreditKeys: recipe.outputs.map((output) => outputCapacityCreditKey(entity.id, output.itemId)),
       powerDemandProduct: (building.powerDemandKw ?? 0) * entity.machineCount,
+      sprayCost: getProliferatorSprayCost(recipe),
+      baseUnitsPerCycle: recipe.id === "matrix_research" || recipe.id === "solar_sail_launch" || recipe.id === "carrier_rocket_launch"
+        ? 1
+        : recipe.outputs.reduce((sum, output) => sum + output.amount, 0),
+      launchEnergyPerCycle: dysonLaunchEnergyPerCycle(recipe.id),
+      matrixResearch: recipe.id === "matrix_research",
     }];
   });
+  let industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
+  let matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
+  const refreshRecipeSpeeds = () => {
+    industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
+    matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
+  };
   for (const runtime of runtimes) {
     const { entity, recipe, baseSpeedProduct, planetSpeed, recipeDuration } = runtime;
     if (skippedEntityIds?.has(entity.id)) continue;
@@ -4728,7 +4961,8 @@ function runMachines(
       continue;
     }
     const powerFactor = powerFactorForEntity(power, entity);
-    const effectiveCyclesPerSecond = baseSpeedProduct * getRecipeSpeedMultiplier(state, recipe.id) * planetSpeed / recipeDuration;
+    const effectiveCyclesPerSecond = baseSpeedProduct *
+      (runtime.matrixResearch ? matrixResearchSpeed : industrialRecipeSpeed) * planetSpeed / recipeDuration;
     const launchFactor = dysonLaunchFactor(state, recipe.id);
     if (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId)) {
       entity.progress = 0;
@@ -4745,11 +4979,15 @@ function runMachines(
       continue;
     }
     const fullInputCycles = Math.floor(availableInputCyclesForRecipe(state, entity, recipe) + EPSILON);
+    const sprayedCycleLimit = availableFullProliferatorCycles(entity, recipe, runtime.sprayCost);
+    const extraProductBonus = getEntityExtraProductBonusForRecipe(entity, recipe);
     const fullOutputCycles = fullInputCycles < 1
       ? 0
-      : Math.floor(availableOutputCycles(state, entity, credits, runtime, fullInputCycles) + EPSILON);
+      : Math.floor(availableOutputCycles(state, entity, credits, runtime, fullInputCycles, {
+          extraProductBonus,
+          sprayedCycleLimit,
+        }) + EPSILON);
     const maximumCycles = Math.min(fullInputCycles, fullOutputCycles);
-    const sprayedCycleLimit = availableFullProliferatorCycles(entity, recipe);
     const progressAtStart = entity.progress ?? 0;
     const baseRate = effectiveCyclesPerSecond * powerFactor * launchFactor;
     let potentialCycles = baseRate * seconds;
@@ -4815,23 +5053,23 @@ function runMachines(
           }
         }
       }
-      consumeProliferatorPoints(entity, recipe, Math.min(sprayedCycles, consumedResearchMatrices));
+      consumeProliferatorPoints(entity, recipe, Math.min(sprayedCycles, consumedResearchMatrices), runtime.sprayCost);
+      refreshRecipeSpeeds();
     } else {
       for (const input of recipe.inputs) {
         entity.inputs[input.itemId] = Math.max(0, Math.floor((entity.inputs[input.itemId] ?? 0) - input.amount * cycles));
       }
-      consumeProliferatorPoints(entity, recipe, sprayedCycles);
+      consumeProliferatorPoints(entity, recipe, sprayedCycles, runtime.sprayCost);
       if (recipe.id === "solar_sail_launch" && cycles > 0) {
         launchDysonSails(state, getPlanet(entity.planetId).systemId, targetDysonOrbitId!, cycles);
       }
       if (recipe.id === "carrier_rocket_launch" && cycles > 0) {
         launchDysonStructure(state, getPlanet(entity.planetId).systemId, cycles);
       }
-      const launchEnergy = dysonLaunchEnergyPerCycle(recipe.id);
+      const launchEnergy = runtime.launchEnergyPerCycle;
       if (launchEnergy > EPSILON && cycles > 0) {
         state.dysonEngineering.launchEnergySpentMj = round(state.dysonEngineering.launchEnergySpentMj + launchEnergy * cycles, 3);
       }
-      const extraProductBonus = getEntityExtraProductBonusForRecipe(entity, recipe);
       for (const output of recipe.outputs) {
         const baseProduced = output.amount * cycles;
         const accumulatedBonus = (entity.proliferatorBonusProgress?.[output.itemId] ?? 0) +
@@ -4848,11 +5086,8 @@ function runMachines(
     entity.progress = Math.max(0, round(entity.progress - cycles, 6));
     const activityFactor = potentialCycles > EPSILON ? Math.min(1, work / potentialCycles) : 0;
     entity.utilization = round(powerFactor * launchFactor * activityFactor, 4);
-    const baseUnitsPerCycle = recipe.id === "matrix_research" || recipe.id === "solar_sail_launch" || recipe.id === "carrier_rocket_launch"
-      ? 1
-      : recipe.outputs.reduce((sum, output) => sum + output.amount, 0);
-    const bonusUnitsPerCycle = work > EPSILON ? baseUnitsPerCycle * getEntityExtraProductBonusForRecipe(entity, recipe) * sprayedWork / work : 0;
-    entity.productionRate = round((seconds > EPSILON ? work / seconds : 0) * (baseUnitsPerCycle + bonusUnitsPerCycle) * 60, 2);
+    const bonusUnitsPerCycle = work > EPSILON ? runtime.baseUnitsPerCycle * extraProductBonus * sprayedWork / work : 0;
+    entity.productionRate = round((seconds > EPSILON ? work / seconds : 0) * (runtime.baseUnitsPerCycle + bonusUnitsPerCycle) * 60, 2);
   }
 }
 
@@ -5651,11 +5886,23 @@ function addQuantumBoundaryFlow(
   record[itemId] = addQuantumInteger(record[itemId], Math.floor(amount));
 }
 
-function createQuantumBoundaryFlow(state: GameState, boundarySecond: number, lookup?: SimulationLookupContext): QuantumBoundaryFlow {
+function quantumBoundaryBandwidth(state: GameState, lookup?: SimulationLookupContext) {
   const level = state.endgame.infiniteResearch.galactic_logistics?.level ?? 0;
-  const stationEntities = lookup?.stations ?? state.entities;
+  if (!lookup) return getQuantumBandwidthSummary(state.entities, level);
+  const multiplier = getQuantumLogisticsMultiplier(level);
+  const globalUploadPerMinute = QUANTUM_UNIT_CAP_PER_MINUTE * multiplier * lookup.quantumTowerStacks;
+  return {
+    multiplier,
+    globalUploadPerMinute,
+    globalDownloadPerMinute: globalUploadPerMinute,
+    activeTowerCount: lookup.quantumStations.length,
+    activeTowerStacks: lookup.quantumTowerStacks,
+  };
+}
+
+function createQuantumBoundaryFlow(state: GameState, boundarySecond: number, lookup?: SimulationLookupContext): QuantumBoundaryFlow {
   const collectors = lookup?.orbitalCollectors ?? state.entities.filter((entity) => entity.buildingId === "orbital_collector");
-  const bandwidth = getQuantumBandwidthSummary(stationEntities, level);
+  const bandwidth = quantumBoundaryBandwidth(state, lookup);
   const existing = state.quantumLogisticsNetwork?.runtimeFlow;
   return {
     boundarySecond,
@@ -5664,7 +5911,7 @@ function createQuantumBoundaryFlow(state: GameState, boundarySecond: number, loo
     globalUploadPerMinute: bandwidth.globalUploadPerMinute,
     globalDownloadPerMinute: bandwidth.globalDownloadPerMinute,
     quantumTowerStacks: bandwidth.activeTowerStacks,
-    quantumCollectorStacks: collectors.reduce((sum, entity) =>
+    quantumCollectorStacks: lookup?.quantumCollectorStacks ?? collectors.reduce((sum, entity) =>
       sum + (isQuantumCollector(entity) ? Math.max(0, Math.floor(entity.machineCount)) : 0), 0),
   };
 }
@@ -5680,33 +5927,42 @@ function settleQuantumNetworkDownloads(
 ): QuantumBoundaryFlow | null {
   if (!state.quantumLogisticsNetwork?.enabled) return null;
   const flow = createQuantumBoundaryFlow(state, boundarySecond, lookup);
-  const stations = (lookup?.stations ?? state.entities).filter(isQuantumStation);
-  const stationById = new Map(stations.map((station) => [station.id, station]));
+  const stations = lookup?.quantumStations ?? state.entities.filter(isQuantumStation);
+  const stationById = lookup?.entityById ?? new Map(stations.map((station) => [station.id, station]));
   const requestByStationItem = new Map<string, QuantumSettlementOutput>();
-  for (const station of stations) {
-    for (const slot of getStationSlots(station)) {
+  const downloadPlans = lookup?.quantumDownloadSlots ?? stations.flatMap((endpoint): IndexedQuantumSlotPlan[] => {
+    const byKey = new Map<string, IndexedQuantumSlotPlan>();
+    for (const slot of getStationSlots(endpoint)) {
       if (!slot.itemId || slot.remoteMode !== "demand") continue;
-      const current = Math.max(0, Math.floor(station.outputs[slot.itemId] ?? 0));
+      const key = `${endpoint.id}:${slot.itemId}`;
+      const existing = byKey.get(key);
+      if (!existing || (slot.priority ?? 1) > existing.priority) {
+        byKey.set(key, { endpoint, itemId: slot.itemId, key, priority: slot.priority ?? 1, slot });
+      }
+    }
+    return [...byKey.values()];
+  });
+  for (const plan of downloadPlans) {
+      const { endpoint: station, slot, itemId, key, priority } = plan;
+      const current = Math.max(0, Math.floor(station.outputs[itemId] ?? 0));
       const localCapacity = Math.max(0, Math.floor(getStationSlotCapacity(state, station, slot)));
-      const incoming = stationInFlightCargo(station, slot.itemId, lookup);
+      const incoming = stationInFlightCargo(station, itemId, lookup);
       const localFree = Math.max(0, localCapacity - current - incoming);
       // Existing over-capacity stock must drain instead of being backfilled.
-      const directThrough = current <= localCapacity ? outputCapacityCredit(credits, station, slot.itemId) : 0;
+      const directThrough = current <= localCapacity ? outputCapacityCredit(credits, station, itemId) : 0;
       const capacity = Math.min(Number.MAX_SAFE_INTEGER, localFree + directThrough);
       if (capacity < 1) continue;
-      const key = `${station.id}:${slot.itemId}`;
       const existing = requestByStationItem.get(key);
-      if (!existing || (slot.priority ?? 1) > (existing.priority ?? 1)) {
+      if (!existing || priority > (existing.priority ?? 1)) {
         requestByStationItem.set(key, {
           key,
           stationId: station.id,
-          itemId: slot.itemId,
+          itemId,
           requested: capacity,
           capacity,
-          priority: slot.priority,
+          priority,
         });
       }
-    }
   }
   const outputs = [...requestByStationItem.values()];
   if (profiler) {
@@ -5716,6 +5972,7 @@ function settleQuantumNetworkDownloads(
   const result = settleQuantumLogisticsNetwork(state.quantumLogisticsNetwork, [], outputs, {
     seconds,
     globalDownloadCap: quantumBoundaryCapacity(flow.globalDownloadPerMinute, seconds),
+    mutateNormalizedState: true,
   });
   state.quantumLogisticsNetwork = result.state;
   // Keep the runtime flow object attached to the post-settlement network so
@@ -5756,22 +6013,26 @@ function settleQuantumNetworkUploads(
   // separate bandwidth of their own.
   const stationEntities = lookup?.stations ?? state.entities;
   const collectors = lookup?.orbitalCollectors ?? state.entities.filter((entity) => entity.buildingId === "orbital_collector");
-  const bandwidth = getQuantumBandwidthSummary(stationEntities, state.endgame.infiniteResearch.galactic_logistics?.level ?? 0);
+  const bandwidth = quantumBoundaryBandwidth(state, lookup);
   flow.globalUploadPerMinute = bandwidth.globalUploadPerMinute;
   flow.globalDownloadPerMinute = bandwidth.globalDownloadPerMinute;
   flow.quantumTowerStacks = bandwidth.activeTowerStacks;
-  flow.quantumCollectorStacks = collectors.reduce((sum, entity) =>
+  flow.quantumCollectorStacks = lookup?.quantumCollectorStacks ?? collectors.reduce((sum, entity) =>
     sum + (isQuantumCollector(entity) ? Math.max(0, Math.floor(entity.machineCount)) : 0), 0);
 
-  const endpoints = stationEntities.filter((entity) => isQuantumStation(entity) || isQuantumCollector(entity));
-  const endpointById = new Map(endpoints.map((endpoint) => [endpoint.id, endpoint]));
+  const endpoints = lookup?.quantumEndpoints ?? stationEntities.filter((entity) => isQuantumStation(entity) || isQuantumCollector(entity));
+  const endpointById = lookup?.entityById ?? new Map(endpoints.map((endpoint) => [endpoint.id, endpoint]));
   // Existing tower buffers are an overflow path only. Drain them directly
   // before building the legacy boundary requests so newly freed inventory is
   // never throttled by the five-second upload budget.
-  for (const endpoint of endpoints) {
-    if (!isQuantumStation(endpoint)) continue;
-    for (const slot of getStationSlots(endpoint)) {
-      if (slot.itemId && slot.remoteMode === "supply") flushQuantumSupplyBuffer(state, endpoint, slot.itemId, lookup);
+  if (lookup) {
+    for (const plan of lookup.quantumUploadSlots) flushQuantumSupplyBuffer(state, plan.endpoint, plan.itemId, lookup);
+  } else {
+    for (const endpoint of endpoints) {
+      if (!isQuantumStation(endpoint)) continue;
+      for (const slot of getStationSlots(endpoint)) {
+        if (slot.itemId && slot.remoteMode === "supply") flushQuantumSupplyBuffer(state, endpoint, slot.itemId, lookup);
+      }
     }
   }
   const requestByEndpointItem = new Map<string, QuantumSettlementInput>();
@@ -5785,22 +6046,38 @@ function settleQuantumNetworkUploads(
       }
       continue;
     }
-    for (const slot of getStationSlots(endpoint)) {
-      if (!slot.itemId || slot.remoteMode !== "supply") continue;
-      const reserved = stationReservedOutgoing(state, endpoint.id, slot.itemId, lookup);
-      const available = Math.max(0, Math.floor((endpoint.outputs[slot.itemId] ?? 0) - slot.minStock - reserved));
-      if (available < 1) continue;
-      const key = `${endpoint.id}:${slot.itemId}`;
-      const existing = requestByEndpointItem.get(key);
-      if (!existing || (slot.priority ?? 1) > (existing.priority ?? 1)) {
-        requestByEndpointItem.set(key, {
-          key,
-          stationId: endpoint.id,
-          itemId: slot.itemId,
-          requested: available,
-          priority: slot.priority,
-        });
+    if (!lookup) {
+      for (const slot of getStationSlots(endpoint)) {
+        if (!slot.itemId || slot.remoteMode !== "supply") continue;
+        const reserved = stationReservedOutgoing(state, endpoint.id, slot.itemId, lookup);
+        const available = Math.max(0, Math.floor((endpoint.outputs[slot.itemId] ?? 0) - slot.minStock - reserved));
+        if (available < 1) continue;
+        const key = `${endpoint.id}:${slot.itemId}`;
+        const existing = requestByEndpointItem.get(key);
+        if (!existing || (slot.priority ?? 1) > (existing.priority ?? 1)) {
+          requestByEndpointItem.set(key, {
+            key,
+            stationId: endpoint.id,
+            itemId: slot.itemId,
+            requested: available,
+            priority: slot.priority,
+          });
+        }
       }
+    }
+  }
+  if (lookup) {
+    for (const plan of lookup.quantumUploadSlots) {
+      const reserved = stationReservedOutgoing(state, plan.endpoint.id, plan.itemId, lookup);
+      const available = Math.max(0, Math.floor((plan.endpoint.outputs[plan.itemId] ?? 0) - plan.slot.minStock - reserved));
+      if (available < 1) continue;
+      requestByEndpointItem.set(plan.key, {
+        key: plan.key,
+        stationId: plan.endpoint.id,
+        itemId: plan.itemId,
+        requested: available,
+        priority: plan.priority,
+      });
     }
   }
   const inputs = [...requestByEndpointItem.values()];
@@ -5808,6 +6085,7 @@ function settleQuantumNetworkUploads(
   const result = settleQuantumLogisticsNetwork(state.quantumLogisticsNetwork, inputs, [], {
     seconds,
     globalUploadCap: quantumBoundaryCapacity(flow.globalUploadPerMinute, seconds),
+    mutateNormalizedState: true,
   });
   state.quantumLogisticsNetwork = result.state;
   for (const request of inputs) {
@@ -6008,7 +6286,7 @@ export function prepareSimulationStep(
   drainMaterialDeliveryHubs(state, seconds, lookup);
   if (profiler) profiler.logisticsMs += profileNow() - subsystemStartedAt;
   subsystemStartedAt = profiler ? profileNow() : 0;
-  const reception = calculateDysonReception(state);
+  const reception = calculateDysonReception(state, lookup);
   if (profiler) profiler.dysonMs += profileNow() - subsystemStartedAt;
   return {
     elapsedBeforeStep,

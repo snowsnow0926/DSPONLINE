@@ -10,7 +10,7 @@ test.use({ serviceWorkers: "block" });
 test("cloud upload preparation keeps a large save off the main thread", async ({ page }) => {
   test.setTimeout(Math.max(180_000, OFFLINE_SECONDS * 250));
   test.skip(!FIXTURE || !existsSync(FIXTURE), "设置 DSP_CLOUD_UPLOAD_FIXTURE 后运行真实大存档夹具");
-  await page.addInitScript(() => window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-10-v1.0.37"));
+  await page.addInitScript(() => window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-11-v1.0.38"));
   await page.goto("/?menu=1");
   const raw = readFileSync(FIXTURE!, "utf8");
   const fixtureSavedAt = (JSON.parse(raw) as { savedAt?: number }).savedAt ?? Date.now();

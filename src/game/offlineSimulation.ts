@@ -11,6 +11,7 @@ import {
   classifyOfflineWorkload,
   type OfflineComplexityReport,
 } from "./offlineComplexity";
+import { decodeVerifiedSaveTransfer, type SaveTransferVerification } from "./saveTransfer";
 
 export type OfflineSimulationWorkerRequest =
   | {
@@ -28,7 +29,7 @@ export type OfflineSimulationWorkerRequest =
   | {
     type: "prepare-upload";
     id: number;
-    raw: string;
+    rawBytes: ArrayBuffer;
     now: number;
     menuSettings?: Partial<GameSettings>;
     returningRewardClaimed: boolean;
@@ -50,9 +51,28 @@ export type OfflineSimulationWorkerResponse =
     algorithmVersion?: string;
     degradedReason?: string;
   }
-  | { type: "complete"; id: number; state: GameState; totalSeconds: number; approximation?: OfflineApproximationReport }
+  | {
+    type: "complete";
+    id: number;
+    payloadBytes: ArrayBuffer;
+    payloadChecksum: string;
+    byteLength: number;
+    summary: CloudUploadSummary;
+    totalSeconds: number;
+    approximation?: OfflineApproximationReport;
+  }
   | { type: "decision-required"; id: number; totalSeconds: number; approximation: OfflineApproximationReport }
-  | { type: "upload-complete"; id: number; payload: string; summary: CloudUploadSummary; offlineSeconds: number; returningReward: Array<{ itemId: string; amount: number }>; diagnostics?: CloudUploadPreparationDiagnostics }
+  | {
+    type: "upload-complete";
+    id: number;
+    payloadBytes: ArrayBuffer;
+    payloadChecksum: string;
+    byteLength: number;
+    summary: CloudUploadSummary;
+    offlineSeconds: number;
+    returningReward: Array<{ itemId: string; amount: number }>;
+    diagnostics?: CloudUploadPreparationDiagnostics;
+  }
   | { type: "cancelled"; id: number }
   | {
     type: "error";
@@ -155,6 +175,26 @@ export interface CloudUploadPreparationDiagnostics {
   skippedOffline: boolean;
 }
 
+function parseTrustedOfflineWorkerState(raw: string, summary: CloudUploadSummary): GameState {
+  const envelope = JSON.parse(raw) as {
+    formatVersion?: unknown;
+    mode?: unknown;
+    checksum?: unknown;
+    state?: unknown;
+  };
+  if (envelope.formatVersion !== 2 || envelope.mode !== summary.mode ||
+    typeof envelope.checksum !== "string" || envelope.checksum !== summary.stateChecksum ||
+    !envelope.state || typeof envelope.state !== "object" || Array.isArray(envelope.state)) {
+    throw new Error("离线 Worker 结果信封与完整性证明不一致");
+  }
+  const state = envelope.state as GameState;
+  if (state.version !== summary.stateVersion || state.mode !== summary.mode ||
+    !Array.isArray(state.entities) || state.entities.length !== summary.entityCount) {
+    throw new Error("离线 Worker 结果摘要与游戏状态不一致");
+  }
+  return state;
+}
+
 export function runOfflineSimulationInWorker(
   state: GameState,
   seconds: number,
@@ -201,6 +241,7 @@ export function runOfflineSimulationInWorkerDetailed(
     ? Math.min(5_000, Math.max(1_000, deadlineMs / 4))
     : 0;
   const workerDeadlineMs = deadlineMs === undefined ? undefined : Math.max(1_000, deadlineMs - conservativeReserveMs);
+  const registry = options.registry ?? createContentPackRuntimeSnapshot(loadContentPackRegistry());
   return new Promise<OfflineSimulationRunResult>((resolve, reject) => {
     let settled = false;
     let deadlineTimer: number | null = null;
@@ -253,9 +294,24 @@ export function runOfflineSimulationInWorkerDetailed(
         return;
       }
       if (message.type === "complete") {
-        try { window.sessionStorage.setItem(OFFLINE_PERFORMANCE_SESSION_KEY, String(Math.max(0, performance.now() - startedAt))); } catch { /* optional diagnostics */ }
-        if (message.approximation) options.onApproximationReport?.(message.approximation);
-        finish(() => resolve({ status: "complete", state: message.state, approximation: message.approximation, complexity }));
+        try {
+          const verification: SaveTransferVerification = {
+            integrity: "valid",
+            stateChecksum: message.summary.stateChecksum ?? "",
+            payloadChecksum: message.payloadChecksum,
+            byteLength: message.byteLength,
+          };
+          const raw = decodeVerifiedSaveTransfer(message.payloadBytes, verification);
+          const workerState = parseTrustedOfflineWorkerState(raw, message.summary);
+          try { window.sessionStorage.setItem(OFFLINE_PERFORMANCE_SESSION_KEY, String(Math.max(0, performance.now() - startedAt))); } catch { /* optional diagnostics */ }
+          if (message.approximation) options.onApproximationReport?.(message.approximation);
+          finish(() => resolve({ status: "complete", state: workerState, approximation: message.approximation, complexity }));
+        } catch (error) {
+          failOrRetryConservative(
+            "离线 Worker 结果传输校验失败，已使用一次零校准保守宏观恢复",
+            `${error instanceof Error ? error.message : "离线结果传输失败"}；未保存任何半成品`,
+          );
+        }
         return;
       }
       if (message.type === "decision-required") {
@@ -283,7 +339,6 @@ export function runOfflineSimulationInWorkerDetailed(
       "快速 Worker 运行失败，已使用一次零校准保守宏观恢复",
       "离线计算 Worker 运行失败，未保存任何半成品",
     );
-    const registry = options.registry ?? createContentPackRuntimeSnapshot(loadContentPackRegistry());
     try {
       worker.postMessage({
         type: "start",
@@ -322,7 +377,14 @@ export function prepareCloudUploadInWorker(
     registry?: ContentPackRuntimeSnapshot;
     onProgress?: (progress: OfflineSimulationProgress) => void;
   } = {},
-): Promise<{ payload: string; summary: CloudUploadSummary; offlineSeconds: number; returningReward: Array<{ itemId: string; amount: number }>; diagnostics: CloudUploadPreparationDiagnostics }> {
+): Promise<{
+  payload: string;
+  summary: CloudUploadSummary;
+  verification: SaveTransferVerification;
+  offlineSeconds: number;
+  returningReward: Array<{ itemId: string; amount: number }>;
+  diagnostics: CloudUploadPreparationDiagnostics;
+}> {
   if (typeof Worker === "undefined") return Promise.reject(new Error("当前浏览器不支持云存档后台 Worker"));
   const worker = new Worker(new URL("./offlineSimulation.worker.ts", import.meta.url), { type: "module", name: "cloud-upload-preparation" });
   const id = Date.now() + Math.floor(Math.random() * 1_000_000);
@@ -355,9 +417,22 @@ export function prepareCloudUploadInWorker(
         return;
       }
       if (message.type === "upload-complete") {
+        const verification: SaveTransferVerification = {
+          integrity: "valid",
+          stateChecksum: message.summary.stateChecksum ?? "",
+          payloadChecksum: message.payloadChecksum,
+          byteLength: message.byteLength,
+        };
+        let payload: string;
+        try {
+          payload = decodeVerifiedSaveTransfer(message.payloadBytes, verification);
+        } catch (error) {
+          finish(() => reject(error instanceof Error ? error : new Error("云存档传输校验失败")));
+          return;
+        }
         const diagnostics = message.diagnostics ?? {
           sourceBytes: 0,
-          payloadBytes: typeof TextEncoder === "undefined" ? message.payload.length : new TextEncoder().encode(message.payload).byteLength,
+          payloadBytes: message.byteLength,
           totalMs: Math.max(0, performance.now() - startedAt),
           inspectMs: 0,
           offlineMs: 0,
@@ -365,7 +440,7 @@ export function prepareCloudUploadInWorker(
           offlineSeconds: message.offlineSeconds,
           skippedOffline: options.skipOffline === true,
         };
-        finish(() => resolve({ payload: message.payload, summary: message.summary, offlineSeconds: message.offlineSeconds, returningReward: message.returningReward, diagnostics }));
+        finish(() => resolve({ payload, summary: message.summary, verification, offlineSeconds: message.offlineSeconds, returningReward: message.returningReward, diagnostics }));
         return;
       }
       if (message.type === "cancelled") {
@@ -376,16 +451,18 @@ export function prepareCloudUploadInWorker(
     };
     worker.onerror = () => finish(() => reject(new Error("云存档后台 Worker 运行失败，未修改本地存档")));
     try {
+      const encoded = new TextEncoder().encode(raw);
+      const rawBytes = encoded.buffer;
       worker.postMessage({
         type: "prepare-upload",
         id,
-        raw,
+        rawBytes,
         now,
         menuSettings: options.menuSettings,
         returningRewardClaimed: options.returningRewardClaimed ?? false,
         skipOffline: options.skipOffline === true,
         registry,
-      } satisfies OfflineSimulationWorkerRequest);
+      } satisfies OfflineSimulationWorkerRequest, [rawBytes]);
     } catch {
       finish(() => reject(new Error("云存档无法交给后台 Worker 处理，未修改本地存档")));
     }

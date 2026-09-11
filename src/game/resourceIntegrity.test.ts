@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { createInitialState, createPlayerInitialState, createSpeedrunInitialState } from "./engine";
+import { createInitialState, createSpeedrunInitialState } from "./engine";
 import { DEFAULT_GALAXY_SEED } from "./galaxy";
 import { inspectSave, migrateGame, serializeEnvelope } from "./storage";
 import {
   CANONICAL_UNIPOLAR_VEIN_ID,
+  SECONDARY_UNIPOLAR_VEIN_ID,
+  UNIPOLAR_VEIN_HARD_CAP,
   auditUnipolarVeins,
+  createSecondUnipolarVeinPackage,
   createUnipolarVeinRepairPackage,
   previewUnipolarVeinRepair,
+  previewSecondUnipolarVein,
   rollbackUnipolarVeinRepair,
 } from "./resourceIntegrity";
 import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
@@ -17,6 +21,14 @@ const context = {
   operator: "test-operator",
   createdAt: 1_786_291_200_000,
 } as const;
+
+function createSingleUnipolarState() {
+  for (let seed = 1; seed <= 512; seed += 1) {
+    const state = createInitialState(seed, false);
+    if (auditUnipolarVeins(state).observedTotal === 1) return state;
+  }
+  throw new Error("test fixture seed with one unipolar vein was not found");
+}
 
 describe("单极磁石资源完整性审计与人工修复", () => {
   it("确认当前规则允许全星区只有一个单极磁石节点", () => {
@@ -55,7 +67,7 @@ describe("单极磁石资源完整性审计与人工修复", () => {
   });
 
   it("缺失规范节点时只在确认令牌匹配后生成一个候选并保持其他玩法字段不变", () => {
-    const source = createPlayerInitialState();
+    const source = createSingleUnipolarState();
     source.entities.find((entity) => entity.id === "vein_iron")!.resourceRemaining = 123_456;
     source.totalProduced.iron_ore = 987;
     source.research.completedTechIds.push("electromagnetism");
@@ -117,5 +129,78 @@ describe("单极磁石资源完整性审计与人工修复", () => {
     const migrated = migrateGame(JSON.parse(JSON.stringify(persisted)))!;
     expect(migrated.entities.some((entity) => entity.id === generatedOnly!.id)).toBe(false);
     expect(auditUnipolarVeins(migrated).healthy).toBe(true);
+  });
+
+  it("普通存档可显式把一个规范单极磁石矿脉扩为两个且不直接增加物资", () => {
+    const source = createSingleUnipolarState();
+    const before = source.entities.find((entity) => entity.id === CANONICAL_UNIPOLAR_VEIN_ID)!;
+    before.resourceRemaining = 12_345;
+    before.outputs.unipolar_magnet = 77;
+    const expansionContext = { ...context, reason: "player confirmed one-to-two expansion" };
+    const preview = previewSecondUnipolarVein(source, expansionContext);
+    expect(preview).toMatchObject({ eligible: true, targetEntityId: SECONDARY_UNIPOLAR_VEIN_ID });
+    expect(() => createSecondUnipolarVeinPackage(source, expansionContext, "wrong")).toThrow(/令牌/);
+    const expansion = createSecondUnipolarVeinPackage(source, expansionContext, preview.confirmationToken);
+    const added = expansion.candidateState.entities.find((entity) => entity.id === SECONDARY_UNIPOLAR_VEIN_ID)!;
+    expect(auditUnipolarVeins(expansion.candidateState)).toMatchObject({
+      healthy: true,
+      observedTotal: UNIPOLAR_VEIN_HARD_CAP,
+      canonicalCount: UNIPOLAR_VEIN_HARD_CAP,
+    });
+    expect(added).toMatchObject({
+      kind: "vein",
+      planetId: "magnetar",
+      resourceId: "unipolar_magnet",
+      position: { x: 170, y: 35 },
+      minerCount: 0,
+      outputs: { unipolar_magnet: 0 },
+    });
+    expect(added.resourceRemaining).toBeGreaterThan(0);
+    expect(expansion.candidateState.entities.find((entity) => entity.id === CANONICAL_UNIPOLAR_VEIN_ID)?.resourceRemaining).toBe(12_345);
+    expect(expansion.candidateState.entities.find((entity) => entity.id === CANONICAL_UNIPOLAR_VEIN_ID)?.outputs.unipolar_magnet).toBe(77);
+    expect(expansion.candidateState.totalProduced).toEqual(source.totalProduced);
+    expect(expansion.audit.operation).toBe("expand-single-unipolar-to-two-v1");
+  });
+
+  it("第二个矿脉硬上限为二，重复执行、速通和伪造 ID 均被拒绝", () => {
+    const source = createSingleUnipolarState();
+    const preview = previewSecondUnipolarVein(source, context);
+    const expanded = createSecondUnipolarVeinPackage(source, context, preview.confirmationToken);
+    expect(previewSecondUnipolarVein(expanded.candidateState, context).eligible).toBe(false);
+    expect(() => createSecondUnipolarVeinPackage(expanded.candidateState, context,
+      previewSecondUnipolarVein(expanded.candidateState, context).confirmationToken)).toThrow(/上限|不能增加/);
+
+    const speedrun = createSpeedrunInitialState();
+    expect(previewSecondUnipolarVein(speedrun, context).blockingReasons.join("；")).toMatch(/速通/);
+
+    const forged = createSingleUnipolarState();
+    forged.entities.push({
+      ...structuredClone(forged.entities.find((entity) => entity.id === CANONICAL_UNIPOLAR_VEIN_ID)!),
+      id: "forged-unipolar",
+      position: { x: 900, y: 900 },
+    });
+    expect(auditUnipolarVeins(forged).healthy).toBe(false);
+    expect(previewSecondUnipolarVein(forged, context).eligible).toBe(false);
+  });
+
+  it("扩容后的两个矿脉可重复保存迁移且旧格式超上限数据只告警不删除", () => {
+    const source = createSingleUnipolarState();
+    const preview = previewSecondUnipolarVein(source, context);
+    const expanded = createSecondUnipolarVeinPackage(source, context, preview.confirmationToken).candidateState;
+    const first = inspectSave(serializeEnvelope(expanded, context.createdAt));
+    const second = inspectSave(serializeEnvelope(first.state!, context.createdAt + 1));
+    expect(first.valid).toBe(true);
+    expect(second.valid).toBe(true);
+    expect(second.state!.entities.filter((entity) => entity.resourceId === "unipolar_magnet")).toHaveLength(2);
+
+    const historical = structuredClone(expanded);
+    historical.entities.push({
+      ...structuredClone(historical.entities.find((entity) => entity.id === SECONDARY_UNIPOLAR_VEIN_ID)!),
+      id: "historical-third-unipolar",
+      position: { x: 490, y: 35 },
+    });
+    const migrated = migrateGame(JSON.parse(JSON.stringify(historical)))!;
+    expect(migrated.entities.filter((entity) => entity.resourceId === "unipolar_magnet")).toHaveLength(3);
+    expect(auditUnipolarVeins(migrated).issues.join("；")).toMatch(/硬上限/);
   });
 });

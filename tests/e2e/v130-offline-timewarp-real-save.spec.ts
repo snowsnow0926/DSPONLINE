@@ -32,6 +32,7 @@ test.describe("1.0.34 real-save offline and pure-idle workers", () => {
         (specifier: string) => Promise<Record<string, (...args: never[]) => unknown>>;
       const storage = await loadModule("/src/game/storage.ts");
       const contentPacks = await loadModule("/src/game/contentPacks.ts");
+      const saveTransfer = await loadModule("/src/game/saveTransfer.ts");
       const parsed = await fetch("/__dsp_real_offline_timewarp_fixture.json").then((response) => response.json());
       const state = storage.migrateGame(parsed.state ?? parsed) as Record<string, any> | null;
       if (!state) throw new Error("fixture migration failed");
@@ -86,7 +87,15 @@ test.describe("1.0.34 real-save offline and pure-idle workers", () => {
         const workerRoundTripMs = performance.now() - startedAt;
         const validationStartedAt = performance.now();
         const committed = response.type === "complete";
-        const output = (committed ? response.state : state) as Record<string, any>;
+        const output = (committed ? (() => {
+          const raw = saveTransfer.decodeVerifiedSaveTransfer(response.payloadBytes, {
+            integrity: "valid",
+            stateChecksum: response.summary?.stateChecksum,
+            payloadChecksum: response.payloadChecksum,
+            byteLength: response.byteLength,
+          }) as string;
+          return (JSON.parse(raw) as { state: Record<string, any> }).state;
+        })() : state) as Record<string, any>;
         const serialized = storage.serializeEnvelope(output) as string;
         const inspection = storage.inspectSave(serialized) as { valid: boolean };
         reports.push({

@@ -6,10 +6,10 @@ import {
   advancePureIdleMacroSession,
   createConservativePureIdleMacroSession,
   createPureIdleMacroSession,
-  finalizePureIdleMacroSession,
   PURE_IDLE_MACRO_ALGORITHM_VERSION,
   PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS,
 } from "./pureIdleMacro";
+import { finalizePureIdleMacroSession } from "./pureIdleMacroValidation";
 import { applyPureIdleAffineContract, type PureIdleAffineContract } from "./offlineApproximation";
 import type { GameState } from "./types";
 

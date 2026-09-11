@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-10-v1.0.37";
+const RELEASE_NOTE_ID = "2026-08-11-v1.0.38";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,9 +110,9 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Unipolar Magnets, Offline Decisions & Star-Map Batch Operations" });
+  const dialog = page.getByRole("dialog", { name: "Endgame Performance, Leaner Saves & Vein Expansion" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.0.37");
+  await expect(dialog).toContainText("1.0.38");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

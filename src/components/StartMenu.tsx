@@ -959,7 +959,11 @@ export function StartMenu({ onEnterGame, onOpenReleaseNotes }: StartMenuProps) {
         // The PUT response is already authoritative. Metadata refresh is a
         // best-effort read and must not hide the confirmed revision.
       }
-      const localSaveResult = await storage.saveVerifiedPayload(prepared.payload, { verified: true });
+      const localSaveResult = await storage.saveVerifiedPayload(prepared.payload, {
+        verified: true,
+        workerSummary: prepared.summary,
+        workerVerification: prepared.verification,
+      });
       if (!localSaveResult.success) {
         updateCloudSlot("main", cloudSave);
         setMessage({ tone: "error", text: `云存档已更新到修订 ${cloudSave.revision}，但本地存档未写入：${localSaveResult.message}` });

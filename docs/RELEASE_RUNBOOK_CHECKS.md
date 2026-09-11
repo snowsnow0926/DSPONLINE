@@ -19,6 +19,24 @@
 
 ## 1. 前置自检（发布前，一次性完成，<10 分钟）
 
+### 1.1 香港单节点快速路径
+
+当用户明确只要求香港 Web 或香港 Web/API 时，先在候选工作树运行本地不可变预检和
+目标计划，再连接服务器：
+
+```powershell
+npm run release:preflight -- --manifest <candidate.json> --sha-sums <SHA256SUMS.txt>
+npm run release:plan -- --manifest <candidate.json> --target hk-web-api
+```
+
+Web-only 使用 `--target hk-web`，不创建 SQLite 快照；Web/API 仍必须按第 3 节完成一次
+独立 Backup API evidence。归档统一用
+`.codex/skills/develop-dspidle/scripts/invoke-protected-release-upload.ps1` 的 SSH
+流式上传，远端整文件哈希验证通过后才提升到新不可变文件名。SCP 只能显式 `-Transport
+Auto` 回退；该入口不切 `current`。HK-only 路径不等待上海、下载页或原生制品，也不
+改变这些目标的 current/previous；第 2、5、6 节仍完整执行香港自己的健康、dry-run、
+原子切换、PWA/cache、Range 和回滚验收。
+
 - [ ] 确定发布候选：`Git SHA`、`Release ID`、`Build ID`（示例 `3e580c715a5a / 1.0.44-3e580c715a5a / 1.0.44+3e580c715a5a`）。
 - [ ] 确认候选工作树干净；确认候选制品 bundle + 各 sub-manifest（web/api/desktop/native-feed/download-site/native-archive）齐全。
 - [ ] 探明并记录**两个节点的确切可达信息**（勿临时补救）：

@@ -112,6 +112,43 @@ pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-protected-ssh
 
 wrapper 强制固定 host key、单次物理出口、BatchMode 和有界连接；不接受 inline remote command。远端脚本只能输出经过隐私审查的版本、指针、健康、哈希和计数，不能输出环境、账号、数据库正文或目录中的秘密。上传制品仍走发布清单约束的独立 SCP 流程；该 wrapper 不自动授予上传权限。
 
+### 4.1 发布制品快速预检与受保护上传
+
+在真正连接节点前，先在固定 clean checkout 中验证不可变候选清单。该预检只读取
+manifest、SHA256SUMS、当前 Git SHA 和制品文件，不访问生产环境：
+
+```powershell
+npm run release:preflight -- `
+  --manifest artifacts\release-manifests\<release>-candidate.json `
+  --sha-sums artifacts\release-manifests\<release>-SHA256SUMS.txt
+npm run release:plan -- `
+  --manifest artifacts\release-manifests\<release>-candidate.json `
+  --sha-sums artifacts\release-manifests\<release>-SHA256SUMS.txt `
+  --target hk-web-api
+```
+
+`release:preflight` 必须确认 clean Git SHA、build ID、文件数量、逐文件大小/SHA-256、
+aggregate SHA-256 和必需的 Web/API 归档。`release:plan` 只输出本次目标的备份、上传、
+dry-run、原子切换和验收边界；它不上传、不备份、不切换。预检失败时不得用手工哈希或
+交接文档中的旧值替代。
+
+上传使用独立的受保护入口，默认通过严格 host-key 校验的 SSH 二进制流传输，只有显式
+指定 `-Transport Auto` 才允许旧版 SCP 作为兼容回退：
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-protected-release-upload.ps1 `
+  -Node HongKong `
+  -ManifestPath artifacts\release-manifests\<release>-candidate.json `
+  -Transport Stream
+```
+
+入口只上传清单中的 Web/API 归档到受限临时目录，远端逐个校验大小和 SHA-256 后才移动
+到新不可变文件名；不会修改 current/previous 指针，也不会创建数据库备份。`-DryRun`
+会先自动寻找同目录的 `*-SHA256SUMS.txt` 并重新运行本地 `release:preflight`；也可用
+`-ShaSumsPath` 显式指定清单。`-DryRun` 只做本地清单和传输能力校验。输出仅包含 release ID、归档文件名、大小、SHA-256、传输
+方式和验证结果；失败时不输出 SSH 错误原文、路径或凭据。上传后仍必须按运维手册完成
+独立备份证据、未激活目录启动、dry-run、原子切换和公网验收。
+
 专用入口：
 
 ```powershell

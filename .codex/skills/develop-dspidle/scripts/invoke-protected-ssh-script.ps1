@@ -12,10 +12,18 @@ param(
   [switch]$Run,
   [switch]$MutationAuthorized,
   [switch]$Sudo,
-  [string]$ExpectedReleaseId = ""
+  [string]$ExpectedReleaseId = "",
+  [string]$FailureReportPath = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+trap {
+  $message = $_.Exception.Message
+  $safeError = if ($message -match '^[A-Z0-9_.-]{1,200}$') { $message } else { 'PROTECTED_SSH_SETUP_FAILED' }
+  [ordered]@{ ok = $false; node = $Node; mode = $Mode; error = $safeError; secretsExposed = $false } | ConvertTo-Json -Compress
+  exit 1
+}
 
 function Read-ScopedEnvironment([string]$Name) {
   foreach ($scope in @("Process", "User", "Machine")) {
@@ -152,7 +160,30 @@ if ($exitCode -ne 0) {
     elseif ($stderr -match "timed out|Connection timed out") { "TIMEOUT" }
     elseif ($stderr -match "sudo:.*password|not allowed to run sudo") { "SUDO" }
     else { "REMOTE_SCRIPT" }
-  throw ("PROTECTED_SSH_EXECUTION_FAILED_" + $category)
+  $safeMarker = (($stdout + "`n" + $stderr) -split "`r?`n" |
+    Where-Object { $_ -match '^DSP_SAFE_ERROR:[A-Z0-9_.-]{1,64}$' } |
+    Select-Object -First 1)
+  $marker = if ($safeMarker) { $safeMarker.Substring(15) } else { $null }
+  $report = [ordered]@{
+    ok = $false
+    node = $Node
+    mode = $Mode
+    category = $category
+    exitCode = $exitCode
+    remoteMarker = $marker
+    stdoutLength = $stdout.Length
+    stderrLength = $stderr.Length
+    secretsExposed = $false
+  }
+  if (-not [string]::IsNullOrWhiteSpace($FailureReportPath)) {
+    $reportAbsolute = [IO.Path]::GetFullPath($FailureReportPath)
+    $reportDirectory = Split-Path -Parent $reportAbsolute
+    if ([string]::IsNullOrWhiteSpace($reportDirectory)) { $reportDirectory = (Get-Location).Path }
+    if (-not (Test-Path -LiteralPath $reportDirectory -PathType Container)) { New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null }
+    $report | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $reportAbsolute -Encoding UTF8
+  }
+  $suffix = if ($marker) { "_" + $marker } else { "" }
+  throw ("PROTECTED_SSH_EXECUTION_FAILED_" + $category + $suffix + "_EXIT_" + $exitCode)
 }
 
 # The streamed script is responsible for emitting privacy-safe output only.

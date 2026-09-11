@@ -255,6 +255,30 @@ SQLite layout v2 将云存档正文从 `app_state` 拆到 `cloud_save_payloads`�
 
 后端失败时切回上一代码目录并重启；除非新代码已执行不可逆数据迁移，否则不要回滚数据库。
 
+### 5.3.1 香港单节点快速路径（2026-08-25）
+
+用户明确只要求香港时，不要因为上海未就绪而阻塞香港，也不要顺带修改下载页或原生 stable。Release Agent 先在候选工作树运行：
+
+```powershell
+npm run release:preflight -- --manifest <candidate.json> --sha-sums <SHA256SUMS.txt>
+npm run release:plan -- --manifest <candidate.json> --target hk-web-api
+```
+
+这两个命令把 clean Git SHA、manifest aggregate、Web/API 归档、目标类型和备份需求固化为一次可审计计划。前端-only 修复使用 `--target hk-web`，明确不触发 API/SQLite 切换。
+
+归档上传统一使用受保护流式入口：
+
+```powershell
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/invoke-protected-release-upload.ps1 `
+  -Node HongKong -ManifestPath <candidate.json> -Transport Stream
+```
+
+该入口保持固定 host key、`IdentitiesOnly`、物理出口绑定和 BatchMode，远端先写唯一暂存名，再以完整大小/SHA-256 校验后原子提升；`-Transport Auto` 才允许旧 SCP 失败后回退流式传输。任何密钥、地址、stderr 或数据库内容都不会写入输出。
+
+API 发布每个窗口只允许一次 Backup API evidence。证据在 24 小时内且设备/inode/mtime/大小/SHA/`quick_check`/schema/layout 均未变化时可以复用；超过 512 MiB 必须提前准备独立预检副本，禁止在切换关键路径重复复制生产库。Web-only 只备份并哈希活动 Nginx 配置，不制造大型 SQLite I/O。
+
+远端 dry-run 必须在一次通过后才允许原子切换；失败立即保持 current/previous/数据库不变。使用 `invoke-protected-ssh-script.ps1 -FailureReportPath <ignored-report.json>` 会保存只含节点、失败分类、退出码、脱敏 marker 和输出长度的报告，避免过去“只有通用 non-zero、无法定位阶段”的问题。收口仍必须独立验证 local/public health/ready、版本/build、Nginx、NRestarts、磁盘、PWA/cache 和 previous 指针。
+
 ### 5.4 排行榜数据完整性处置
 
 #### 5.4.1 异常检测与人工复核策略

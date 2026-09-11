@@ -143,6 +143,30 @@ npm run build
 
 ### 正式发布
 
+候选进入 Release Agent 前先运行一次本地不可变清单预检；它不会连接服务器，能够在
+上传前发现 SHA、Git、文件大小和候选元数据不一致：
+
+```powershell
+npm run release:preflight -- `
+  --manifest artifacts\release-manifests\<release>-candidate.json `
+  --sha-sums artifacts\release-manifests\<release>-SHA256SUMS.txt
+npm run release:plan -- `
+  --manifest artifacts\release-manifests\<release>-candidate.json `
+  --sha-sums artifacts\release-manifests\<release>-SHA256SUMS.txt `
+  --target hk-web-api
+```
+
+只做香港 Web-only 时将目标改为 `hk-web`，这样不会误触发 SQLite 备份门禁。预检和计划
+输出是机器可读 JSON；任何失败都应修复候选或 transport 后重新开始，不能跳过并依赖旧
+交接记录。上传使用 `docs/PROTECTED_RELEASE_ACCESS.md` 中的受保护流式入口，上传本身
+不切换 `current`，仍需按部署手册完成备份、隔离启动、dry-run、原子切换和公网验收。
+
+发布工具本身的本地回归可用以下命令，覆盖清单拒绝、备份证据、代理交接和原子切换：
+
+```powershell
+npm run release:test-tools
+```
+
 ```powershell
 npm ci
 npm --prefix server ci

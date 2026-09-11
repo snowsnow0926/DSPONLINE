@@ -19,4 +19,13 @@ flock --exclusive --nonblock 8 || {
   printf 'another DSP Idle release switch is already running\n' >&2
   exit 75
 }
-exec "${NODE:-/usr/bin/node}" "$control_root/release-switch.mjs" "$@"
+set +e
+"${NODE:-/usr/bin/node}" "$control_root/release-switch.mjs" "$@"
+status=$?
+if [[ "$status" -ne 0 ]]; then
+  # The protected SSH wrapper consumes this marker and reports only the
+  # bounded category/exit code. Detailed Node errors stay out of transport
+  # diagnostics and are never copied into release records.
+  printf 'DSP_SAFE_ERROR:RELEASE_SWITCH_FAILED\n' >&2
+fi
+exit "$status"

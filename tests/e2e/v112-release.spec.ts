@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-17-v1.0.45";
+const RELEASE_NOTE_ID = "2026-08-17-v1.0.46";
 
 async function seedV112Factory(page: Page, options: { fontScale?: number; theme?: "dark" | "light"; mobileUi?: "legacy" | "next" } = {}) {
   await page.addInitScript(({ fontScale, theme, mobileUi, releaseNoteId }) => {

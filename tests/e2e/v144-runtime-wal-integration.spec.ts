@@ -71,9 +71,80 @@ async function findBlankCanvasPoint(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.45");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.46");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
   });
+});
+
+test("recovers a failed durable finalize in the current page before resume", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.addInitScript(() => {
+    const tracker = { armed: false, finalizeFailures: 0 };
+    (window as typeof window & { __v146DurableRepair?: typeof tracker }).__v146DurableRepair = tracker;
+    const NativeWorker = window.Worker;
+    const WrappedWorker = new Proxy(NativeWorker, {
+      construct(target, args) {
+        const worker = Reflect.construct(target, args) as Worker;
+        const isPersistence = String(args[0]).includes("simulationRuntimeRecoveryPersistence.worker") &&
+          (args[1] as WorkerOptions | undefined)?.name === "runtime-recovery-persistence";
+        if (!isPersistence) return worker;
+        const nativePostMessage = worker.postMessage.bind(worker);
+        let failed = false;
+        worker.postMessage = ((message: Record<string, unknown>, transferOrOptions?: Transferable[] | StructuredSerializeOptions) => {
+          if (!failed && tracker.armed && message.type === "finalize") {
+            failed = true;
+            tracker.finalizeFailures += 1;
+            // Leave the staged intent in IndexedDB and fail the client before
+            // the finalize response can be consumed by the page.
+            window.setTimeout(() => {
+              worker.terminate();
+              worker.dispatchEvent(new ErrorEvent("error", { message: "injected durable finalize failure" }));
+            }, 0);
+            return;
+          }
+          if (transferOrOptions === undefined) nativePostMessage(message);
+          else nativePostMessage(message, transferOrOptions);
+        }) as typeof worker.postMessage;
+        return worker;
+      },
+    });
+    Object.defineProperty(window, "Worker", { configurable: true, writable: true, value: WrappedWorker });
+  });
+
+  await page.goto("/?menu=1");
+  await page.getByRole("button", { name: /开始游戏/ }).click();
+  const shell = page.locator(".game-shell");
+  await expect(shell).toBeVisible({ timeout: 20_000 });
+  await expect(shell).toHaveAttribute("data-runtime-recovery", "active");
+  await expect(shell).toHaveAttribute("data-simulation-worker", "active", { timeout: 20_000 });
+
+  const beforePause = await readRecoveryProof(page);
+  await page.getByLabel("暂停模拟").click();
+  await expect.poll(async () => (await readRecoveryProof(page)).sequence, { timeout: 20_000 })
+    .toBeGreaterThan(beforePause.sequence);
+  await page.evaluate(() => {
+    (window as typeof window & { __v146DurableRepair?: { armed: boolean } }).__v146DurableRepair!.armed = true;
+  });
+  await page.getByLabel("打开设置").click();
+  const operations = page.getByRole("dialog", { name: "运营中心" });
+  await operations.locator(".operations-tabs").getByRole("tab", { name: "设置" }).click();
+  await operations.getByRole("button", { name: "教程、版本与其他", exact: true }).first().click();
+  await operations.getByRole("button", { name: "舒缓", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __v146DurableRepair?: { finalizeFailures: number } }
+  ).__v146DurableRepair?.finalizeFailures ?? 0), { timeout: 20_000 }).toBe(1);
+  await operations.getByLabel("关闭运营中心").click();
+  await expect(page.getByLabel("继续模拟")).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText(/durable 模拟 Worker 异常|durable 模拟回执/).first()).toBeVisible({ timeout: 20_000 });
+
+  await page.getByLabel("继续模拟").click();
+  await expect(shell).toHaveAttribute("data-simulation-paused", "false", { timeout: 60_000 });
+  await expect(shell).toHaveAttribute("data-simulation-worker", "active", { timeout: 60_000 });
+  await expect(shell).toHaveAttribute("data-runtime-recovery", "active");
+  await expect(shell).toHaveAttribute("data-difficulty", "relaxed");
+  const proof = await readRecoveryProof(page);
+  expect(proof.pending).toBe(false);
+  expect(proof.finalized).toBe(true);
 });
 
 test("running and paused UI commands drain through WAL before pagehide without promoting an emergency primary", async ({ page }) => {

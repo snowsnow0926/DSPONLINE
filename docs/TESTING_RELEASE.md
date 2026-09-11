@@ -1,5 +1,9 @@
 # 测试与发布基线
 
+# 1.0.46 durable 存档热修候选（2026-08-17，本地未发布）
+
+本候选修复 durable finalize 失败后的同页 recovery、revision/head 安全重试和纯挂机终态 Worker 接管；不改变 GameState v47、save envelope v2、cloud schema v8、SQLite layout v3 或 IndexedDB 结构。最终门禁必须使用最终 1.0.46 工作树重新执行，不能复用 1.0.45 历史计数。开发交接见 [RELEASE_HANDOFF_1.0.46.md](./RELEASE_HANDOFF_1.0.46.md)。
+
 > **1.0.45 空间站扩展候选门禁（2026-08-17，合并后）**：`codex/1.0.45-space-station` 合并完成。当前工作树实测：typecheck ✅；production build ✅；Vitest 168 文件通过 / 7 跳过、1406 项通过 / 20 跳过 / 0 失败；server 357 通过 / 2 跳过 + station-profile 3/3；ops 56 通过 / 6 跳过；native 24/24；空间站 E2E 5/5。全量 Playwright 以发布 agent 最终门禁结果为准。详见 [RELEASE_HANDOFF_1.0.45.md](./RELEASE_HANDOFF_1.0.45.md)。
 
 > **测试运行优化（2026-08-17）**：为缩短全量测试时间，已启用 E2E 并行 worker（本地 4 / CI 2）、server 测试并发 4、ops 测试并发 2，并把 `ci.yml` 拆为 `unit` / `server-ops-native` / `build` / `e2e` 四个并行 job。新增快速脚本：`npm run test:quick`、`npm run test:unit:fast`、`npm run test:changed`、`npm run test:e2e:fast`；Playwright 报告升级为 `list + html + json`（`playwright-report/`、`test-results/playwright-report.json`）。Vitest 因 Windows 大套件内存崩溃约束仍保持 `maxWorkers=1`；发布门禁 `release-gate.yml` 保持全量串行保证确定性。完整说明见 [RELEASE_RUNBOOK_CHECKS.md](./RELEASE_RUNBOOK_CHECKS.md) 第 9 节。

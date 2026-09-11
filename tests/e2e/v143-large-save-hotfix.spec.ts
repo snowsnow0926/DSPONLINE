@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
 const BACKUP_KEY = `${SAVE_KEY}.backup`;
-const RELEASE_NOTE_ID = "2026-08-17-v1.0.45";
+const RELEASE_NOTE_ID = "2026-08-17-v1.0.46";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(({ releaseNoteId }) => {
@@ -111,7 +111,7 @@ test("running simulation that advances during return receives one final cleanup 
     };
   }, { saveKey: SAVE_KEY, backupKey: BACKUP_KEY });
 
-  // 1.0.45 may commit one or two revisions depending on how the larger v47
+  // 1.0.46 may commit one or two revisions depending on how the larger v47
   // payload is coalesced behind the delayed save Worker. The important
   // invariant is that at least one final cleanup save lands and the return
   // save contains the wall time accumulated behind the barrier.

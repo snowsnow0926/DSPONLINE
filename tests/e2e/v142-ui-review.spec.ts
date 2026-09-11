@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-17-v1.0.45";
+const RELEASE_NOTE_ID = "2026-08-17-v1.0.46";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -521,7 +521,7 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveAttribute("aria-label", "全星系空间站扩展");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.0.45");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.0.46");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
   await expect(dialog).toContainText("全星系唯一空间站");
   await expect(dialog).toContainText("出口合同与双轨经济");

@@ -90,6 +90,35 @@ const release1045Copy = {
   },
 } as const;
 
+const release1046Copy = {
+  date: { "zh-CN": "2026年8月17日", en: "August 17, 2026" },
+  title: { "zh-CN": "存档恢复与模拟 Worker 热修", en: "Save Recovery and Simulation Worker Hotfix" },
+  summary: {
+    "zh-CN": "1.0.46 修复 durable 模拟 finalize 失败后页面被永久暂停、只能刷新恢复的问题。当前页面会读取 pending intent，按原始边界精确回放，先验证 T1 主存档，再原子建立新的 recovery head 并重建模拟 Worker；纯挂机终态保存也会在主 Worker 被回收后安全重建。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 不变。",
+    en: "Version 1.0.46 fixes the durable simulation path that could leave a page permanently paused after finalize failure until refresh. The current page now reads the pending intent, replays it at the original boundary, verifies a T1 primary save, atomically installs a new recovery head, and rebuilds the simulation Worker; pure-idle terminal saves also rebuild the normal Worker when it was retired. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain unchanged.",
+  },
+  recoveryTitle: { "zh-CN": "当前页面精确恢复", en: "Exact recovery without refresh" },
+  recoveryDescription: {
+    "zh-CN": "durable 回执失败或 Worker 异常后，点击继续会读取 recovery head 与 pending intent，在恢复 Worker 中按顺序回放，避免重复执行或丢失未提交时间；成功后恢复日志与宏观进度保持连续。",
+    en: "After a durable acknowledgement or Worker failure, Continue reads the recovery head and pending intent, replays them in order inside a recovery Worker, and avoids both duplicate execution and lost uncommitted time. The recovery log and macro progress remain continuous after success.",
+  },
+  revisionTitle: { "zh-CN": "revision 与 recovery head 安全重试", en: "Safe revision/head retry" },
+  revisionDescription: {
+    "zh-CN": "主存档检查点发现模拟 revision 与 recovery head 不一致时，重新取得一次权威检查点并复核 T1，而不是直接阻断滚动基线；保存期间编辑仍遵循设置中的保护或队列语义。",
+    en: "When a primary checkpoint observes a revision/head mismatch, it obtains and verifies one fresh authoritative checkpoint instead of permanently blocking the rollover. Save-time edits still follow the configured protection or queue semantics.",
+  },
+  pureIdleTitle: { "zh-CN": "纯挂机保存接管更稳", en: "Safer pure-idle hand-off" },
+  pureIdleDescription: {
+    "zh-CN": "纯挂机停止、后台宽限和恢复日志提交后，即使普通模拟 Worker 曾被回收，也会在同页重建并接管已验证终态，不要求刷新才能完成保存。",
+    en: "After pure-idle stop, background grace, and recovery-log commit, the page rebuilds and adopts the verified terminal state even if the normal simulation Worker was retired; refresh is no longer required to finish saving.",
+  },
+  compatibilityTitle: { "zh-CN": "存档协议保持兼容", en: "Save protocol compatibility" },
+  compatibilityDescription: {
+    "zh-CN": "不升级 GameState、存档封装、cloud schema、SQLite layout 或 IndexedDB 结构；旧 recovery、pending intent、普通存档和速通存档继续按原边界读取。",
+    en: "GameState, save envelopes, cloud schema, SQLite layout, and IndexedDB structure are unchanged; existing recovery records, pending intents, normal saves, and speedrun saves continue to load at their original boundaries.",
+  },
+} as const;
+
 const currentCopy = {
   date: { "zh-CN": "2026年8月15日", en: "August 15, 2026" },
   title: { "zh-CN": "超大工厂运行态与保存性能优化", en: "Large-factory Runtime and Save Performance" },
@@ -287,7 +316,11 @@ function release1044Message(locale: AppLocale, key: keyof typeof currentCopy): s
   return currentCopy[key][locale];
 }
 
-function currentMessage(locale: AppLocale, key: keyof typeof release1045Copy): string {
+function currentMessage(locale: AppLocale, key: keyof typeof release1046Copy): string {
+  return release1046Copy[key][locale];
+}
+
+function release1045Message(locale: AppLocale, key: keyof typeof release1045Copy): string {
   return release1045Copy[key][locale];
 }
 
@@ -302,17 +335,33 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
-    id: "2026-08-17-v1.0.45",
+    id: "2026-08-17-v1.0.46",
     date: currentMessage(locale, "date"),
-    version: "1.0.45",
+    version: "1.0.46",
     title: currentMessage(locale, "title"),
     summary: currentMessage(locale, "summary"),
     items: [
-      { id: "global-orbital-station", title: currentMessage(locale, "stationTitle"), description: currentMessage(locale, "stationDescription") },
-      { id: "contracts-and-economy", title: currentMessage(locale, "contractsTitle"), description: currentMessage(locale, "contractsDescription") },
-      { id: "public-profile-and-social", title: currentMessage(locale, "publicTitle"), description: currentMessage(locale, "publicDescription") },
-      { id: "m0-bridge", title: currentMessage(locale, "bridgeTitle"), description: currentMessage(locale, "bridgeDescription") },
+      { id: "runtime-recovery", title: currentMessage(locale, "recoveryTitle"), description: currentMessage(locale, "recoveryDescription") },
+      { id: "revision-head-retry", title: currentMessage(locale, "revisionTitle"), description: currentMessage(locale, "revisionDescription") },
+      { id: "pure-idle-handoff", title: currentMessage(locale, "pureIdleTitle"), description: currentMessage(locale, "pureIdleDescription") },
       { id: "version-upgrade", title: currentMessage(locale, "compatibilityTitle"), description: currentMessage(locale, "compatibilityDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes1045(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-17-v1.0.45",
+    date: release1045Message(locale, "date"),
+    version: "1.0.45",
+    title: release1045Message(locale, "title"),
+    summary: release1045Message(locale, "summary"),
+    items: [
+      { id: "global-orbital-station", title: release1045Message(locale, "stationTitle"), description: release1045Message(locale, "stationDescription") },
+      { id: "contracts-and-economy", title: release1045Message(locale, "contractsTitle"), description: release1045Message(locale, "contractsDescription") },
+      { id: "public-profile-and-social", title: release1045Message(locale, "publicTitle"), description: release1045Message(locale, "publicDescription") },
+      { id: "m0-bridge", title: release1045Message(locale, "bridgeTitle"), description: release1045Message(locale, "bridgeDescription") },
+      { id: "version-upgrade", title: release1045Message(locale, "compatibilityTitle"), description: release1045Message(locale, "compatibilityDescription") },
     ],
   };
 }

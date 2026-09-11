@@ -350,9 +350,11 @@ import {
   commitSimulationRuntimeRecoveryCheckpointInPersistenceWorker,
   finalizeSimulationRuntimeRecoveryIntentInPersistenceWorker,
   initializeSimulationRuntimeRecoveryInPersistenceWorker,
+  readSimulationRuntimeRecoveryInPersistenceWorker,
   stageUnsignedSimulationRuntimeRecoveryIntentInPersistenceWorker,
 } from "./game/simulationRuntimeRecoveryPersistenceClient";
 import type { SimulationRuntimeStartupRecoveryBinding } from "./game/simulationRuntimeStartupRecovery";
+import { replaySimulationRuntimeStartupInWorker } from "./game/simulationRuntimeStartupRecoveryClient";
 import { getLocalSaveBackend, getLocalSaveRawCacheSize, getLocalSaveWriterStatus, getPrimaryLocalSaveRecoveryIdentity, listLocalSaveCatalogs, subscribeLocalSaveStorageStatus } from "./game/localSaveStore";
 import { resolveLargeSaveAutosavePolicy, type LargeSaveAutosavePolicy } from "./game/largeSaveAutosavePolicy";
 import type { AuthoritativeSaveCheckpointOverlay } from "./game/authoritativeSaveSerializationProtocol";
@@ -1468,6 +1470,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const audioContextRef = useRef<AudioContext | null>(null);
   const simulationWorkerRef = useRef<Worker | null>(null);
   const simulationWorkerDisabledRef = useRef(false);
+  const simulationWorkerRebuildInFlightRef = useRef<Promise<void> | null>(null);
   const contentPackRuntimeSnapshotRef = useRef<ContentPackRuntimeSnapshot>(createContentPackRuntimeSnapshot(INITIAL_CONTENT_PACK_REGISTRY));
   const simulationWorkerRegistryFingerprintRef = useRef<string | null>(null);
   const simulationSubmissionRef = useRef<SimulationSubmission | null>(null);
@@ -1482,6 +1485,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const durableRecoveryLifecycleRef = useRef<"active" | "degraded" | "unavailable">(loaded.runtimeRecovery ? "active" : "unavailable");
   const durableRecoveryFinalizeInFlightRef = useRef<number | null>(null);
   const durableRecoveryFinalizeReadyRef = useRef<number | null>(null);
+  const durableRecoveryRepairInFlightRef = useRef<Promise<boolean> | null>(null);
+  // Keep the unpaused T0 state separately from the user-visible safety stop.
+  // Replaying a pending time slice from a paused stop boundary would silently
+  // discard the operation because the simulation engine correctly honors pause.
+  const durableRecoveryReplayBaseRef = useRef<GameState | null>(null);
   const durableRecoveryStageInFlightRef = useRef(false);
   const durableRecoveryStageRequestRef = useRef<{ simulationSeconds: number; wallSeconds: number } | null>(null);
   // The initial simulation Worker install has the same state as the verified
@@ -1499,6 +1507,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     writeAllowEditsDuringSavePreference(enabled);
   }, []);
   const rejectPlayerStateEditDuringPrimarySave = useCallback((): boolean => {
+    if (durableRecoveryRepairInFlightRef.current) {
+      setNotice("正在从 durable recovery 重建模拟，当前操作暂不可用");
+      return true;
+    }
     if (allowEditsDuringSaveRef.current) return false;
     if (!durablePrimarySaveInFlightRef.current) return false;
     const rejection = "本次操作未应用；保存完成后即可继续编辑";
@@ -2558,7 +2570,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } catch {
       simulationSubmissionRef.current = null;
       simulationRecoveryRef.current = null;
-      simulationWorkerDisabledRef.current = true;
+      simulationWorkerDisabledRef.current = typeof Worker === "undefined";
       simulationWorkerRef.current = null;
       setSimulationWorkerActive(false);
       worker.terminate();
@@ -2568,6 +2580,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       gameRef.current = stopped;
       setGame(stopped);
       setNotice("模拟 Worker 恢复失败，已回到最近精确检查点并暂停模拟");
+      if (typeof Worker !== "undefined") setSimulationWorkerGeneration((generation) => generation + 1);
     }
   }, []);
   dispatchSimulationRecoveryRef.current = dispatchSimulationRecovery;
@@ -2662,6 +2675,139 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
   }, []);
 
+  /**
+   * A durable finalize can fail after the simulation Worker has already
+   * retired itself.  Keep the document useful in that state: replay the
+   * verified T0 journal in a recovery Worker, promote the resulting T1
+   * primary, then rebuild the live simulation Worker in this same page.
+   */
+  const repairDurableSimulationRuntime = useCallback((): Promise<boolean> => {
+    const active = durableRecoveryRepairInFlightRef.current;
+    if (active) return active;
+    const repair = (async () => {
+      if (lifecycleExitStartedRef.current || typeof Worker === "undefined" ||
+        durableRecoveryLifecycleRef.current !== "active" || durablePrimarySaveInFlightRef.current) return false;
+      const mode = gameRef.current.mode === "speedrun" ? "speedrun" : "normal";
+      const identity = getPrimaryLocalSaveRecoveryIdentity(mode);
+      const writer = getLocalSaveWriterStatus();
+      const registry = contentPackRuntimeSnapshotRef.current;
+      if (!identity || writer.role !== "primary" || !writer.writerId || writer.fencingToken < 1 ||
+        !registry.fingerprint) return false;
+      const fence = { ownerId: writer.writerId, fencingToken: writer.fencingToken };
+      try {
+        const read = await readSimulationRuntimeRecoveryInPersistenceWorker(identity, fence);
+        if (!read.ok) return false;
+        if (!read.recovery) {
+          if (read.proof && durableRecoveryHeadRef.current) {
+            durableRecoveryHeadRef.current = {
+              ...durableRecoveryHeadRef.current,
+              sequence: read.proof.sequence,
+              stateRevision: read.proof.stateRevision,
+            };
+            simulationStateRevisionRef.current = read.proof.stateRevision;
+          }
+          return true;
+        }
+        if (read.recovery.checkpoint.registryFingerprint !== registry.fingerprint) return false;
+        const replayBase = durableRecoveryReplayBaseRef.current ?? latestAuthoritativeCheckpointRef.current;
+        const replay = await replaySimulationRuntimeStartupInWorker(replayBase, read.recovery, {
+          registry,
+          timeoutMs: 120_000,
+        });
+        const saved = await saveGameVerified(replay.state);
+        if (!saved.success) return false;
+        const t1Identity = getPrimaryLocalSaveRecoveryIdentity(mode);
+        const currentWriter = getLocalSaveWriterStatus();
+        if (!t1Identity || currentWriter.role !== "primary" || !currentWriter.writerId || currentWriter.fencingToken < 1) return false;
+        const checkpoint = createSimulationRuntimeDurablePrimaryCheckpoint({
+          baseIdentity: t1Identity,
+          sessionId: `repair_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`,
+          stateRevision: Math.max(1, replay.replay.finalStateRevision),
+          registry,
+          committedAtMs: t1Identity.savedAt,
+        });
+        const initialized = await initializeSimulationRuntimeRecoveryInPersistenceWorker(checkpoint, {
+          ownerId: currentWriter.writerId,
+          fencingToken: currentWriter.fencingToken,
+        });
+        if (!initialized.result.ok) return false;
+        durableRecoveryHeadRef.current = {
+          baseIdentity: checkpoint.baseIdentity,
+          sessionId: checkpoint.sessionId,
+          generation: checkpoint.generation,
+          sequence: checkpoint.lastSequence,
+          stateRevision: checkpoint.stateRevision,
+          registryFingerprint: checkpoint.registryFingerprint,
+        };
+        durableRecoveryReplayBaseRef.current = null;
+        simulationStateRevisionRef.current = checkpoint.stateRevision;
+        simulationPendingSecondsRef.current = 0;
+        simulationPendingWallSecondsRef.current = 0;
+        simulationRetrySecondsRef.current = 0;
+        simulationRetryWallSecondsRef.current = 0;
+        setTimeWarpPendingUi(0);
+        simulationReplayJournalRef.current = [];
+        simulationRecoveryRef.current = null;
+        latestAuthoritativeCheckpointRef.current = replay.state;
+        lastSimulationResultRef.current = replay.state;
+        simulationProjectionIndexRef.current = createSimulationProjectionStateIndex(replay.state);
+        gameRef.current = replay.state;
+        setGame(replay.state);
+        simulationWorkerRef.current?.terminate();
+        simulationWorkerRef.current = null;
+        simulationSubmissionRef.current = null;
+        simulationWorkerDisabledRef.current = false;
+        setSimulationWorkerActive(false);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    durableRecoveryRepairInFlightRef.current = repair;
+    void repair.then(() => {
+      if (durableRecoveryRepairInFlightRef.current === repair) durableRecoveryRepairInFlightRef.current = null;
+    }, () => {
+      if (durableRecoveryRepairInFlightRef.current === repair) durableRecoveryRepairInFlightRef.current = null;
+    });
+    return repair;
+  }, []);
+
+  /** Wait until a rebuilt Worker has installed its exact state transfer. */
+  const ensureSimulationWorkerAvailableForRecovery = useCallback((): Promise<void> => {
+    if (typeof Worker === "undefined") return Promise.reject(new Error("当前环境不支持模拟 Worker"));
+    if (simulationWorkerRef.current && !simulationWorkerDisabledRef.current &&
+      !simulationSubmissionRef.current && lastSimulationResultRef.current) return Promise.resolve();
+    const active = simulationWorkerRebuildInFlightRef.current;
+    if (active) return active;
+    simulationWorkerRef.current?.terminate();
+    simulationWorkerRef.current = null;
+    simulationWorkerDisabledRef.current = false;
+    const rebuild = new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 30_000;
+      const poll = () => {
+        if (simulationWorkerRef.current && !simulationWorkerDisabledRef.current &&
+          !simulationSubmissionRef.current && lastSimulationResultRef.current) {
+          resolve();
+          return;
+        }
+        if (Date.now() >= deadline) {
+          reject(new Error("模拟 Worker 重建超时"));
+          return;
+        }
+        window.setTimeout(poll, 25);
+      };
+      setSimulationWorkerGeneration((generation) => generation + 1);
+      window.setTimeout(poll, 0);
+    });
+    simulationWorkerRebuildInFlightRef.current = rebuild;
+    void rebuild.then(() => {
+      if (simulationWorkerRebuildInFlightRef.current === rebuild) simulationWorkerRebuildInFlightRef.current = null;
+    }, () => {
+      if (simulationWorkerRebuildInFlightRef.current === rebuild) simulationWorkerRebuildInFlightRef.current = null;
+    });
+    return rebuild;
+  }, []);
+
   const persistDurablePrimaryCheckpoint = useCallback(async (
     requestedState: GameState | undefined,
     kind: RuntimePersistenceKind,
@@ -2697,8 +2843,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         sourceState = gameRef.current;
         barrierState = await requestAuthoritativeSimulationCheckpoint();
       }
-      const saveState = requestedState ?? barrierState;
-      const checkpointRevision = simulationStateRevisionRef.current;
+      let saveState = requestedState ?? barrierState;
+      let checkpointRevision = simulationStateRevisionRef.current;
       // The checkpoint Worker may resolve after pagehide. Do not turn that
       // late result into a new primary/IDB transaction; T0 remains the exact
       // recovery source for the next boot.
@@ -2707,7 +2853,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在验证 T1 主存档并滚动 recovery…" });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "serialize-write-readback" });
-      const result = await saveVerifiedPrimaryCheckpoint(saveState);
+      let result = await saveVerifiedPrimaryCheckpoint(saveState);
       if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
       if (!result.success) {
         setSaveFailure(result);
@@ -2717,19 +2863,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return result;
       }
       const mode = saveState.mode === "speedrun" ? "speedrun" : "normal";
-      const identity = getPrimaryLocalSaveRecoveryIdentity(mode);
-      const status = getLocalSaveWriterStatus();
+      let identity = getPrimaryLocalSaveRecoveryIdentity(mode);
+      let status = getLocalSaveWriterStatus();
       const head = durableRecoveryHeadRef.current;
       if (!identity || status.role !== "primary" || status.fencingToken < 1 || !head) {
         throw new Error("T1 写入后未取得 durable identity/fence，已阻止继续模拟");
       }
       if (head.baseIdentity.mode !== mode) throw new Error("durable mode 与主存档不匹配");
       if (simulationStateRevisionRef.current !== head.stateRevision) {
-        // 开启“保存期间允许继续编辑”后，保存过程中产生的编辑会把 UI/Worker
-        // revision 推到 checkpoint 之前。此时 head 落后是预期的可追赶状态：
-        // 用保存时的 checkpointRevision 滚动，下一次保存自然追平，不阻断游戏。
         if (!allowEditsDuringSaveRef.current) {
-          throw new Error("模拟 revision 与 durable recovery head 不一致，已阻止滚动基线");
+          // A late Worker response can move the in-memory revision after the
+          // first T1 payload was written. Re-read one authoritative checkpoint
+          // and replace the T1 payload once, so the new recovery head is bound
+          // to the same state/revision instead of permanently disabling resume.
+          const retryState = await requestAuthoritativeSimulationCheckpoint();
+          const retryResult = await saveVerifiedPrimaryCheckpoint(retryState);
+          if (!retryResult.success) throw new Error(retryResult.message);
+          saveState = retryState;
+          checkpointRevision = simulationStateRevisionRef.current;
+          result = retryResult;
+          identity = getPrimaryLocalSaveRecoveryIdentity(mode);
+          status = getLocalSaveWriterStatus();
+          if (!identity || status.role !== "primary" || status.fencingToken < 1) {
+            throw new Error("revision 重试后未取得 durable identity/fence");
+          }
         }
       }
       const fence = { ownerId: status.writerId, fencingToken: status.fencingToken };
@@ -2900,6 +3057,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const sourceStateTransfer = saved.sourceStateTransfer;
       if (!sourceStateTransfer) throw new Error("纯挂机保存未返还模拟 Worker state transfer");
       setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "serialize-write-readback", startedAt, message: "主存档已验证，正在等待模拟 Worker 接管…" });
+      // A previous durable failure may have retired the normal simulation
+      // Worker. Rebuild it before handing over the verified terminal transfer;
+      // pure-idle recovery must not require a page refresh to finish saving.
+      await ensureSimulationWorkerAvailableForRecovery();
       await replaceSimulationAuthorityFromStateTransfer(sourceStateTransfer, durableRecoveryHeadRef.current);
       const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
       if (saved.bytes !== undefined) setPersistedPrimaryBytes(saved.bytes);
@@ -2919,7 +3080,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current) simulationCheckpointBarrierRef.current = false;
       window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
     }
-  }, [clearPureIdleRecovery, replaceSimulationAuthorityFromStateTransfer, requestAuthoritativeSimulationCheckpoint]);
+  }, [clearPureIdleRecovery, ensureSimulationWorkerAvailableForRecovery, replaceSimulationAuthorityFromStateTransfer, requestAuthoritativeSimulationCheckpoint]);
 
   const persistPrimarySave = useCallback(async (
     state?: GameState,
@@ -3348,6 +3509,31 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     if (gameRef.current.timeWarp.enabled) return;
     const wasPaused = gameRef.current.paused;
+    if (wasPaused && durableRecoveryLifecycleRef.current === "active" &&
+      (!simulationWorkerRef.current || simulationWorkerDisabledRef.current)) {
+      beginRuntimeTransition("resume");
+      setNotice("正在从 durable recovery 恢复模拟…");
+      void repairDurableSimulationRuntime().then(async (repaired) => {
+        if (!repaired) {
+          setNotice("durable recovery 恢复失败，已暂停；请重试或刷新后精确恢复");
+          return;
+        }
+        try {
+          await ensureSimulationWorkerAvailableForRecovery();
+          const resumed = setPaused(gameRef.current, false);
+          publishRuntimeGame(resumed, true);
+          setNotice("模拟已继续");
+        } catch (error) {
+          const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
+          latestAuthoritativeCheckpointRef.current = stopped;
+          lastSimulationResultRef.current = stopped;
+          gameRef.current = stopped;
+          setGame(stopped);
+          setNotice(`durable 模拟 Worker 重建失败（${error instanceof Error ? error.message : "未知错误"}），已暂停`);
+        }
+      });
+      return;
+    }
     beginRuntimeTransition(wasPaused ? "resume" : "pause");
     invalidateFactoryAlertProjection();
     const next = setPaused(gameRef.current, !gameRef.current.paused);
@@ -3356,7 +3542,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       dispatchDurableUiCommandRef.current();
     }
     setNotice(wasPaused ? "模拟已继续" : "模拟已暂停");
-  }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+  }, [ensureSimulationWorkerAvailableForRecovery, invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave, repairDurableSimulationRuntime]);
 
   const handleTimeWarpEnabledChange = useCallback((enabled: boolean) => {
     if (rejectPlayerStateEditDuringPrimarySave()) return;
@@ -4143,12 +4329,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationWorkerRef.current = null;
           setSimulationWorkerActive(false);
           worker.terminate();
+          if (!durableRecoveryReplayBaseRef.current) durableRecoveryReplayBaseRef.current = latestAuthoritativeCheckpointRef.current;
           const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
           latestAuthoritativeCheckpointRef.current = stopped;
           lastSimulationResultRef.current = stopped;
           gameRef.current = stopped;
           setGame(stopped);
-          setNotice("durable 模拟回执缺少可确认 revision，已暂停；刷新后将从 pending intent 精确恢复");
+          setNotice("durable 模拟回执缺少可确认 revision，已暂停；点击继续将从 pending intent 精确恢复");
           return;
         }
         const status = getLocalSaveWriterStatus();
@@ -4288,12 +4475,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               simulationWorkerRef.current = null;
               setSimulationWorkerActive(false);
               worker.terminate();
+              if (!durableRecoveryReplayBaseRef.current) durableRecoveryReplayBaseRef.current = latestAuthoritativeCheckpointRef.current;
               const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
               latestAuthoritativeCheckpointRef.current = stopped;
               lastSimulationResultRef.current = stopped;
               gameRef.current = stopped;
               setGame(stopped);
-              setNotice(`durable 回执检查点吸收失败（${error instanceof Error ? error.message : "未知错误"}），已暂停；刷新后精确恢复`);
+              setNotice(`durable 回执检查点吸收失败（${error instanceof Error ? error.message : "未知错误"}），已暂停；点击继续将精确恢复`);
             }
           })();
           return;
@@ -4326,12 +4514,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationWorkerRef.current = null;
           setSimulationWorkerActive(false);
           worker.terminate();
+          if (!durableRecoveryReplayBaseRef.current) durableRecoveryReplayBaseRef.current = latestAuthoritativeCheckpointRef.current;
           const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
           latestAuthoritativeCheckpointRef.current = stopped;
           lastSimulationResultRef.current = stopped;
           gameRef.current = stopped;
           setGame(stopped);
-          setNotice(`durable 模拟回执未能写入确认（${error instanceof Error ? error.message : "未知错误"}），已暂停；刷新后精确恢复`);
+          setNotice(`durable 模拟回执未能写入确认（${error instanceof Error ? error.message : "未知错误"}），已暂停；点击继续将精确恢复`);
         });
         return;
       }
@@ -4620,6 +4809,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (simulationWorkerRef.current !== worker) return;
       setInitialSimulationWorkerReady(true);
       const submission = simulationSubmissionRef.current;
+      if (submission?.durableIntent) {
+        simulationSubmissionRef.current = null;
+        simulationRetrySecondsRef.current += submission.simulationSeconds;
+        simulationRetryWallSecondsRef.current += submission.wallSeconds;
+        if (!durableRecoveryReplayBaseRef.current) durableRecoveryReplayBaseRef.current = latestAuthoritativeCheckpointRef.current;
+        simulationWorkerRef.current = null;
+        simulationWorkerDisabledRef.current = true;
+        setSimulationWorkerActive(false);
+        worker.terminate();
+        const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
+        latestAuthoritativeCheckpointRef.current = stopped;
+        lastSimulationResultRef.current = stopped;
+        gameRef.current = stopped;
+        setGame(stopped);
+        setNotice("durable 模拟 Worker 异常，已暂停；点击继续将从 recovery 精确恢复");
+        return;
+      }
       if (submission?.state.timeWarp.enabled || gameRef.current.timeWarp.enabled) {
         abortPureIdleForWorkerFailure("模拟 Worker 异常，纯挂机已安全停止；未完成预算没有计入收益");
         return;
@@ -5114,7 +5320,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         lastSimulationResultRef.current = stopped;
         gameRef.current = stopped;
         setGame(stopped);
-        setNotice("durable 模拟 Worker 不可用，已暂停；刷新后从 recovery 精确恢复");
+        setNotice("durable 模拟 Worker 不可用，已暂停；点击继续将从 recovery 精确恢复");
         return;
       }
       if (currentState.timeWarp.enabled) {

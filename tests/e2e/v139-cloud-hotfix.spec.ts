@@ -90,13 +90,13 @@ test.afterAll(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-test("reports the 1.0.45 candidate version and a unique build id", async ({ page }) => {
+test("reports the 1.0.46 candidate version and a unique build id", async ({ page }) => {
   await page.goto("/?menu=1");
   const application = await page.evaluate(async () => {
     const { collectClientDiagnostics } = await import("/src/game/diagnostics.ts");
     return collectClientDiagnostics().application as { version: string; build: string };
   });
-  expect(application.version).toBe("1.0.45");
+  expect(application.version).toBe("1.0.46");
   expect(application.build).toMatch(/^1\.0\.45\+[0-9a-f]{12}(?:\.dirty)?$/);
 });
 

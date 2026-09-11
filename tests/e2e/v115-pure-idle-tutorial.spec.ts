@@ -4,7 +4,7 @@ import { selectSettingsCategory } from "./settings-helpers";
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.45");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-17-v1.0.46");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     window.localStorage.setItem("dspidle:tutorial-progress:1.0.15", "[]");
     window.localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({
@@ -58,7 +58,7 @@ test("settings opens the complete tutorial and keeps independent reading progres
   await selectSettingsCategory(operations, "教程、版本与其他", "other");
   await operations.getByRole("button", { name: "打开新手教程" }).click();
   const tutorial = page.getByRole("dialog", { name: "新手教程" });
-  await expect(tutorial).toContainText("DSP极简网络 · v1.0.45");
+  await expect(tutorial).toContainText("DSP极简网络 · v1.0.46");
   await expect(tutorial).toContainText("认识画布");
   await tutorial.getByRole("button", { name: "标记本节完成" }).click();
   await expect(tutorial.locator(".tutorial-progress")).toContainText("1/");

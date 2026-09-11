@@ -1,5 +1,9 @@
 # DSP极简网络项目现状
 
+# 1.0.46 durable 存档热修开发候选（2026-08-17，本地未发布）
+
+当前开发工作树已切换到 `1.0.46 / Android 1000046`，修复 durable finalize 失败后页面永久暂停、revision/head mismatch 直接阻断，以及纯挂机终态保存依赖刷新才能接管的问题。GameState v47、save envelope v2、cloud schema v8、SQLite layout v3 与 IndexedDB 结构不变。线上回退、发布和下载页不在本开发会话范围；开发交接见 [RELEASE_HANDOFF_1.0.46.md](./RELEASE_HANDOFF_1.0.46.md)，候选记录见 [releases/1.0.46-candidate.md](./releases/1.0.46-candidate.md)。
+
 > **1.0.45 空间站扩展候选（2026-08-17，开发完成未发布）**：分支 `codex/1.0.45-space-station` 已从 1.0.44 release candidate 合并 `codex/space-station-expansion`，完成 M0-M5：全星系唯一空间站、三阶段建设、轨道货运终端、量子手动交付、每日合同、徽记/声望、装饰、公开主页和轻社交。版本为 `1.0.45 / Android 1000045`；默认启用并写入 GameState v47 / cloud schema v8 / SQLite layout v3。M0 桥接开关已实现：`VITE_SPACE_STATION_ENABLED=false` 可构建不升级 v46 的桥接版。完整交接见 [RELEASE_HANDOFF_1.0.45.md](./RELEASE_HANDOFF_1.0.45.md)。
 
 > **1.0.43 香港 Web 稳定热修（2026-08-14，已发布）**：香港 Web current 已原子切换到不可变 `web-1.0.43-fceca3eda51c` / Build ID `1.0.43+fceca3eda51c`，previous 为 `web-1.0.42-c24e6247d257`；香港 API 保持 `api-1.0.42-c24e6247d257`，上海 Web/API、上海下载页、Android/Windows stable 均保持 1.0.42。运行时/测试树 `6c2df9686031` 在不升级 GameState v46、envelope v2、cloud schema v7、SQLite layout v2 或 IndexedDB records 的前提下，将 v46 线路迁移降为保持原顺序的 O(E+B) 索引/分区，使用 Worker 完整检查导入/云恢复，并修复立即保存重复持久化、受控返回 cleanup 和增产剂 1 亿上限重载截断。最终源码/制品为 clean `fceca3eda51cf7e488e176e23c6119ba104b77fd`；旧 `1.0.43-a47eb33d0b84` 永久作废。两次受保护切换分别因物理绑定探针 TLS 超时和继承 manifest MIME 的错误预期安全回滚到 1.0.42；第三次 generation 13 切换、真实附件导入/保存/返回、PWA、健康和约 1 小时 47 分观察通过，API/数据库/上海/原生/下载页/玩家数据均未修改。完整证据见 [候选记录](./releases/1.0.43-candidate.md)、[Release Agent 交接](./RELEASE_HANDOFF_1.0.43.md) 与 [正式发布记录](./releases/1.0.43.md)。

@@ -1,12 +1,14 @@
 # 原生应用构建与更新
 
-> 当前发布版本：Web/Windows `1.0.42`；Android 正式包 `1.0.42 / 1000042`
-> 1.0.37 按用户要求继续作为香港 previous-stable 和历史下载备份；1.0.42 已写入两地 Web/API 和上海公网更新清单。
-> 当前公开稳定版本：Windows `1.0.42` 未签名测试包；Android `1.0.42 / 1000042` 正式签名包
+> 当前发布版本：Web/Windows `1.1.0`；Android 正式包 `1.1.0 / 1001000`
+> 1.0.47 是香港 previous-stable Web、双节点 direct code rollback 和上海下载页回滚版本；1.1.0 已写入两地 Web/API 和上海公网更新清单。
+> 当前公开稳定版本：Windows `1.1.0` 未签名测试包；Android `1.1.0 / 1001000` 正式签名包
 > Windows 包名：`com.dspidle.network`
 > Android applicationId：`cn.dsponline.network`
-> Web、Windows 与 Android 1.0.42 共用 `GameState` v46。两端存档 envelope v2 和云 schema v7 不变；旧存档通过连续守恒迁移载入。
+> Web、Windows 与 Android 1.1.0 共用 `GameState` v47。两端存档 envelope v2、云 schema v8、SQLite layout v3 与 IndexedDB records 不变；旧存档通过连续守恒迁移载入。
 > 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
+
+> 1.1.0 正式 APK 为 5,251,105 bytes、SHA-256 `6185968203e6cd3a6b81d0de3bb4c86e9425bc4c129f7f00df62ff682d1df285`，通过 zipalign、APK v2/v3 与批准历史证书连续性；AAB 为 5,040,031 bytes、SHA-256 `8e2a72acb04eca316b5cd974eaa0c27601751c8db4193ff45b15ec355cdef0d1`，只作签名归档。Windows setup 为 109,829,237 bytes、SHA-256 `281013bc80f57c6e62c4571175ebeb0a58b88eeafb0616cedbb580af70dbb7bd`，Authenticode 继续为 `NotSigned`。完整公网下载哈希、Range 206、feeds 和残余设备门禁见 [1.1.0 正式发布记录](./releases/1.1.0.md)。
 
 > 1.0.42 已使用既有 Android 长期证书生成正式 APK/AAB，并生成 Windows 安装程序；APK 与 Windows setup 已进入上海公网更新清单，AAB 只作归档。API 36.1 模拟器完成正式 1.0.38→1.0.42 覆盖升级；Android 实体真机、低配 Windows 和实体输入法/读屏器没有可用设备，不能描述为已通过。
 

@@ -1,5 +1,11 @@
 # 测试与发布基线
 
+> **Android 1.2.8 修复验证（2026-09-09）**：Vitest 3076/96；server 390/2 + station 4/4；Ops 56/6；native 622/9；全量 Chromium 加版本断言修正后受影响文件复跑，唯一用例 451/33、无未解决失败。最终签名 APK 的原始页面和 Android 模拟器均连接真实香港云节点，覆盖升级保留主存档摘要；实体设备/长时后台未执行。首轮失败和复跑边界见 [发布记录](./releases/1.2.8-android-cloud-hotfix.md)。
+
+> **2026-09-08 香港固定玩家补偿 Web 验证**：`fccaa35e6b41` 的 typecheck/build/manifest、服务端 390/2 + station 4/4、Ops 56/6、native 617/9 通过；Vitest 首轮 3,073/96/3 个耗时失败，原用例隔离复跑全部通过；Chromium 首轮 447/33/4 失败，原用例复跑 4/4。香港加 3,700、上海不加数、刷新幂等、今日/在线不变、缺失值、三种屏幕尺寸，以及公网页面与 PWA 回退缓存隔离均通过。详细首轮/复跑边界见 [发布记录](./releases/ops-hk-player-display-3700-2026-09-08.md)，不把复跑结果倒写成首轮全绿。
+
+> 2026-09-08 上海迁机补充：恢复演练需区分正常过期会话清理与保护数据丢失。新上海的独立演练校验器仅允许确认已经过期的原会话被清理，剩余会话身份/到期时间以及账号、存档等保护计数继续严格检查；本地与 Linux 合成验证覆盖过期、有效、有效会话丢失、身份变化、异常新增、账号丢失及备份篡改。完整实库复跑和现役 helper/drop-in 边界以 [上海迁移记录](./releases/ops-shanghai-vps-migration-2026-09-08.md) 为准，不能把该专项当作一次完整游戏发布测试。
+
 > **1.2.7 Windows/Rust 原生整合候选新鲜门禁（2026-09-02，未部署）**：本候选在已开发一周的 Windows/Rust 原生工作树上以真正双父合并方式纳入线上 1.2.6（父提交分别为 `f0cd0c26d82a82b9cdca7de40691e69692cdef04` 与 `6b3c88f0cf474ba4add47a69f78c5e7e0b5b48b3`），不是重新实现网页版本。完整 Vitest **385 文件通过 / 13 条件跳过；3,053 项通过 / 28 跳过 / 0 失败**；Rust workspace **Core 1,057 通过 / 3 ignored、Host library 239/0、Host binary 3/0**；native/desktop **585/1 条件跳过/0 失败**；server **390/2 + station 4/4**；Ops **56/6**；backup **2/2**；原生长差分 **51/51**；typecheck、fmt、strict Clippy、licenses（125）、coverage、thin-UI、Web build 全部通过。完整 Chromium 第二轮 **437 通过 / 27 跳过 / 0 失败（464）**，durable WAL **7/7**，nightly Firefox/WebKit **2/2**；首轮 Chromium 的 4 个旧 1.2.6 文案/Build ID 断言已修正，首轮失败日志保留。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 不变；Windows 仍为 `NotSigned` 本地候选，未连接生产。详见 [1.2.7 Windows 原生整合开发报告](./releases/1.2.7-windows-native-integration-development-report-2026-09-02.md)。
 
 > **1.2.6 正式发布验收已收口（2026-08-31）**：固定 runtime `df828869e276e5d3a67513095a4d1c93d13c500f` 的发布前软件与真实档门禁保持下方记录；用户随后只针对精确 Release ID 明确豁免 Android 实体设备、三档 Windows、Windows 1.2.5→1.2.6 覆盖升级和长时运行。两节点新鲜 SQLite 快照、不可变 staging、dry-run、原子切换、两地 6× 稳定采样、严格 TLS Web/PWA、下载 9/9 完整哈希、APK/setup Range 206、Android v2/v3 证书连续性和 Windows `NotSigned` 身份均通过；previous-stable 已切到不可变 1.2.5 并通过清洁浏览器隔离。下载域名唯一 A 记录回切旧上海后，DNSPod 权威与三个公共解析器全部收敛，独立物理出口安全 DNS 的非固定目标完整读回通过。完整证据和区域性 TLS 合成探针边界见 [1.2.6 正式发布记录](./releases/1.2.6.md)。

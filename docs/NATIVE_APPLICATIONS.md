@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> **当前 Android stable：1.2.8 / 1002008（2026-09-09）**。云服务与更新地址漏配已修复，APK 长期证书和 1.2.7 覆盖升级通过。官方构建启用 `DSP_ANDROID_BUILD_PROFILE=official` 并要求完整 HTTPS 地址；社区离线默认保留。实体手机未测试，模拟器结果不代替真机。主分支现有 Windows 开发版本不在本次版本调整范围，后续 Android code 必须大于 1002008。见 [发布记录](./releases/1.2.8-android-cloud-hotfix.md)。
+
 > **Campaign / Galaxy 原生玩家壳边界（2026-09-01，开发候选）**：当前 Windows Host 新增 `native-core-campaign-workspace-projection-v1` 与 `native-core-galaxy-account-workspace-projection-v1` capability。preload 只接受 exact-key `{sessionId,runId,expectedRevision,expectedRegistryFingerprint}`；main 只把请求路由到当前 normal-main 玩家权威 broker，不允许回落到 renderer shadow 会话。返回分别受 256 KiB 与 64 KiB 硬预算，renderer boundary 拒绝截断、额外键、重复 ID、计数漂移和 lineage 漂移。
 >
 > 原生 Campaign 页只读固定目录标签与 Rust 进度，不接收 GameState；导航只发 UI locator。原生 Galaxy 页只接收 Rust 游戏摘要和单独的本地账户状态，可创建/切换身份、编辑资料并登录/退出云账号；恢复、导入、覆盖当前主档在 active authority 下显式不可用且没有写入口。Campaign 投影目前打开时仍做 `O(E+B)` Rust 扫描，预算收紧不等于查询计算免费。该切片不生成安装包、不改变签名/更新通道，也不放开 `authorityEligible`。
@@ -30,7 +32,7 @@
 > 当前稳定版 Windows 包名：`com.dspidle.network`；本工作树性能开发版使用上方独立身份。
 > Android applicationId：`cn.dsponline.network`
 > 1.2.6 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；产率复制终端直结和星球工厂重置不改变旧档迁移边界。
-> 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
+> 公开下载入口：`https://download.dsponline.cn/`，2026-09-08 已迁至新上海，安装包与稳定清单保持 1.2.6，文件完整哈希和 Range 206 复验通过；不消耗香港游戏节点流量。主机与后续运维入口见 [上海迁移记录](./releases/ops-shanghai-vps-migration-2026-09-08.md)。
 
 > 冻结 APK：5,394,620 B，SHA-256 `671a6acb3579c175fc8ea87d8e4f921f5f63f9c36116956e9970a0c187367886`；AAB：5,183,622 B，SHA-256 `7f422c4df00ef56b05d70ff28a6eafd0f657751ab5c813c6af1431171e0ea0e1`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；实体 Android 设备门禁由用户只针对本 Release ID 明确豁免，未创建新证书。
 

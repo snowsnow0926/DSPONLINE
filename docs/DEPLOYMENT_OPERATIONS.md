@@ -1,5 +1,9 @@
 # 部署与运维手册
 
+> **Android-only 下载切换（2026-09-09）**：使用新上海受保护通道，下载 current=`download-site-1.2.8-aa1f970a677b`，previous=`download-site-1.2.7-dab2ff5066b7`。APK/stable 为 1.2.8 / 1002008，Windows stable 为 1.2.6；Web/API、数据库、服务进程未切换。11 文件远端复算、8 文件公网完整哈希与 3 文件 Range 通过；下载回退独立于 Web/API/数据。见 [完整证据](./releases/1.2.8-android-cloud-hotfix.md)。
+
+> **2026-09-08 香港 Web 展示补偿**：current Web `1.2.7-fccaa35e6b41`，API 保持 `api-1.2.6-df828869e276`，generation 50。用户指定累计界面固定增加 3,700（2026-08-14—09-07），属于客户端展示估算，公开 API 和真实身份记录不加数。后续发布应携带主工作树提交 `3589b7c2`；如迁至 API 计算，须同步删除前端补偿。直接 Web 回滚与 `/canary/previous/` 均保留 `1.2.7-dab2ff5066b7`，新 Nginx SHA `eb1c5156390be5a15419504c4670cdc8cef3b13e8c6c92e38a40b4a20053d83a`。详见 [发布、验收与回滚记录](./releases/ops-hk-player-display-3700-2026-09-08.md)。
+
 > 公开仓库脱敏说明：本文及 `deploy/` 模板中的节点地址、证书主机名和对象存储标识均使用示例占位符。实际值只应从受保护的运维环境注入，不能提交到 Git。
 
 ## 1. 环境边界
@@ -8,12 +12,14 @@
 | --- | --- | --- | --- |
 | 香港正式 | `https://dsponline.cn` | `hk-origin.example.invalid` | 正式 Web、云账号、云存档、排行榜 |
 | 香港别名 | `https://www.dsponline.cn` | 同上 | 301 到根域名 |
-| 上海旧节点 | `http://shanghai-node.example.invalid` | `shanghai-node.example.invalid` | 独立 HTTP 入口和备用试玩；不提供账号密码输入 |
-| 上海下载节点 | `https://download.dsponline.cn` | `shanghai-node.example.invalid` | Windows/Android 安装包与稳定更新清单 |
+| 上海独立节点 | `http://shanghai-new-node.example.invalid` | `shanghai-new-node.example.invalid` | 已迁新机的独立 HTTP 入口和备用试玩；不提供账号密码输入 |
+| 上海下载节点 | `https://download.dsponline.cn` | `shanghai-new-node.example.invalid` | Windows/Android 安装包与稳定更新清单 |
 | 本地前端 | `http://127.0.0.1:4318` | 开发机 | Vite |
 | 本地 API | `http://127.0.0.1:4320` | 开发机 | Node 云服务 |
 
 硬边界：上海节点必须继续由上海本机提供前端与 `/api`，不得改成香港反代或域名跳转。上海为 HTTP，前端必须继续拒绝云账号密码传输。
+
+> 当前上海状态（2026-09-08，全业务迁机）：新上海承接原旧上海业务和公开下载，DSP Web/API current 为 `1.2.6-df828869e276`、previous 为 `1.2.5-0a1c6629ced1`，generation 32 / proxy 92，green/4322；下载 current/previous 同为 1.2.6/1.2.5。健康、下载完整哈希、Range、权威/公共 DNS 和节点磁盘监控通过。后续运维必须从受保护 `DSP_SH_NEW_*` 在单个调用子进程内映射到 Shanghai helper；原 `DSP_SH_*` 仍指旧机，不要继续向旧机部署。旧机保留数据、停止写入并设置自动启动保护，到期前仅转发新上海；跨机回退必须先冻结新机并保全新增数据。香港不在此次变更范围，其异地备份 timer 的 inactive 状态需另行核实。完整证据见 [迁移记录](./releases/ops-shanghai-vps-migration-2026-09-08.md)；以下按日期保留的旧发布状态不是迁机后的拓扑。
 
 > 当前生产状态（2026-08-31，1.2.6 已稳定发布）：香港/上海 Web/API current 均为 `1.2.6-df828869e276`，previous 均为 `1.2.5-0a1c6629ced1`；香港 generation 48 / proxy generation 192，上海 generation 32 / proxy generation 92，均为 green / 4322。上海下载页 current 为 `download-site-1.2.6-df828869e276`、previous 为 1.2.5；香港 `/canary/previous/` 302/no-store 到不可变 1.2.5。两地 API/proxy/health timer active、`NRestarts=0`、pending 与 disposable preflight 均为空、health/ready 200、Nginx 有效。香港/上海正式发布快照分别为 4,460,781,568 / 462,848 B，并通过完整 SHA、quick-check、schema 8、layout 3 和文件身份绑定；香港异地备份 timer active，上海恢复演练 timer active。最终磁盘 81% / 77%。`download.dsponline.cn` 的唯一 A 记录已按明确授权回切旧上海，默认线路和 TTL 600 不变；新上海继续在线但不承担当前公开下载。Windows 1.2.6 为 `NotSigned`；Android `1.2.6 / 1002006` 保持长期证书。完整证据与香港到旧上海区域性 TLS 合成探针的残余边界见 [1.2.6 发布记录](./releases/1.2.6.md)。
 
@@ -472,6 +478,8 @@ chmod 0600 backup-private.pem
 - `dsp-idle-leaderboard-review-report.timer`：每日 22:00（Asia/Shanghai）生成 `leaderboard-review-latest.json`；报告只读，人工确认前不改变账号或排行榜。
 - 香港 `dsp-idle-offsite-backup.timer` 与上海 `dsp-idle-restore-drill.timer`：检查最后成功时间、timer 上次结果和报告文件。
 - 玩家指标：检查 `players.total`、`players.today`、`players.online` 和 `players.onlineWindowSeconds`；两个节点分别统计，不能直接相加当作严格独立用户数。
+
+玩家计数不能只检查 HTTP 202。2026-09-08 香港调查发现，1.0.41 事故留下的 `/api/presence` 与 `/api/analytics` Nginx 精确规则返回 `accepted:false,deferred:true`，导致 8 月 14 日起上报被丢弃。本次最终只开放玩家计数所需的 presence，analytics/errors 仍保留原熔断。后续发布必须检查有效 Nginx 规则和真实心跳的持久化时间，不能从旧配置副本带回 presence 熔断。只读 `GET /api/presence` 在现役 API 应为 404；若得到临时静态 202，说明请求仍被拦截。写入验证应观察真实玩家流量，禁止制造生产测试玩家。累计为匿名标识去重，今日为当日活跃去重，均不能用注册账号数或请求数代替。历史缺口、承载观察及本次修复验收见 [香港玩家计数修复记录](./releases/ops-hk-player-count-recovery-2026-09-08.md)。
 
 备份、恢复演练和节点探针 oneshot 必须从独立不可变运维包 `/usr/local/lib/dsp-idle-ops/current/deploy` 执行；不得绑定应用 `current` 软链接。CLI 入口判断必须比较真实路径；unit 只有在退出码为 0、最新状态文件为 `ok=true` 且制品/报告存在时才算成功。若 unit 显示 `success` 却没有生成对应状态文件，应按空运行故障处理，不能视为监控或备份成功。
 

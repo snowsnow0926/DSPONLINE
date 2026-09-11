@@ -1,0 +1,302 @@
+{
+  "startDate": "2026-08-14",
+  "asOf": "2026-09-08 22:47:52 Asia/Shanghai",
+  "notWrittenToProduction": true,
+  "calibration": {
+    "fullOverlapStart": "2026-08-25",
+    "fullOverlapEnd": "2026-09-07",
+    "registrations": 98,
+    "presenceIpUaPlayerDays": 2276,
+    "activePlayerDaysPerRegistration": 22.68335918367347,
+    "newPerActive": 0.6050665800584606,
+    "estimatedNewPerRegistration": 13.724942565502982
+  },
+  "totals": {
+    "estimatedNewAug14To24": 2290,
+    "estimatedNewAug25ThroughSnapshot": 1588,
+    "estimatedNewWholePeriod": 3878,
+    "alreadyRecordedAug14BeforeOutage": 80,
+    "estimatedNewBeyondStalledBaseline": 3798,
+    "scenario55WholePeriod": 3532,
+    "scenario65WholePeriod": 4160,
+    "hypotheticalCumulativeFromStalled8884": 12682
+  },
+  "daily": [
+    {
+      "date": "2026-08-14",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 29,
+      "registrationsUsedForMissingNew": 15,
+      "knownNew": 80,
+      "estimatedActive": 658,
+      "estimatedNew": 286,
+      "unroundedNew": 285.8741384825447,
+      "newScenario55": 267.13771326530616,
+      "newScenario65": 301.1627520408164
+    },
+    {
+      "date": "2026-08-15",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 14,
+      "registrationsUsedForMissingNew": 14,
+      "knownNew": 0,
+      "estimatedActive": 318,
+      "estimatedNew": 192,
+      "unroundedNew": 192.14919591704174,
+      "newScenario55": 174.66186571428574,
+      "newScenario65": 206.41856857142858
+    },
+    {
+      "date": "2026-08-16",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 24,
+      "registrationsUsedForMissingNew": 24,
+      "knownNew": 0,
+      "estimatedActive": 544,
+      "estimatedNew": 329,
+      "unroundedNew": 329.39862157207153,
+      "newScenario55": 299.42034122448985,
+      "newScenario65": 353.86040326530616
+    },
+    {
+      "date": "2026-08-17",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 30,
+      "registrationsUsedForMissingNew": 30,
+      "knownNew": 0,
+      "estimatedActive": 681,
+      "estimatedNew": 412,
+      "unroundedNew": 411.7482769650895,
+      "newScenario55": 374.27542653061226,
+      "newScenario65": 442.3255040816327
+    },
+    {
+      "date": "2026-08-18",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 8,
+      "registrationsUsedForMissingNew": 8,
+      "knownNew": 0,
+      "estimatedActive": 181,
+      "estimatedNew": 110,
+      "unroundedNew": 109.79954052402385,
+      "newScenario55": 99.80678040816328,
+      "newScenario65": 117.95346775510205
+    },
+    {
+      "date": "2026-08-19",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 15,
+      "registrationsUsedForMissingNew": 15,
+      "knownNew": 0,
+      "estimatedActive": 340,
+      "estimatedNew": 206,
+      "unroundedNew": 205.87413848254474,
+      "newScenario55": 187.13771326530613,
+      "newScenario65": 221.16275204081634
+    },
+    {
+      "date": "2026-08-20",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 9,
+      "registrationsUsedForMissingNew": 9,
+      "knownNew": 0,
+      "estimatedActive": 204,
+      "estimatedNew": 124,
+      "unroundedNew": 123.52448308952684,
+      "newScenario55": 112.28262795918369,
+      "newScenario65": 132.69765122448982
+    },
+    {
+      "date": "2026-08-21",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 15,
+      "registrationsUsedForMissingNew": 15,
+      "knownNew": 0,
+      "estimatedActive": 340,
+      "estimatedNew": 206,
+      "unroundedNew": 205.87413848254474,
+      "newScenario55": 187.13771326530613,
+      "newScenario65": 221.16275204081634
+    },
+    {
+      "date": "2026-08-22",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 10,
+      "registrationsUsedForMissingNew": 10,
+      "knownNew": 0,
+      "estimatedActive": 227,
+      "estimatedNew": 137,
+      "unroundedNew": 137.24942565502982,
+      "newScenario55": 124.75847551020411,
+      "newScenario65": 147.44183469387758
+    },
+    {
+      "date": "2026-08-23",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 10,
+      "registrationsUsedForMissingNew": 10,
+      "knownNew": 0,
+      "estimatedActive": 227,
+      "estimatedNew": 137,
+      "unroundedNew": 137.24942565502982,
+      "newScenario55": 124.75847551020411,
+      "newScenario65": 147.44183469387758
+    },
+    {
+      "date": "2026-08-24",
+      "method": "registration-proportion extrapolation; Aug 14 preserves 80 known first-seen identities",
+      "registeredAccounts": 11,
+      "registrationsUsedForMissingNew": 11,
+      "knownNew": 0,
+      "estimatedActive": 250,
+      "estimatedNew": 151,
+      "unroundedNew": 150.9743682205328,
+      "newScenario55": 137.2343230612245,
+      "newScenario65": 162.18601816326532
+    },
+    {
+      "date": "2026-08-25",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 247,
+      "estimatedNew": 150,
+      "unroundedNew": 149.5150377720039,
+      "newScenario55": 135.907805,
+      "newScenario65": 160.618315
+    },
+    {
+      "date": "2026-08-26",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 205,
+      "estimatedNew": 124,
+      "unroundedNew": 124.10339103605068,
+      "newScenario55": 112.80885,
+      "newScenario65": 133.31955
+    },
+    {
+      "date": "2026-08-27",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 207,
+      "estimatedNew": 125,
+      "unroundedNew": 125.28532809353688,
+      "newScenario55": 113.88322000000002,
+      "newScenario65": 134.58926000000002
+    },
+    {
+      "date": "2026-08-28",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 189,
+      "estimatedNew": 114,
+      "unroundedNew": 114.056926047418,
+      "newScenario55": 103.676705,
+      "newScenario65": 122.52701499999999
+    },
+    {
+      "date": "2026-08-29",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 136,
+      "estimatedNew": 82,
+      "unroundedNew": 82.14462549529068,
+      "newScenario55": 74.668715,
+      "newScenario65": 88.24484500000001
+    },
+    {
+      "date": "2026-08-30",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 151,
+      "estimatedNew": 92,
+      "unroundedNew": 91.60012195518026,
+      "newScenario55": 83.263675,
+      "newScenario65": 98.402525
+    },
+    {
+      "date": "2026-08-31",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 158,
+      "estimatedNew": 96,
+      "unroundedNew": 95.73690165638196,
+      "newScenario55": 87.02397,
+      "newScenario65": 102.84651000000001
+    },
+    {
+      "date": "2026-09-01",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 157,
+      "estimatedNew": 95,
+      "unroundedNew": 95.14593312763886,
+      "newScenario55": 86.48678500000001,
+      "newScenario65": 102.21165500000001
+    },
+    {
+      "date": "2026-09-02",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 149,
+      "estimatedNew": 90,
+      "unroundedNew": 90.41818489769406,
+      "newScenario55": 82.189305,
+      "newScenario65": 97.13281500000001
+    },
+    {
+      "date": "2026-09-03",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 133,
+      "estimatedNew": 80,
+      "unroundedNew": 80.37171990906138,
+      "newScenario55": 73.05716000000001,
+      "newScenario65": 86.34028
+    },
+    {
+      "date": "2026-09-04",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 131,
+      "estimatedNew": 79,
+      "unroundedNew": 79.1897828515752,
+      "newScenario55": 71.98279000000001,
+      "newScenario65": 85.07057
+    },
+    {
+      "date": "2026-09-05",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 112,
+      "estimatedNew": 68,
+      "unroundedNew": 67.96138080545632,
+      "newScenario55": 61.776275000000005,
+      "newScenario65": 73.008325
+    },
+    {
+      "date": "2026-09-06",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 108,
+      "estimatedNew": 66,
+      "unroundedNew": 65.59750669048394,
+      "newScenario55": 59.62753500000001,
+      "newScenario65": 70.468905
+    },
+    {
+      "date": "2026-09-07",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 139,
+      "estimatedNew": 84,
+      "unroundedNew": 83.91753108152,
+      "newScenario55": 76.28027000000002,
+      "newScenario65": 90.14941000000002
+    },
+    {
+      "date": "2026-09-08",
+      "method": "access-log deduplication calibrated to restored presence; historical new/active proportion",
+      "estimatedActive": 401,
+      "estimatedNew": 243,
+      "unroundedNew": 242.88806531341348,
+      "newScenario55": 220.783035,
+      "newScenario65": 260.925405
+    }
+  ],
+  "limitations": [
+    "Aug 14-24 has no access logs: daily active and missing-new figures are registration-proportion extrapolations.",
+    "A registration can happen after first play; the conversion assumes the mix and lag remain comparable across periods.",
+    "Aug 14 preserves 80 observed first-seen identities; only 15 registrations after the outage calibrate its missing-new estimate.",
+    "Sep 8 ends at the prior 22:47:52 observation, not midnight. No new remote scan was needed for this date-range correction.",
+    "55-65 percent varies only the new/active assumption. It is not a confidence interval and does not bound registration extrapolation error.",
+    "Anonymous identities are not unique humans. Daily active estimates are not additive unique users.",
+    "Some modeled identities have already reappeared since repair. Never add this estimate directly to live player totals."
+  ]
+}

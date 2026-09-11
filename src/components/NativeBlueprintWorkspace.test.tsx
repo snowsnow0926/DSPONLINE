@@ -163,6 +163,7 @@ describe("NativeBlueprintWorkspace", () => {
       resolution?: NativeBlueprintRenameResolution | null;
       onConsumeRenameResolution?: (submissionId: number) => void;
       commandPending?: boolean;
+      open?: boolean;
     } = {},
   ) {
     const onSelectBlueprint = callbacks.onSelectBlueprint ?? vi.fn<(blueprintId: string) => void>();
@@ -185,7 +186,7 @@ describe("NativeBlueprintWorkspace", () => {
       }
       : callbacks.latestIdentity ?? null;
     act(() => root.render(<NativeBlueprintWorkspace
-      open
+      open={callbacks.open ?? true}
       status={status}
       frame={value}
       latestIdentity={latestIdentity}
@@ -473,6 +474,40 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")).toBe(input);
     expect(input.disabled).toBe(true);
     expect(host.textContent).toContain("禁止自动重发");
+  });
+
+  it("AUDIT: an actual workspace remount loses the draft and can return pending without an editor", () => {
+    renderWorkspace(frame());
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")!.click());
+    const input = host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")!;
+    act(() => {
+      replaceInputValue(input, "未提交草稿");
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      root.render(<></>);
+    });
+    renderWorkspace(frame(), "ready", {
+      pendingIdentity: pendingRename("uncertain", { targetName: "未提交草稿" }),
+    });
+    expect(host.querySelector("[data-native-blueprint-rename-input]")).toBeNull();
+    expect(host.textContent).not.toContain("未提交草稿");
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")!.disabled).toBe(true);
+    expect(host.textContent).toContain("绝不自动重发");
+  });
+
+  it("AUDIT: close and reopen during composition strands the composing latch", () => {
+    renderWorkspace(frame());
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")!.click());
+    const input = host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")!;
+    act(() => {
+      replaceInputValue(input, "合成中草稿");
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    });
+    renderWorkspace(frame(), "ready", { open: false });
+    expect(host.querySelector("[data-native-blueprint-rename-input]")).toBeNull();
+    renderWorkspace(frame(), "ready", { open: true });
+    const reopened = host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")!;
+    expect(reopened.value).toBe("合成中草稿");
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='submit-rename']")!.disabled).toBe(true);
   });
 
   it.each([

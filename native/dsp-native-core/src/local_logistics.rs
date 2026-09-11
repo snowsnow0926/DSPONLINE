@@ -582,6 +582,28 @@ impl LocalPeerDirectory {
         true
     }
 
+    /// Append the exact endpoint closure for the local demand rows that the
+    /// next dispatch pass may inspect. This is a read-only view over the
+    /// existing wake queue; it does not consume, reorder, or acknowledge any
+    /// pending work.
+    pub(crate) fn append_pending_dispatch_power_dependencies(
+        &self,
+        target: &mut Vec<usize>,
+    ) -> bool {
+        let pending = if self.dispatch_all_pending {
+            self.local_waiting_station_indices.as_ref()
+        } else {
+            self.pending_dispatch_demand_indices.as_slice()
+        };
+        self.append_station_power_dependencies(pending, target)
+    }
+
+    /// Feed an externally proved false -> true power edge through the same
+    /// immutable reverse graph used by the legacy power snapshot scan.
+    pub(crate) fn wake_dispatch_from_power_events(&mut self, recovered_station_indices: &[usize]) {
+        self.wake_dispatch_from_changed_stations(recovered_station_indices);
+    }
+
     /// Append demand rows whose local dispatch eligibility can change when
     /// one of the supplied station rows changes. Demand-side capacity and
     /// vehicle changes wake that row; supply-side inventory and vehicle

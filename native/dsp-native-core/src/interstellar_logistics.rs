@@ -7,7 +7,7 @@ use serde_json::{Map, Number, Value, json};
 
 use crate::catalog::PlanetDefinition;
 use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
-use crate::state::{CoreState, ExactRowIdIndex, SharedArc};
+use crate::state::{CoreState, ExactRowIdIndex, FactoryTopology, SharedArc};
 use crate::station_route_ledger::StationRouteLedger;
 
 const EPSILON: f64 = 0.0001;
@@ -355,6 +355,332 @@ pub(crate) struct StationPowerScan {
     pub runtime_fallback: bool,
 }
 
+const POWER_DOMAINS_PER_GRID: usize = 4;
+const POWER_DOMAIN_FALLBACK: usize = 0;
+const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StationPowerEventRow {
+    grid_slot: usize,
+    priority: u8,
+    collector: bool,
+}
+
+/// Runtime-only proof that turns the complete logical station-power selection
+/// into exact false -> true events. The logical selection remains the oracle:
+/// this cache never substitutes a partial power map for authority. It only
+/// allows the product path to materialize power values for endpoints that will
+/// actually be queried after the recovery events have been expanded.
+#[derive(Debug, Clone, Default)]
+struct StationPowerEventSource {
+    topology: Option<Arc<FactoryTopology>>,
+    local_station_ranks: Option<Arc<HashMap<usize, usize>>>,
+    catalog_fingerprint: String,
+    registry_fingerprint: String,
+    rows: Vec<StationPowerEventRow>,
+    selected_station_indices: Vec<usize>,
+    ready_station_indices: Vec<usize>,
+    domain_powered: Vec<u8>,
+    initialized: bool,
+    fallback_full_scan: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct StationPowerEventPlan {
+    pub recovered_station_indices: Vec<usize>,
+    pub full_scan: bool,
+    pub initialized_this_step: bool,
+    pub logical_selected_rows: usize,
+    pub changed_domain_rows: usize,
+}
+
+impl StationPowerEventSource {
+    fn estimated_bytes(&self) -> u64 {
+        (self.rows.capacity() * std::mem::size_of::<StationPowerEventRow>()
+            + (self.selected_station_indices.capacity() + self.ready_station_indices.capacity())
+                * std::mem::size_of::<usize>()
+            + self.domain_powered.capacity() * std::mem::size_of::<u8>()
+            + self.catalog_fingerprint.capacity()
+            + self.registry_fingerprint.capacity()) as u64
+    }
+
+    fn permanently_fallback(&mut self, logical_selected_rows: usize) -> StationPowerEventPlan {
+        self.fallback_full_scan = true;
+        StationPowerEventPlan {
+            full_scan: true,
+            logical_selected_rows,
+            ..StationPowerEventPlan::default()
+        }
+    }
+
+    fn initialize_metadata(
+        &mut self,
+        state: &CoreState,
+        entities: &[Value],
+        local_directory: &crate::local_logistics::LocalPeerDirectory,
+        domain_count: usize,
+    ) -> bool {
+        let station_indices = state.factory_topology.station_indices.as_slice();
+        if domain_count == 0
+            || !domain_count.is_multiple_of(POWER_DOMAINS_PER_GRID)
+            || station_indices.windows(2).any(|pair| pair[0] >= pair[1])
+            || station_indices.len() != local_directory.shared_station_ranks().len()
+            || state.catalog.fingerprint.is_empty()
+            || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            || state.catalog.snapshot.registry_fingerprint
+                != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            || state.catalog.snapshot.registry_fingerprint != state.identity.registry_fingerprint
+        {
+            return false;
+        }
+
+        let mut rows = Vec::with_capacity(station_indices.len());
+        for &entity_index in station_indices {
+            let Some(object) = entities.get(entity_index).and_then(Value::as_object) else {
+                return false;
+            };
+            let Some(building_id) = string_at(object, "buildingId") else {
+                return false;
+            };
+            if string_at(object, "kind") != Some("station")
+                || !state.catalog.buildings.contains_key(building_id)
+            {
+                return false;
+            }
+            let collector = building_id == "orbital_collector";
+            let planet = state
+                .factory_topology
+                .entity_planet_indices
+                .get(entity_index)
+                .copied()
+                .unwrap_or(usize::MAX);
+            let grid = state
+                .factory_topology
+                .entity_grid_indices
+                .get(entity_index)
+                .copied()
+                .unwrap_or(usize::MAX);
+            let Some(grid_slot) = planet
+                .checked_mul(3)
+                .and_then(|slot| slot.checked_add(grid))
+                .filter(|slot| {
+                    collector
+                        || slot
+                            .checked_mul(POWER_DOMAINS_PER_GRID)
+                            .is_some_and(|domain| domain < domain_count)
+                })
+            else {
+                return false;
+            };
+            if !collector {
+                let Some(planet_id) = state
+                    .catalog
+                    .planets
+                    .get(planet)
+                    .map(|planet| planet.id.as_str())
+                else {
+                    return false;
+                };
+                let expected_grid = ["grid-a", "grid-b", "grid-c"].get(grid).copied();
+                if string_at(object, "planetId") != Some(planet_id)
+                    || object
+                        .get("powerGridId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("grid-a")
+                        != expected_grid.unwrap_or_default()
+                {
+                    return false;
+                }
+            }
+            let priority = finite_number(object.get("powerPriority"))
+                .floor()
+                .clamp(1.0, 3.0) as u8;
+            rows.push(StationPowerEventRow {
+                grid_slot,
+                priority,
+                collector,
+            });
+        }
+
+        let local_station_ranks = local_directory.shared_station_ranks();
+        if station_indices
+            .iter()
+            .copied()
+            .enumerate()
+            .any(|(rank, index)| local_station_ranks.get(&index).copied() != Some(rank))
+        {
+            return false;
+        }
+        self.topology = Some(Arc::clone(&state.factory_topology));
+        self.local_station_ranks = Some(local_station_ranks);
+        self.catalog_fingerprint = state.catalog.fingerprint.clone();
+        self.registry_fingerprint = state.identity.registry_fingerprint.clone();
+        self.rows = rows;
+        true
+    }
+
+    fn identity_matches(
+        &self,
+        state: &CoreState,
+        local_directory: &crate::local_logistics::LocalPeerDirectory,
+        domain_count: usize,
+    ) -> bool {
+        self.topology
+            .as_ref()
+            .is_some_and(|topology| Arc::ptr_eq(topology, &state.factory_topology))
+            && self
+                .local_station_ranks
+                .as_ref()
+                .is_some_and(|ranks| Arc::ptr_eq(ranks, &local_directory.shared_station_ranks()))
+            && self.catalog_fingerprint == state.catalog.fingerprint
+            && self.registry_fingerprint == state.identity.registry_fingerprint
+            && self.rows.len() == state.factory_topology.station_indices.len()
+            && (!self.initialized || self.domain_powered.len() == domain_count)
+    }
+
+    fn powered(
+        &self,
+        station_index: usize,
+        row: StationPowerEventRow,
+        selected: &[usize],
+        ready: &[usize],
+        domains: &[u8],
+    ) -> Option<bool> {
+        if selected.binary_search(&station_index).is_err() {
+            return Some(false);
+        }
+        if row.collector {
+            return Some(true);
+        }
+        let domain = row
+            .grid_slot
+            .checked_mul(POWER_DOMAINS_PER_GRID)?
+            .checked_add(if ready.binary_search(&station_index).is_ok() {
+                usize::from(row.priority)
+            } else {
+                POWER_DOMAIN_FALLBACK
+            })?;
+        match domains.get(domain).copied() {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            _ => None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan(
+        &mut self,
+        state: &CoreState,
+        entities: &[Value],
+        logical_selected: &[usize],
+        ready: &[usize],
+        domains: &[u8],
+        scan: StationPowerScan,
+        local_directory: &crate::local_logistics::LocalPeerDirectory,
+    ) -> StationPowerEventPlan {
+        let logical_selected_rows = logical_selected.len();
+        let inputs_valid = logical_selected.windows(2).all(|pair| pair[0] < pair[1])
+            && ready.windows(2).all(|pair| pair[0] < pair[1])
+            && logical_selected.iter().chain(ready.iter()).all(|index| {
+                state
+                    .factory_topology
+                    .station_indices
+                    .binary_search(index)
+                    .is_ok()
+            })
+            && domains.iter().all(|value| *value <= 1)
+            && !scan.directory_fallback
+            && !scan.runtime_fallback;
+        if self.fallback_full_scan || !inputs_valid {
+            return self.permanently_fallback(logical_selected_rows);
+        }
+        if self.topology.is_none()
+            && !self.initialize_metadata(state, entities, local_directory, domains.len())
+        {
+            return self.permanently_fallback(logical_selected_rows);
+        }
+        if !self.identity_matches(state, local_directory, domains.len()) {
+            return self.permanently_fallback(logical_selected_rows);
+        }
+
+        if !self.initialized {
+            self.selected_station_indices.clear();
+            self.selected_station_indices
+                .extend_from_slice(logical_selected);
+            self.ready_station_indices.clear();
+            self.ready_station_indices.extend_from_slice(ready);
+            self.domain_powered.clear();
+            self.domain_powered.extend_from_slice(domains);
+            self.initialized = true;
+            return StationPowerEventPlan {
+                full_scan: true,
+                initialized_this_step: true,
+                logical_selected_rows,
+                changed_domain_rows: domains.len(),
+                ..StationPowerEventPlan::default()
+            };
+        }
+
+        let changed_domain_rows = self
+            .domain_powered
+            .iter()
+            .zip(domains)
+            .filter(|(previous, current)| previous != current)
+            .count();
+        let selection_changed = self.selected_station_indices != logical_selected;
+        let ready_changed = self.ready_station_indices != ready;
+        let mut recovered_station_indices = Vec::new();
+        if changed_domain_rows > 0 || selection_changed || ready_changed {
+            let mut candidates = self.selected_station_indices.clone();
+            candidates.extend_from_slice(logical_selected);
+            candidates.sort_unstable();
+            candidates.dedup();
+            for station_index in candidates {
+                let Ok(rank) = state
+                    .factory_topology
+                    .station_indices
+                    .binary_search(&station_index)
+                else {
+                    return self.permanently_fallback(logical_selected_rows);
+                };
+                let row = self.rows[rank];
+                let Some(previous) = self.powered(
+                    station_index,
+                    row,
+                    &self.selected_station_indices,
+                    &self.ready_station_indices,
+                    &self.domain_powered,
+                ) else {
+                    return self.permanently_fallback(logical_selected_rows);
+                };
+                let Some(current) =
+                    self.powered(station_index, row, logical_selected, ready, domains)
+                else {
+                    return self.permanently_fallback(logical_selected_rows);
+                };
+                if !previous && current {
+                    recovered_station_indices.push(station_index);
+                }
+            }
+        }
+
+        self.selected_station_indices.clear();
+        self.selected_station_indices
+            .extend_from_slice(logical_selected);
+        self.ready_station_indices.clear();
+        self.ready_station_indices.extend_from_slice(ready);
+        self.domain_powered.clear();
+        self.domain_powered.extend_from_slice(domains);
+        StationPowerEventPlan {
+            recovered_station_indices,
+            full_scan: false,
+            initialized_this_step: false,
+            logical_selected_rows,
+            changed_domain_rows,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct InterstellarReadyStationScan {
     pub selected_station_rows: usize,
@@ -420,6 +746,7 @@ pub(crate) struct InterstellarRouteActivity {
     /// without a planet, is outside the indexed authority contract. Preserve
     /// the permissive legacy behavior by scanning every row in that case.
     warper_refill_full_scan_required: bool,
+    station_power_event_source: StationPowerEventSource,
 }
 
 impl InterstellarRouteActivity {
@@ -444,6 +771,7 @@ impl InterstellarRouteActivity {
             + self.warper_tray_amount_bits.capacity() * std::mem::size_of::<Option<u64>>())
             as u64
             + self.transition_route_view.estimated_bytes()
+            + self.station_power_event_source.estimated_bytes()
     }
 
     fn has_remote_routes(&self) -> bool {
@@ -1374,6 +1702,7 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
         pending_warper_refill_station_indices: Vec::new(),
         warper_tray_amount_bits: Vec::new(),
         warper_refill_full_scan_required,
+        station_power_event_source: StationPowerEventSource::default(),
     }
 }
 
@@ -1441,6 +1770,54 @@ pub(crate) fn refresh_dispatch_power_wakes(
     route_activity: &mut InterstellarRouteActivity,
 ) {
     route_activity.refresh_power_wakes(peer_directory, station_indices, powers);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan_station_power_events(
+    state: &CoreState,
+    entities: &[Value],
+    logical_selected: &[usize],
+    ready_station_indices: &[usize],
+    domain_powered: &[u8],
+    scan: StationPowerScan,
+    local_directory: &crate::local_logistics::LocalPeerDirectory,
+    route_activity: &mut InterstellarRouteActivity,
+) -> StationPowerEventPlan {
+    route_activity.station_power_event_source.plan(
+        state,
+        entities,
+        logical_selected,
+        ready_station_indices,
+        domain_powered,
+        scan,
+        local_directory,
+    )
+}
+
+pub(crate) fn force_station_power_event_full_scan(route_activity: &mut InterstellarRouteActivity) {
+    route_activity.station_power_event_source.fallback_full_scan = true;
+}
+
+/// Materialize the exact legacy fallback map. The pre-existing logical
+/// selector is an event-source index only: once the event proof is unavailable
+/// the product path must power every station row, not reuse a sparse index and
+/// merely label it a full scan.
+pub(crate) fn full_station_power_selection(
+    all_station_indices: &[usize],
+    source_scan: StationPowerScan,
+) -> (Vec<usize>, StationPowerScan) {
+    let selected = all_station_indices.to_vec();
+    let total_station_rows = selected.len();
+    (
+        selected,
+        StationPowerScan {
+            selected_station_rows: total_station_rows,
+            total_station_rows,
+            dense_fallback: source_scan.dense_fallback,
+            directory_fallback: source_scan.directory_fallback,
+            runtime_fallback: source_scan.runtime_fallback,
+        },
+    )
 }
 
 /// Select the only station rows whose power can be observed by this step's
@@ -1528,6 +1905,68 @@ pub(crate) fn select_station_power_indices(
     (selected, scan)
 }
 
+/// Select power rows that can actually be queried after exact power-recovery
+/// events and warper refill have already been applied. Unlike the logical
+/// oracle selection above, stable ready-but-unpowered rows are represented by
+/// the event snapshot and therefore do not need a scalar map entry every step.
+pub(crate) fn select_operational_station_power_indices(
+    all_station_indices: &[usize],
+    active_route_station_indices: &[usize],
+    changed_station_indices: &[usize],
+    local_directory: &crate::local_logistics::LocalPeerDirectory,
+    peer_directory: &InterstellarPeerDirectory,
+    route_activity: &InterstellarRouteActivity,
+) -> (Vec<usize>, StationPowerScan) {
+    let mut selected = active_route_station_indices.to_vec();
+    selected.extend_from_slice(&peer_directory.hub_station_indices);
+    let directory_fallback = peer_directory.fallback_full_scan
+        || !route_activity.opaque_route_demand_indices.is_empty()
+        || route_activity.warper_refill_full_scan_required
+        || !peer_directory.station_power_index_valid
+        || peer_directory.total_station_rows != all_station_indices.len();
+    let mut runtime_fallback = false;
+    if !directory_fallback {
+        runtime_fallback |=
+            !local_directory.append_pending_dispatch_power_dependencies(&mut selected);
+        runtime_fallback |= !local_directory
+            .append_station_power_dependencies(changed_station_indices, &mut selected);
+        runtime_fallback |= !peer_directory.append_power_dependencies_for_demands(
+            &route_activity.pending_dispatch_demand_indices,
+            &mut selected,
+        );
+        runtime_fallback |= !peer_directory.append_power_dependencies_from_changed_stations(
+            changed_station_indices,
+            &mut selected,
+        );
+    }
+    selected.sort_unstable();
+    selected.dedup();
+    runtime_fallback |= selected
+        .iter()
+        .any(|index| all_station_indices.binary_search(index).is_err());
+    let dense_fallback = !directory_fallback
+        && !runtime_fallback
+        && !selected.is_empty()
+        && selected
+            .len()
+            .saturating_mul(STATION_POWER_DENSE_DENOMINATOR)
+            >= all_station_indices
+                .len()
+                .saturating_mul(STATION_POWER_DENSE_NUMERATOR);
+    if directory_fallback || runtime_fallback || dense_fallback {
+        selected.clear();
+        selected.extend_from_slice(all_station_indices);
+    }
+    let scan = StationPowerScan {
+        selected_station_rows: selected.len(),
+        total_station_rows: all_station_indices.len(),
+        dense_fallback,
+        directory_fallback,
+        runtime_fallback,
+    };
+    (selected, scan)
+}
+
 pub(crate) fn reset_dispatch_wakes(
     peer_directory: &InterstellarPeerDirectory,
     route_activity: &mut InterstellarRouteActivity,
@@ -1535,6 +1974,7 @@ pub(crate) fn reset_dispatch_wakes(
     route_activity.wake_all_dispatch_demands(peer_directory);
     route_activity.powered_station_indices.clear();
     route_activity.wake_all_warper_refill_stations();
+    route_activity.station_power_event_source = StationPowerEventSource::default();
 }
 
 fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
@@ -5225,11 +5665,11 @@ mod tests {
         format!("{hash:08x}")
     }
 
-    fn dispatch_fixture_catalog() -> RuntimeCatalog {
+    fn dispatch_fixture_catalog_for_registry(registry_fingerprint: &str) -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
                 protocol_version: 1,
-                registry_fingerprint: "remote-route-active-test".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
                 planets: vec![
                     PlanetDefinition {
                         id: "source_planet".to_owned(),
@@ -5323,7 +5763,7 @@ mod tests {
                 proliferators: Vec::new(),
                 technologies: Vec::new(),
             },
-            "remote-route-active-test",
+            registry_fingerprint,
         )
         .unwrap()
     }
@@ -6083,6 +6523,13 @@ mod tests {
     }
 
     fn dispatch_fixture_state(entities: &[Value]) -> CoreState {
+        dispatch_fixture_state_for_registry(entities, "remote-route-active-test")
+    }
+
+    fn dispatch_fixture_state_for_registry(
+        entities: &[Value],
+        registry_fingerprint: &str,
+    ) -> CoreState {
         let entity_count = entities.len();
         let base = serde_json::to_vec(&dispatch_fixture_base()).unwrap();
         let entities = serde_json::to_vec(entities).unwrap();
@@ -6146,11 +6593,11 @@ mod tests {
                 revision: 7,
                 state_version: 47,
                 mode: "normal".to_owned(),
-                registry_fingerprint: "remote-route-active-test".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
                 base_primary_checksum: "12345678".to_owned(),
             },
             &records,
-            dispatch_fixture_catalog(),
+            dispatch_fixture_catalog_for_registry(registry_fingerprint),
         )
         .unwrap()
     }
@@ -7984,6 +8431,312 @@ mod tests {
             .collect()
     }
 
+    fn station_power_event_scan(
+        selected_station_rows: usize,
+        total_station_rows: usize,
+    ) -> StationPowerScan {
+        StationPowerScan {
+            selected_station_rows,
+            total_station_rows,
+            dense_fallback: false,
+            directory_fallback: false,
+            runtime_fallback: false,
+        }
+    }
+
+    #[test]
+    fn station_power_event_source_uses_true_full_first_and_restart_fallbacks() {
+        let entities = station_power_fanout_fixture(16);
+        let state =
+            dispatch_fixture_state_for_registry(&entities, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let base = dispatch_fixture_base();
+        let peer_directory = InterstellarPeerDirectory::build(
+            &state,
+            base.as_object().expect("event-source base"),
+            &entities,
+        );
+        let mut activity = prepare_route_activity(&entities);
+        let logical = vec![0, 8];
+        let ready = vec![8];
+        let mut domains = vec![0_u8; state.catalog.planets.len() * 3 * POWER_DOMAINS_PER_GRID];
+        let scan = station_power_event_scan(logical.len(), entities.len());
+
+        let first = plan_station_power_events(
+            &state,
+            &entities,
+            &logical,
+            &ready,
+            &domains,
+            scan,
+            &local_directory,
+            &mut activity,
+        );
+        assert!(first.full_scan);
+        assert!(first.initialized_this_step);
+        let (first_indices, first_scan) =
+            full_station_power_selection(&state.factory_topology.station_indices, scan);
+        assert_eq!(first_indices, state.factory_topology.station_indices);
+        assert_eq!(first_scan.selected_station_rows, entities.len());
+        assert_eq!(first_scan.total_station_rows, entities.len());
+
+        let steady = plan_station_power_events(
+            &state,
+            &entities,
+            &logical,
+            &ready,
+            &domains,
+            scan,
+            &local_directory,
+            &mut activity,
+        );
+        assert!(!steady.full_scan);
+        assert!(steady.recovered_station_indices.is_empty());
+
+        // Both rows are on source_planet/grid-a. Only the ready demand reads
+        // its explicit priority-1 domain; the non-ready supply reads fallback.
+        domains[1] = 1;
+        let recovered = plan_station_power_events(
+            &state,
+            &entities,
+            &logical,
+            &ready,
+            &domains,
+            scan,
+            &local_directory,
+            &mut activity,
+        );
+        assert!(!recovered.full_scan);
+        assert_eq!(recovered.changed_domain_rows, 1);
+        assert_eq!(recovered.recovered_station_indices, vec![8]);
+
+        reset_dispatch_wakes(&peer_directory, &mut activity);
+        let restarted = plan_station_power_events(
+            &state,
+            &entities,
+            &logical,
+            &ready,
+            &domains,
+            scan,
+            &local_directory,
+            &mut activity,
+        );
+        assert!(restarted.full_scan);
+        assert!(restarted.initialized_this_step);
+    }
+
+    #[test]
+    fn station_power_event_source_permanently_falls_back_for_mod_drift_failure_and_bad_index() {
+        let entities = station_power_fanout_fixture(16);
+        let logical = vec![0, 8];
+        let ready = vec![8];
+        let scan = station_power_event_scan(logical.len(), entities.len());
+
+        let mod_state = dispatch_fixture_state(&entities);
+        let mod_local = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &mod_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let domains = vec![0_u8; mod_state.catalog.planets.len() * 3 * POWER_DOMAINS_PER_GRID];
+        let mut mod_activity = prepare_route_activity(&entities);
+        assert!(
+            plan_station_power_events(
+                &mod_state,
+                &entities,
+                &logical,
+                &ready,
+                &domains,
+                scan,
+                &mod_local,
+                &mut mod_activity,
+            )
+            .full_scan
+        );
+        assert!(mod_activity.station_power_event_source.fallback_full_scan);
+
+        let state =
+            dispatch_fixture_state_for_registry(&entities, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        let local = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let mut initialized = prepare_route_activity(&entities);
+        assert!(
+            plan_station_power_events(
+                &state,
+                &entities,
+                &logical,
+                &ready,
+                &domains,
+                scan,
+                &local,
+                &mut initialized,
+            )
+            .full_scan
+        );
+
+        let mut drifted_state = state.clone();
+        Arc::make_mut(&mut drifted_state.catalog)
+            .fingerprint
+            .push_str("-drift");
+        assert!(
+            plan_station_power_events(
+                &drifted_state,
+                &entities,
+                &logical,
+                &ready,
+                &domains,
+                scan,
+                &local,
+                &mut initialized,
+            )
+            .full_scan
+        );
+        assert!(initialized.station_power_event_source.fallback_full_scan);
+        assert!(
+            plan_station_power_events(
+                &state,
+                &entities,
+                &logical,
+                &ready,
+                &domains,
+                scan,
+                &local,
+                &mut initialized,
+            )
+            .full_scan,
+            "a signature drift must permanently close the event path"
+        );
+
+        let mut bad_index = prepare_route_activity(&entities);
+        assert!(
+            plan_station_power_events(
+                &state,
+                &entities,
+                &logical,
+                &ready,
+                &domains,
+                scan,
+                &local,
+                &mut bad_index,
+            )
+            .full_scan
+        );
+        bad_index.station_power_event_source.local_station_ranks = Some(Arc::new(HashMap::new()));
+        assert!(
+            plan_station_power_events(
+                &state,
+                &entities,
+                &logical,
+                &ready,
+                &domains,
+                scan,
+                &local,
+                &mut bad_index,
+            )
+            .full_scan
+        );
+        assert!(bad_index.station_power_event_source.fallback_full_scan);
+
+        let mut failed = prepare_route_activity(&entities);
+        let mut invalid_domains = domains.clone();
+        invalid_domains[0] = 2;
+        assert!(
+            plan_station_power_events(
+                &state,
+                &entities,
+                &logical,
+                &ready,
+                &invalid_domains,
+                scan,
+                &local,
+                &mut failed,
+            )
+            .full_scan
+        );
+        assert!(failed.station_power_event_source.fallback_full_scan);
+        assert!(
+            plan_station_power_events(
+                &state,
+                &entities,
+                &logical,
+                &ready,
+                &domains,
+                scan,
+                &local,
+                &mut failed,
+            )
+            .full_scan,
+            "a failed proof must not retry the event path in the same session"
+        );
+    }
+
+    #[test]
+    fn discarded_station_power_event_candidate_does_not_consume_recovery_edge() {
+        let entities = station_power_fanout_fixture(16);
+        let state =
+            dispatch_fixture_state_for_registry(&entities, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        let local = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let logical = vec![0, 8];
+        let ready = vec![8];
+        let scan = station_power_event_scan(logical.len(), entities.len());
+        let domains = vec![0_u8; state.catalog.planets.len() * 3 * POWER_DOMAINS_PER_GRID];
+        let mut committed = prepare_route_activity(&entities);
+        assert!(
+            plan_station_power_events(
+                &state,
+                &entities,
+                &logical,
+                &ready,
+                &domains,
+                scan,
+                &local,
+                &mut committed,
+            )
+            .full_scan
+        );
+
+        let mut powered_domains = domains.clone();
+        powered_domains[1] = 1;
+        let mut failed_candidate = committed.clone();
+        let failed_edge = plan_station_power_events(
+            &state,
+            &entities,
+            &logical,
+            &ready,
+            &powered_domains,
+            scan,
+            &local,
+            &mut failed_candidate,
+        );
+        assert_eq!(failed_edge.recovered_station_indices, vec![8]);
+
+        // `prepare_advance` owns the candidate Arc and publishes it only after
+        // every later phase succeeds. Discarding that clone must leave the
+        // committed snapshot able to emit the same edge on an exact retry.
+        let retry = plan_station_power_events(
+            &state,
+            &entities,
+            &logical,
+            &ready,
+            &powered_domains,
+            scan,
+            &local,
+            &mut committed,
+        );
+        assert_eq!(retry.recovered_station_indices, vec![8]);
+    }
+
     #[test]
     fn station_power_reverse_index_memory_and_selection_scale_linearly_under_high_fanout() {
         let small_entities = station_power_fanout_fixture(64);
@@ -8164,6 +8917,24 @@ mod tests {
         assert!(!scan.dense_fallback);
         assert!(!scan.directory_fallback);
         assert!(!scan.runtime_fallback);
+
+        let active_route_station_indices = ledger.active_station_indices();
+        let (operational, operational_scan) = select_operational_station_power_indices(
+            &state.factory_topology.station_indices,
+            &active_route_station_indices,
+            &[],
+            &local_directory,
+            &directory,
+            &activity,
+        );
+        assert_eq!(
+            operational,
+            vec![0, 1, 2, 3],
+            "the product power map must contain every supply, demand, vehicle owner and waypoint endpoint"
+        );
+        assert!(!operational_scan.dense_fallback);
+        assert!(!operational_scan.directory_fallback);
+        assert!(!operational_scan.runtime_fallback);
 
         let sparse_powers = selected
             .iter()

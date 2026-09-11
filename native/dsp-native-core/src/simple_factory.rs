@@ -467,6 +467,14 @@ fn finite_number(value: Option<&Value>) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn power_domain_state(value: f64) -> u8 {
+    if value.is_finite() {
+        u8::from(value > EPSILON)
+    } else {
+        2
+    }
+}
+
 fn quantum_boundary_changed_station_inventory(
     flow: Option<&crate::quantum_logistics::BoundaryFlow>,
 ) -> bool {
@@ -4331,6 +4339,7 @@ fn simulate_step(
         (planet != usize::MAX && grid != usize::MAX)
             .then_some((grid_slot(planet, grid), entity_index))
     });
+    let mut station_power_domains = vec![2_u8; grids.len() * 4];
     for (runtime_index, runtime) in grids.iter_mut().enumerate() {
         let connected_demand = runtime
             .consumers
@@ -4402,6 +4411,7 @@ fn simulate_step(
         } else {
             (runtime.supplied_kw / runtime.demand_kw).min(1.0)
         };
+        station_power_domains[runtime_index * 4] = power_domain_state(runtime.factor);
         let missing_kw = (runtime.supplied_kw - runtime.base_generation_kw).max(0.0);
         let dispatch_candidates = runtime.dispatch_candidates.clone();
         allocate_power_by_priority(
@@ -4451,6 +4461,12 @@ fn simulate_step(
             } else {
                 (remaining / demand).min(1.0)
             };
+            station_power_domains[runtime_index * 4 + priority] =
+                power_domain_state(if runtime.has_power_source {
+                    factor
+                } else {
+                    0.0
+                });
             for consumer in &runtime.consumers[priority] {
                 power_factors.insert(consumer.entity_index, factor);
             }
@@ -5179,7 +5195,7 @@ fn simulate_step(
         base,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
-    let (station_power_indices, station_power_scan) =
+    let (logical_station_power_indices, logical_station_power_scan) =
         crate::interstellar_logistics::select_station_power_indices(
             &state.factory_topology.station_indices,
             &ready_logistics_station_indices,
@@ -5188,6 +5204,65 @@ fn simulate_step(
             interstellar_peer_directory,
             interstellar_route_activity,
         );
+    let station_power_event_plan = crate::interstellar_logistics::plan_station_power_events(
+        state,
+        entities,
+        &logical_station_power_indices,
+        &ready_logistics_station_indices,
+        &station_power_domains,
+        logical_station_power_scan,
+        local_step_runtime,
+        std::sync::Arc::make_mut(interstellar_route_activity),
+    );
+    let mut prefilled_warpers = None;
+    let (station_power_indices, station_power_scan) = if station_power_event_plan.full_scan {
+        crate::interstellar_logistics::full_station_power_selection(
+            &state.factory_topology.station_indices,
+            logical_station_power_scan,
+        )
+    } else {
+        local_step_runtime
+            .wake_dispatch_from_power_events(&station_power_event_plan.recovered_station_indices);
+        crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+            &station_power_event_plan.recovered_station_indices,
+            interstellar_peer_directory,
+            std::sync::Arc::make_mut(interstellar_route_activity),
+        );
+        let refill = crate::interstellar_logistics::refill_station_warpers(
+            base,
+            entities,
+            std::sync::Arc::make_mut(interstellar_route_activity),
+            &step_route_ledger,
+        )?;
+        crate::interstellar_logistics::wake_dispatch_from_changed_stations(
+            &refill.0,
+            interstellar_peer_directory,
+            std::sync::Arc::make_mut(interstellar_route_activity),
+        );
+        local_step_runtime.wake_ready_from_changed_stations(&refill.0);
+        let mut changed_station_indices = late_logistics_changed_entity_indices.clone();
+        changed_station_indices
+            .extend_from_slice(&station_power_event_plan.recovered_station_indices);
+        changed_station_indices.extend_from_slice(&refill.0);
+        changed_station_indices.sort_unstable();
+        changed_station_indices.dedup();
+        let active_route_station_indices = step_route_ledger.active_station_indices();
+        let selection = crate::interstellar_logistics::select_operational_station_power_indices(
+            &state.factory_topology.station_indices,
+            &active_route_station_indices,
+            &changed_station_indices,
+            local_step_runtime,
+            interstellar_peer_directory,
+            interstellar_route_activity,
+        );
+        if selection.1.directory_fallback || selection.1.runtime_fallback {
+            crate::interstellar_logistics::force_station_power_event_full_scan(
+                std::sync::Arc::make_mut(interstellar_route_activity),
+            );
+        }
+        prefilled_warpers = Some(refill);
+        selection
+    };
     let station_powers = station_power_indices
         .iter()
         .copied()
@@ -5212,6 +5287,15 @@ fn simulate_step(
         .collect::<HashMap<_, _>>();
     if profile_enabled {
         eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tstation-power-events\tlogical={}/{}\trecovered={}\tdomain-changes={}\tinitialized={}\tfull-scan={}",
+            station_power_event_plan.logical_selected_rows,
+            state.factory_topology.station_indices.len(),
+            station_power_event_plan.recovered_station_indices.len(),
+            station_power_event_plan.changed_domain_rows,
+            station_power_event_plan.initialized_this_step,
+            station_power_event_plan.full_scan,
+        );
+        eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tstation-power-active\t{}/{}\tdense={}\tdirectory-fallback={}\truntime-fallback={}",
             station_power_scan.selected_station_rows,
             station_power_scan.total_station_rows,
@@ -5226,13 +5310,15 @@ fn simulate_step(
         interstellar_peer_directory,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
-    let (warper_changed_station_indices, warper_refill_scan) =
-        crate::interstellar_logistics::refill_station_warpers(
+    let (warper_changed_station_indices, warper_refill_scan) = match prefilled_warpers {
+        Some(refill) => refill,
+        None => crate::interstellar_logistics::refill_station_warpers(
             base,
             entities,
             std::sync::Arc::make_mut(interstellar_route_activity),
             &step_route_ledger,
-        )?;
+        )?,
+    };
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\twarper-refill-active\t{}/{}\treservation-rows={}\tdense={}\tdirectory-fallback={}",

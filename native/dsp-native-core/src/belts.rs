@@ -1351,6 +1351,63 @@ struct Group {
     inactive_routes: Vec<usize>,
 }
 
+/// One target-capacity query in persisted first-use order. Routes that feed
+/// the same target slot intentionally share one query: that slot is the
+/// smallest conflict component whose free capacity is consumed serially by
+/// the legacy route order. Non-quantum components are immutable probes and
+/// may run in private worker plans; quantum supply remains in the stable
+/// serial stream because it shares one network deposit session.
+#[derive(Debug, Clone, Copy)]
+struct TargetCapacityPlanEntry {
+    route_index: u32,
+    parallel_result_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TargetCapacityPlanDiagnostics {
+    component_count: usize,
+    parallel_component_count: usize,
+    serial_component_count: usize,
+    worker_count: usize,
+}
+
+#[derive(Debug)]
+struct BeltTransferProfiler {
+    enabled: bool,
+    checkpoint: std::time::Instant,
+}
+
+impl BeltTransferProfiler {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some(),
+            checkpoint: std::time::Instant::now(),
+        }
+    }
+
+    fn mark(&mut self, label: &'static str) {
+        if self.enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\t{label}\t{:.3}",
+                self.checkpoint.elapsed().as_secs_f64() * 1_000.0
+            );
+            self.checkpoint = std::time::Instant::now();
+        }
+    }
+
+    fn target_capacity_plan(&self, diagnostics: TargetCapacityPlanDiagnostics) {
+        if self.enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tbelt-transfer-target-capacity-plan-workers\tworkers={}\tcomponents={}\tparallel={}\tserial={}",
+                diagnostics.worker_count,
+                diagnostics.component_count,
+                diagnostics.parallel_component_count,
+                diagnostics.serial_component_count,
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 enum BeltPostAction {
     #[default]
@@ -2655,6 +2712,205 @@ fn target_capacity(
     Ok(capacity - input_amount(target, item_id))
 }
 
+fn target_capacity_for_route(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    prepared_routes: &PreparedRoutes,
+    route_index: usize,
+    quantum_session: &mut Option<crate::quantum_logistics::SupplyDepositSession>,
+) -> anyhow::Result<f64> {
+    let route = prepared_routes
+        .routes
+        .get(route_index)
+        .ok_or_else(|| anyhow!("native belt target-capacity route is outside the topology"))?;
+    let prepared_group = prepared_routes
+        .groups
+        .get(route.source_group())
+        .ok_or_else(|| anyhow!("native belt target-capacity group is outside the topology"))?;
+    let item_id = state
+        .symbols
+        .resolve(prepared_group.item_symbol)
+        .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+    let target = entities
+        .get(route.target_index())
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native belt target is not an object"))?;
+    Ok(target_capacity(
+        state,
+        base,
+        quantum_session,
+        entities,
+        target,
+        item_id,
+        route.target_port_index,
+    )?
+    .floor()
+    .max(0.0))
+}
+
+fn build_transfer_target_capacity_plan(
+    prepared_routes: &PreparedRoutes,
+    selection: &ActiveSelection,
+    groups: &[Group],
+    target_free: &mut [f64],
+    touched_target_slots: &mut Vec<u32>,
+    mut route_requires_serial: impl FnMut(usize) -> anyhow::Result<bool>,
+) -> anyhow::Result<(Vec<TargetCapacityPlanEntry>, Vec<u32>)> {
+    if target_free.len() != expand_compact_index(prepared_routes.target_slot_count) {
+        bail!("native belt target-capacity workspace changed");
+    }
+
+    let mut plan = Vec::<TargetCapacityPlanEntry>::new();
+    let mut parallel_route_indices = Vec::<u32>::new();
+    for group_index in selection.group_indices(prepared_routes.groups.len()) {
+        let group = groups
+            .get(group_index)
+            .ok_or_else(|| anyhow!("native belt target-capacity group is outside the runtime"))?;
+        if group.available < 1.0 {
+            continue;
+        }
+        let prepared_group = prepared_routes
+            .groups
+            .get(group_index)
+            .ok_or_else(|| anyhow!("native belt target-capacity group is outside the topology"))?;
+        for route_index in prepared_group.route_indices.iter().copied() {
+            let route_index_expanded = expand_compact_index(route_index);
+            let route = prepared_routes
+                .routes
+                .get(route_index_expanded)
+                .ok_or_else(|| {
+                    anyhow!("native belt target-capacity route is outside the topology")
+                })?;
+            let target_slot = route.target_slot();
+            let target_free_slot = target_free.get_mut(target_slot).ok_or_else(|| {
+                anyhow!("native belt target-capacity slot is outside the workspace")
+            })?;
+            if !target_free_slot.is_nan() {
+                continue;
+            }
+
+            // Reserve the component before any worker starts so duplicate
+            // routes can never schedule two probes for one shared capacity.
+            // The slot is restored to a finite value in stable plan order.
+            *target_free_slot = f64::NEG_INFINITY;
+            touched_target_slots.push(compact_index(target_slot, "target-capacity touched slot")?);
+
+            let parallel_result_index = if route_requires_serial(route_index_expanded)? {
+                None
+            } else {
+                let result_index = compact_index(
+                    parallel_route_indices.len(),
+                    "parallel target-capacity result index",
+                )?;
+                parallel_route_indices.push(route_index);
+                Some(result_index)
+            };
+            plan.push(TargetCapacityPlanEntry {
+                route_index,
+                parallel_result_index,
+            });
+        }
+    }
+    Ok((plan, parallel_route_indices))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_transfer_target_capacities_with_runtime(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    prepared_routes: &PreparedRoutes,
+    selection: &ActiveSelection,
+    groups: &[Group],
+    target_free: &mut [f64],
+    touched_target_slots: &mut Vec<u32>,
+    quantum_session: &mut Option<crate::quantum_logistics::SupplyDepositSession>,
+    executor: &DeterministicRuntime,
+) -> anyhow::Result<TargetCapacityPlanDiagnostics> {
+    let (plan, parallel_route_indices) = build_transfer_target_capacity_plan(
+        prepared_routes,
+        selection,
+        groups,
+        target_free,
+        touched_target_slots,
+        |route_index| {
+            let route = &prepared_routes.routes[route_index];
+            let prepared_group = &prepared_routes.groups[route.source_group()];
+            let item_id = state
+                .symbols
+                .resolve(prepared_group.item_symbol)
+                .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+            let target = entities[route.target_index()]
+                .as_object()
+                .ok_or_else(|| anyhow!("native belt target is not an object"))?;
+            Ok(crate::quantum_logistics::is_supply_endpoint(
+                target, item_id,
+            ))
+        },
+    )?;
+
+    // These probes only read the exact candidate snapshot. Results are kept
+    // private to workers, collected in route order, then applied below in the
+    // original first-use order. A worker error is therefore reported at the
+    // same stable component boundary and cannot partially mutate GameState.
+    let parallel_results = executor.indexed_map(&parallel_route_indices, |_, route_index| {
+        target_capacity_for_route(
+            state,
+            base,
+            entities,
+            prepared_routes,
+            expand_compact_index(*route_index),
+            &mut None,
+        )
+    });
+    let worker_count = if parallel_route_indices.is_empty() {
+        0
+    } else {
+        executor.worker_count_for_items(parallel_route_indices.len())
+    };
+    let parallel_component_count = parallel_route_indices.len();
+    let mut parallel_results = parallel_results.into_iter().enumerate();
+    let mut serial_component_count = 0_usize;
+    for entry in &plan {
+        let route_index = expand_compact_index(entry.route_index);
+        let capacity = if let Some(expected_result_index) = entry.parallel_result_index {
+            let (actual_result_index, result) = parallel_results
+                .next()
+                .ok_or_else(|| anyhow!("native belt target-capacity result is missing"))?;
+            if actual_result_index != expand_compact_index(expected_result_index) {
+                bail!("native belt target-capacity result order changed");
+            }
+            result?
+        } else {
+            serial_component_count = serial_component_count.saturating_add(1);
+            target_capacity_for_route(
+                state,
+                base,
+                entities,
+                prepared_routes,
+                route_index,
+                quantum_session,
+            )?
+        };
+        if !capacity.is_finite() || capacity < 0.0 {
+            bail!("native belt target capacity is invalid");
+        }
+        let target_slot = prepared_routes.routes[route_index].target_slot();
+        target_free[target_slot] = capacity;
+    }
+    if parallel_results.next().is_some() {
+        bail!("native belt target-capacity result count changed");
+    }
+
+    Ok(TargetCapacityPlanDiagnostics {
+        component_count: plan.len(),
+        parallel_component_count,
+        serial_component_count,
+        worker_count,
+    })
+}
+
 fn route_from_record(
     state: &CoreState,
     entities: &[Value],
@@ -2980,6 +3236,7 @@ pub(crate) fn transfer(
     if belt_runtime.progress.is_empty() {
         return Ok(());
     }
+    let mut profiler = BeltTransferProfiler::new();
     let routes = &prepared_routes.routes;
     let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
     let mut quantum_session = None;
@@ -3012,6 +3269,7 @@ pub(crate) fn transfer(
         seconds,
         belt_limit,
     )?;
+    profiler.mark("belt-transfer-select-and-clock");
     let progress = &belt_runtime.progress;
     belt_runtime
         .workspace
@@ -3045,6 +3303,22 @@ pub(crate) fn transfer(
                 .is_some_and(|outputs| outputs.contains_key(item_id)),
         );
     }
+    profiler.mark("belt-transfer-source-snapshot");
+
+    let target_capacity_diagnostics = prepare_transfer_target_capacities_with_runtime(
+        state,
+        base,
+        entities,
+        prepared_routes,
+        &selection,
+        groups,
+        target_free,
+        touched_target_slots,
+        &mut quantum_session,
+        deterministic_runtime(),
+    )?;
+    profiler.mark("belt-transfer-target-capacity-plan");
+    profiler.target_capacity_plan(target_capacity_diagnostics);
 
     for index in selection.group_indices(prepared_routes.groups.len()) {
         for route_index in prepared_routes.groups[index]
@@ -3060,28 +3334,9 @@ pub(crate) fn transfer(
                 }
                 continue;
             }
-            let target = entities[route.target_index()]
-                .as_object()
-                .ok_or_else(|| anyhow!("native belt target is not an object"))?;
-            let item_id = state
-                .symbols
-                .resolve(prepared_routes.groups[index].item_symbol)
-                .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
             let target_slot = route.target_slot();
-            if target_free[target_slot].is_nan() {
-                let free = target_capacity(
-                    state,
-                    base,
-                    &mut quantum_session,
-                    entities,
-                    target,
-                    item_id,
-                    route.target_port_index,
-                )?
-                .floor()
-                .max(0.0);
-                target_free[target_slot] = free;
-                touched_target_slots.push(compact_index(target_slot, "transfer target slot")?);
+            if !target_free[target_slot].is_finite() {
+                bail!("native belt target-capacity plan is incomplete");
             }
             if target_free[target_slot] < 1.0 {
                 post_actions[route_index] = BeltPostAction::ResetProgress;
@@ -3117,6 +3372,7 @@ pub(crate) fn transfer(
             }
         }
     }
+    profiler.mark("belt-transfer-candidate-scan");
 
     // These persistent scratch buffers retain the canonical candidate order;
     // cursor rotation and every floating point operation therefore remain
@@ -3436,6 +3692,7 @@ pub(crate) fn transfer(
             };
         }
     }
+    profiler.mark("belt-transfer-stable-apply");
     pending_wake_group_indices.sort_unstable();
     pending_wake_group_indices.dedup();
     let mut pending_wakes = std::mem::take(pending_wake_group_indices);
@@ -3463,6 +3720,7 @@ pub(crate) fn transfer(
     // here gives downstream wake caches stable topology order and excludes
     // probes that did not actually move material.
     finalize_material_movement_evidence(changed_entity_indices);
+    profiler.mark("belt-transfer-finalize");
     Ok(())
 }
 
@@ -4802,6 +5060,168 @@ mod tests {
         assert_eq!(indices, [0, 1, 2]);
         assert_eq!(routes, [0, 1, 2]);
         assert!(ActiveSelection::All.is_full_scan());
+    }
+
+    fn target_capacity_plan_fixture() -> PreparedRoutes {
+        let route = |source_group: usize, target_slot: usize, belt_sort_rank: usize| Route {
+            capacity: 6.0,
+            source_index: compact_index(source_group, "test source index").unwrap(),
+            target_index: compact_index(target_slot, "test target index").unwrap(),
+            source_group: compact_index(source_group, "test source group").unwrap(),
+            target_slot: compact_index(target_slot, "test target slot").unwrap(),
+            belt_sort_rank: compact_index(belt_sort_rank, "test belt rank").unwrap(),
+            target_port_index: None,
+            priority: 1,
+        };
+        PreparedRoutes {
+            routes: vec![
+                route(0, 2, 0),
+                route(0, 0, 1),
+                route(1, 0, 0),
+                route(1, 1, 1),
+                route(2, 3, 0),
+            ],
+            groups: vec![
+                PreparedGroup {
+                    source_index: 0,
+                    item_symbol: 0,
+                    balanced_splitter: false,
+                    always_awake: false,
+                    route_indices: vec![0, 1].into_boxed_slice(),
+                },
+                PreparedGroup {
+                    source_index: 1,
+                    item_symbol: 0,
+                    balanced_splitter: false,
+                    always_awake: false,
+                    route_indices: vec![2, 3].into_boxed_slice(),
+                },
+                PreparedGroup {
+                    source_index: 2,
+                    item_symbol: 0,
+                    balanced_splitter: false,
+                    always_awake: false,
+                    route_indices: vec![4].into_boxed_slice(),
+                },
+            ],
+            target_slot_count: 4,
+            total_capacity: 30.0,
+            group_by_key: Arc::new(HashMap::new()),
+        }
+    }
+
+    fn target_capacity_runtime_groups(available: [f64; 3]) -> Vec<Group> {
+        available
+            .into_iter()
+            .map(|available| Group {
+                available,
+                ..Group::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn target_capacity_plan_deduplicates_conflicts_and_keeps_stable_first_use_order() {
+        let prepared = target_capacity_plan_fixture();
+        let groups = target_capacity_runtime_groups([5.0, 7.0, 0.0]);
+        let mut target_free = vec![f64::NAN; 4];
+        let mut touched = Vec::new();
+        let mut classified = Vec::new();
+
+        let (plan, parallel_routes) = build_transfer_target_capacity_plan(
+            &prepared,
+            &ActiveSelection::All,
+            &groups,
+            &mut target_free,
+            &mut touched,
+            |route_index| {
+                classified.push(route_index);
+                Ok(route_index == 3)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.iter()
+                .map(|entry| expand_compact_index(entry.route_index))
+                .collect::<Vec<_>>(),
+            [0, 1, 3]
+        );
+        assert_eq!(
+            plan.iter()
+                .map(|entry| entry.parallel_result_index.map(expand_compact_index))
+                .collect::<Vec<_>>(),
+            [Some(0), Some(1), None]
+        );
+        assert_eq!(
+            parallel_routes
+                .iter()
+                .copied()
+                .map(expand_compact_index)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert_eq!(classified, [0, 1, 3]);
+        assert_eq!(touched, [2, 0, 1]);
+        assert!(target_free[0].is_infinite() && target_free[0].is_sign_negative());
+        assert!(target_free[1].is_infinite() && target_free[1].is_sign_negative());
+        assert!(target_free[2].is_infinite() && target_free[2].is_sign_negative());
+        assert!(target_free[3].is_nan());
+    }
+
+    #[test]
+    fn target_capacity_plan_respects_sparse_selection_and_serial_components() {
+        let prepared = target_capacity_plan_fixture();
+        let groups = target_capacity_runtime_groups([5.0, 7.0, 9.0]);
+        let selection = ActiveSelection::Mask {
+            selected_group_indices: vec![1],
+            selected_route_indices: vec![2, 3],
+        };
+        let mut target_free = vec![f64::NAN; 4];
+        let mut touched = Vec::new();
+
+        let (plan, parallel_routes) = build_transfer_target_capacity_plan(
+            &prepared,
+            &selection,
+            &groups,
+            &mut target_free,
+            &mut touched,
+            |route_index| Ok(route_index == 3),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.iter()
+                .map(|entry| expand_compact_index(entry.route_index))
+                .collect::<Vec<_>>(),
+            [2, 3]
+        );
+        assert_eq!(parallel_routes, [2]);
+        assert_eq!(touched, [0, 1]);
+        assert!(target_free[2].is_nan() && target_free[3].is_nan());
+    }
+
+    #[test]
+    fn target_capacity_plan_fails_closed_on_out_of_range_mod_topology() {
+        let mut prepared = target_capacity_plan_fixture();
+        prepared.groups[0].route_indices = vec![u32::MAX].into_boxed_slice();
+        let groups = target_capacity_runtime_groups([5.0, 7.0, 9.0]);
+        let mut target_free = vec![f64::NAN; 4];
+        let mut touched = Vec::new();
+
+        let error = build_transfer_target_capacity_plan(
+            &prepared,
+            &ActiveSelection::All,
+            &groups,
+            &mut target_free,
+            &mut touched,
+            |_| Ok(false),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("outside the topology"));
+        assert!(target_free.iter().all(|value| value.is_nan()));
+        assert!(touched.is_empty());
     }
 
     #[test]

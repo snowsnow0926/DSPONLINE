@@ -15,6 +15,8 @@
 
 硬边界：上海节点必须继续由上海本机提供前端与 `/api`，不得改成香港反代或域名跳转。上海为 HTTP，前端必须继续拒绝云账号密码传输。
 
+> 当前生产状态（1.1.2，2026-08-21）：香港 Web current 为 `web-1.1.2-48d70aa-cloudfix2`，香港 API 保持 `api-1.1.1-da53958b860c`；上海 Web/API current 为 `web-1.1.2-48d70aa-cloudfix2` / `api-1.1.2-48d70aa`，generation 16（blue/4321），直接 previous 均为 1.1.1；上海下载页 current 为 `download-site-1.1.2-48d70aa`，previous 为 1.1.1，Android/Windows stable 均为 1.1.2。上海 pending 为空，API/proxy/Nginx `NRestarts=0`，health/ready 为 200；数据库保持 schema v8 / SQLite layout v3，没有恢复、跨节点复制或手工修改。发布前只清理可重建缓存和已证明未引用的临时文件，精确根盘使用率为 85.569869%，新鲜 Backup API evidence 已通过哈希、`quick_check` 与身份校验。下载域名严格 TLS、完整 APK/Setup SHA、Range/cache 均通过；Android 使用批准长期证书，Windows 继续 `NotSigned`。完整证据与回滚边界见 [releases/1.1.2.md](./releases/1.1.2.md)。
+
 > 当前生产状态（1.1.1，2026-08-20）：香港、上海 Web/API、上海下载页与 Android/Windows stable 均为 `1.1.1-da53958b860c` / `1.1.1+da53958b860c`。香港 generation 28（blue/4321）、上海 generation 15（green/4322），两地直接代码 previous 均为 `1.1.0-9b2c579cbe0d`；上海下载页直接回滚为 1.1.0，香港 `/canary/previous/` 继续固定 1.0.47。数据库保持 schema v8 / SQLite layout v3；本版没有恢复或跨节点复制数据库。完整发布、异常恢复、备份、原生和公网证据见 [releases/1.1.1.md](./releases/1.1.1.md)。
 
 > 当前生产状态（2026-08-15）：香港 Web generation 13 current 为 `web-1.0.43-fceca3eda51c`、Build ID `1.0.43+fceca3eda51c`，直接 previous 为 `web-1.0.42-c24e6247d257`；香港 API、上海 Web/API、上海下载页和 Android/Windows stable 均保持 1.0.42。发布代理继续 forward 到 `api-1.0.42-c24e6247d257`，活动 API `NRestarts=0`，pending switch 为空。两地数据库继续独立使用 schema v7 / SQLite layout v2；本次 Web-only 发布没有 API/数据库/上海/下载/原生写入。香港 `/canary/previous/` 继续 302 到不可变 `/canary/1.0.37-853ecdb12795/`。完整 1.0.43 切换、两次安全回滚、真实附件与观察证据见 [releases/1.0.43.md](./releases/1.0.43.md)；1.0.42 双节点/原生/下载历史见 [releases/1.0.42.md](./releases/1.0.42.md)。

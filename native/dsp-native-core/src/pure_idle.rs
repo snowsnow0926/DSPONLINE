@@ -9190,6 +9190,551 @@ mod tests {
         }
     }
 
+    fn audit_multi_center_construction_fixture(
+        center_count: usize,
+        stock: u64,
+        target: u64,
+        machine_count: u64,
+        prebuilt_job_steps: usize,
+        extra_inert_entities: usize,
+    ) -> CoreState {
+        let mut base = powered_fixture_base(15.0, "infinite");
+        base["tray"] = json!({ "iron_ore": stock });
+        base["planetTrays"]["home"] = json!({ "iron_ore": stock });
+        base["construction"] =
+            json!({ "test_building": 0, "conveyor_belt_mk1": 0 });
+        let mut jobs = Map::new();
+        if prebuilt_job_steps > 0 {
+            for index in 0..center_count {
+                let construction_id = if index % 2 == 0 {
+                    "test_building"
+                } else {
+                    "conveyor_belt_mk1"
+                };
+                jobs.insert(
+                    format!("construction-center-{index:05}"),
+                    json!({
+                        "constructionId": construction_id,
+                        "steps": (0..prebuilt_job_steps)
+                            .map(|_| json!({
+                                "kind": "building",
+                                "constructionId": construction_id
+                            }))
+                            .collect::<Vec<_>>(),
+                        "stepIndex": 0,
+                        "elapsedSeconds": 0,
+                        "inventory": {}
+                    }),
+                );
+            }
+        }
+        base["constructionAutomation"] = json!({
+            "enabled": true,
+            "targetStock": {
+                "test_building": target,
+                "conveyor_belt_mk1": target
+            },
+            "cursor": 0,
+            "totalCrafted": 0,
+            "lastCraftedId": null,
+            "destroyedByproducts": {},
+            "jobs": jobs,
+            "quantumSourceEnabled": false,
+            "quantumMaterialBuffer": {}
+        });
+        let mut entities = vec![
+            json!({
+                "id": "wind",
+                "kind": "power",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "wind_turbine",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "controller",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "time_warp_device",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 1,
+                "productionRate": 0
+            }),
+        ];
+        for index in 0..center_count {
+            entities.push(json!({
+                "id": format!("construction-center-{index:05}"),
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "construction_center",
+                "machineCount": machine_count,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }));
+        }
+        for index in 0..extra_inert_entities {
+            entities.push(json!({
+                "id": format!("audit-inert-wind-{index:05}"),
+                "kind": "power",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "wind_turbine",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }));
+        }
+        fixture_state_from_parts(base, entities)
+    }
+
+    fn audit_compare_construction_macro_split(initial: CoreState, label: &str) -> bool {
+        let mut one_shot = initial.clone();
+        let revision = one_shot.revision;
+        let result = advance_macro_v10(
+            &mut one_shot,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "{label} one-shot reason={:?}", result.reason);
+
+        let mut segmented = initial;
+        for seconds in [30.0, 190.0, 190.0, 190.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "{label} segmented reason={:?}", result.reason);
+        }
+        let one_hash = one_shot.summary().unwrap().canonical_sha256;
+        let split_hash = segmented.summary().unwrap().canonical_sha256;
+        eprintln!(
+            "AUDIT {label} equal={} oneHash={one_hash} splitHash={split_hash} oneConstruction={:?} splitConstruction={:?} oneTray={:?} splitTray={:?} oneCrafted={:?} splitCrafted={:?}",
+            split_hash == one_hash,
+            one_shot.base_value()["construction"],
+            segmented.base_value()["construction"],
+            one_shot.base_value()["tray"],
+            segmented.base_value()["tray"],
+            one_shot.base_value()["constructionAutomation"]["totalCrafted"],
+            segmented.base_value()["constructionAutomation"]["totalCrafted"],
+        );
+        split_hash == one_hash
+    }
+
+    #[test]
+    fn audit_macro_v10_multi_center_shared_stock_split_matrix() {
+        let mut all_equal = true;
+        for center_count in [2, 3, 5] {
+            all_equal &= audit_compare_construction_macro_split(
+                audit_multi_center_construction_fixture(
+                    center_count,
+                    75_000,
+                    100_000,
+                    1_000,
+                    0,
+                    0,
+                ),
+                &format!("auto-{center_count}"),
+            );
+            all_equal &= audit_compare_construction_macro_split(
+                audit_multi_center_construction_fixture(
+                    center_count,
+                    75_000,
+                    100_000,
+                    1_000,
+                    1_000,
+                    0,
+                ),
+                &format!("wip-{center_count}"),
+            );
+        }
+        assert!(all_equal, "one-shot and segmented canonical states diverged");
+    }
+
+    fn audit_multi_planet_construction_fixture(center_count: usize) -> CoreState {
+        let mut base = powered_fixture_base(15.0, "infinite");
+        base["tray"] = json!({ "iron_ore": 40_000 });
+        base["planetTrays"] = json!({
+            "home": { "iron_ore": 40_000 },
+            "outpost": { "iron_ore": 35_000 }
+        });
+        base["planetTrayItemLimits"] = json!({ "home": 1_000_000, "outpost": 1_000_000 });
+        base["planetMetrics"] = json!({ "home": {}, "outpost": {} });
+        base["powerGridMetrics"] = json!({ "home": {}, "outpost": {} });
+        base["exploration"]["colonizedPlanetIds"] = json!(["home", "outpost"]);
+        base["exploration"]["unlockedSystemIds"] = json!(["helios", "borealis"]);
+        base["exploration"]["surveyProgressBySystem"]["borealis"] = json!(1);
+        base["galaxy"]["profiles"]["outpost"] = json!({
+            "windMultiplier": 1,
+            "solarMultiplier": 1,
+            "geothermalMultiplier": 1,
+            "miningMultiplier": 1,
+            "productionSpeedMultiplier": 1,
+            "specialization": "balanced",
+            "oceanType": "none"
+        });
+        base["construction"] =
+            json!({ "test_building": 0, "conveyor_belt_mk1": 0 });
+        base["constructionAutomation"] = json!({
+            "enabled": true,
+            "targetStock": {
+                "test_building": 100_000,
+                "conveyor_belt_mk1": 100_000
+            },
+            "cursor": 0,
+            "totalCrafted": 0,
+            "lastCraftedId": null,
+            "destroyedByproducts": {},
+            "jobs": {},
+            "quantumSourceEnabled": false,
+            "quantumMaterialBuffer": {}
+        });
+        let mut entities = vec![
+            json!({
+                "id": "wind-home", "kind": "power", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "wind_turbine",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 0, "productionRate": 0
+            }),
+            json!({
+                "id": "wind-outpost", "kind": "power", "planetId": "outpost",
+                "powerGridId": "grid-a", "buildingId": "wind_turbine",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 0, "productionRate": 0
+            }),
+            json!({
+                "id": "controller", "kind": "machine", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "time_warp_device",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 1, "productionRate": 0
+            }),
+        ];
+        for index in 0..center_count {
+            entities.push(json!({
+                "id": format!("construction-center-{index:05}"),
+                "kind": "machine",
+                "planetId": if index % 2 == 0 { "home" } else { "outpost" },
+                "powerGridId": "grid-a",
+                "buildingId": "construction_center",
+                "machineCount": 1_000,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }));
+        }
+        fixture_state_from_parts_with_belts_and_catalog(
+            base,
+            entities,
+            Vec::new(),
+            fixture_catalog_with_outpost(),
+        )
+    }
+
+    #[test]
+    fn audit_macro_v10_multi_planet_split_matrix() {
+        let mut all_equal = true;
+        for center_count in [2, 3, 5] {
+            all_equal &= audit_compare_construction_macro_split(
+                audit_multi_planet_construction_fixture(center_count),
+                &format!("multi-planet-{center_count}"),
+            );
+        }
+        assert!(all_equal, "multi-planet one-shot and segmented states diverged");
+    }
+
+    #[derive(Debug)]
+    struct AuditConstructionTailTiming {
+        total: std::time::Duration,
+        base_clone: std::time::Duration,
+        parse_entities: std::time::Duration,
+        run_centers: std::time::Duration,
+        commit: std::time::Duration,
+    }
+
+    fn audit_apply_construction_tail_reference(
+        mut state: CoreState,
+        elapsed_after: f64,
+        per_second: bool,
+    ) -> (CoreState, AuditConstructionTailTiming) {
+        let certificate = state
+            .pure_idle_macro_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.construction_certificate.as_ref())
+            .expect("audit fixture should retain construction certificate")
+            .clone();
+        validate_renewable_power_tail_certificate(&state, &certificate.renewable_power).unwrap();
+        let elapsed_before = state.base_value()["elapsedSeconds"].as_f64().unwrap();
+        let before_whole = elapsed_micros(elapsed_before).unwrap() / MICROS_PER_SECOND;
+        let after_whole = elapsed_micros(elapsed_after).unwrap() / MICROS_PER_SECOND;
+        let scheduled_seconds = after_whole - before_whole;
+        assert!(scheduled_seconds >= 0);
+
+        let mut current_ids = Vec::new();
+        let mut power_factors = HashMap::<usize, f64>::new();
+        for &entity_index in &state.factory_topology.construction_center_indices {
+            let (entity_id, grid) = construction_center_identity(&state, entity_index).unwrap();
+            assert!(certificate.renewable_power.grids.contains_key(&grid));
+            current_ids.push(entity_id);
+            power_factors.insert(entity_index, 1.0);
+        }
+        assert_eq!(current_ids, certificate.center_entity_ids);
+
+        let total_start = std::time::Instant::now();
+        let base_clone_start = std::time::Instant::now();
+        let mut base = state.base_value().clone();
+        let base_clone = base_clone_start.elapsed();
+        let parse_start = std::time::Instant::now();
+        let mut entities = state.parse_entities_parallel().unwrap();
+        let parse_entities = parse_start.elapsed();
+        let mut runtime = state.prepared_construction_runtime().unwrap_or_else(|| {
+            Arc::new(crate::construction::ConstructionRuntime::build(
+                &state, &base, &entities,
+            ))
+        });
+
+        let run_start = std::time::Instant::now();
+        if per_second {
+            for _ in 0..scheduled_seconds {
+                crate::construction::run_centers(
+                    &state,
+                    &mut base,
+                    &mut entities,
+                    1.0,
+                    &power_factors,
+                    &state.factory_topology.construction_center_indices,
+                    Arc::make_mut(&mut runtime),
+                )
+                .unwrap();
+            }
+        } else {
+            crate::construction::run_centers(
+                &state,
+                &mut base,
+                &mut entities,
+                scheduled_seconds as f64,
+                &power_factors,
+                &state.factory_topology.construction_center_indices,
+                Arc::make_mut(&mut runtime),
+            )
+            .unwrap();
+        }
+        let run_centers = run_start.elapsed();
+
+        for &entity_index in &state.factory_topology.construction_center_indices {
+            let center = entities[entity_index].as_object_mut().unwrap();
+            center.insert("utilization".to_owned(), Value::from(0));
+            center.insert("productionRate".to_owned(), Value::from(0));
+        }
+        base.insert(
+            "elapsedSeconds".to_owned(),
+            Value::Number(Number::from_f64(elapsed_after).unwrap()),
+        );
+        let commit_start = std::time::Instant::now();
+        let next_revision = state.revision.checked_add(1).unwrap();
+        let belt_commit = crate::belts::BeltCommitBatch::unchanged(&state).unwrap();
+        state
+            .commit_simulated_state(base, entities, belt_commit, next_revision, false)
+            .unwrap();
+        state.install_prepared_construction_runtime(runtime);
+        let commit = commit_start.elapsed();
+        (
+            state,
+            AuditConstructionTailTiming {
+                total: total_start.elapsed(),
+                base_clone,
+                parse_entities,
+                run_centers,
+                commit,
+            },
+        )
+    }
+
+    fn audit_duration_ms(duration: std::time::Duration) -> f64 {
+        duration.as_secs_f64() * 1_000.0
+    }
+
+    fn audit_construction_domain_projection(state: &CoreState) -> Value {
+        let mut centers = state
+            .parse_entities_parallel()
+            .unwrap()
+            .into_iter()
+            .filter(|entity| {
+                entity.get("buildingId").and_then(Value::as_str) == Some("construction_center")
+            })
+            .collect::<Vec<_>>();
+        for center in &mut centers {
+            let center = center.as_object_mut().unwrap();
+            center.insert("utilization".to_owned(), Value::from(0));
+            center.insert("productionRate".to_owned(), Value::from(0));
+        }
+        json!({
+            "tray": state.base_value().get("tray"),
+            "construction": state.base_value().get("construction"),
+            "constructionAutomation": state.base_value().get("constructionAutomation"),
+            "portableFleet": state.base_value().get("portableFleet"),
+            "productionStats": state.base_value().get("productionStats"),
+            "consumptionStats": state.base_value().get("consumptionStats"),
+            "centers": centers,
+        })
+    }
+
+    #[test]
+    fn audit_per_second_reference_matches_one_second_exact_oracle() {
+        for (label, center_count, prebuilt_job_steps) in
+            [("one-auto", 1_usize, 0_usize), ("five-auto", 5, 0), ("five-wip", 5, 1_000)]
+        {
+            let mut calibrated = audit_multi_center_construction_fixture(
+                center_count,
+                750_000,
+                1_000_000,
+                1_000,
+                prebuilt_job_steps,
+                0,
+            );
+            let revision = calibrated.revision;
+            let result = advance_macro_v10(
+                &mut calibrated,
+                &pure_idle_macro_request(revision, 30.0, 2.0),
+            )
+            .unwrap();
+            assert!(result.supported, "{label} calibration reason={:?}", result.reason);
+
+            let mut exact = calibrated.clone();
+            let exact_start = std::time::Instant::now();
+            for _ in 30..600 {
+                let revision = exact.revision;
+                let result = exact
+                    .advance_exact(&exact_request(revision, 1.0, 1.0 / 15.0))
+                    .unwrap();
+                assert!(result.supported, "{label} exact reason={:?}", result.reason);
+            }
+            let exact_time = exact_start.elapsed();
+            let (reference, timing) =
+                audit_apply_construction_tail_reference(calibrated, 600.0, true);
+            let exact_projection = audit_construction_domain_projection(&exact);
+            let reference_projection = audit_construction_domain_projection(&reference);
+            eprintln!(
+                "AUDIT-EXACT-ORACLE {label} equal={} exactMs={:.3} referenceMs={:.3} exactConstruction={:?} referenceConstruction={:?}",
+                exact_projection == reference_projection,
+                audit_duration_ms(exact_time),
+                audit_duration_ms(timing.total),
+                exact.base_value()["construction"],
+                reference.base_value()["construction"],
+            );
+            assert_eq!(reference_projection, exact_projection, "{label} construction domain");
+        }
+    }
+
+    #[test]
+    fn audit_macro_v10_per_second_reference_and_tail_cost() {
+        let scenarios = [
+            ("one-center", 1_usize, 1_000_u64, 0_usize),
+            ("five-centers", 5, 1_000, 0),
+            // The documented player fixture had 221 entities and one center
+            // stacked to 44,311 machines. This stays synthetic and read-only.
+            ("near-real-shape", 1, 44_311, 218),
+        ];
+        for (label, center_count, machine_count, extra_entities) in scenarios {
+            let initial = audit_multi_center_construction_fixture(
+                center_count,
+                750_000,
+                1_000_000,
+                machine_count,
+                0,
+                extra_entities,
+            );
+            let mut one_shot = initial.clone();
+            let revision = one_shot.revision;
+            let result = advance_macro_v10(
+                &mut one_shot,
+                &pure_idle_macro_request(revision, 600.0, 40.0),
+            )
+            .unwrap();
+            assert!(result.supported, "{label} one-shot reason={:?}", result.reason);
+
+            let mut calibrated = initial;
+            let revision = calibrated.revision;
+            let result = advance_macro_v10(
+                &mut calibrated,
+                &pure_idle_macro_request(revision, 30.0, 2.0),
+            )
+            .unwrap();
+            assert!(result.supported, "{label} calibration reason={:?}", result.reason);
+
+            let mut segmented = calibrated.clone();
+            let segmented_start = std::time::Instant::now();
+            for seconds in [190.0, 190.0, 190.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+                )
+                .unwrap();
+                assert!(result.supported, "{label} segment reason={:?}", result.reason);
+            }
+            let segmented_time = segmented_start.elapsed();
+
+            let (bulk, bulk_timing) =
+                audit_apply_construction_tail_reference(calibrated.clone(), 600.0, false);
+            let (per_second, per_second_timing) =
+                audit_apply_construction_tail_reference(calibrated, 600.0, true);
+
+            let one_hash = one_shot.summary().unwrap().canonical_sha256;
+            let bulk_hash = bulk.summary().unwrap().canonical_sha256;
+            let segmented_hash = segmented.summary().unwrap().canonical_sha256;
+            let reference_hash = per_second.summary().unwrap().canonical_sha256;
+            assert_eq!(one_hash, bulk_hash, "{label} audit bulk should mirror one-shot");
+            eprintln!(
+                "AUDIT-TIMING {label} hashes one={one_hash} segmented={segmented_hash} perSecond={reference_hash} equal(one,segmented)={} equal(segmented,perSecond)={} construction one={:?} segmented={:?} perSecond={:?} bulkMs={:.3} bulkCloneMs={:.3} bulkParseMs={:.3} bulkRunMs={:.3} bulkCommitMs={:.3} segmentedMs={:.3} perSecondMs={:.3} refCloneMs={:.3} refParseMs={:.3} refRunMs={:.3} refCommitMs={:.3}",
+                one_hash == segmented_hash,
+                segmented_hash == reference_hash,
+                one_shot.base_value()["construction"],
+                segmented.base_value()["construction"],
+                per_second.base_value()["construction"],
+                audit_duration_ms(bulk_timing.total),
+                audit_duration_ms(bulk_timing.base_clone),
+                audit_duration_ms(bulk_timing.parse_entities),
+                audit_duration_ms(bulk_timing.run_centers),
+                audit_duration_ms(bulk_timing.commit),
+                audit_duration_ms(segmented_time),
+                audit_duration_ms(per_second_timing.total),
+                audit_duration_ms(per_second_timing.base_clone),
+                audit_duration_ms(per_second_timing.parse_entities),
+                audit_duration_ms(per_second_timing.run_centers),
+                audit_duration_ms(per_second_timing.commit),
+            );
+        }
+    }
+
     #[test]
     fn macro_v10_construction_tail_stops_at_owned_stock_and_rebuilds_after_reload() {
         let mut stock_limited = productive_construction_macro_fixture(15.0, 100);

@@ -6,6 +6,8 @@ import {
 } from "./pureIdleMacro";
 import type { PureIdleMacroWorkerRequest, PureIdleMacroWorkerResponse } from "./pureIdleMacro.worker";
 import type { GameState } from "./types";
+import { decodeVerifiedSaveTransfer, type SaveTransferVerification } from "./saveTransfer";
+import { parseTrustedWorkerEnvelope } from "./storage";
 
 export interface PureIdleMacroFinalResult {
   state: GameState;
@@ -178,8 +180,19 @@ export class PureIdleMacroClient {
   ): Promise<PureIdleMacroFinalResult> {
     const response = await this.request({ type: "finalize", targetWallSeconds }, options);
     if (response.type !== "finalized") throw new PureIdleMacroClientError("operation", "纯挂机 Worker 没有返回最终存档");
+    const verification: SaveTransferVerification = {
+      integrity: "valid",
+      stateChecksum: response.stateChecksum,
+      payloadChecksum: response.payloadChecksum,
+      byteLength: response.byteLength,
+    };
+    const raw = decodeVerifiedSaveTransfer(response.payloadBytes, verification);
+    const state = parseTrustedWorkerEnvelope(raw, verification, undefined, { persistentProjection: false });
+    if (state.version !== response.stateVersion || state.mode !== response.mode || state.entities.length !== response.entityCount) {
+      throw new PureIdleMacroClientError("operation", "纯挂机 Worker 结果摘要与重载状态不一致");
+    }
     return {
-      state: response.state,
+      state,
       summary: response.summary,
       rawBytes: response.rawBytes,
       durationMs: response.durationMs,

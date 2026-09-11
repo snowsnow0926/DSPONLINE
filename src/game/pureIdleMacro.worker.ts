@@ -7,7 +7,7 @@ import {
 import {
   advancePureIdleMacroSession,
   createPureIdleMacroSession,
-  finalizePureIdleMacroSession,
+  finalizePureIdleMacroCandidate,
   PURE_IDLE_MACRO_ALGORITHM_VERSION,
   PURE_IDLE_MACRO_OPERATION_DEADLINE_MS,
   type PureIdleMacroMode,
@@ -15,6 +15,7 @@ import {
   type PureIdleMacroSession,
   type PureIdleMacroSummary,
 } from "./pureIdleMacro";
+import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
 import type { GameState } from "./types";
 
 export type PureIdleMacroWorkerRequest =
@@ -56,7 +57,13 @@ export type PureIdleMacroWorkerResponse =
     id: number;
     type: "finalized";
     summary: PureIdleMacroSummary;
-    state: GameState;
+    payloadBytes: ArrayBuffer;
+    payloadChecksum: string;
+    stateChecksum: string;
+    byteLength: number;
+    stateVersion: number;
+    mode: "normal" | "speedrun";
+    entityCount: number;
     rawBytes: number;
     durationMs: number;
   }
@@ -142,18 +149,32 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
       return;
     }
     postProgress("finalizing");
-    const result = finalizePureIdleMacroSession(session, request.targetWallSeconds, registry.registry, {
+    const result = finalizePureIdleMacroCandidate(session, request.targetWallSeconds, {
       deadlineAtMs,
       shouldCancel: interrupted,
+    });
+    const mode = result.state.mode === "speedrun" ? "speedrun" : "normal";
+    const serialized = serializeSaveEnvelopeToTransfer(result.state, {
+      formatVersion: 2,
+      kind: "primary",
+      mode,
+      slot: "main",
+      savedAt: Date.now(),
     });
     self.postMessage({
       id: request.id,
       type: "finalized",
       summary: result.summary,
-      state: result.state,
-      rawBytes: result.rawBytes,
+      payloadBytes: serialized.bytes,
+      payloadChecksum: serialized.payloadChecksum,
+      stateChecksum: serialized.stateChecksum,
+      byteLength: serialized.byteLength,
+      stateVersion: result.state.version,
+      mode,
+      entityCount: result.state.entities.length,
+      rawBytes: serialized.byteLength,
       durationMs: Math.max(0, performance.now() - startedAt),
-    } satisfies PureIdleMacroWorkerResponse);
+    } satisfies PureIdleMacroWorkerResponse, [serialized.bytes]);
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       self.postMessage({

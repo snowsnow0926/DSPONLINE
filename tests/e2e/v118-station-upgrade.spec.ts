@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-10-v1.0.37";
+const RELEASE_NOTE_ID = "2026-08-11-v1.0.38";
 
 function seedStationUpgradeFixture() {
   return () => {
-    const releaseNoteId = "2026-08-10-v1.0.37";
+    const releaseNoteId = "2026-08-11-v1.0.38";
     const entityBase = {
       interactionLocked: false,
       minerCount: 0,
@@ -82,7 +82,7 @@ test("selected interstellar station exposes a working Mk.II upgrade and star map
 test("missing technology and materials are shown instead of a silent no-op", async ({ page }) => {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-10-v1.0.37");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-11-v1.0.38");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     window.localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state: {
       version: 43, nextId: 2, activePlanetId: "home",

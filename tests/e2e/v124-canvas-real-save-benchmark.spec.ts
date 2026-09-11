@@ -194,7 +194,7 @@ async function runStage(browser: Browser, source: SourceState, planetId: string,
   const raw = JSON.stringify({ savedAt: Date.now(), state });
   await page.addInitScript(({ extreme, features }) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-10-v1.0.37");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-11-v1.0.38");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.canvas-performance-features.v1", JSON.stringify(features));
     if (extreme) {
@@ -277,7 +277,7 @@ async function runStagesOnOnePage(browser: Browser, source: SourceState, planetI
   const raw = JSON.stringify({ savedAt: Date.now(), state });
   await page.addInitScript(({ features, extreme }) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-10-v1.0.37");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-11-v1.0.38");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.canvas-performance-features.v1", JSON.stringify(features));
     if (extreme) localStorage.setItem("dsp-idle-network.endgame-extreme.v1", "true");

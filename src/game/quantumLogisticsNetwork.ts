@@ -292,6 +292,8 @@ export interface QuantumSettlementOptions {
   seconds?: number;
   globalUploadCap?: DecimalIntegerString | number;
   globalDownloadCap?: DecimalIntegerString | number;
+  /** Engine-only fast path for a state already normalized at load/session creation. */
+  mutateNormalizedState?: boolean;
 }
 
 export interface QuantumSettlementDiagnostics {
@@ -568,7 +570,7 @@ export function settleQuantumLogisticsNetwork(
   outputs: readonly QuantumSettlementOutput[],
   options: QuantumSettlementOptions = {},
 ): QuantumSettlementResult {
-  const state = normalizeQuantumLogisticsNetworkState(network);
+  const state = options.mutateNormalizedState ? network : normalizeQuantumLogisticsNetworkState(network);
   if (!state.enabled) {
     return {
       state,

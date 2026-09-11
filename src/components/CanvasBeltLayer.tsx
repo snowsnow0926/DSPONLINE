@@ -37,21 +37,24 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
   // not rebuild a multi-thousand-line spatial index.
   const batch = useMemo(() => buildCanvasLineBatchFromGeometry(belts, planetId, nodes, routeCenters), [nodes, planetId, routeCenters, topologyRevision]);
   const hitIndex = useMemo(() => buildCanvasBeltHitIndex(batch), [batch]);
-  const beltById = useMemo(() => new Map(belts.map((belt) => [belt.id, belt])), [belts]);
+  // Item/color belongs to topology. Runtime flow refreshes replace the belts
+  // array frequently, but must not rebuild the full visual map or hit layer.
+  const beltItemById = useMemo(() => new Map(belts.map((belt) => [belt.id, belt.itemId])), [planetId, topologyRevision]);
   const lineGroups = useMemo(() => {
     const groups = new Map<string, { color: string; selected: boolean; indexes: number[] }>();
     for (let index = 0; index < batch.beltIds.length; index += 1) {
-      const belt = beltById.get(batch.beltIds[index]);
-      if (!belt) continue;
-      const selected = selectedBeltIds.has(belt.id);
-      const color = selected ? "#f3d27b" : ITEMS[belt.itemId]?.color ?? "#6da8a0";
+      const beltId = batch.beltIds[index];
+      const itemId = beltItemById.get(beltId);
+      if (!itemId) continue;
+      const selected = selectedBeltIds.has(beltId);
+      const color = selected ? "#f3d27b" : ITEMS[itemId]?.color ?? "#6da8a0";
       const key = `${selected ? 1 : 0}|${color}`;
       const group = groups.get(key) ?? { color, selected, indexes: [] };
       group.indexes.push(index);
       groups.set(key, group);
     }
     return [...groups.values()];
-  }, [batch.beltIds, beltById, selectedBeltIds]);
+  }, [batch.beltIds, beltItemById, selectedBeltIds]);
 
   const draw = useCallback(() => {
     drawFrameRef.current = null;

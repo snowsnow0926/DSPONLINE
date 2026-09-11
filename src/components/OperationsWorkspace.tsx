@@ -122,6 +122,8 @@ interface OperationsWorkspaceProps {
   onLoadSlot: (slotId: SaveSlotId) => void;
   onDeleteSlot: (slotId: SaveSlotId) => void;
   onCreateSnapshot: () => void;
+  onAddSecondUnipolarVein: () => void;
+  unipolarExpansionBusy: boolean;
   onLoadSnapshot: (snapshotId: string) => void;
   onDeleteSnapshot: (snapshotId: string) => void;
   onDeleteSnapshots: (snapshotIds: string[]) => void;
@@ -670,13 +672,15 @@ function SavesPanel({
   onLoadSlot,
   onDeleteSlot,
   onCreateSnapshot,
+  onAddSecondUnipolarVein,
+  unipolarExpansionBusy,
   onLoadSnapshot,
   onDeleteSnapshot,
   onDeleteSnapshots,
   onValidateMod,
   onExportModTemplate,
 }: Pick<OperationsWorkspaceProps,
-  "game" | "slots" | "snapshots" | "importPreview" | "modValidation" | "onManualSave" | "onExport" | "onImport" | "onConfirmImport" | "onConfirmImportRescue" | "importRescueArmed" | "onCancelImport" | "onSaveSlot" | "onLoadSlot" | "onDeleteSlot" | "onCreateSnapshot" | "onLoadSnapshot" | "onDeleteSnapshot" | "onDeleteSnapshots" | "onValidateMod" | "onExportModTemplate">) {
+  "game" | "slots" | "snapshots" | "importPreview" | "modValidation" | "onManualSave" | "onExport" | "onImport" | "onConfirmImport" | "onConfirmImportRescue" | "importRescueArmed" | "onCancelImport" | "onSaveSlot" | "onLoadSlot" | "onDeleteSlot" | "onCreateSnapshot" | "onAddSecondUnipolarVein" | "unipolarExpansionBusy" | "onLoadSnapshot" | "onDeleteSnapshot" | "onDeleteSnapshots" | "onValidateMod" | "onExportModTemplate">) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modInputRef = useRef<HTMLInputElement>(null);
   const [deleteRequest, setDeleteRequest] = useState<(SaveDeleteTarget & ({ kind: "slot"; slotId: SaveSlotId } | { kind: "snapshot"; snapshotId: string } | { kind: "snapshots"; snapshotIds: string[] })) | null>(null);
@@ -685,6 +689,13 @@ function SavesPanel({
   const summaryBySlot = new Map(slots.map((slot) => [slot.slotId, slot]));
   const automaticSnapshotCount = snapshots.filter((snapshot) => snapshot.reason === "自动快照").length;
   const manualSnapshotCount = snapshots.length - automaticSnapshotCount;
+  const unipolarCount = game.entities.filter((entity) => entity.kind === "vein" && entity.resourceId === "unipolar_magnet").length;
+  const unipolarEligible = game.mode !== "speedrun" && game.speedrun?.enabled !== true && unipolarCount === 1 && game.paused;
+  const unipolarStatus = game.mode === "speedrun" || game.speedrun?.enabled === true
+    ? "速通存档禁止扩容"
+    : unipolarCount >= 2 ? `当前 ${unipolarCount} 个，硬上限 2`
+      : !game.paused ? "请先暂停模拟"
+        : unipolarCount === 1 ? "符合一次性扩容条件" : `当前 ${unipolarCount} 个，需先通过资源审计`;
   useEffect(() => {
     let active = true;
     void getLocalSaveStorageEstimate().then((estimate) => { if (active) setStorageEstimate(estimate); });
@@ -714,6 +725,14 @@ function SavesPanel({
             event.target.value = "";
           }}
         />
+      </section>
+      <section className="save-resource-integrity-tool" aria-label="单极磁石矿脉扩容工具">
+        <header><div><ShieldCheck size={14} /><strong>单极磁石矿脉扩容</strong></div><small>{unipolarStatus}</small></header>
+        <p>仅为恰好拥有 1 个规范矿脉的普通存档新增 1 个矿脉；总数硬上限为 2。操作会先创建恢复快照，不会写入矿物缓存、托盘、累计产量或排行榜。</p>
+        <div><span>当前数量 <strong>{unipolarCount}</strong></span><span>目标数量 <strong>2</strong></span><span>模式 <strong>{game.mode === "speedrun" ? "速通" : "普通"}</strong></span></div>
+        <button type="button" className="danger" disabled={!unipolarEligible || unipolarExpansionBusy} onClick={onAddSecondUnipolarVein}>
+          <MapPin size={14} />{unipolarExpansionBusy ? "正在备份并校验…" : "备份后增加 1 个矿脉"}
+        </button>
       </section>
       {importPreview ? <section className="save-import-preview" aria-label="存档导入预览">
         <header><div><FileCheck2 size={15} /><strong>导入预览</strong></div><span className={`save-integrity save-integrity--${importPreview.integrity}`}>{integrityLabel(importPreview.integrity)}</span></header>

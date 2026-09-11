@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import { createCloudServer } from "./index.mjs";
 import {
   CLOUD_PAYLOAD_BLOB_TABLE,
+  auditCurrentMainCloudPayloadResolution,
   initializeCloudPayloadStore,
   readCloudPayload,
   writeCloudPayload,
@@ -500,6 +501,94 @@ test("ready reports aggregate current-main payload resolution without exposing s
     });
     assert.equal(JSON.stringify(body.currentMainPayloads).includes(present), false);
     assert.equal(JSON.stringify(body.currentMainPayloads).includes(sha256(present)), false);
+  } finally {
+    if (server?.listening) await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("committed payload changes audit only affected owners and preserve the full audit result", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "dsp-cloud-incremental-main-audit-"));
+  const databasePath = path.join(directory, "cloud.sqlite");
+  const database = createDatabase(databasePath);
+  const left = createPayload("left");
+  const right = createPayload("unrelated-legacy-" + "x".repeat(2 * 1024 * 1024));
+  const missing = createPayload("missing");
+  writePayload(database, "left", 1, left);
+  database.prepare("INSERT INTO cloud_save_payloads (user_id, slot, revision, payload) VALUES ('right', 'main', 1, ?)").run(right);
+  writeAppState(database, {
+    schemaVersion: 8, storageLayoutVersion: 3,
+    users: { left: user("left"), right: user("right"), missing: user("missing") },
+    cloudSaves: { left: metadata(left, 1), right: metadata(right, 1), missing: metadata(missing, 1) },
+    cloudSaveHistory: {},
+  });
+  database.close();
+  let server;
+  try {
+    server = await createCloudServer({ databaseFile: databasePath, logger: { error() {} } });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const store = server.store;
+    const prepare = store.database.prepare.bind(store.database);
+    const auditedOwners = [];
+    store.database.prepare = (sql) => {
+      const statement = prepare(sql);
+      if (sql.includes("AS storageType") && sql.includes("slot = 'main' AND revision = ?")) {
+        return { get(...args) { auditedOwners.push(args[2]); return statement.get(...args); } };
+      }
+      return statement;
+    };
+    const verifyOracle = () => {
+      const observed = { ...store.currentMainPayloadStatus() };
+      delete observed.available; delete observed.checkedAt;
+      store.database.prepare = prepare;
+      assert.deepEqual(observed, auditCurrentMainCloudPayloadResolution(store.database, store._data));
+    };
+    const changed = createPayload("left-revision-2");
+    await store.mutate((draft) => {
+      draft.data.cloudSaves.left = draft.stageCloudSavePayload("left", "main", { ...metadata(changed, 2), payload: changed });
+    });
+    assert.deepEqual(auditedOwners, ["left"], "a small upload must not read another owner's large legacy body");
+    assert.equal(store.currentMainPayloadStatus().missingPayloadRows, 1);
+    verifyOracle();
+
+    await store.mutate((draft) => draft.discardCloudSavePayload("left", "main", 2));
+    assert.equal(store.currentMainPayloadStatus().missingPayloadRows, 2);
+    verifyOracle();
+
+    await store.mutate((draft) => {
+      draft.data.cloudSaves.left = draft.stageCloudSavePayload("left", "main", { ...metadata(changed, 2), payload: changed });
+      draft.discardUserCloudSavePayloads("right");
+      delete draft.data.cloudSaves.right;
+      delete draft.data.users.right;
+    });
+    assert.equal(store.currentMainPayloadStatus().checked, 2);
+    assert.equal(store.currentMainPayloadStatus().resolvable, 1);
+    verifyOracle();
+
+    const before = { ...store.currentMainPayloadStatus() };
+    store.faultInjector = ({ phase }) => { if (phase === "after-app-state-write") throw new Error("test rollback"); };
+    await assert.rejects(store.mutate((draft) => draft.discardCloudSavePayload("left", "main", 2)), /test rollback/);
+    assert.deepEqual(store.currentMainPayloadStatus(), before, "failed transactions cannot publish audit changes");
+    verifyOracle();
+    store.faultInjector = null;
+    const originalAudit = store.refreshCurrentMainPayloadAudit;
+    let presenceAuditCalls = 0;
+    store.refreshCurrentMainPayloadAudit = function (...args) { presenceAuditCalls += 1; return originalAudit.apply(this, args); };
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/presence`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ playerId: "incremental_audit_presence_fixture" }),
+    });
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).players.total, 1);
+    assert.equal(presenceAuditCalls, 0);
+    assert.deepEqual(store.currentMainPayloadStatus(), before);
+    store.refreshCurrentMainPayloadAudit = originalAudit;
+    await new Promise((resolve) => server.close(resolve));
+    server = await createCloudServer({ databaseFile: databasePath, logger: { error() {} } });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    assert.equal(server.store.currentMainPayloadStatus().checked, 2);
+    assert.equal(server.store.currentMainPayloadStatus().missingPayloadRows, 1);
+    assert.equal(Object.keys(server.store.data.players).length, 1);
   } finally {
     if (server?.listening) await new Promise((resolve) => server.close(resolve));
     await rm(directory, { recursive: true, force: true });

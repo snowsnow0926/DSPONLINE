@@ -1573,6 +1573,7 @@ class SqliteStore extends AtomicStoreBase {
       maximumProjectedCharacters: 161,
     };
     this.currentMainPayloadAudit = unavailableCurrentMainPayloadAudit();
+    this.currentMainPayloadAuditByUser = null;
     this.runtimeStatePersistence = null;
   }
 
@@ -1584,17 +1585,36 @@ class SqliteStore extends AtomicStoreBase {
     this.refreshCurrentMainPayloadAudit();
   }
 
-  refreshCurrentMainPayloadAudit() {
+  refreshCurrentMainPayloadAudit(affectedUserIds = null) {
     try {
-      this.currentMainPayloadAudit = {
-        available: true,
-        checkedAt: Date.now(),
-        ...auditCurrentMainCloudPayloadResolution(this.database, this._data),
-      };
+      // A committed upload changes only its owners' payload resolution. Reusing
+      // unchanged reports avoids reading every other current save after each
+      // upload, especially when legacy direct bodies no longer fit in cache.
+      const rebuild = affectedUserIds === null || this.currentMainPayloadAuditByUser === null;
+      const reports = rebuild ? new Map() : new Map(this.currentMainPayloadAuditByUser);
+      const userIds = rebuild ? Object.keys(this._data.cloudSaves ?? {}) : new Set(affectedUserIds);
+      for (const userId of userIds) {
+        const metadata = this._data.cloudSaves?.[userId];
+        if (!Object.hasOwn(this._data.cloudSaves ?? {}, userId)) {
+          reports.delete(userId);
+          continue;
+        }
+        reports.set(userId, auditCurrentMainCloudPayloadResolution(this.database, {
+          users: this._data.users,
+          cloudSaves: { [userId]: metadata },
+        }));
+      }
+      const aggregate = { ...unavailableCurrentMainPayloadAudit(Date.now()), available: true };
+      for (const report of reports.values()) {
+        for (const [key, value] of Object.entries(report)) aggregate[key] += value;
+      }
+      this.currentMainPayloadAuditByUser = reports;
+      this.currentMainPayloadAudit = aggregate;
     } catch {
       // Readiness must surface an unavailable audit without leaking database
       // details or blocking the remainder of the service's status response.
       this.currentMainPayloadAudit = unavailableCurrentMainPayloadAudit(Date.now());
+      this.currentMainPayloadAuditByUser = null;
     }
   }
 
@@ -1694,7 +1714,11 @@ class SqliteStore extends AtomicStoreBase {
     super.afterMutationCommitted(mutation);
     if (mutation.writes.size > 0 || mutation.fileWrites?.size > 0 || mutation.deletes.size > 0 ||
       mutation.userDeletes.size > 0 || mutation.replaceUserPayloads?.size > 0) {
-      this.refreshCurrentMainPayloadAudit();
+      const affectedUserIds = new Set([...mutation.userDeletes, ...mutation.replaceUserPayloads]);
+      for (const collection of [mutation.writes, mutation.fileWrites, mutation.deletes]) {
+        for (const record of collection?.values() ?? []) affectedUserIds.add(record.userId);
+      }
+      this.refreshCurrentMainPayloadAudit(affectedUserIds);
     }
     if (!mutation.legacyPending) return;
     for (const [key, write] of mutation.writes) {

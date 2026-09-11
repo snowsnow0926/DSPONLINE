@@ -160,6 +160,7 @@ export function TimeWarpIdleOverlay({
   const projected = projectedSnapshot(macroSummary, fallback, elapsed);
   const baseline = macroSummary?.baseline ?? persistentBaseline;
   const modeLabel = macroSummary?.mode === "extreme" ? "终局极限模式" : "宏观纯挂机";
+  const boundedExact = macroSummary?.settlementMode === "bounded-exact";
   const phaseLabel = macroSummary
     ? macroSummary.phase === "preparing-power" ? "正在准备供电快照"
       : macroSummary.phase === "calibrating" ? "正在执行有界精确校准"
@@ -169,7 +170,7 @@ export function TimeWarpIdleOverlay({
               : macroSummary.phase === "finalizing" ? "正在结算并验证存档"
                 : macroSummary.phase === "recovering" ? "正在恢复 Worker"
                   : macroSummary.phase === "failed" ? "正在等待安全恢复"
-                    : "正常宏观结算中"
+                    : boundedExact ? "产量波动，分段精确结算中" : "正常宏观结算中"
     : continueAvailable ? "源存档或恢复日志需要处理" : "正在准备供电快照";
   const nextValidationSeconds = macroSummary?.nextValidationAtWallSeconds == null
     ? null
@@ -216,7 +217,9 @@ export function TimeWarpIdleOverlay({
         </header>
         <p className="time-warp-idle-lead">{continueAvailable
           ? "当前恢复记录未通过安全校验，未结算候选不会覆盖主存档。"
-          : "每 30 秒执行一次有界宏观结算，有限与无限科研由独立整数账本处理。页面进入后台后保留 5 分钟高倍率宽限，超出部分自动切换普通离线结算。"}</p>
+          : boundedExact
+            ? "检测到产量速率跨越缓存或物流边界，当前每段复用普通模拟精确结算；浏览器休眠或长时间无进度时，未结算尾段自动切换普通离线流程。"
+            : "每 30 秒执行一次有界宏观结算，有限与无限科研由独立整数账本处理。页面进入后台后保留 5 分钟高倍率宽限，超出部分自动切换普通离线结算。"}</p>
 
         <section className="time-warp-idle-metrics" aria-label="运行摘要">
           <div><Gauge size={17} /><span>实际倍率</span><strong>{macroSummary?.actualMultiplier ?? computeLimits.actualMultiplier}x</strong></div>
@@ -225,7 +228,7 @@ export function TimeWarpIdleOverlay({
           <div><Clock3 size={17} /><span>历史累计挂机</span><strong>{formatDuration(game.idleSettlement.totalIdleTime)}</strong><small>仅统计已验证提交的时间段</small></div>
           <div className={`efficiency-${efficiencyTone(macroSummary?.minimumEfficiency ?? null)}`}><Activity size={17} /><span>关键产线最低效率</span><strong>{efficiencyLabel(macroSummary?.minimumEfficiency ?? null)}</strong><small>{macroSummary?.limitingReason ?? "等待校准"}</small></div>
           <div><HardDrive size={17} /><span>保存与恢复</span><strong className={saveFailure ? "warning" : "ready"}>{saveFailure ? "需要处理" : "检查点正常"}</strong><small>{recoveryStatus}</small></div>
-          <div><ShieldCheck size={17} /><span>下次真实校验</span><strong>{macroSummary?.mode === "extreme" ? "仅宏观结算" : nextValidationSeconds === null ? "校准后开始" : formatDuration(nextValidationSeconds)}</strong></div>
+          <div><ShieldCheck size={17} /><span>下次真实校验</span><strong>{boundedExact ? "每段均为精确" : nextValidationSeconds === null ? "校准后开始" : formatDuration(nextValidationSeconds)}</strong></div>
         </section>
 
         <section className="time-warp-idle-output" aria-label="终局产出">
@@ -260,6 +263,7 @@ export function TimeWarpIdleOverlay({
             <div><span>供电上限</span><strong>{macroSummary?.powerLimitedMultiplier ?? computeLimits.powerLimitedMultiplier}x</strong></div>
             <div><span>精确计算能力</span><strong>约 {computeLimits.computeLimitedMultiplier}x</strong></div>
             <div><span>宏观算法</span><strong>{macroSummary?.algorithmVersion ?? "等待初始化"}</strong></div>
+            <div><span>结算路径</span><strong>{boundedExact ? "分段精确" : macroSummary?.settlementMode === "conservative" ? "保守宏观" : "守恒宏观"}</strong></div>
             <div><span>已结算墙钟</span><strong>{formatDuration(macroSummary?.settledWallSeconds ?? 0)}</strong></div>
             <div><span>已结算模拟</span><strong>{formatDuration(macroSummary?.settledSimulationSeconds ?? 0)}</strong></div>
             <div><span>合同版本</span><strong>{macroSummary?.contractVersion ?? 0}</strong></div>

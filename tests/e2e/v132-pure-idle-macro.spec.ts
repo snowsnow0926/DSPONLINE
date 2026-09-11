@@ -270,7 +270,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     expect(result.durationMs).toBeLessThan(30_000);
   });
 
-  test("migrates a pure-idle-macro-v2 recovery summary with active research to v3", async ({ page }) => {
+  test("migrates a pure-idle-macro-v2 recovery summary with active research to v4", async ({ page }) => {
     const result = await page.evaluate(async () => {
       const contentPacks = await import("/src/game/contentPacks.ts");
       const engine = await import("/src/game/engine.ts");
@@ -345,7 +345,7 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
     });
 
     expect(result.oldAlgorithm).toBe("pure-idle-macro-v2");
-    expect(result.newAlgorithm).toBe("pure-idle-macro-v3");
+    expect(result.newAlgorithm).toBe("pure-idle-macro-v4");
     expect(result).toMatchObject({ researchKind: "finite", researchId: "electromagnetic_matrix" });
   });
 
@@ -816,8 +816,12 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
       const registry = contentPacks.createContentPackRuntimeSnapshot(contentPacks.createContentPackRegistry());
       const client = new macro.PureIdleMacroClient();
       const startedAt = performance.now();
+      const initializeStartedAt = performance.now();
       await client.initialize(state, "extreme", registry);
+      const initializeMs = performance.now() - initializeStartedAt;
+      const finalizeStartedAt = performance.now();
       const finalized = await client.finalize(30 * 24 * 60 * 60);
+      const finalizeRoundTripMs = performance.now() - finalizeStartedAt;
       const durationMs = performance.now() - startedAt;
       client.close();
       const raw = storage.serializeEnvelope(finalized.state);
@@ -828,6 +832,10 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
           typeof route.progress === "number" && route.progress >= 0 && route.progress <= 1));
       return {
         durationMs,
+        initializeMs,
+        finalizeRoundTripMs,
+        workerFinalizeDurationMs: finalized.durationMs,
+        transferBytes: finalized.rawBytes,
         sourceUnchanged: benchmark.hashGameState(state) === sourceHash,
         valid: inspection.valid,
         routesValid,
@@ -855,13 +863,14 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
       };
     });
 
+    console.log(`PURE_IDLE_MACRO_REAL_SAVE ${JSON.stringify(result)}`);
     expect(result.sourceUnchanged).toBe(true);
     expect(result.valid).toBe(true);
     expect(result.routesValid).toBe(true);
     expect(result.entityCountPreserved).toBe(true);
     expect(result.beltCountPreserved).toBe(true);
     expect(result.settledWallSeconds).toBe(30 * 24 * 60 * 60);
-    expect(result.algorithmVersion).toBe("pure-idle-macro-v3");
+    expect(result.algorithmVersion).toBe("pure-idle-macro-v4");
     expect(result.requestedMultiplier).toBeGreaterThanOrEqual(1);
     expect(result.powerLimitedMultiplier).toBeGreaterThanOrEqual(1);
     expect(result.actualMultiplier).toBeGreaterThanOrEqual(1);
@@ -871,6 +880,5 @@ test.describe("1.0.34 pure-idle macro recovery", () => {
       expect(result.researchAfter).toBeTruthy();
     }
     expect(result.durationMs).toBeLessThan(30_000);
-    console.log(`PURE_IDLE_MACRO_REAL_SAVE ${JSON.stringify(result)}`);
   });
 });

@@ -15,7 +15,8 @@ import {
   selectOfflineWorkerStrategyAfterFastResult,
   type OfflineWorkerSettlementRequestShape,
 } from "./offlineSettlementStrategy";
-import { applyReturningRewardToState, inspectSave, serializeEnvelope } from "./storage";
+import { applyReturningRewardToState, inspectSave, prepareSaveStateForBackground } from "./storage";
+import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
 import { getOfflineSimulationLimitSeconds } from "./endgame";
 import type { GameSettings, GameState } from "./types";
 
@@ -33,8 +34,8 @@ function nowMs(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
-function post(message: OfflineSimulationWorkerResponse): void {
-  self.postMessage(message);
+function post(message: OfflineSimulationWorkerResponse, transfer: Transferable[] = []): void {
+  self.postMessage(message, transfer);
 }
 
 function mergeUploadSettings(saved: GameSettings, menu?: Partial<GameSettings>): GameSettings {
@@ -54,9 +55,7 @@ function mergeUploadSettings(saved: GameSettings, menu?: Partial<GameSettings>):
   };
 }
 
-function uploadSummary(state: GameState, payload: string, savedAt: number): CloudUploadSummary {
-  const envelope = JSON.parse(payload) as { checksum?: unknown };
-  const stateChecksum = typeof envelope.checksum === "string" ? envelope.checksum : null;
+function uploadSummary(state: GameState, stateChecksum: string, savedAt: number): CloudUploadSummary {
   return {
     mode: state.mode === "speedrun" ? "speedrun" : "normal",
     stateVersion: state.version,
@@ -71,6 +70,46 @@ function uploadSummary(state: GameState, payload: string, savedAt: number): Clou
     computedStateChecksum: stateChecksum,
     integrity: "valid" as const,
   };
+}
+
+function serializeWorkerState(
+  state: GameState,
+  savedAt: number,
+  persistent: boolean,
+  registry: Parameters<typeof prepareSaveStateForBackground>[1],
+) {
+  const serializedState = persistent ? prepareSaveStateForBackground(state, registry) : state;
+  const serialized = serializeSaveEnvelopeToTransfer(serializedState, {
+    formatVersion: 2,
+    kind: "primary",
+    mode: state.mode === "speedrun" ? "speedrun" : "normal",
+    slot: "main",
+    savedAt,
+  });
+  return {
+    serialized,
+    summary: uploadSummary(state, serialized.stateChecksum, savedAt),
+  };
+}
+
+function postCompletedState(
+  requestId: number,
+  state: GameState,
+  totalSeconds: number,
+  registry: Parameters<typeof prepareSaveStateForBackground>[1],
+  approximation?: OfflineApproximationReport,
+): void {
+  const { serialized, summary } = serializeWorkerState(state, Date.now(), false, registry);
+  post({
+    type: "complete",
+    id: requestId,
+    payloadBytes: serialized.bytes,
+    payloadChecksum: serialized.payloadChecksum,
+    byteLength: serialized.byteLength,
+    summary,
+    totalSeconds,
+    ...(approximation ? { approximation } : {}),
+  }, [serialized.bytes]);
 }
 
 self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => {
@@ -109,9 +148,12 @@ self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => 
   try {
     applyContentPackRuntimeSnapshot(request.registry);
     if (request.type === "prepare-upload") {
-      const sourceBytes = new TextEncoder().encode(request.raw).byteLength;
+      const sourceBytes = request.rawBytes.byteLength;
+      let sourceRaw = new TextDecoder("utf-8", { fatal: true }).decode(request.rawBytes);
+      request.rawBytes = new ArrayBuffer(0);
       const inspectStartedAt = nowMs();
-      const inspection = inspectSave(request.raw, request.registry.registry);
+      const inspection = inspectSave(sourceRaw, request.registry.registry);
+      sourceRaw = "";
       const inspectMs = Math.max(0, nowMs() - inspectStartedAt);
       if (!inspection.valid || !inspection.state) throw new Error(inspection.issues[0] ?? "本地存档格式或完整性无效");
       const savedAt = inspection.savedAt ?? request.now;
@@ -150,18 +192,20 @@ self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => 
         currentPhase = "saving";
         postProgress(offlineSeconds, offlineSeconds);
         const serializeStartedAt = nowMs();
-        const payload = serializeEnvelope(state, request.now, "primary", undefined, request.registry.registry);
+        const { serialized, summary } = serializeWorkerState(state, request.now, true, request.registry.registry);
         const serializeMs = Math.max(0, nowMs() - serializeStartedAt);
         post({
           type: "upload-complete",
           id: request.id,
-          payload,
-          summary: uploadSummary(state, payload, request.now),
+          payloadBytes: serialized.bytes,
+          payloadChecksum: serialized.payloadChecksum,
+          byteLength: serialized.byteLength,
+          summary,
           offlineSeconds,
           returningReward: returning.reward.map((entry) => ({ itemId: entry.itemId, amount: entry.amount })),
           diagnostics: {
             sourceBytes,
-            payloadBytes: new TextEncoder().encode(payload).byteLength,
+            payloadBytes: serialized.byteLength,
             totalMs: Math.max(0, nowMs() - operationStartedAt),
             inspectMs,
             offlineMs,
@@ -169,7 +213,7 @@ self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => 
             offlineSeconds,
             skippedOffline: request.skipOffline === true,
           },
-        });
+        }, [serialized.bytes]);
         activeId = null;
       };
       runChunk();
@@ -242,7 +286,7 @@ self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => 
           algorithmVersion: experiment.report.algorithmVersion,
           degradedReason: experiment.report.fallbackReason,
         });
-        post({ type: "complete", id: request.id, state: experiment.state, totalSeconds: request.seconds, approximation });
+        postCompletedState(request.id, experiment.state, request.seconds, request.registry.registry, approximation);
         activeId = null;
         return;
       }
@@ -310,7 +354,7 @@ self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => 
         setTimeout(runChunk, 0);
         return;
       }
-      post({ type: "complete", id: request.id, state: completeSimulationAdvanceSession(session), totalSeconds: session.totalSeconds, approximation });
+      postCompletedState(request.id, completeSimulationAdvanceSession(session), session.totalSeconds, request.registry.registry, approximation);
       activeId = null;
     };
     runChunk();

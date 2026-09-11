@@ -108,6 +108,65 @@ export interface PureIdleBackgroundPlan {
   graceExpired: boolean;
 }
 
+type PureIdleProgressRecord = Pick<
+  PureIdleRecoveryRecord,
+  "startedAtMs" | "backgroundStartedAtMs" | "settledWallSeconds" | "summary"
+>;
+
+export function getPureIdleSettledWallSeconds(record: Pick<PureIdleProgressRecord, "settledWallSeconds" | "summary">): number {
+  return Math.max(0, record.settledWallSeconds, record.summary?.settledWallSeconds ?? 0);
+}
+
+/**
+ * v1-v3 recovery summaries predate settlementMode. Treat an unknown path as
+ * bounded until the checkpoint has been recalibrated by the current Worker;
+ * otherwise an old unstable session could receive an unsafe multi-minute
+ * exact catch-up as its first v4 operation.
+ */
+export function requiresBoundedPureIdleCatchup(
+  record: { summary?: Pick<PureIdleMacroSummary, "settlementMode"> },
+): boolean {
+  const settlementMode = record.summary?.settlementMode;
+  return settlementMode === undefined || settlementMode === "bounded-exact";
+}
+
+/**
+ * Detect browser/OS suspension even when no visibility or pagehide event was
+ * delivered. The returned timestamp is the last committed macro boundary,
+ * so an unattended interval cannot be reclaimed as fresh high-rate time.
+ */
+export function getPureIdleUnattendedBackgroundStartedAt(
+  record: PureIdleProgressRecord,
+  nowMs = Date.now(),
+  maximumUnattendedSeconds = PURE_IDLE_BACKGROUND_GRACE_SECONDS,
+): number | null {
+  if (record.backgroundStartedAtMs !== undefined) return null;
+  const totalWallSeconds = Math.max(0, (nowMs - record.startedAtMs) / 1_000);
+  const settledWallSeconds = Math.min(totalWallSeconds, getPureIdleSettledWallSeconds(record));
+  const maximumGap = Math.max(1, maximumUnattendedSeconds);
+  if (totalWallSeconds - settledWallSeconds <= maximumGap + 1e-9) return null;
+  return Math.max(record.startedAtMs, Math.min(nowMs, record.startedAtMs + settledWallSeconds * 1_000));
+}
+
+/** Limit high-rate catch-up when an unstable factory must use exact chunks. */
+export function capPureIdleBackgroundPlan(
+  plan: PureIdleBackgroundPlan,
+  settledWallSeconds: number,
+  maximumAdditionalHighRateSeconds: number,
+): PureIdleBackgroundPlan {
+  const highWallSeconds = Math.min(
+    plan.highWallSeconds,
+    Math.max(0, settledWallSeconds) + Math.max(0, maximumAdditionalHighRateSeconds),
+  );
+  const normalOfflineSeconds = Math.max(0, plan.totalWallSeconds - highWallSeconds);
+  return {
+    ...plan,
+    highWallSeconds,
+    normalOfflineSeconds,
+    graceExpired: plan.graceExpired || normalOfflineSeconds > 1e-9,
+  };
+}
+
 export const PURE_IDLE_WORKER_RESTART_LIMIT = 2;
 
 export function getPureIdleForceConservativeReason(
@@ -609,6 +668,7 @@ export async function markPureIdleBackground(
   sessionId: string,
   ownerToken: string,
   backgroundStartedAtMs = Date.now(),
+  nowMs = Date.now(),
 ): Promise<boolean> {
   const db = await openDatabase();
   const transaction = db.transaction(STORE_NAME, "readwrite");
@@ -622,8 +682,8 @@ export async function markPureIdleBackground(
     ...heartbeat,
     schemaVersion: RECOVERY_SCHEMA_VERSION,
     backgroundStartedAtMs: heartbeat.backgroundStartedAtMs ?? backgroundStartedAtMs,
-    heartbeatAtMs: backgroundStartedAtMs,
-    leaseExpiresAtMs: backgroundStartedAtMs + LEASE_DURATION_MS,
+    heartbeatAtMs: nowMs,
+    leaseExpiresAtMs: nowMs + LEASE_DURATION_MS,
   } satisfies PureIdleHeartbeatRecord);
   await transactionDone(transaction);
   return true;

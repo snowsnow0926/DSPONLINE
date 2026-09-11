@@ -28,12 +28,19 @@ import { getInfiniteResearchCostBigInt, getInfiniteResearchMaximumLevel } from "
 import { normalizeDecimalIntegerString } from "./quantityFormat";
 import { ACTIVITY_MATERIAL_IDS } from "./activity";
 import { computeSaveStateChecksum, inspectSaveEnvelopeChecksum } from "./saveEnvelopeIntegrity";
+import {
+  computeSavePayloadTextChecksum,
+  decodeVerifiedSaveTransfer,
+  serializeSaveEnvelopeToTransfer,
+  type SaveTransferVerification,
+} from "./saveTransfer";
 import { createEmptyGalacticHubNetwork, createEmptySystemSpaceStations } from "./systemSpaceStation";
 import { normalizeHubInteger, SYSTEM_HUB_MAX_DIGITS } from "./systemHubLogistics";
 import { createEmptyQuantumLogisticsNetworkState, normalizeQuantumInteger, normalizeQuantumLogisticsNetworkState, QUANTUM_MAX_INTEGER_DIGITS } from "./quantumLogisticsNetwork";
 import { evaluateSpeedrunMilestones, normalizeSpeedrunState } from "./speedrun";
 import { normalizeIdleSettlementState } from "./idleSettlement";
-import { getActiveContentPackReferences, getMissingContentPackRequirements, loadContentPackRegistry, type ContentPackRegistry } from "./contentPacks";
+import { getMissingContentPackRequirements, loadContentPackRegistry, type ContentPackRegistry } from "./contentPacks";
+import { projectPersistentSaveState } from "./saveProjection";
 import {
   clearPrimarySaveEmergencyMirror,
   flushLocalSaveWrites,
@@ -415,30 +422,30 @@ function legacyChecksumFor(formatVersion: number, state: unknown): string {
   return computeSaveStateChecksum(formatVersion, projected);
 }
 
-function envelopeFor(
+function serializeEnvelopeProjection(
   state: GameState,
   savedAt = Date.now(),
   kind: SaveEnvelope["kind"] = "primary",
   reason?: string,
   contentPackRegistry: ContentPackRegistry = loadContentPackRegistry(),
   slot: SaveSlotId | "main" = "main",
-): SaveEnvelope {
-  // Detach the exact serializable snapshot before hashing. The old shallow
-  // envelope could retain live nested references between checksum generation
-  // and a later stringify performed by a caller.
-  const persistent = JSON.parse(JSON.stringify(persistentState(state, contentPackRegistry))) as GameState;
-  persistent.achievements.unlockedIds = persistent.achievements.unlockedIds.filter(isAchievementId);
-  const envelope: SaveEnvelope = {
+): { raw: string; verification: SaveTransferVerification } {
+  const persistent = prepareSaveStateForBackground(state, contentPackRegistry);
+  const serialized = serializeSaveEnvelopeToTransfer(persistent, {
     formatVersion: SAVE_FORMAT_VERSION,
     kind,
     ...(reason ? { reason } : {}),
     savedAt,
     mode: saveModeForState(state),
     slot,
-    state: persistent,
+  });
+  const verification: SaveTransferVerification = {
+    integrity: serialized.integrity,
+    stateChecksum: serialized.stateChecksum,
+    payloadChecksum: serialized.payloadChecksum,
+    byteLength: serialized.byteLength,
   };
-  envelope.checksum = computeSaveStateChecksum(SAVE_FORMAT_VERSION, persistent);
-  return envelope;
+  return { raw: decodeVerifiedSaveTransfer(serialized.bytes, verification), verification };
 }
 
 export function serializeEnvelope(
@@ -449,11 +456,7 @@ export function serializeEnvelope(
   contentPackRegistry: ContentPackRegistry = loadContentPackRegistry(),
   slot: SaveSlotId | "main" = "main",
 ): string {
-  const raw = JSON.stringify(envelopeFor(state, savedAt, kind, reason, contentPackRegistry, slot));
-  if (inspectSaveEnvelopeChecksum(raw).status !== "valid") {
-    throw new Error("生成的存档未通过完整性自检");
-  }
-  return raw;
+  return serializeEnvelopeProjection(state, savedAt, kind, reason, contentPackRegistry, slot).raw;
 }
 
 export interface BackgroundSaveResult {
@@ -461,21 +464,29 @@ export interface BackgroundSaveResult {
   durationMs: number;
   usedWorker: boolean;
   summary?: CloudSaveSummary;
+  verification: SaveTransferVerification;
 }
 
 let backgroundSaveRequestId = 0;
 
 /**
- * Prepare the persistent projection once on the main thread, then let a
- * short-lived Worker perform the large checksum/stringify step. The old
- * synchronous serializer remains the fallback for browsers without Worker.
+ * Send one structured-cloned source snapshot to a short-lived Worker. Sparse
+ * projection, checksum, serialization and byte verification all stay off the
+ * UI thread; the synchronous serializer remains the compatibility fallback.
  */
-export function serializeEnvelopeInWorker(state: GameState, savedAt = Date.now(), kind: SaveEnvelope["kind"] = "primary", reason?: string): Promise<BackgroundSaveResult> {
+export function serializeEnvelopeInWorker(
+  state: GameState,
+  savedAt = Date.now(),
+  kind: SaveEnvelope["kind"] = "primary",
+  reason?: string,
+  slot: SaveSlotId | "main" = "main",
+): Promise<BackgroundSaveResult> {
   if (typeof Worker === "undefined") {
     const startedAt = monotonicNow();
-    return Promise.resolve({ raw: serializeEnvelope(state, savedAt, kind, reason), durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
+    const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, loadContentPackRegistry(), slot);
+    return Promise.resolve({ ...serialized, durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
   }
-  const persistent = prepareSaveStateForBackground(state);
+  const contentPackRegistry = loadContentPackRegistry();
   const id = ++backgroundSaveRequestId;
   return new Promise((resolve) => {
     let worker: Worker;
@@ -483,7 +494,8 @@ export function serializeEnvelopeInWorker(state: GameState, savedAt = Date.now()
       worker = new Worker(new URL("./save.worker.ts", import.meta.url), { type: "module", name: "save-serialization" });
     } catch {
       const startedAt = monotonicNow();
-      resolve({ raw: serializeEnvelope(state, savedAt, kind, reason), durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
+      const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, loadContentPackRegistry(), slot);
+      resolve({ ...serialized, durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
       return;
     }
     let settled = false;
@@ -495,22 +507,43 @@ export function serializeEnvelopeInWorker(state: GameState, savedAt = Date.now()
     };
     const fallback = () => {
       const startedAt = monotonicNow();
-      finish({ raw: serializeEnvelope(state, savedAt, kind, reason), durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
+      const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, loadContentPackRegistry(), slot);
+      finish({ ...serialized, durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
     };
     worker.onerror = fallback;
-    worker.onmessage = (event: MessageEvent<{ id: number; raw?: string; durationMs?: number; summary?: CloudSaveSummary; error?: string }>) => {
-      if (event.data.id !== id || !event.data.raw || event.data.error) {
+    worker.onmessage = (event: MessageEvent<{ id: number; bytes?: ArrayBuffer; payloadChecksum?: string; byteLength?: number; durationMs?: number; summary?: CloudSaveSummary; error?: string }>) => {
+      const { bytes, payloadChecksum, byteLength, summary } = event.data;
+      if (event.data.id !== id || !(bytes instanceof ArrayBuffer) || !payloadChecksum || !summary?.stateChecksum ||
+        summary.integrity !== "valid" || byteLength !== bytes.byteLength || event.data.error) {
         fallback();
         return;
       }
-      if (inspectSaveEnvelopeChecksum(event.data.raw).status !== "valid") {
+      const verification: SaveTransferVerification = {
+        integrity: "valid",
+        stateChecksum: summary.stateChecksum,
+        payloadChecksum,
+        byteLength,
+      };
+      let raw: string;
+      try {
+        raw = decodeVerifiedSaveTransfer(bytes, verification);
+      } catch {
         fallback();
         return;
       }
-      finish({ raw: event.data.raw, durationMs: Math.max(0, event.data.durationMs ?? 0), usedWorker: true, ...(event.data.summary ? { summary: event.data.summary } : {}) });
+      finish({ raw, verification, durationMs: Math.max(0, event.data.durationMs ?? 0), usedWorker: true, summary });
     };
     try {
-      worker.postMessage({ id, formatVersion: SAVE_FORMAT_VERSION, savedAt, kind, ...(reason ? { reason } : {}), state: persistent });
+      worker.postMessage({
+        id,
+        formatVersion: SAVE_FORMAT_VERSION,
+        savedAt,
+        kind,
+        slot,
+        ...(reason ? { reason } : {}),
+        state,
+        contentPackRegistry,
+      });
     } catch {
       fallback();
     }
@@ -2218,45 +2251,14 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
   return syncCampaignProgress(repairedSpeedrun, { grantRewards: saved.version >= 18 });
 }
 
-function persistentState(state: GameState, contentPackRegistry: ContentPackRegistry = loadContentPackRegistry()): GameState {
-  const { runtimeFlow: _runtimeFlow, ...quantumLogisticsNetwork } = state.quantumLogisticsNetwork;
-  const persistentEntities = state.entities.map((entity) => {
-    if (entity.buildingId === "interstellar_logistics_station") return entity;
-    const { quantumTarget: _legacyQuantumTarget, ...withoutLegacyQuantumTarget } = entity;
-    return withoutLegacyQuantumTarget;
-  });
-  const sanitizeBlueprint = (blueprint: BlueprintDefinition): BlueprintDefinition => ({
-    ...blueprint,
-    entities: blueprint.entities.map((entity) => {
-      const { quantumTarget: _legacyQuantumTarget, operationEnabledOnDeploy: _legacyOperation, ...withoutLegacyFields } = entity;
-      if (entity.buildingId === "interstellar_logistics_station") return { ...withoutLegacyFields, quantumTarget: entity.quantumTarget === true };
-      if (entity.buildingId === "micro_black_hole_connector") return typeof entity.operationEnabledOnDeploy === "boolean"
-        ? { ...withoutLegacyFields, operationEnabledOnDeploy: entity.operationEnabledOnDeploy }
-        : withoutLegacyFields;
-      return withoutLegacyFields;
-    }),
-  });
-  return {
-    ...state,
-    mode: saveModeForState(state),
-    idleSettlement: normalizeIdleSettlementState(state.idleSettlement),
-    // Production curves are runtime diagnostics. Keeping them in every local
-    // recovery point multiplies save size without affecting factory progress.
-    productionHistory: [],
-    contentPacks: getActiveContentPackReferences(contentPackRegistry),
-    entities: persistentEntities,
-    blueprints: state.blueprints.map(sanitizeBlueprint),
-    blueprintVersions: state.blueprintVersions.map((snapshot) => ({ ...snapshot, definition: sanitizeBlueprint(snapshot.definition) })),
-    planetTrays: { ...state.planetTrays, [state.activePlanetId]: { ...state.tray } },
-    quantumLogisticsNetwork,
-  };
-}
-
 /** Detach runtime-only fields before handing a snapshot to the save Worker. */
-export function prepareSaveStateForBackground(state: GameState): GameState {
-  const prepared = JSON.parse(JSON.stringify(persistentState(state))) as GameState;
-  prepared.achievements.unlockedIds = prepared.achievements.unlockedIds.filter(isAchievementId);
-  return prepared;
+export function prepareSaveStateForBackground(
+  state: GameState,
+  contentPackRegistry: ContentPackRegistry = loadContentPackRegistry(),
+): GameState {
+  // postMessage performs the one authoritative structured clone synchronously.
+  // Avoid creating another full JSON clone on the UI thread before that copy.
+  return projectPersistentSaveState(state, contentPackRegistry);
 }
 
 function buildOfflineReport(before: GameState, after: GameState, seconds: number): OfflineReport {
@@ -2514,6 +2516,54 @@ export function inspectSave(raw: string, contentPackRegistry?: ContentPackRegist
     state,
     summary,
   };
+}
+
+/**
+ * Parse a payload that has already passed decodeVerifiedSaveTransfer. The
+ * transferable byte hash makes the Worker-produced envelope authoritative, so
+ * this path performs one JSON parse plus the normal version migration without
+ * recomputing the same 20+ MB state checksum on the UI thread.
+ */
+export function parseTrustedWorkerEnvelope(
+  raw: string,
+  verification: SaveTransferVerification,
+  contentPackRegistry: ContentPackRegistry = loadContentPackRegistry(),
+  options: { persistentProjection?: boolean } = {},
+): GameState {
+  if (verification.integrity !== "valid" || !verification.stateChecksum) {
+    throw new Error("Worker 存档缺少完整性证明");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("Worker 存档无法解析");
+  }
+  if (!isRecord(parsed) || parsed.formatVersion !== SAVE_FORMAT_VERSION ||
+    !isRecord(parsed.state) || parsed.checksum !== verification.stateChecksum) {
+    throw new Error("Worker 存档信封与完整性证明不一致");
+  }
+  if (parsed.mode !== "normal" && parsed.mode !== "speedrun") throw new Error("Worker 存档模式无效");
+  if (parsed.slot !== "main" && parsed.slot !== 1 && parsed.slot !== 2 && parsed.slot !== 3) {
+    throw new Error("Worker 存档槽位无效");
+  }
+  const requiredPacks = Array.isArray(parsed.state.contentPacks)
+    ? parsed.state.contentPacks.filter((entry: unknown) => isRecord(entry) && typeof entry.id === "string" && typeof entry.version === "string") as Array<{ id: string; version: string }>
+    : [];
+  const missingPacks = getMissingContentPackRequirements(requiredPacks, contentPackRegistry);
+  if (missingPacks.length > 0) throw new MissingContentPacksError(missingPacks);
+  if (options.persistentProjection === false) {
+    const state = parsed.state as unknown as GameState;
+    if (state.mode !== parsed.mode || !Number.isFinite(state.version) ||
+      !Array.isArray(state.entities) || !Array.isArray(state.belts) ||
+      !isRecord(state.research) || !isRecord(state.timeWarp) || !isRecord(state.dysonSphere)) {
+      throw new Error("Worker 运行态结构或模式校验失败");
+    }
+    return state;
+  }
+  const state = migrateGame(parsed.state, contentPackRegistry);
+  if (!state || state.mode !== parsed.mode) throw new Error("Worker 存档迁移或模式校验失败");
+  return state;
 }
 
 export interface SaveRepairResult {
@@ -2851,12 +2901,31 @@ export function saveGame(state: GameState, options: { emergencyMirror?: boolean 
   };
 }
 
-async function verifyPersistedEnvelope(key: string, expectedRaw: string): Promise<boolean> {
+async function verifyPersistedEnvelope(
+  key: string,
+  expectedRaw: string,
+  workerVerification?: SaveTransferVerification,
+): Promise<boolean> {
   await flushLocalSaveWrites();
   const stored = await readPersistedLocalSaveValue(key);
   if (stored !== expectedRaw) return false;
+  // The exact string read-back is the same byte sequence that the worker
+  // already hashed. Avoid parsing the full 20+ MB state again on the UI thread.
+  if (workerVerification?.integrity === "valid") return true;
   const inspection = inspectSave(stored);
   return inspection.valid && inspection.checksum === "valid";
+}
+
+function matchesWorkerVerification(
+  raw: string,
+  summary: CloudSaveSummary | undefined,
+  verification: SaveTransferVerification | undefined,
+): summary is CloudSaveSummary & { mode: SaveMode; integrity: "valid"; stateChecksum: string } {
+  if (!summary || (summary.mode !== "normal" && summary.mode !== "speedrun") || summary.integrity !== "valid" ||
+    typeof summary.stateChecksum !== "string" || summary.stateChecksum.length === 0 ||
+    !verification || verification.integrity !== "valid" || verification.stateChecksum !== summary.stateChecksum) return false;
+  const measured = computeSavePayloadTextChecksum(raw);
+  return measured.byteLength === verification.byteLength && measured.checksum === verification.payloadChecksum;
 }
 
 /**
@@ -2865,21 +2934,33 @@ async function verifyPersistedEnvelope(key: string, expectedRaw: string): Promis
  * recovery point while the user is waiting for a cloud upload. The exact raw
  * value is still read back from IndexedDB before success is reported.
  */
-export async function saveVerifiedPayload(raw: string, options: { verified?: boolean; deferBackup?: boolean; mode?: SaveMode } = {}): Promise<SaveGameResult> {
-  const inspection = inspectSave(raw);
-  if (!inspection.valid || !inspection.state || inspection.checksum !== "valid") {
+export async function saveVerifiedPayload(
+  raw: string,
+  options: {
+    verified?: boolean;
+    deferBackup?: boolean;
+    mode?: SaveMode;
+    workerSummary?: CloudSaveSummary;
+    workerVerification?: SaveTransferVerification;
+  } = {},
+): Promise<SaveGameResult> {
+  const trustedWorkerPayload = options.verified === true &&
+    matchesWorkerVerification(raw, options.workerSummary, options.workerVerification);
+  const inspection = trustedWorkerPayload ? null : inspectSave(raw);
+  if (!trustedWorkerPayload && (!inspection?.valid || !inspection.state || inspection.checksum !== "valid")) {
     return failedSave("verification", "后台生成的存档完整性校验失败，请重试", utf8ByteLength(raw));
   }
-  if (options.mode !== undefined && inspection.mode !== options.mode) {
+  const payloadMode = trustedWorkerPayload ? options.workerSummary!.mode! : inspection!.mode;
+  if (options.mode !== undefined && payloadMode !== options.mode) {
     return failedSave(
       "verification",
-      `存档模式不匹配：不能把${inspection.mode === "speedrun" ? "速通" : "普通"}存档写入${options.mode === "speedrun" ? "速通" : "普通"}主档`,
+      `存档模式不匹配：不能把${payloadMode === "speedrun" ? "速通" : "普通"}存档写入${options.mode === "speedrun" ? "速通" : "普通"}主档`,
       utf8ByteLength(raw),
     );
   }
   const startedAt = monotonicNow();
   const bytes = utf8ByteLength(raw);
-  const mode = options.mode ?? inspection.mode;
+  const mode = options.mode ?? payloadMode;
   const primaryKey = primarySaveKey(mode);
   const backupKey = backupSaveKey(mode);
   const previous = getLocalSaveValue(primaryKey);
@@ -2910,7 +2991,7 @@ export async function saveVerifiedPayload(raw: string, options: { verified?: boo
     return {
       success: true,
       message: "主存档已保存",
-      savedAt: Date.now(),
+    savedAt: trustedWorkerPayload ? options.workerSummary!.savedAt : inspection!.savedAt ?? Date.now(),
       bytes,
       backupSaved,
       timings: {
@@ -2959,8 +3040,11 @@ async function saveGameVerifiedOnce(state: GameState): Promise<SaveGameResult> {
   const primaryKey = primarySaveKey(mode);
   const backupKey = backupSaveKey(mode);
   let raw: string;
+  let workerVerification: SaveTransferVerification | undefined;
   try {
-    raw = (await serializeEnvelopeInWorker(state, savedAt)).raw;
+    const serialized = await serializeEnvelopeInWorker(state, savedAt);
+    raw = serialized.raw;
+    workerVerification = serialized.verification;
   } catch {
     return failedSave("unavailable", "无法生成本地主存档，请立即导出当前进度");
   }
@@ -2992,7 +3076,7 @@ async function saveGameVerifiedOnce(state: GameState): Promise<SaveGameResult> {
 
   const commitPrimary = async (): Promise<boolean> => {
     setLocalSaveValue(primaryKey, raw);
-    return verifyPersistedEnvelope(primaryKey, raw);
+    return verifyPersistedEnvelope(primaryKey, raw, workerVerification);
   };
 
   const primaryWriteStartedAt = monotonicNow();
@@ -3167,14 +3251,15 @@ export async function saveGameSlotVerified(slotId: SaveSlotId, state: GameState)
   const key = saveSlotKey(slotId, mode);
   let raw: string;
   try {
-    raw = serializeEnvelope(state, savedAt, "slot", undefined, loadContentPackRegistry(), slotId);
+    const serialized = await serializeEnvelopeInWorker(state, savedAt, "slot", undefined, slotId);
+    raw = serialized.raw;
     const capacity = await hasLocalSaveCapacity(key, raw);
     if (!capacity.ok) {
       return failedSave("quota", "本地存储空间不足，槽位尚未保存。请先管理快照或导出存档。", utf8ByteLength(raw));
     }
     invalidateSaveSummaryCache(key);
     setLocalSaveValue(key, raw);
-    if (!await verifyPersistedEnvelope(key, raw)) {
+    if (!await verifyPersistedEnvelope(key, raw, serialized.verification)) {
       await recoverLocalSaveCache();
       return failedSave("verification", `本地槽位 ${slotId} 写入校验失败`, utf8ByteLength(raw));
     }
@@ -3468,7 +3553,8 @@ export async function saveGameSnapshotVerified(state: GameState, reason = "自�
   const id = `${savedAt}-${sequence}`;
   const key = `${snapshotSavePrefix(mode)}.${id}`;
   try {
-    const raw = serializeEnvelope(state, savedAt, "snapshot", reason);
+    const serialized = await serializeEnvelopeInWorker(state, savedAt, "snapshot", reason);
+    const raw = serialized.raw;
     const capacity = await hasLocalSaveCapacity(key, raw);
     if (!capacity.ok) return null;
     invalidateSaveSummaryCache(key);
@@ -3476,8 +3562,23 @@ export async function saveGameSnapshotVerified(state: GameState, reason = "自�
     setLocalSaveValue(key, raw);
     if (reason === "自动快照") trimAutomaticSnapshots(AUTOMATIC_SAVE_SNAPSHOT_LIMIT, mode);
     await flushLocalSaveWrites();
-    if (!await verifyPersistedEnvelope(key, raw)) return null;
-    return getSnapshotSummaryForKey(key, raw, mode);
+    if (!await verifyPersistedEnvelope(key, raw, serialized.verification)) return null;
+    if (!serialized.summary) return getSnapshotSummaryForKey(key, raw, mode);
+    const summary = {
+      id,
+      mode,
+      savedAt: serialized.summary.savedAt,
+      elapsedSeconds: serialized.summary.elapsedSeconds,
+      completedTechCount: serialized.summary.completedTechCount,
+      structurePoints: serialized.summary.structurePoints,
+      activePlanetId: serialized.summary.activePlanetId as PlanetId,
+      reason,
+      integrity: "valid",
+      valid: true,
+      issues: [],
+    } satisfies SaveSnapshotSummary;
+    saveSummaryCache.set(key, { raw, summary });
+    return summary;
   } catch {
     await recoverLocalSaveCache();
     return null;

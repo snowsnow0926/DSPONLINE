@@ -281,12 +281,17 @@ import {
 } from "./game/contentPacks";
 import { baselineAccountProgress, createLocalAccount, getActiveAccount, loadAccountState, recordAccountProgress, saveAccountState, setActiveCloudBinding, switchLocalAccount, updateAccountProfile, type AccountProfileChanges } from "./game/account";
 import { removeLeaderboardData } from "./game/leaderboard";
+import { createSecondUnipolarVeinPackage, previewSecondUnipolarVein } from "./game/resourceIntegrity";
 import { trackAnalyticsEvent } from "./game/analytics";
 import { CLOUD_AUTO_SYNC_INTERVAL_MS, CloudApiError, compareCloudSaveSummary, fetchCloudPublicStatus, getCloudToken, markCloudSaveSynchronized, readCloudAutoSyncStatus, refreshCloudSaveMetadata, resumeCloudSession, summarizeCloudPayload, uploadCloudSave, writeCloudAutoSyncStatus } from "./game/cloud";
 import type { BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProliferatorMode, ProliferatorTier, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
 import type { SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
-import type { PureIdleMacroMode, PureIdleMacroSummary } from "./game/pureIdleMacro";
+import {
+  PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS,
+  type PureIdleMacroMode,
+  type PureIdleMacroSummary,
+} from "./game/pureIdleMacro";
 import { beginIdleRun, finishIdleRun, settleIdleRun } from "./game/idleSettlement";
 import { classifyOfflineWorkload, offlineProfileLabel } from "./game/offlineComplexity";
 import {
@@ -294,16 +299,20 @@ import {
   claimPureIdleRecovery,
   clearPureIdleBackground,
   clearPureIdleRecovery,
+  capPureIdleBackgroundPlan,
   createPureIdleRecovery,
   getPureIdleForceConservativeReason,
   getPureIdleBackgroundPlan,
   getPureIdleOwnerToken,
+  getPureIdleSettledWallSeconds,
+  getPureIdleUnattendedBackgroundStartedAt,
   heartbeatPureIdleRecovery,
   markPureIdleBackground,
   PURE_IDLE_WORKER_RESTART_LIMIT,
   recordPureIdleRecoveryTransition,
   recordPureIdleWorkerFailure,
   releasePureIdleRecoveryLease,
+  requiresBoundedPureIdleCatchup,
   resetPureIdleWorkerFailures,
   type PureIdleRecoveryTransition,
   type PureIdleRecoveryRecord,
@@ -820,6 +829,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [operationsTab, setOperationsTab] = useState<OperationsTab>("alerts");
   const [offlineReport, setOfflineReport] = useState<OfflineReport | null>(loaded.offlineReport);
   const [saveSlots, setSaveSlots] = useState(() => getSaveSlotSummaries(loaded.state.mode));
+  const [unipolarExpansionBusy, setUnipolarExpansionBusy] = useState(false);
   const [saveSnapshots, setSaveSnapshots] = useState<SaveSnapshotSummary[]>(() => getSaveSnapshotSummaries(loaded.state.mode));
   const [importPreview, setImportPreview] = useState<SaveInspection | null>(null);
   const [pendingImportState, setPendingImportState] = useState<GameState | null>(null);
@@ -1646,7 +1656,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     record: PureIdleRecoveryRecord,
     nowMs = Date.now(),
   ): Promise<"continued" | "completed" | "not-backgrounded"> => {
-    const plan = getPureIdleBackgroundPlan(record, nowMs);
+    const boundedCatchupRequired = requiresBoundedPureIdleCatchup(record);
+    const maximumUnattendedSeconds = boundedCatchupRequired
+      ? PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS
+      : undefined;
+    const unattendedStartedAtMs = getPureIdleUnattendedBackgroundStartedAt(
+      record,
+      nowMs,
+      maximumUnattendedSeconds,
+    );
+    if (unattendedStartedAtMs !== null) {
+      const marked = await markPureIdleBackground(
+        record.sessionId,
+        pureIdleOwnerTokenRef.current,
+        unattendedStartedAtMs,
+        nowMs,
+      );
+      if (marked) {
+        record = { ...record, backgroundStartedAtMs: unattendedStartedAtMs };
+        if (pureIdleRecoveryRef.current?.sessionId === record.sessionId) pureIdleRecoveryRef.current = record;
+      }
+    }
+    let plan = getPureIdleBackgroundPlan(record, nowMs);
+    if (boundedCatchupRequired) {
+      plan = capPureIdleBackgroundPlan(
+        plan,
+        getPureIdleSettledWallSeconds(record),
+        PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS,
+      );
+    }
     if (!plan.backgrounded) return "not-backgrounded";
     if (pureIdleStoppingRef.current || pureIdleBackgroundRecoveryRef.current) return "completed";
     pureIdleBackgroundRecoveryRef.current = true;
@@ -1695,8 +1733,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       stopRequestedAtMs: nowMs,
       targetWallSeconds: plan.highWallSeconds,
     }, nowMs);
-    setPureIdleRecoveryStatus("后台宽限已结束，正在切换普通离线结算");
-    setNotice("后台超过 5 分钟，剩余时间将按普通离线规则结算");
+    setPureIdleRecoveryStatus(boundedCatchupRequired
+      ? "检测到长时间无进度，正在切换普通离线尾段"
+      : "后台宽限已结束，正在切换普通离线结算");
+    setNotice(boundedCatchupRequired
+      ? "待重校准或产量波动的产线只保留有界高倍率精确段，未安全推进的尾段将按普通离线规则结算"
+      : "后台超过 5 分钟，剩余时间将按普通离线规则结算");
     const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record);
     if (!finalizer) {
       pureIdleStoppingRef.current = false;
@@ -1983,20 +2025,29 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const stopPureIdle = useCallback(async () => {
     if (pureIdleMacroActiveRef.current) {
       if (pureIdleStoppingRef.current) return;
-      pureIdleStoppingRef.current = true;
       const record = pureIdleRecoveryRef.current;
       if (!record) {
-        pureIdleStoppingRef.current = false;
         setNotice("找不到纯挂机恢复检查点，主存档未改变");
         return;
       }
       const stoppedAtMs = Date.now();
+      const boundedCatchupRequired = requiresBoundedPureIdleCatchup(record);
+      const maximumUnattendedSeconds = boundedCatchupRequired
+        ? PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS
+        : undefined;
+      const unattendedStartedAtMs = getPureIdleUnattendedBackgroundStartedAt(
+        record,
+        stoppedAtMs,
+        maximumUnattendedSeconds,
+      );
       const backgroundPlan = getPureIdleBackgroundPlan(record, stoppedAtMs);
-      if (backgroundPlan.backgrounded && backgroundPlan.graceExpired) {
-        pureIdleStoppingRef.current = false;
+      const boundedExactTail = boundedCatchupRequired &&
+        backgroundPlan.totalWallSeconds - getPureIdleSettledWallSeconds(record) > PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS;
+      if (unattendedStartedAtMs !== null || backgroundPlan.backgrounded && (backgroundPlan.graceExpired || boundedExactTail)) {
         await settlePureIdleBackgroundRecovery(record, stoppedAtMs);
         return;
       }
+      pureIdleStoppingRef.current = true;
       const targetWallSeconds = backgroundPlan.backgrounded
         ? backgroundPlan.highWallSeconds
         : Math.max(0, (stoppedAtMs - record.startedAtMs) / 1_000);
@@ -2628,8 +2679,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       client = pureIdleMacroClientRef.current;
       if (!client || client.busy) return;
+      const boundedCatchupRequired = requiresBoundedPureIdleCatchup(record);
+      const maximumUnattendedSeconds = boundedCatchupRequired
+        ? PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS
+        : undefined;
+      const unattendedStartedAtMs = getPureIdleUnattendedBackgroundStartedAt(
+        record,
+        Date.now(),
+        maximumUnattendedSeconds,
+      );
+      if (unattendedStartedAtMs !== null) {
+        await settlePureIdleBackgroundRecovery(record);
+        return;
+      }
       const backgroundPlan = getPureIdleBackgroundPlan(record);
-      if (backgroundPlan.backgrounded && backgroundPlan.graceExpired && document.visibilityState === "visible") {
+      const boundedExactTail = boundedCatchupRequired &&
+        backgroundPlan.totalWallSeconds - getPureIdleSettledWallSeconds(record) > PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS;
+      if (backgroundPlan.backgrounded && (backgroundPlan.graceExpired || boundedExactTail) && document.visibilityState === "visible") {
         await settlePureIdleBackgroundRecovery(record);
         return;
       }
@@ -4307,6 +4373,55 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(snapshot ? "手动快照已创建" : "快照创建失败：本地存储空间不足");
     playTone(snapshot ? "confirm" : "alert");
   }, [playTone, refreshSaveData]);
+
+  const addSecondUnipolarVein = useCallback(async () => {
+    if (unipolarExpansionBusy) return;
+    const source = gameRef.current;
+    if (!source.paused) {
+      setNotice("请先暂停模拟，再执行单极磁石矿脉扩容");
+      playTone("alert");
+      return;
+    }
+    const context = {
+      saveId: "normal-main",
+      reason: "player confirmed one-to-two unipolar vein expansion",
+      operator: "local-player",
+      createdAt: Date.now(),
+    } as const;
+    const preview = previewSecondUnipolarVein(source, context);
+    if (!preview.eligible) {
+      setNotice(preview.blockingReasons[0] ?? "当前存档不能增加第二个单极磁石矿脉");
+      playTone("alert");
+      return;
+    }
+    const firstConfirmed = await gameDialog.confirm(
+      "当前普通存档恰好有 1 个规范单极磁石矿脉。继续后会在磁潮孤星新增 1 个空缓存、未安装矿机的有限矿脉，总数硬上限为 2；不会直接增加库存或累计产量。是否查看最终确认？",
+      { title: "单极磁石矿脉扩容预览", confirmLabel: "继续确认" },
+    );
+    if (!firstConfirmed) return;
+    const finalConfirmed = await gameDialog.confirm(
+      `执行前将创建可回滚快照，并校验源存档 ${preview.sourceChecksum}。该操作仅限普通模式，副本不能计入速通排行榜。确认增加第二个矿脉？`,
+      { title: "最终确认：增加到两个矿脉", confirmLabel: "创建快照并增加", danger: true },
+    );
+    if (!finalConfirmed) return;
+    setUnipolarExpansionBusy(true);
+    try {
+      const snapshot = await saveGameSnapshotVerified(source, "增加第二个单极磁石矿脉前");
+      if (!snapshot) throw new Error("无法创建扩容前快照，操作已取消；请先释放本地存储空间");
+      const repairPackage = createSecondUnipolarVeinPackage(source, context, preview.confirmationToken);
+      const saved = await persistPrimarySave(repairPackage.candidateState);
+      if (!saved.success) throw new Error(`${saved.message}；原存档仍可从扩容前快照恢复`);
+      commitGame(() => repairPackage.candidateState);
+      await refreshSaveData();
+      setNotice("单极磁石矿脉已从 1 个增加到 2 个；新增矿脉缓存为空，扩容前快照已保留");
+      playTone("complete");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "单极磁石矿脉扩容失败，原存档未修改");
+      playTone("alert");
+    } finally {
+      setUnipolarExpansionBusy(false);
+    }
+  }, [commitGame, gameDialog, persistPrimarySave, playTone, refreshSaveData, unipolarExpansionBusy]);
 
   const loadSnapshot = useCallback(async (snapshotId: string) => {
     const state = loadSaveSnapshot(snapshotId, gameRef.current.mode);
@@ -7672,6 +7787,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onLoadSlot={loadFromSlot}
             onDeleteSlot={deleteSlot}
             onCreateSnapshot={createSnapshot}
+            onAddSecondUnipolarVein={addSecondUnipolarVein}
+            unipolarExpansionBusy={unipolarExpansionBusy}
             onLoadSnapshot={loadSnapshot}
             onDeleteSnapshot={deleteSnapshot}
             onDeleteSnapshots={deleteSnapshots}

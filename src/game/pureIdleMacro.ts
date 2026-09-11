@@ -1,4 +1,3 @@
-import type { ContentPackRegistry } from "./contentPacks";
 import {
   getEffectiveSimulationMultiplier,
   refreshDysonGenerationSnapshot,
@@ -8,6 +7,7 @@ import {
   advanceExactSimulationWindow,
   applyPureIdleAffineContract,
   createPureIdleAffineCalibration,
+  type PureIdleAffineApplication,
   type PureIdleAffineContract,
 } from "./offlineApproximation";
 import {
@@ -16,16 +16,18 @@ import {
   type ResearchMacroLedger,
   type ResearchMacroStatus,
 } from "./researchMacro";
-import { inspectSave, serializeEnvelope } from "./storage";
 import type { GameState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v3";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v4";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
 export const PURE_IDLE_MACRO_OPERATION_DEADLINE_MS = 30_000;
+export const PURE_IDLE_MAX_PRODUCTION_RATE_DRIFT = 0.20;
+export const PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS = 60;
 
 export type PureIdleMacroMode = "stable" | "extreme";
+export type PureIdleSettlementMode = "affine" | "bounded-exact" | "conservative";
 export type PureIdleMacroPhase =
   | "preparing-power"
   | "calibrating"
@@ -72,6 +74,7 @@ export interface PureIdleLineStatus {
 export interface PureIdleMacroSummary {
   phase: PureIdleMacroPhase;
   mode: PureIdleMacroMode;
+  settlementMode: PureIdleSettlementMode;
   algorithmVersion: string;
   settledWallSeconds: number;
   settledSimulationSeconds: number;
@@ -103,6 +106,7 @@ export interface PureIdleMacroSummary {
 export interface PureIdleMacroSession {
   mode: PureIdleMacroMode;
   phase: PureIdleMacroPhase;
+  settlementMode: PureIdleSettlementMode;
   candidate: GameState;
   contract: PureIdleAffineContract;
   researchLedger: ResearchMacroLedger;
@@ -166,10 +170,6 @@ function throwIfMacroInterrupted(options: PureIdleMacroOperationOptions): void {
 }
 
 type ResearchMacroApplicationRemainders = Parameters<typeof advanceResearchMacroInPlace>[4];
-
-export type PureIdleCandidateValidation =
-  | { ok: true; state: GameState; rawBytes: number }
-  | { ok: false; failure: string };
 
 function finite(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -293,6 +293,7 @@ export function summarizePureIdleMacroSession(session: PureIdleMacroSession): Pu
   return {
     phase: session.phase,
     mode: session.mode,
+    settlementMode: session.settlementMode,
     algorithmVersion: PURE_IDLE_MACRO_ALGORITHM_VERSION,
     settledWallSeconds: session.settledWallSeconds,
     settledSimulationSeconds: session.settledSimulationSeconds,
@@ -328,6 +329,7 @@ function calibrate(state: GameState): {
   rate: PureIdleRateSnapshot;
   calibratedState: GameState;
   calibrationWallSeconds: number;
+  maximumProductionRateDrift: number;
 } {
   const multiplier = Math.max(1, getEffectiveSimulationMultiplier(state));
   const result = createPureIdleAffineCalibration(state, PURE_IDLE_MACRO_CALIBRATION_SECONDS / multiplier);
@@ -343,6 +345,7 @@ function calibrate(state: GameState): {
     ),
     calibratedState: result.calibratedState,
     calibrationWallSeconds: result.calibrationWallSeconds,
+    maximumProductionRateDrift: result.maximumProductionRateDrift,
   };
 }
 
@@ -371,6 +374,7 @@ export function createConservativePureIdleMacroSession(
   return {
     mode,
     phase: "conservative",
+    settlementMode: "conservative",
     candidate: state,
     contract: {
       deltas: [],
@@ -421,9 +425,13 @@ export function createPureIdleMacroSession(
   const baselineResearch = captureResearchMacroStatus(state);
   const calibrated = calibrate(state);
   throwIfMacroInterrupted(options);
+  const settlementMode: PureIdleSettlementMode = calibrated.maximumProductionRateDrift > PURE_IDLE_MAX_PRODUCTION_RATE_DRIFT
+    ? "bounded-exact"
+    : "affine";
   return {
     mode,
     phase: "running",
+    settlementMode,
     candidate: state,
     contract: calibrated.contract,
     researchLedger: calibrated.researchLedger,
@@ -439,8 +447,11 @@ export function createPureIdleMacroSession(
     validationCount: 0,
     validationFailures: 0,
     lastValidationDurationMs: 0,
-    lastValidationDeviation: 0,
-    nextValidationAtWallSeconds: mode === "stable" ? PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS : null,
+    lastValidationDeviation: calibrated.maximumProductionRateDrift,
+    ...(settlementMode === "bounded-exact"
+      ? { lastValidationReason: `校准产量速率偏差 ${(calibrated.maximumProductionRateDrift * 100).toFixed(2)}%，已改用分段精确结算` }
+      : {}),
+    nextValidationAtWallSeconds: settlementMode === "affine" ? PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS : null,
     boundaryCorrections: 0,
     calibrationWindowsCompleted: 3,
     actualMultiplier: Math.max(1, getEffectiveSimulationMultiplier(state)),
@@ -465,7 +476,8 @@ function runShadowValidation(session: PureIdleMacroSession, options: PureIdleMac
     session.actualMultiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
     const next = calibrate(session.candidate);
     throwIfMacroInterrupted(options);
-    const deviation = maximumRateDeviation(session.currentRate, next.rate);
+    const terminalDeviation = maximumRateDeviation(session.currentRate, next.rate);
+    const deviation = Math.max(terminalDeviation, next.maximumProductionRateDrift);
     session.currentRate = next.rate;
     session.researchLedger = next.researchLedger;
     session.researchRemainder = 0n;
@@ -479,7 +491,11 @@ function runShadowValidation(session: PureIdleMacroSession, options: PureIdleMac
       simulationSeconds: PURE_IDLE_MACRO_CALIBRATION_SECONDS,
       candidate: next.calibratedState,
     };
-    if (deviation >= 0.15) {
+    if (next.maximumProductionRateDrift > PURE_IDLE_MAX_PRODUCTION_RATE_DRIFT) {
+      session.settlementMode = "bounded-exact";
+      session.nextValidationAtWallSeconds = null;
+      session.lastValidationReason = `产量速率偏差 ${(next.maximumProductionRateDrift * 100).toFixed(2)}%，后续改用分段精确结算`;
+    } else if (deviation >= 0.15) {
       session.contract = next.contract;
       session.contractVersion += 1;
       session.lastValidationReason = deviation >= 0.3
@@ -510,11 +526,16 @@ export function advancePureIdleMacroSession(
   if (!Number.isFinite(targetWallSeconds) || targetWallSeconds < session.settledWallSeconds) {
     throw new Error("纯挂机目标墙钟时间无效或发生倒退");
   }
+  if (session.settlementMode === "bounded-exact" &&
+    targetWallSeconds - session.settledWallSeconds > PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS + 1e-9) {
+    throw new Error(`分段精确纯挂机单次最多推进 ${PURE_IDLE_BOUNDED_EXACT_MAX_WALL_SECONDS} 秒墙钟，请切换普通离线尾段`);
+  }
   if (session.settledWallSeconds + 1e-9 < targetWallSeconds) {
     const operationStartedAt = macroNow();
-    // Live orchestration calls this at each 30-second boundary. A tab that
-    // slept or reloaded can arrive with days of debt; applying one equivalent
-    // affine window keeps recovery cost independent of wall-clock duration.
+    // Live orchestration calls this at each 30-second boundary. A stable
+    // affine session may cover a larger target in one operation; bounded exact
+    // sessions are rejected above the explicit limit and their tail is routed
+    // through ordinary offline settlement by the App coordinator.
     let exactSimulationSeconds = 0;
     let macroWallSeconds = targetWallSeconds - session.settledWallSeconds;
     const checkpoint = session.calibrationCheckpoint;
@@ -549,11 +570,27 @@ export function advancePureIdleMacroSession(
     const multiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
     session.actualMultiplier = multiplier;
     const macroSimulationSeconds = macroWallSeconds * multiplier;
-    const applied = macroWallSeconds <= 1e-9
-      ? { ok: true as const, boundaryCorrections: 0 }
-      : session.conservativeOnly
-        ? { ok: false as const, boundaryCorrections: 0, failure: session.degradedReason ?? "零校准保守宏观" }
-        : applyPureIdleAffineContract(session.candidate, session.contract, macroSimulationSeconds, macroWallSeconds);
+    let applied: PureIdleAffineApplication;
+    if (macroWallSeconds <= 1e-9) {
+      applied = { ok: true, boundaryCorrections: 0 };
+    } else if (session.conservativeOnly) {
+      applied = { ok: false, boundaryCorrections: 0, failure: session.degradedReason ?? "零校准保守宏观" };
+    } else if (session.settlementMode === "bounded-exact") {
+      const beforeExact = capturePureIdleTerminalSnapshot(session.candidate);
+      session.candidate = advanceExactSimulationWindow(
+        session.candidate,
+        macroSimulationSeconds,
+        macroWallSeconds,
+      );
+      session.currentRate = rateBetween(
+        beforeExact,
+        capturePureIdleTerminalSnapshot(session.candidate),
+        Math.max(1e-9, macroSimulationSeconds),
+      );
+      applied = { ok: true, boundaryCorrections: 0, exactSimulationSeconds: macroSimulationSeconds };
+    } else {
+      applied = applyPureIdleAffineContract(session.candidate, session.contract, macroSimulationSeconds, macroWallSeconds);
+    }
     throwIfMacroInterrupted(options);
     if (!applied.ok) {
       // The last complete candidate remains intact because affine application
@@ -566,7 +603,7 @@ export function advancePureIdleMacroSession(
       session.candidate.elapsedSeconds += macroSimulationSeconds;
     } else {
       session.phase = "running";
-      session.degradedReason = undefined;
+      if (session.settlementMode === "affine") session.degradedReason = undefined;
       session.boundaryCorrections += applied.boundaryCorrections;
     }
     const macroResearchSeconds = Math.max(0, macroSimulationSeconds - (applied.exactSimulationSeconds ?? 0));
@@ -588,7 +625,7 @@ export function advancePureIdleMacroSession(
     }
     session.settledWallSeconds = targetWallSeconds;
     session.settledSimulationSeconds += exactSimulationSeconds + macroSimulationSeconds;
-    if (applied.exactSimulationSeconds && !session.conservativeOnly) {
+    if (applied.exactSimulationSeconds && !session.conservativeOnly && session.settlementMode === "affine") {
       // A finite-resource or transport boundary changed the sustainable tail.
       // Recalibrate once from the exact committed state so future calls do not
       // repeatedly replay an already-crossed boundary.
@@ -609,6 +646,11 @@ export function advancePureIdleMacroSession(
           candidate: recalibrated.calibratedState,
         };
         session.lastValidationReason = "有限资源或物流边界已由普通模拟跨越，后续宏观合同已重建";
+        if (recalibrated.maximumProductionRateDrift > PURE_IDLE_MAX_PRODUCTION_RATE_DRIFT) {
+          session.settlementMode = "bounded-exact";
+          session.nextValidationAtWallSeconds = null;
+          session.lastValidationReason = `边界后产量速率偏差 ${(recalibrated.maximumProductionRateDrift * 100).toFixed(2)}%，已改用分段精确结算`;
+        }
       } catch (error) {
         session.lastValidationReason = error instanceof Error
           ? `边界后重校准失败：${error.message}`
@@ -620,7 +662,7 @@ export function advancePureIdleMacroSession(
     session.actualMultiplier = Math.max(1, getEffectiveSimulationMultiplier(session.candidate));
     session.computationDurationMs = Math.max(0,
       macroNow() - operationStartedAt);
-    if (!session.conservativeOnly && session.mode === "stable" && session.nextValidationAtWallSeconds !== null &&
+    if (!session.conservativeOnly && session.settlementMode === "affine" && session.nextValidationAtWallSeconds !== null &&
       session.settledWallSeconds + 1e-9 >= session.nextValidationAtWallSeconds) {
       const crossedValidations = Math.floor(
         (session.settledWallSeconds - session.nextValidationAtWallSeconds) /
@@ -630,42 +672,20 @@ export function advancePureIdleMacroSession(
       if (crossedValidations > 1) {
         session.lastValidationReason = `${session.lastValidationReason ?? "影子校验已完成"}；休眠期间 ${crossedValidations - 1} 次历史校验已合并`;
       }
-      session.nextValidationAtWallSeconds += crossedValidations * PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS;
+      if (session.nextValidationAtWallSeconds !== null) {
+        session.nextValidationAtWallSeconds += crossedValidations * PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS;
+      }
     }
   }
   return summarizePureIdleMacroSession(session);
 }
 
-function rawByteLength(raw: string): number {
-  try {
-    return new TextEncoder().encode(raw).byteLength;
-  } catch {
-    return raw.length;
-  }
-}
-
-export function validatePureIdleCandidate(
-  candidate: GameState,
-  contentPackRegistry: ContentPackRegistry,
-): PureIdleCandidateValidation {
-  try {
-    const raw = serializeEnvelope(candidate, Date.now(), "primary", undefined, contentPackRegistry);
-    const inspection = inspectSave(raw, contentPackRegistry);
-    if (!inspection.valid || !inspection.state) {
-      return { ok: false, failure: inspection.issues[0] ?? "候选存档无法通过正式重载校验" };
-    }
-    return { ok: true, state: inspection.state, rawBytes: rawByteLength(raw) };
-  } catch (error) {
-    return { ok: false, failure: error instanceof Error ? error.message : "候选存档序列化失败" };
-  }
-}
-
-export function finalizePureIdleMacroSession(
+/** Worker path: finish deterministic settlement before transferable serialization. */
+export function finalizePureIdleMacroCandidate(
   session: PureIdleMacroSession,
   targetWallSeconds: number,
-  contentPackRegistry: ContentPackRegistry,
   options: PureIdleMacroOperationOptions = {},
-): { state: GameState; summary: PureIdleMacroSummary; rawBytes: number } {
+): { state: GameState; summary: PureIdleMacroSummary } {
   throwIfMacroInterrupted(options);
   advancePureIdleMacroSession(session, targetWallSeconds, options);
   session.phase = "finalizing";
@@ -679,13 +699,6 @@ export function finalizePureIdleMacroSession(
     allocatedPowerKw: 0,
   };
   throwIfMacroInterrupted(options);
-  const validation = validatePureIdleCandidate(session.candidate, contentPackRegistry);
-  throwIfMacroInterrupted(options);
-  if (!validation.ok) {
-    session.phase = "failed";
-    throw new Error(`纯挂机候选存档未通过重载校验：${validation.failure}`);
-  }
-  session.candidate = validation.state;
   const summary = summarizePureIdleMacroSession(session);
-  return { state: validation.state, summary, rawBytes: validation.rawBytes };
+  return { state: session.candidate, summary };
 }

@@ -1141,6 +1141,8 @@ export interface PureIdleAffineCalibration {
   calibratedState: GameState;
   calibrationSeconds: number;
   calibrationWallSeconds: number;
+  /** Relative drift between the final two exact production-rate slices. */
+  maximumProductionRateDrift: number;
 }
 
 export interface PureIdleAffineApplication {
@@ -1390,11 +1392,13 @@ export function createPureIdleAffineCalibration(
   if (!Number.isFinite(calibrationWallSeconds) || calibrationWallSeconds <= 0 || !validateFastNumbers(state)) return null;
   const snapshots = [captureAffineSnapshot(state)];
   const researchSnapshots = [captureResearchMacroCalibrationSnapshot(state)];
+  const productionSnapshots = [{ ...state.totalProduced }];
   let shadow = structuredClone(state);
   for (let index = 0; index < FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS; index += 1) {
     shadow = runExact(shadow, FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, calibrationWallSeconds / 3);
     snapshots.push(captureAffineSnapshot(shadow));
     researchSnapshots.push(captureResearchMacroCalibrationSnapshot(shadow));
+    productionSnapshots.push({ ...shadow.totalProduced });
   }
   const contract = createFastAffineContractFromSnapshots(
     snapshots,
@@ -1408,12 +1412,30 @@ export function createPureIdleAffineCalibration(
     FAST_OFFLINE_CALIBRATION_SLICE_SECONDS,
   );
   if (!contract || !researchLedger) return null;
+  const previous = productionSnapshots.at(-3) ?? {};
+  const middle = productionSnapshots.at(-2) ?? {};
+  const latest = productionSnapshots.at(-1) ?? {};
+  const productionItemIds = new Set([
+    ...Object.keys(previous),
+    ...Object.keys(middle),
+    ...Object.keys(latest),
+  ]);
+  let maximumProductionRateDrift = 0;
+  for (const itemId of productionItemIds) {
+    const previousRate = Math.max(0, Math.floor(finiteNumber(middle[itemId as ItemId]) - finiteNumber(previous[itemId as ItemId])));
+    const latestRate = Math.max(0, Math.floor(finiteNumber(latest[itemId as ItemId]) - finiteNumber(middle[itemId as ItemId])));
+    maximumProductionRateDrift = Math.max(
+      maximumProductionRateDrift,
+      Math.abs(latestRate - previousRate) / Math.max(1, latestRate, previousRate),
+    );
+  }
   return {
     contract: removeResearchInputDeltas(contract, state),
     researchLedger,
     calibratedState: shadow,
     calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
     calibrationWallSeconds,
+    maximumProductionRateDrift,
   };
 }
 

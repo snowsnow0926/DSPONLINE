@@ -6,11 +6,15 @@ import {
   advancePureIdleMacroSession,
   createConservativePureIdleMacroSession,
   createPureIdleMacroSession,
-  finalizePureIdleMacroSession,
   PURE_IDLE_MACRO_ALGORITHM_VERSION,
   PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS,
 } from "./pureIdleMacro";
-import { applyPureIdleAffineContract, type PureIdleAffineContract } from "./offlineApproximation";
+import { finalizePureIdleMacroSession } from "./pureIdleMacroValidation";
+import {
+  advanceExactSimulationWindow,
+  applyPureIdleAffineContract,
+  type PureIdleAffineContract,
+} from "./offlineApproximation";
 import type { GameState } from "./types";
 
 function pureIdleState(): GameState {
@@ -142,7 +146,7 @@ describe("pure idle macro session", () => {
     expect(incremental.settledSimulationSeconds).toBe(single.settledSimulationSeconds);
   });
 
-  it("runs fixed shadow validation only in stable mode", () => {
+  it("keeps shadow validation enabled when the UI uses terminal extreme mode", () => {
     const source = pureIdleState();
     const stable = createPureIdleMacroSession(structuredClone(source), "stable");
     const extreme = createPureIdleMacroSession(structuredClone(source), "extreme");
@@ -152,9 +156,61 @@ describe("pure idle macro session", () => {
 
     expect(stableSummary.validationCount + stableSummary.validationFailures).toBe(1);
     expect(stableSummary.nextValidationAtWallSeconds).toBe(PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS * 2);
-    expect(extremeSummary.validationCount).toBe(0);
-    expect(extremeSummary.validationFailures).toBe(0);
-    expect(extremeSummary.nextValidationAtWallSeconds).toBeNull();
+    expect(extremeSummary.validationCount + extremeSummary.validationFailures).toBe(1);
+    expect(extremeSummary.nextValidationAtWallSeconds).toBe(PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS * 3);
+  });
+
+  it("uses bounded exact settlement when calibration production rates cross a capacity boundary", () => {
+    const source = pureIdleState();
+    source.settings.resourceMode = "infinite";
+    source.settings.productionBufferLimit = 1_000;
+    addWindGeneration(source, 50_000_000);
+    const initial = createInitialState(12_345, false);
+    const vein = structuredClone(initial.entities.find((entity) => entity.id === "vein_iron")!);
+    vein.minerCount = 100;
+    vein.outputs = { iron_ore: 0 };
+    source.entities.push(vein);
+    const session = createPureIdleMacroSession(structuredClone(source), "extreme");
+    const exactSource = structuredClone(session.candidate);
+
+    const summary = advancePureIdleMacroSession(session, 12);
+    const exact = advanceExactSimulationWindow(exactSource, summary.settledSimulationSeconds, 12);
+    const candidateVein = session.candidate.entities.find((entity) => entity.id === vein.id)!;
+    const exactVein = exact.entities.find((entity) => entity.id === vein.id)!;
+
+    expect(summary.settlementMode).toBe("bounded-exact");
+    expect(summary.lastValidationReason).toContain("分段精确结算");
+    expect(session.candidate.totalProduced.iron_ore).toBe(exact.totalProduced.iron_ore);
+    expect(candidateVein.outputs.iron_ore).toBe(exactVein.outputs.iron_ore);
+    expect(hashGameState({ ...session.candidate, productionHistory: [] })).toBe(
+      hashGameState({ ...exact, productionHistory: [] }),
+    );
+    expect(session.candidate.productionHistory.every((sample) =>
+      Number.isFinite(sample.elapsedSeconds) && (sample.sampleDurationSeconds ?? 0) > 0)).toBe(true);
+
+    const settledHash = hashGameState(session.candidate);
+    const duplicate = advancePureIdleMacroSession(session, 12);
+    expect(duplicate.settledWallSeconds).toBe(12);
+    expect(hashGameState(session.candidate)).toBe(settledHash);
+  });
+
+  it("refuses an unbounded exact catch-up so orchestration can route the tail offline", () => {
+    const source = pureIdleState();
+    source.settings.resourceMode = "infinite";
+    source.settings.productionBufferLimit = 1_000;
+    addWindGeneration(source, 50_000_000);
+    const initial = createInitialState(12_345, false);
+    const vein = structuredClone(initial.entities.find((entity) => entity.id === "vein_iron")!);
+    vein.minerCount = 100;
+    vein.outputs = { iron_ore: 0 };
+    source.entities.push(vein);
+    const session = createPureIdleMacroSession(structuredClone(source), "extreme");
+    const initializedHash = hashGameState(session.candidate);
+
+    expect(session.settlementMode).toBe("bounded-exact");
+    expect(() => advancePureIdleMacroSession(session, 61)).toThrow(/普通离线尾段/);
+    expect(session.settledWallSeconds).toBe(0);
+    expect(hashGameState(session.candidate)).toBe(initializedHash);
   });
 
   it("reports current terminal efficiency against the immutable calibration rate", () => {

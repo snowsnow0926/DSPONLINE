@@ -57,8 +57,8 @@ flowchart LR
 - `src/App.tsx`：顶层会话和工厂编排。它管理工作区、画布交互、连接、选中状态、存档定时器和模拟 Worker。
 - `src/game/simulationProjection.ts`、`src/game/simulationDelta.ts`：定义 P4 的版本化 UI 投影和实验性增量协议。实时 Worker 默认继续返回完整 `GameState` 兼容 oracle；设备级开发开关 `dsp-idle-network.experimental-simulation-delta.v1` 开启后，首次/命令边界仍传完整状态，连续模拟只传带 `baseRevision/nextRevision` 的变化实体、线路和顶层字段。Worker 会比较增量与完整状态的同编码序列化大小，增量不更小时自动回退完整状态并标记原因；主线程发现 revision 不匹配会暂存时间预算并要求完整重同步，不能用旧响应覆盖新状态。两条路径共享同一 `advancePersistentSimulationRuntime`，不改变存档格式。
 - `src/components/TimeWarpIdleOverlay.tsx`：时间扭曲纯挂机覆盖层。覆盖层是独立的交互边界，隐藏画布并展示实际倍率、挂机时间、模拟积压、关键产量、保存状态和退出原因。停止时冻结目标墙钟边界并复用当前已校准 Worker；只有主存档写入和读回验证成功后才退出。保存或 Worker 失败继续显示检查点、提交状态、重试和明确放弃未结算时间入口，不静默返回画布。
-- `src/game/pureIdleMacro.ts`、`pureIdleMacro.worker.ts`、`pureIdleMacroClient.ts`：`pure-idle-macro-v3` 终局宏观纯挂机的校准合同、候选状态、科研账本、验证摘要和正式重载门禁。启动及恢复从检查点重新计算时间扭曲供电倍率；普通合同不可用、影子尾验偏差或 Worker 失败时只切换有界保守宏观，不再创建覆盖完整挂机时长的精确会话。Worker 代次隔离迟到消息，连续两次失败后从原始合法检查点进入零校准保守模式。`pureIdleRecovery.ts` 将检查点、心跳、墙钟进度、失败次数、开始前暂停状态、结算 ID、检查点指纹、冻结边界、退出原因和提交标记保存到独立 IndexedDB；Web Lock 与可过期租约防止重复结算，旧 schema v1 记录按读取时默认值兼容，恢复日志不属于 `GameState`、存档 envelope 或云 payload。
-- 页面进入后台时，`pureIdleRecovery.ts` 记录设备级背景边界；高倍率宏观结算最多覆盖该边界后的 300 秒。恢复或重新打开页面时，超过宽限的剩余墙钟时间只交给普通离线 Worker，且通过运行时单飞锁避免可见性事件与心跳定时器重复提交；浏览器硬关闭没有 `pagehide` 时以最后一次持久心跳作为保守边界。
+- `src/game/pureIdleMacro.ts`、`pureIdleMacro.worker.ts`、`pureIdleMacroClient.ts`：`pure-idle-macro-v4` 终局纯挂机的校准合同、候选状态、科研账本、验证摘要和正式重载门禁。三段精确校准除原有守恒合同外，还比较最后两段逐物品产量速率；最大漂移超过 20% 时改用最多 60 秒墙钟一段的普通引擎精确结算，缓存、传送带、物流、矿脉和库存继续由同一权威模拟写入。稳定仿射路径在普通及终局极限 UI 模式下都保留十分钟影子校验；普通合同不可用或 Worker 连续失败时仍进入有界保守宏观。Worker 代次隔离迟到消息。`pureIdleRecovery.ts` 将检查点、心跳、墙钟进度、失败次数、开始前暂停状态、结算 ID、检查点指纹、冻结边界、退出原因和提交标记保存到独立 IndexedDB；Web Lock 与可过期租约防止重复结算，旧 schema v1 及缺少 `settlementMode` 的 v3 摘要按有界路径恢复后重新校准，恢复日志不属于 `GameState`、存档 envelope 或云 payload。
+- 页面进入后台时，`pureIdleRecovery.ts` 记录设备级背景边界；稳定仿射路径最多保留 300 秒高倍率宽限。浏览器或操作系统未送达 `visibilitychange/pagehide` 而暂停计时器时，以最后一个已提交墙钟边界识别隐式后台；不稳定产线最多再推进 60 秒高倍率精确段，剩余时间只交给现有普通离线 Worker。该交接使用同一结算检查点和运行时单飞锁，不能重复处理已提交区间，也不删除缓存、跳过产量或补发物资。
 - `src/components/TutorialWorkspace.tsx`：零基础教程工作区。内容是只读 UI 数据，搜索、目录和阅读进度使用设备级 `localStorage`，不写入 `GameState` 或云存档。
 - `src/components/SystemSpaceStationWorkspace.tsx`：空间站/太空电梯独立工作区；只通过领域命令管理施工、Mk.II 模式、共享仓库、模块和五路输出，不把空间站伪装成普通行星画布。
 
@@ -111,7 +111,8 @@ React Flow 的持久真相仍来自 `GameState`。`src/game/canvasLineBatch.ts` 
 - `src/game/statistics.ts`、`productionManagement.ts`、`planning.ts`、`alerts.ts`：统计、全星球设备诊断、目标产能反推和故障聚合。生产管理快照完全由 `GameState` 派生，不写回存档。
 - `src/game/campaign.ts`、`progression.ts`、`endgame.ts`：任务、成就和终局 progression。
 - `src/game/productionRefresh.ts`、`quantityFormat.ts`、`infiniteResearch.ts`、`galacticActivity.ts`：设备级画面发布策略、精确大数显示、BigInt 无限科研曲线和银河活动时间域。前三者不读取墙上时间；活动时钟只接受服务器校准后持久化的单调时间。
-- `src/game/storage.ts`、`saveEnvelopeIntegrity.ts`：迁移、确定性 envelope 校验、自检序列化、受控救援、离线结算、槽位、备份与快照。校验函数在客户端与服务端各有无浏览器依赖的同算法实现。
+- `src/game/storage.ts`、`saveProjection.ts`、`saveEnvelopeIntegrity.ts`、`saveTransfer.ts`、`save.worker.ts`：迁移、确定性 envelope 校验、稀疏持久投影、可转移 UTF-8 缓冲区、受控救援、离线结算、槽位、备份与快照。`saveProjection.ts` 是不导入任何 Worker URL 的纯模块，避免 Worker 入口反向导入 `storage.ts` 形成生产构建循环。Worker 对一份权威 JSON 计算状态校验、payload 哈希和字节长度，主线程只对原样读回做证明匹配；Worker 不可用时保留同步兼容路径。校验函数在客户端与服务端各有无浏览器依赖的同算法实现。
+- `src/game/pureIdleMacro.ts`、`pureIdleMacro.worker.ts`、`pureIdleMacroValidation.ts`：宏观结算核心与 Worker 保持纯依赖；同步诊断调用所需的正式序列化/重载门禁单独放在 validation 模块，Worker 不导入它。生产 Worker 返回已哈希的运行态缓冲区，主线程只解析一次并核对摘要。
 - `src/game/performanceMonitor.ts`、`src/hooks/usePerformanceMonitor.ts`：默认关闭的页面会话性能采样、60 秒滚动窗口和匿名报告；只读取权威状态与 Worker 计时，不进入 `GameState`。
 - `src/game/systemSpaceStation.ts`：空间站四阶段施工、Mk.I→Mk.II 原地升级、升级状态/材料缺口查询、稳定顺序批量升级、legacy/elevator 模式切换、五路输出约束和模块成本；命令只返回新的 `GameState`，不持有可变全局配置。
 - `src/game/systemHubLogistics.ts`：系统共享仓库的规范十进制大整数、五秒边界比例分配、跨星系舰队返回桶和电梯站输入/输出结算。运行时只保存聚合舰队桶，`bigint` 不进入 JSON。
@@ -135,9 +136,13 @@ React Flow 的持久真相仍来自 `GameState`。`src/game/canvasLineBatch.ts` 
 
 云上传的请求体先由 Worker 生成一份已校验 payload，再由 `cloud.ts` 处理传输：浏览器用持续消费的 `ReadableStream → CompressionStream("gzip")`，压缩阶段最多等待 5 秒；不支持压缩、流异常或压缩超时时，只要原始请求不超过 30 MiB 才回退明文，主动取消始终抛出 `AbortError`，不能静默回退。网络请求超时不等同于压缩失败：客户端先读取 `/account` 的当前云端元数据，若新 revision 的 `stateChecksum`、`savedAt` 和完整摘要与本次 payload 一致则视为已提交；revision 未变化时使用同一 `expectedRevision` 最多重试一次明文请求；revision 变化但摘要不匹配进入 409 冲突，无法确认时显示状态未知，绝不显示成功或静默覆盖。所有主档、自动同步、手动槽位和银河页面上传共用该协议。
 
+1.0.38 的主档、槽位、快照和云上传均把稀疏投影、状态校验与序列化放在 Worker 内完成，再通过可转移 `ArrayBuffer` 返回。纯挂机停止需要立即进入 UI 的完整运行态，因此 Worker 返回完整运行态 JSON 的单一可转移缓冲区，主线程只解析一次；正式落盘随后仍使用稀疏持久投影。这样避免“稀疏对象 + 迁移完整对象 + structured clone”同时驻留。所有传输失败都丢弃候选并保留原始检查点，不能用跳过产量或补发物资恢复。
+
 性能监控只有玩家主动开启后才随 Worker 请求附带 `profile=true`。模拟器在生产/采集、传送带、物流、电力、戴森、制造施工、统计历史和状态复制边界累计耗时；这些数字不参与状态变更、随机顺序或哈希。主线程 hook 以每秒最多一个样本记录 FPS、帧峰值、Worker 往返、积压、内存、状态/存档大小和保存耗时，停止后不再执行阶段计时。
 
 模拟会话还可以建立只读 `SimulationLookupContext`。它按实体 ID、行星、电网和线路端点组织运行时索引，并额外缓存按行星分类的机器、站点、轨道采集器、物流缓冲区和巨构视图，以及线路端点、容量和兼容性，避免每步重复执行 `state.entities.find` 和实体类型过滤。动态航线账本带有 Worker 私有脏标记：会话开始或航线完成时才重建，派遣新路线立即增量写入；未完成航线不会每个模拟步全量扫描。每步派遣写入不持久化的槽位结果，拥堵统计直接复用该结果；科技或探索使路线环境变化时会清空相关缓存。索引只在会话内随状态复制创建，绝不写入 `GameState`、存档或状态哈希；legacy 全扫描路径继续作为逐状态比较的确定性 oracle。供电、采矿、生产、施工、射线接收、线路转运和容量预留在索引存在时保持原数组顺序，索引不存在时继续使用 legacy 路径；实体配置、配方或线路拓扑改变时必须重建索引。
+
+1.0.38 进一步让传送带候选、源可用量账本、目标容量账本和稳定分配顺序跨连续 Worker 请求复用；生产阶段缓存配方静态量、喷涂成本和倍率，戴森接收按星系复用发电快照，电网复用覆盖拓扑，量子网络在已归一化的 Worker 私有状态上原地结算。任何实体/线路数组替换、库存/优先级/供电/线路变化都会触发对应重建或动态脏标记。公共领域 API 仍默认不可变，legacy oracle、完整持久状态、每建筑缓存、在途货物和量子库存必须一致。
 
 离线 Worker 通过 `advanceOfflineSimulationChunk()` 使用确定性会话步长；五秒量子/空间站边界已经由引擎内部完整结算时，跳过重复的全体机器事件扫描，较大步长仍保留保守的路线到达、机器周期和探索任务边界提示。边界只是精确模拟会话的切段提示，不能跳过任何结算公式。`fast-30s-v2` 在内存副本上执行最多 30 个模拟秒的有界精确校准，再按实测合同推进剩余时间；有限科技和无限科技分别使用共享整数/BigInt 科研账本，不能由通用字段外推。桌面 Worker 使用约 30 秒软预算和 60 秒硬预算，校准、宏观、保守宏观和验证阶段持续检查取消与 deadline；普通合同拒绝、尾验偏差或校准超时只转保守宏观，不得整段精确重放。普通离线 Worker 崩溃或超时时，主线程只从原始状态启动一次有界的零校准保守 Worker；该重启仍失败就明确返回且不提交候选，不跨会话持久化失败计数。`invalid-source`、用户取消和 Worker 失败保持独立结果语义。普通资源、缓存和运输量偏差保留诊断，结构、有限数值、容量和正式序列化重载仍是硬门禁。`alerts.ts` 在告警工作区关闭时只构造计数快照，打开工作区才生成标题、位置和完整说明。
 

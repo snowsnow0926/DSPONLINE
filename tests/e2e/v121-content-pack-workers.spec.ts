@@ -7,6 +7,7 @@ test("custom recipes run identically in main, realtime Worker, offline Worker, a
     const packs = await import("/src/game/contentPacks.ts");
     const mods = await import("/src/game/mods.ts");
     const benchmark = await import("/src/game/benchmark.ts");
+    const offlineSimulation = await import("/src/game/offlineSimulation.ts");
     const validation = mods.validateContentPack({
       formatVersion: 2,
       id: "worker_registry_regression",
@@ -78,26 +79,16 @@ test("custom recipes run identically in main, realtime Worker, offline Worker, a
       };
       worker.postMessage({ id: 1, state, simulationSeconds: 20, wallSeconds: 20, registryFingerprint: snapshot.fingerprint, registry: snapshot });
     });
-    const runOffline = (state: typeof initial) => new Promise<typeof initial>((resolve, reject) => {
-      const worker = new Worker(new URL("/src/game/offlineSimulation.worker.ts", location.origin), { type: "module" });
-      const timeout = window.setTimeout(() => { worker.terminate(); reject(new Error("离线 Worker 超时")); }, 10_000);
-      worker.onerror = () => { window.clearTimeout(timeout); worker.terminate(); reject(new Error("离线 Worker 错误")); };
-      worker.onmessage = (event) => {
-        if (event.data.id !== 2 || event.data.type === "progress") return;
-        window.clearTimeout(timeout);
-        worker.terminate();
-        if (event.data.type !== "complete") reject(new Error(event.data.message ?? "离线 Worker 未完成"));
-        else resolve(event.data.state);
-      };
-      worker.postMessage({ type: "start", id: 2, state, seconds: 20, registry: snapshot });
-    });
+    const runOffline = (state: typeof initial) => offlineSimulation.runOfflineSimulationInWorker(state, 20, { registry: snapshot });
 
     packs.applyContentPackRuntimeSnapshot(snapshot);
     const main = engine.advanceSimulation(structuredClone(initial), 20);
     const realtime = await runRealtime(structuredClone(initial));
     const offline = await runOffline(structuredClone(initial));
     const summarize = (state: typeof initial) => ({
-      hash: benchmark.hashGameState(state),
+      // Transferable JSON canonicalizes explicitly-present `undefined` fields
+      // to absence; compare the exact persisted representation on every path.
+      hash: benchmark.hashGameState(JSON.parse(JSON.stringify(state))),
       machines: assemblers.map((assembler) => {
         const entity = state.entities.find((candidate) => candidate.id === assembler.id)!;
         return { input: entity.inputs.gravity_matrix ?? 0, output: entity.outputs.space_warper ?? 0, progress: entity.progress };

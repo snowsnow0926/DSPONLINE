@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-10-v1.0.37";
+const RELEASE_NOTE_ID = "2026-08-11-v1.0.38";
 
 async function seedBatchSave(page: Page, options: { offlineSeconds?: number; paused?: boolean; topology?: boolean; bypassMenu?: boolean } = {}) {
   await page.addInitScript(({ offlineSeconds, paused, topology, bypassMenu, releaseNoteId }) => {

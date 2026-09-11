@@ -137,7 +137,7 @@ async function seedManagementFixture(page: Page, options: FixtureOptions = {}) {
       paused: true,
     };
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-10-v1.0.37");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-11-v1.0.38");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     if (mobileUi) window.localStorage.setItem("dsp-idle-network.mobile-ui.v1", mobileUi);

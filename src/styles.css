@@ -18732,6 +18732,42 @@ html[data-ui-font-scale="200"] .operations-settings .setting-row > span {
   display: none;
 }
 
+.save-resource-integrity-tool {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warning) 7%, var(--panel));
+}
+
+.save-resource-integrity-tool > header,
+.save-resource-integrity-tool > header > div,
+.save-resource-integrity-tool > div,
+.save-resource-integrity-tool button {
+  display: flex;
+  align-items: center;
+}
+
+.save-resource-integrity-tool > header { justify-content: space-between; gap: 10px; }
+.save-resource-integrity-tool > header > div { gap: 7px; color: var(--warning); }
+.save-resource-integrity-tool > header small,
+.save-resource-integrity-tool p { color: var(--muted); }
+.save-resource-integrity-tool p { margin: 0; line-height: 1.55; }
+.save-resource-integrity-tool > div { flex-wrap: wrap; gap: 8px; }
+.save-resource-integrity-tool > div > span {
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
+  color: var(--muted);
+}
+.save-resource-integrity-tool > div strong { color: var(--text); }
+.save-resource-integrity-tool button {
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+}
+
 .save-slot-list {
   display: grid;
   gap: 8px;

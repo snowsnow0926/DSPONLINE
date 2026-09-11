@@ -16,12 +16,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Save envelope v2 uses FNV-1a over JavaScript UTF-16 code units. */
 export function computeSaveStateChecksum(formatVersion: number, state: unknown): string {
   const payload = JSON.stringify({ formatVersion, state });
+  return computeSaveChecksumChunks([payload]);
+}
+
+function computeSaveChecksumChunks(chunks: readonly string[]): string {
   let hash = 0x811c9dc5;
-  for (let index = 0; index < payload.length; index += 1) {
-    hash ^= payload.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
+  for (const chunk of chunks) {
+    for (let index = 0; index < chunk.length; index += 1) {
+      hash ^= chunk.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Compute the v2 checksum from the exact JSON text that will be embedded in
+ * the envelope. This lets save workers serialize the large state only once.
+ */
+export function computeSaveStateChecksumFromJson(formatVersion: number, stateJson: string): string {
+  return computeSaveChecksumChunks([
+    `{"formatVersion":${JSON.stringify(formatVersion)},"state":`,
+    stateJson,
+    "}",
+  ]);
 }
 
 export function inspectSaveEnvelopeChecksum(raw: string): SaveEnvelopeChecksumInspection {

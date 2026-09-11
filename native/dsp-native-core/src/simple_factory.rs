@@ -352,6 +352,28 @@ fn apply_renewable_power_facility_patch(
     set_number(object, "productionRate", 0.0)
 }
 
+struct ProfileDurationGuard<'a> {
+    started: Option<std::time::Instant>,
+    total: &'a mut std::time::Duration,
+}
+
+impl<'a> ProfileDurationGuard<'a> {
+    fn new(enabled: bool, total: &'a mut std::time::Duration) -> Self {
+        Self {
+            started: enabled.then(std::time::Instant::now),
+            total,
+        }
+    }
+}
+
+impl Drop for ProfileDurationGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(started) = self.started {
+            *self.total += started.elapsed();
+        }
+    }
+}
+
 // Built-in recipes currently have at most two outputs. Keep a wider inline
 // budget for content packs, but conservatively leave unusually wide MOD
 // recipes on the byte-identical serial path instead of allocating one result
@@ -4405,12 +4427,16 @@ fn simulate_step(
         .is_some()
         .then(Vec::<MachineProductionEvent>::new);
     profile_mark!("machine-local-settlement-plan");
+    let renewable_power_plan_started = profile_enabled.then(std::time::Instant::now);
     let renewable_power_facility_patches = collect_renewable_power_facility_patches_with_runtime(
         deterministic_runtime(),
         state,
         entities,
         &grids,
     )?;
+    let renewable_power_plan_duration = renewable_power_plan_started
+        .map(|started| started.elapsed())
+        .unwrap_or_default();
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tfactory-renewable-power-patches\tworkers={}\tcandidates={}",
@@ -4424,6 +4450,26 @@ fn simulate_step(
     let has_galactic_material_exporter = state.factory_topology.has_galactic_material_exporter;
     let research_entity_indexes = &state.factory_topology.research_entity_indices;
     let mut reset_research_progress_before_next_entity = false;
+    let entity_loop_started = profile_enabled.then(std::time::Instant::now);
+    let mut renewable_power_apply_duration = std::time::Duration::ZERO;
+    let mut vein_replay_duration = std::time::Duration::ZERO;
+    let mut local_machine_prepare_duration = std::time::Duration::ZERO;
+    let mut serial_power_duration = std::time::Duration::ZERO;
+    let mut serial_machine_duration = std::time::Duration::ZERO;
+    let mut serial_research_duration = std::time::Duration::ZERO;
+    let mut serial_sail_launch_duration = std::time::Duration::ZERO;
+    let mut serial_rocket_launch_duration = std::time::Duration::ZERO;
+    let mut serial_other_machine_duration = std::time::Duration::ZERO;
+    let mut serial_research_count = 0usize;
+    let mut serial_sail_launch_count = 0usize;
+    let mut serial_rocket_launch_count = 0usize;
+    let mut serial_other_machine_count = 0usize;
+    let mut rocket_header_duration = std::time::Duration::ZERO;
+    let mut rocket_capacity_duration = std::time::Duration::ZERO;
+    let mut rocket_rate_duration = std::time::Duration::ZERO;
+    let mut rocket_settlement_duration = std::time::Duration::ZERO;
+    let mut rocket_dyson_launch_duration = std::time::Duration::ZERO;
+    let mut rocket_final_metrics_duration = std::time::Duration::ZERO;
 
     for &entity_index in &state.factory_topology.non_station_indices {
         if reset_research_progress_before_next_entity {
@@ -4440,6 +4486,8 @@ fn simulate_step(
             .peek()
             .is_some_and(|patch| patch.entity_index == entity_index)
         {
+            let _profile =
+                ProfileDurationGuard::new(profile_enabled, &mut renewable_power_apply_duration);
             let patch = renewable_power_facility_patches
                 .next()
                 .expect("peeked renewable power facility patch disappeared");
@@ -4456,6 +4504,7 @@ fn simulate_step(
             .peek()
             .is_some_and(|outcome| outcome.entity_index == entity_index)
         {
+            let _profile = ProfileDurationGuard::new(profile_enabled, &mut vein_replay_duration);
             let outcome = vein_settlement_outcomes
                 .next()
                 .expect("peeked native vein settlement outcome disappeared");
@@ -4481,6 +4530,8 @@ fn simulate_step(
             .and_then(|indices| indices.peek().copied())
             == Some(entity_index)
         {
+            let _profile =
+                ProfileDurationGuard::new(profile_enabled, &mut local_machine_prepare_duration);
             // Capture every base-derived scalar at this exact row. Research
             // and Dyson machines remain serial below, so later local rows see
             // their post-barrier state even though private entity mutation is
@@ -4514,6 +4565,7 @@ fn simulate_step(
             bail!("native simple factory entity topology is unknown");
         }
         if kind == "power" {
+            let _profile = ProfileDurationGuard::new(profile_enabled, &mut serial_power_duration);
             let building_id = state
                 .symbols
                 .resolve(state.entities.buildings[entity_index])
@@ -4600,6 +4652,7 @@ fn simulate_step(
             continue;
         }
         if kind == "machine" {
+            let _profile = ProfileDurationGuard::new(profile_enabled, &mut serial_machine_duration);
             let building_id = state
                 .symbols
                 .resolve(state.entities.buildings[entity_index])
@@ -4618,6 +4671,25 @@ fn simulate_step(
                 .symbols
                 .resolve(state.entities.recipes[entity_index])
                 .unwrap_or_default();
+            let (category_duration, category_count) = match recipe_id {
+                "matrix_research" => (&mut serial_research_duration, &mut serial_research_count),
+                "solar_sail_launch" => (
+                    &mut serial_sail_launch_duration,
+                    &mut serial_sail_launch_count,
+                ),
+                "carrier_rocket_launch" => (
+                    &mut serial_rocket_launch_duration,
+                    &mut serial_rocket_launch_count,
+                ),
+                _ => (
+                    &mut serial_other_machine_duration,
+                    &mut serial_other_machine_count,
+                ),
+            };
+            *category_count += 1;
+            let _category_profile = ProfileDurationGuard::new(profile_enabled, category_duration);
+            let rocket_header_started = (profile_enabled && recipe_id == "carrier_rocket_launch")
+                .then(std::time::Instant::now);
             let building = state
                 .catalog
                 .buildings
@@ -4639,6 +4711,11 @@ fn simulate_step(
                 set_number(object, "productionRate", 0.0)?;
                 continue;
             }
+            if let Some(started) = rocket_header_started {
+                rocket_header_duration += started.elapsed();
+            }
+            let rocket_capacity_started = (profile_enabled && recipe_id == "carrier_rocket_launch")
+                .then(std::time::Instant::now);
             let machine_count = finite_number(object.get("machineCount"));
             let capacity = stacked_capacity(
                 building.output_capacity,
@@ -4657,6 +4734,11 @@ fn simulate_step(
             ) + EPSILON)
                 .floor();
             let maximum_cycles = input_cycles.min(output_cycles);
+            if let Some(started) = rocket_capacity_started {
+                rocket_capacity_duration += started.elapsed();
+            }
+            let rocket_rate_started = (profile_enabled && recipe_id == "carrier_rocket_launch")
+                .then(std::time::Instant::now);
             let sprayed_cycle_limit = available_full_proliferator_cycles(state, object, recipe);
             let extra_product_bonus = proliferator_extra_bonus(state, object, recipe);
             let progress_at_start = finite_number(object.get("progress"));
@@ -4691,6 +4773,9 @@ fn simulate_step(
                 potential_cycles =
                     sprayed_work + base_rate * (seconds - accelerated_seconds).max(0.0);
             }
+            if let Some(started) = rocket_rate_started {
+                rocket_rate_duration += started.elapsed();
+            }
             if maximum_cycles < 1.0 || potential_cycles <= EPSILON {
                 set_number(object, "utilization", 0.0)?;
                 set_number(object, "productionRate", 0.0)?;
@@ -4700,6 +4785,9 @@ fn simulate_step(
             if string_at(object, "proliferatorMode") != Some("speed") {
                 sprayed_work = work.min((sprayed_cycle_limit - progress_at_start).max(0.0));
             }
+            let rocket_settlement_started = (profile_enabled
+                && recipe_id == "carrier_rocket_launch")
+                .then(std::time::Instant::now);
             let progressed = rounded(progress_at_start + work, 6);
             let cycles = maximum_cycles.min((progressed + EPSILON).floor());
             let sprayed_cycles = cycles.min(sprayed_cycle_limit);
@@ -4731,7 +4819,13 @@ fn simulate_step(
                     );
                 }
                 consume_proliferator_points(state, object, recipe, sprayed_cycles)?;
+                let rocket_launch_started = (profile_enabled
+                    && recipe_id == "carrier_rocket_launch")
+                    .then(std::time::Instant::now);
                 crate::dyson::launch(state, base, object, &recipe.id, cycles)?;
+                if let Some(started) = rocket_launch_started {
+                    rocket_dyson_launch_duration += started.elapsed();
+                }
                 for output in &recipe.outputs {
                     let accumulated_bonus = object
                         .get("proliferatorBonusProgress")
@@ -4774,6 +4868,12 @@ fn simulate_step(
                     }
                 }
             }
+            if let Some(started) = rocket_settlement_started {
+                rocket_settlement_duration += started.elapsed();
+            }
+            let rocket_final_metrics_started = (profile_enabled
+                && recipe_id == "carrier_rocket_launch")
+                .then(std::time::Instant::now);
             set_number(
                 object,
                 "progress",
@@ -4814,12 +4914,18 @@ fn simulate_step(
                     2,
                 ),
             )?;
+            if let Some(started) = rocket_final_metrics_started {
+                rocket_final_metrics_duration += started.elapsed();
+            }
             continue;
         }
         if matches!(kind, "storage" | "splitter") {
             continue;
         }
     }
+    let entity_loop_duration = entity_loop_started
+        .map(|started| started.elapsed())
+        .unwrap_or_default();
     if vein_settlement_outcomes.next().is_some() {
         bail!("native vein settlement plan was not fully replayed");
     }
@@ -4832,6 +4938,8 @@ fn simulate_step(
     {
         bail!("native local machine settlement plan was not fully applied");
     }
+    let local_machine_execute_started = profile_enabled.then(std::time::Instant::now);
+    let mut local_machine_replay_duration = std::time::Duration::ZERO;
     if let Some(events) = machine_production_events {
         let outcomes = execute_local_machine_settlement_tasks_with_runtime(
             deterministic_runtime(),
@@ -4844,29 +4952,101 @@ fn simulate_step(
             production_buffer_limit,
             seconds,
         );
+        let local_machine_execute_duration = local_machine_execute_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
         let mut outcomes = outcomes.into_iter().map(Some).collect::<Vec<_>>();
         // Replay placeholders and serial contributions in their original row
         // and output order. In particular, do not reduce worker-local f64
         // totals: IEEE-754 addition order is observable in totalProduced.
-        for event in events {
-            match event {
-                MachineProductionEvent::ParallelTask(task_index) => {
-                    let outcome = outcomes
-                        .get_mut(task_index)
-                        .and_then(Option::take)
-                        .ok_or_else(|| {
-                            anyhow!("native local machine production replay diverged")
-                        })?;
-                    merge_local_machine_production(state, outcome, &mut produced_by_item)?;
-                }
-                MachineProductionEvent::Inline { item_id, produced } => {
-                    add_produced_item(&mut produced_by_item, &item_id, produced);
+        {
+            let _profile =
+                ProfileDurationGuard::new(profile_enabled, &mut local_machine_replay_duration);
+            for event in events {
+                match event {
+                    MachineProductionEvent::ParallelTask(task_index) => {
+                        let outcome = outcomes
+                            .get_mut(task_index)
+                            .and_then(Option::take)
+                            .ok_or_else(|| {
+                                anyhow!("native local machine production replay diverged")
+                            })?;
+                        merge_local_machine_production(state, outcome, &mut produced_by_item)?;
+                    }
+                    MachineProductionEvent::Inline { item_id, produced } => {
+                        add_produced_item(&mut produced_by_item, &item_id, produced);
+                    }
                 }
             }
         }
         if outcomes.iter().any(Option::is_some) {
             bail!("native local machine settlement outcome was not replayed");
         }
+        if profile_enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tfactory-local-machine-execute\t{:.3}",
+                local_machine_execute_duration.as_secs_f64() * 1_000.0,
+            );
+        }
+    } else if profile_enabled {
+        eprintln!("DSP_NATIVE_CORE_PROFILE\tfactory-local-machine-execute\t0.000");
+    }
+    if profile_enabled {
+        let categorized_loop_duration = renewable_power_apply_duration
+            + vein_replay_duration
+            + local_machine_prepare_duration
+            + serial_power_duration
+            + serial_machine_duration;
+        let residual_loop_duration = entity_loop_duration.saturating_sub(categorized_loop_duration);
+        for (label, duration) in [
+            (
+                "factory-renewable-power-plan",
+                renewable_power_plan_duration,
+            ),
+            (
+                "factory-renewable-power-apply",
+                renewable_power_apply_duration,
+            ),
+            ("factory-vein-replay", vein_replay_duration),
+            (
+                "factory-local-machine-prepare",
+                local_machine_prepare_duration,
+            ),
+            ("factory-serial-power", serial_power_duration),
+            ("factory-serial-global-machine", serial_machine_duration),
+            ("factory-serial-research", serial_research_duration),
+            ("factory-serial-sail-launch", serial_sail_launch_duration),
+            (
+                "factory-serial-rocket-launch",
+                serial_rocket_launch_duration,
+            ),
+            (
+                "factory-serial-other-machine",
+                serial_other_machine_duration,
+            ),
+            ("factory-rocket-header", rocket_header_duration),
+            ("factory-rocket-capacity", rocket_capacity_duration),
+            ("factory-rocket-rate", rocket_rate_duration),
+            ("factory-rocket-settlement", rocket_settlement_duration),
+            ("factory-rocket-dyson-launch", rocket_dyson_launch_duration),
+            (
+                "factory-rocket-final-metrics",
+                rocket_final_metrics_duration,
+            ),
+            ("factory-entity-loop-residual", residual_loop_duration),
+            (
+                "factory-local-machine-replay",
+                local_machine_replay_duration,
+            ),
+        ] {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\t{label}\t{:.3}",
+                duration.as_secs_f64() * 1_000.0,
+            );
+        }
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tfactory-serial-global-counts\tresearch={serial_research_count}\tsail={serial_sail_launch_count}\trocket={serial_rocket_launch_count}\tother={serial_other_machine_count}",
+        );
     }
     profile_mark!("power-facilities-machines-miners");
 

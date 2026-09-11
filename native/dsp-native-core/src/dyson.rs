@@ -1047,10 +1047,25 @@ pub(crate) fn launch(
     }
     let system_id = system_for_planet(state, text(entity, "planetId").unwrap_or_default())
         .ok_or_else(|| anyhow!("native Dyson launcher planet is unknown"))?;
+    let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
+    let total_started = profile_enabled.then(std::time::Instant::now);
+    let snapshot_started = profile_enabled.then(std::time::Instant::now);
     let snapshot = base.clone();
+    let snapshot_duration = snapshot_started
+        .map(|started| started.elapsed())
+        .unwrap_or_default();
+    let load_started = profile_enabled.then(std::time::Instant::now);
     let mut dyson = load(base)?;
+    let load_duration = load_started
+        .map(|started| started.elapsed())
+        .unwrap_or_default();
+    let sync_started = profile_enabled.then(std::time::Instant::now);
     if recipe_id == "solar_sail_launch" {
         sync_swarm(&snapshot, &mut dyson)?;
+        let sync_duration = sync_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let mutate_started = profile_enabled.then(std::time::Instant::now);
         let target_id = text(entity, "targetDysonOrbitId")
             .ok_or_else(|| anyhow!("native Dyson ejector target is missing"))?;
         let per_sail = sail_power(&snapshot, system_id);
@@ -1065,8 +1080,24 @@ pub(crate) fn launch(
         set_number(orbit, "totalLaunched", (launched + cycles).floor())?;
         set_number(orbit, "generationKw", (sails + cycles).floor() * per_sail)?;
         aggregate_swarm(&mut dyson)?;
+        let mutate_duration = mutate_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        if profile_enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tdyson-launch-sail-detail\tsnapshot={:.3}\tload={:.3}\tsync={:.3}\tmutate={:.3}",
+                snapshot_duration.as_secs_f64() * 1_000.0,
+                load_duration.as_secs_f64() * 1_000.0,
+                sync_duration.as_secs_f64() * 1_000.0,
+                mutate_duration.as_secs_f64() * 1_000.0,
+            );
+        }
     } else {
         sync_sphere(&mut dyson)?;
+        let sync_duration = sync_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let mutate_started = profile_enabled.then(std::time::Instant::now);
         let plan = dyson
             .plans
             .get_mut(system_id)
@@ -1081,7 +1112,35 @@ pub(crate) fn launch(
             (total + cycles).floor(),
         )?;
         reconcile_plan(plan)?;
+        let mutate_duration = mutate_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let generation_started = profile_enabled.then(std::time::Instant::now);
         update_generation(&snapshot, &mut dyson)?;
+        let generation_duration = generation_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        if profile_enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tdyson-launch-rocket-detail\tsnapshot={:.3}\tload={:.3}\tsync={:.3}\tmutate={:.3}\tgeneration={:.3}",
+                snapshot_duration.as_secs_f64() * 1_000.0,
+                load_duration.as_secs_f64() * 1_000.0,
+                sync_duration.as_secs_f64() * 1_000.0,
+                mutate_duration.as_secs_f64() * 1_000.0,
+                generation_duration.as_secs_f64() * 1_000.0,
+            );
+        }
+    }
+    let snapshot_drop_started = profile_enabled.then(std::time::Instant::now);
+    drop(snapshot);
+    if profile_enabled {
+        let snapshot_drop_duration = snapshot_drop_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tdyson-launch-snapshot-drop\t{:.3}",
+            snapshot_drop_duration.as_secs_f64() * 1_000.0,
+        );
     }
     let spent = finite(dyson.engineering.get("launchEnergySpentMj"));
     let per_cycle = if recipe_id == "solar_sail_launch" {
@@ -1094,7 +1153,21 @@ pub(crate) fn launch(
         "launchEnergySpentMj",
         rounded(spent + per_cycle * cycles, 3),
     )?;
+    let save_started = profile_enabled.then(std::time::Instant::now);
     save(base, dyson);
+    if profile_enabled {
+        let save_duration = save_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let total_duration = total_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tdyson-launch-save-total\tsave={:.3}\ttotal={:.3}",
+            save_duration.as_secs_f64() * 1_000.0,
+            total_duration.as_secs_f64() * 1_000.0,
+        );
+    }
     Ok(())
 }
 

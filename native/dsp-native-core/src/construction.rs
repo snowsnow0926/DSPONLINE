@@ -24,6 +24,17 @@ const CONSTRUCTION_QUANTUM_PREFETCH_SECONDS: f64 = 5.0;
 const CONSTRUCTION_QUANTUM_PREFETCH_MAX_JOBS: f64 = 10_000_000.0;
 const CONSTRUCTION_QUANTUM_EXTENDED_PREFETCH_MAX_JOBS: f64 = 100_000_000.0;
 
+static AUDIT_RUN_CENTERS_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn audit_reset_run_centers_calls() {
+    AUDIT_RUN_CENTERS_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn audit_run_centers_calls() -> usize {
+    AUDIT_RUN_CENTERS_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Debug, Clone)]
 enum Step {
     Material {
@@ -3491,6 +3502,7 @@ pub(crate) fn run_centers(
     center_indices: &[usize],
     runtime: &mut ConstructionRuntime,
 ) -> anyhow::Result<ConstructionRunOutcome> {
+    AUDIT_RUN_CENTERS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (selected_center_indices, scan) =
         runtime.selected_rows(state, base, entities, power_factors, center_indices);
     let mut receipt = ConstructionRunReceipt::default();

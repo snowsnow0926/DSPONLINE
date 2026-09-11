@@ -69,3 +69,28 @@ pub use v47_import::{
 
 pub const CORE_PROTOCOL_VERSION: u16 = 1;
 pub const CORE_STATE_FORMAT_VERSION: u16 = 1;
+
+#[doc(hidden)]
+pub fn audit_reset_run_centers_calls() {
+    construction::audit_reset_run_centers_calls();
+}
+
+#[doc(hidden)]
+pub fn audit_run_centers_calls() -> usize {
+    construction::audit_run_centers_calls()
+}
+
+#[doc(hidden)]
+pub fn audit_reset_construction_tail_block_calls() {
+    pure_idle::audit_reset_construction_tail_block_calls();
+}
+
+#[doc(hidden)]
+pub fn audit_construction_tail_block_calls() -> usize {
+    pure_idle::audit_construction_tail_block_calls()
+}
+
+#[doc(hidden)]
+pub fn audit_construction_tail_empty_stops() -> usize {
+    pure_idle::audit_construction_tail_empty_stops()
+}

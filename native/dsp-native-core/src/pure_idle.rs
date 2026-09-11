@@ -12,7 +12,7 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
-const MACRO_V10_ALGORITHM_VERSION: &str = "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-handcraft-construction-stock-v11";
+const MACRO_V10_ALGORITHM_VERSION: &str = "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-handcraft-construction-stock-sec-v12";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -3286,16 +3286,35 @@ fn apply_construction_tail_certificate(
             state, &base, &entities,
         ))
     });
-    let outcome = crate::construction::run_centers(
-        state,
-        &mut base,
-        &mut entities,
-        scheduled_seconds as f64,
-        &power_factors,
-        &state.factory_topology.construction_center_indices,
-        Arc::make_mut(&mut runtime),
-    )
-    .map_err(|error| format!("construction-tail settlement failed: {error:#}"))?;
+    // Construction centers share target cursors, per-planet material and a
+    // guarded fair-work budget. Feeding the whole tail to `run_centers` in one
+    // call lets the first center spend its entire long-window share before a
+    // later center runs, while a segmented caller alternates those shares.
+    // Replay canonical whole-second boundaries against the one decoded graph
+    // so F^(a+b) is exactly F^a followed by F^b. Once the active directory is
+    // empty, no production, delivery or power event exists in this isolated
+    // tail that could wake it, so the remaining seconds are a proven no-op.
+    let mut crafted = 0_i128;
+    let mut remaining_seconds = scheduled_seconds;
+    while remaining_seconds > 0 {
+        let outcome = crate::construction::run_centers(
+            state,
+            &mut base,
+            &mut entities,
+            1.0,
+            &power_factors,
+            &state.factory_topology.construction_center_indices,
+            Arc::make_mut(&mut runtime),
+        )
+        .map_err(|error| format!("construction-tail settlement failed: {error:#}"))?;
+        crafted = crafted
+            .checked_add(outcome.receipt.crafted)
+            .ok_or_else(|| "construction-tail crafted receipt overflowed".to_owned())?;
+        remaining_seconds -= 1;
+        if outcome.scan.selected_rows == 0 {
+            break;
+        }
+    }
 
     // Bucket-average diagnostics are not gameplay authority and vary with the
     // caller's segmentation. Preserve work progress, but keep these two
@@ -3320,9 +3339,7 @@ fn apply_construction_tail_certificate(
         .commit_simulated_state(base, entities, belt_commit, next_revision, false)
         .map_err(|error| format!("construction-tail commit failed: {error:#}"))?;
     state.install_prepared_construction_runtime(runtime);
-    Ok(ConstructionTailApplication {
-        crafted: outcome.receipt.crafted,
-    })
+    Ok(ConstructionTailApplication { crafted })
 }
 
 fn source_has_unbounded_vein(state: &CoreState, item_id: &str) -> Result<bool, String> {
@@ -8745,6 +8762,222 @@ mod tests {
         state
     }
 
+    fn audit_multi_center_construction_fixture(
+        multiplier: f64,
+        center_count: usize,
+        prebuilt_job_steps: usize,
+        stock: u64,
+    ) -> CoreState {
+        let mut base = powered_fixture_base(multiplier, "infinite");
+        base["tray"] = json!({ "iron_ore": stock });
+        base["planetTrays"]["home"] = json!({ "iron_ore": stock });
+        base["construction"] = json!({ "test_building": 0, "conveyor_belt_mk1": 0 });
+        let mut jobs = Map::new();
+        if prebuilt_job_steps > 0 {
+            for index in 0..center_count {
+                let construction_id = if index % 2 == 0 {
+                    "test_building"
+                } else {
+                    "conveyor_belt_mk1"
+                };
+                jobs.insert(
+                    format!("construction-center-{index:05}"),
+                    json!({
+                        "constructionId": construction_id,
+                        "steps": (0..prebuilt_job_steps)
+                            .map(|_| json!({
+                                "kind": "building",
+                                "constructionId": construction_id
+                            }))
+                            .collect::<Vec<_>>(),
+                        "stepIndex": 0,
+                        "elapsedSeconds": 0,
+                        "inventory": {}
+                    }),
+                );
+            }
+        }
+        base["constructionAutomation"] = json!({
+            "enabled": true,
+            "targetStock": {
+                "test_building": 100_000_000,
+                "conveyor_belt_mk1": 100_000_000
+            },
+            "cursor": 0,
+            "totalCrafted": 0,
+            "lastCraftedId": null,
+            "destroyedByproducts": {},
+            "jobs": jobs,
+            "quantumSourceEnabled": false,
+            "quantumMaterialBuffer": {}
+        });
+        let mut entities = vec![
+            json!({
+                "id": "wind", "kind": "power", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "wind_turbine",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "controller", "kind": "machine", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "time_warp_device",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 1,
+                "productionRate": 0
+            }),
+        ];
+        for index in 0..center_count {
+            entities.push(json!({
+                "id": format!("construction-center-{index:05}"),
+                "kind": "machine", "planetId": "home", "powerGridId": "grid-a",
+                "buildingId": "construction_center", "machineCount": 1_000,
+                "minerCount": 0, "inputs": {}, "outputs": {}, "progress": 0,
+                "routingCursor": 0, "utilization": 0, "productionRate": 0
+            }));
+        }
+        fixture_state_from_parts(base, entities)
+    }
+
+    fn audit_multi_planet_construction_fixture(
+        multiplier: f64,
+        center_count: usize,
+        prebuilt_job_steps: usize,
+        home_stock: u64,
+        outpost_stock: u64,
+    ) -> CoreState {
+        let mut base = powered_fixture_base(multiplier, "infinite");
+        base["tray"] = json!({ "iron_ore": home_stock });
+        base["planetTrays"] = json!({
+            "home": { "iron_ore": home_stock },
+            "outpost": { "iron_ore": outpost_stock }
+        });
+        base["planetTrayItemLimits"]["outpost"] = json!(1_000_000);
+        base["planetMetrics"]["outpost"] = json!({});
+        base["powerGridMetrics"]["outpost"] = json!({});
+        base["galaxy"]["profiles"]["outpost"] = json!({
+            "windMultiplier": 1,
+            "solarMultiplier": 1,
+            "geothermalMultiplier": 1,
+            "miningMultiplier": 1,
+            "productionSpeedMultiplier": 1,
+            "specialization": "balanced",
+            "oceanType": "none"
+        });
+        base["exploration"]["unlockedSystemIds"] = json!(["helios", "borealis"]);
+        base["exploration"]["colonizedPlanetIds"] = json!(["home", "outpost"]);
+        base["exploration"]["surveyProgressBySystem"]["borealis"] = json!(1);
+        base["construction"] = json!({ "test_building": 0, "conveyor_belt_mk1": 0 });
+        let mut jobs = Map::new();
+        if prebuilt_job_steps > 0 {
+            for index in 0..center_count {
+                let construction_id = if index % 2 == 0 {
+                    "test_building"
+                } else {
+                    "conveyor_belt_mk1"
+                };
+                jobs.insert(
+                    format!("construction-center-{index:05}"),
+                    json!({
+                        "constructionId": construction_id,
+                        "steps": (0..prebuilt_job_steps)
+                            .map(|_| json!({
+                                "kind": "building",
+                                "constructionId": construction_id
+                            }))
+                            .collect::<Vec<_>>(),
+                        "stepIndex": 0,
+                        "elapsedSeconds": 0.5,
+                        "inventory": { "iron_ore": 1 }
+                    }),
+                );
+            }
+        }
+        base["constructionAutomation"] = json!({
+            "enabled": true,
+            "targetStock": {
+                "test_building": 100_000_000,
+                "conveyor_belt_mk1": 100_000_000
+            },
+            "cursor": 0,
+            "totalCrafted": 0,
+            "lastCraftedId": null,
+            "destroyedByproducts": {},
+            "jobs": jobs,
+            "quantumSourceEnabled": false,
+            "quantumMaterialBuffer": {}
+        });
+        let mut entities = vec![
+            json!({
+                "id": "wind", "kind": "power", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "wind_turbine",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "controller", "kind": "machine", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "time_warp_device",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 1,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "outpost-wind", "kind": "power", "planetId": "outpost",
+                "powerGridId": "grid-b", "buildingId": "wind_turbine",
+                "machineCount": 1, "minerCount": 0, "inputs": {}, "outputs": {},
+                "progress": 0, "routingCursor": 0, "utilization": 0,
+                "productionRate": 0
+            }),
+        ];
+        for index in 0..center_count {
+            let (planet_id, grid_id) = if index % 2 == 0 {
+                ("home", "grid-a")
+            } else {
+                ("outpost", "grid-b")
+            };
+            entities.push(json!({
+                "id": format!("construction-center-{index:05}"),
+                "kind": "machine", "planetId": planet_id, "powerGridId": grid_id,
+                "buildingId": "construction_center", "machineCount": 10,
+                "minerCount": 0, "inputs": {}, "outputs": {}, "progress": 0,
+                "routingCursor": 0, "utilization": 0, "productionRate": 0
+            }));
+        }
+        fixture_state_from_parts_with_belts_and_catalog(
+            base,
+            entities,
+            Vec::new(),
+            fixture_catalog_with_outpost(),
+        )
+    }
+
+    fn audit_construction_material_total(state: &CoreState) -> i128 {
+        let base = state.base_value();
+        let mut total = proof_counter(base["tray"].get("iron_ore"), "home tray iron").unwrap();
+        total += proof_counter(
+            base["planetTrays"]["outpost"].get("iron_ore"),
+            "outpost tray iron",
+        )
+        .unwrap();
+        total += proof_counter(
+            base["construction"].get("test_building"),
+            "test building stock",
+        )
+        .unwrap();
+        total += proof_counter(
+            base["construction"].get("conveyor_belt_mk1"),
+            "belt stock",
+        )
+        .unwrap();
+        if let Some(jobs) = base["constructionAutomation"]["jobs"].as_object() {
+            for job in jobs.values() {
+                total += proof_counter(job["inventory"].get("iron_ore"), "WIP iron").unwrap();
+            }
+        }
+        total
+    }
+
     fn pure_idle_request(
         revision: u64,
         simulation_seconds: f64,
@@ -9188,6 +9421,209 @@ mod tests {
                 long.summary().unwrap().canonical_sha256,
             );
         }
+    }
+
+    #[test]
+    fn audit_macro_construction_matches_ordinary_one_second_exact_oracle() {
+        for center_count in [2, 3, 5] {
+            for prebuilt_job_steps in [0, 1_000] {
+                let initial = audit_multi_center_construction_fixture(
+                    15.0,
+                    center_count,
+                    prebuilt_job_steps,
+                    1_000_000,
+                );
+                let mut macro_state = initial.clone();
+                let revision = macro_state.revision;
+                let result = advance_macro_v10(
+                    &mut macro_state,
+                    &pure_idle_macro_request(revision, 31.0, 31.0 / 15.0),
+                )
+                .unwrap();
+                assert!(result.supported, "macro reason={:?}", result.reason);
+
+                let mut oracle = initial;
+                for _ in 0..31 {
+                    let revision = oracle.revision;
+                    let result = oracle
+                        .advance_exact(&exact_request(revision, 1.0, 1.0 / 15.0))
+                        .unwrap();
+                    assert!(result.supported, "oracle reason={:?}", result.reason);
+                }
+
+                assert_eq!(
+                    macro_state.base_value()["constructionAutomation"],
+                    oracle.base_value()["constructionAutomation"],
+                    "{center_count} centers/{prebuilt_job_steps} WIP diverged from the ordinary one-second exact oracle",
+                );
+                assert_eq!(
+                    macro_state.base_value()["construction"],
+                    oracle.base_value()["construction"],
+                );
+                assert_eq!(macro_state.base_value()["tray"], oracle.base_value()["tray"]);
+            }
+        }
+    }
+
+    #[test]
+    fn audit_multi_planet_construction_is_split_invariant_and_material_conserving() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            for center_count in [2, 3, 5] {
+                for prebuilt_job_steps in [0, 1_000] {
+                    let initial = audit_multi_planet_construction_fixture(
+                        multiplier,
+                        center_count,
+                        prebuilt_job_steps,
+                        2_400,
+                        1_600,
+                    );
+                    let initial_total = audit_construction_material_total(&initial);
+                    let mut one_shot = initial.clone();
+                    let revision = one_shot.revision;
+                    let result = advance_macro_v10(
+                        &mut one_shot,
+                        &pure_idle_macro_request(revision, 600.0, 600.0 / multiplier),
+                    )
+                    .unwrap();
+                    assert!(
+                        result.supported,
+                        "{multiplier}x/{center_count} centers/{prebuilt_job_steps} WIP reason={:?}",
+                        result.reason
+                    );
+                    assert_eq!(audit_construction_material_total(&one_shot), initial_total);
+
+                    let mut segmented = initial;
+                    for seconds in [30.0, 73.0, 197.0, 300.0] {
+                        let revision = segmented.revision;
+                        let result = advance_macro_v10(
+                            &mut segmented,
+                            &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                        )
+                        .unwrap();
+                        assert!(result.supported, "segment reason={:?}", result.reason);
+                    }
+                    assert_eq!(
+                        segmented.summary().unwrap().canonical_sha256,
+                        one_shot.summary().unwrap().canonical_sha256,
+                        "{multiplier}x/{center_count} centers/{prebuilt_job_steps} WIP multi-planet split drift",
+                    );
+                    assert_eq!(audit_construction_material_total(&segmented), initial_total);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn audit_multi_planet_wip_survives_checkpoint_reload() {
+        let initial = audit_multi_planet_construction_fixture(15.0, 5, 1_000, 20_000, 10_000);
+        let initial_total = audit_construction_material_total(&initial);
+        let mut continuous = initial.clone();
+        let revision = continuous.revision;
+        let result = advance_macro_v10(
+            &mut continuous,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "continuous reason={:?}", result.reason);
+
+        let mut checkpointed = initial;
+        let revision = checkpointed.revision;
+        let result = advance_macro_v10(
+            &mut checkpointed,
+            &pure_idle_macro_request(revision, 31.0, 31.0 / 15.0),
+        )
+        .unwrap();
+        assert!(result.supported, "prefix reason={:?}", result.reason);
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        checkpointed
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let mut identity = checkpointed.identity.clone();
+        identity.revision = checkpointed.revision;
+        let mut reloaded = CoreState::from_internal_records(
+            identity,
+            &records,
+            fixture_catalog_with_outpost(),
+        )
+        .unwrap();
+        assert!(reloaded.pure_idle_macro_runtime.is_none());
+        let revision = reloaded.revision;
+        let result = advance_macro_v10(
+            &mut reloaded,
+            &pure_idle_macro_request(revision, 569.0, 569.0 / 15.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reload reason={:?}", result.reason);
+        assert_eq!(
+            reloaded.summary().unwrap().canonical_sha256,
+            continuous.summary().unwrap().canonical_sha256,
+        );
+        assert_eq!(audit_construction_material_total(&reloaded), initial_total);
+    }
+
+    #[test]
+    #[ignore = "manual audit benchmark"]
+    fn audit_construction_tail_per_second_performance_probe() {
+        let mut calibrated = productive_construction_macro_fixture(15.0, 100_000_000);
+        let revision = calibrated.revision;
+        let result = advance_macro_v10(
+            &mut calibrated,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "calibration reason={:?}", result.reason);
+        let base = calibrated.base_value().clone();
+        let entities = calibrated.parse_entities_parallel().unwrap();
+        let runtime = calibrated.prepared_construction_runtime().unwrap();
+        let power_factors = calibrated
+            .factory_topology
+            .construction_center_indices
+            .iter()
+            .map(|&entity_index| (entity_index, 1.0))
+            .collect::<HashMap<_, _>>();
+        const SECONDS: usize = 100_000;
+
+        let mut bulk_base = base.clone();
+        let mut bulk_entities = entities.clone();
+        let mut bulk_runtime = runtime.as_ref().clone();
+        let bulk_started = std::time::Instant::now();
+        crate::construction::run_centers(
+            &calibrated,
+            &mut bulk_base,
+            &mut bulk_entities,
+            SECONDS as f64,
+            &power_factors,
+            &calibrated.factory_topology.construction_center_indices,
+            &mut bulk_runtime,
+        )
+        .unwrap();
+        let bulk_elapsed = bulk_started.elapsed();
+
+        let mut replay_base = base;
+        let mut replay_entities = entities;
+        let mut replay_runtime = runtime.as_ref().clone();
+        let replay_started = std::time::Instant::now();
+        for _ in 0..SECONDS {
+            crate::construction::run_centers(
+                &calibrated,
+                &mut replay_base,
+                &mut replay_entities,
+                1.0,
+                &power_factors,
+                &calibrated.factory_topology.construction_center_indices,
+                &mut replay_runtime,
+            )
+            .unwrap();
+        }
+        let replay_elapsed = replay_started.elapsed();
+        eprintln!(
+            "AUDIT construction-tail {SECONDS}s bulk={bulk_elapsed:?} per_second={replay_elapsed:?} ratio={:.1}",
+            replay_elapsed.as_secs_f64() / bulk_elapsed.as_secs_f64().max(f64::EPSILON)
+        );
+        assert_eq!(replay_base, bulk_base);
     }
 
     #[test]

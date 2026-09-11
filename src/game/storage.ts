@@ -1964,7 +1964,8 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
     })
     : [];
   const productionHistory: GameState["productionHistory"] = Array.isArray(saved.productionHistory)
-    ? saved.productionHistory.slice(-180).flatMap((sample: Record<string, any>) => {
+    ? saved.productionHistory.slice(-180).flatMap((sample: Record<string, any> | null) => {
+      if (!isRecord(sample)) return [];
       const elapsedSeconds = nonNegativeNumber(sample.elapsedSeconds);
       if (elapsedSeconds <= 0) return [];
       return [{

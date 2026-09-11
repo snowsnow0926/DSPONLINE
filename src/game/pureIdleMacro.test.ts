@@ -63,6 +63,13 @@ function addWindGeneration(state: GameState, machineCount: number): void {
 }
 
 describe("pure idle macro session", () => {
+  it("starts from a recovery state containing a legacy null production-history sample", () => {
+    const source = pureIdleState();
+    source.productionHistory = [null as never];
+    const session = createPureIdleMacroSession(source, "stable");
+    expect(session.candidate.productionHistory.every((sample) => sample !== null)).toBe(true);
+  });
+
   it("binds stop settlement, completed research, and the original pause intent before serialization", () => {
     const baseline = pureIdleState();
     baseline.idleSettlement = {

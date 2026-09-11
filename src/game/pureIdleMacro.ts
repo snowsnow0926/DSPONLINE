@@ -18,6 +18,7 @@ import {
   type ResearchMacroLedger,
   type ResearchMacroStatus,
 } from "./researchMacro";
+import { sanitizeProductionHistorySamples } from "./productionStatistics";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
 export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v3";
@@ -436,6 +437,7 @@ export function createPureIdleMacroSession(
   if (state.timeWarp.pendingSimulationSeconds > 1e-6 || state.timeWarp.pendingWallSeconds > 1e-6) {
     throw new Error("纯挂机检查点仍包含未提交模拟预算");
   }
+  state.productionHistory = sanitizeProductionHistorySamples(state.productionHistory);
   throwIfMacroInterrupted(options);
   if (options.forceConservativeReason) {
     return createConservativePureIdleMacroSession(state, mode, options.forceConservativeReason);

@@ -44,7 +44,7 @@ import {
 } from "./galaxy";
 import { completeStationOperationModeTransition, createEmptyGalacticHubNetwork, createEmptySystemSpaceStations, settleSpaceStationConstructionInputs } from "./systemSpaceStation";
 import { isElevatorStation, settleSystemHubLogistics, SYSTEM_HUB_SETTLEMENT_SECONDS } from "./systemHubLogistics";
-import { compactProductionHistory, PRODUCTION_HISTORY_SAMPLE_SECONDS } from "./productionStatistics";
+import { compactProductionHistory, PRODUCTION_HISTORY_SAMPLE_SECONDS, sanitizeProductionHistorySamples } from "./productionStatistics";
 import type {
   BeltTier,
   BeltInputPortIndex,
@@ -375,7 +375,7 @@ function copyState(state: GameState): GameState {
     })),
     handcraftQueue: state.handcraftQueue.map((entry) => ({ ...entry })),
     productionPlans: state.productionPlans.map((plan) => ({ ...plan, recipeSelections: { ...plan.recipeSelections } })),
-    productionHistory: state.productionHistory.map((sample) => ({
+    productionHistory: sanitizeProductionHistorySamples(state.productionHistory).map((sample) => ({
       ...sample,
       productionPerMinute: { ...sample.productionPerMinute },
       consumptionPerMinute: { ...sample.consumptionPerMinute },

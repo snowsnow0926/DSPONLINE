@@ -1,4 +1,5 @@
 import type { BeltConnection, FactoryEntity, GameState } from "./types";
+import { sanitizeProductionHistorySamples } from "./productionStatistics";
 
 export const SIMULATION_RUNTIME_PROTOCOL_VERSION = 1 as const;
 
@@ -56,7 +57,10 @@ function validateSimulationStateShape(value: unknown): GameState {
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.entities) || !Array.isArray(parsed.belts)) {
     throw new Error("模拟运行时状态结构无效");
   }
-  return parsed as GameState;
+  const productionHistory = sanitizeProductionHistorySamples(parsed.productionHistory);
+  return Array.isArray(parsed.productionHistory) && productionHistory.length === parsed.productionHistory.length
+    ? parsed as GameState
+    : { ...parsed, productionHistory } as GameState;
 }
 
 function validateSimulationStateTransferEnvelope(transfer: SimulationStateTransfer): void {
@@ -108,6 +112,7 @@ function isContainer(value: unknown): value is Record<string, unknown> | unknown
 
 function createValuePatches(previous: unknown, current: unknown, path: SimulationPatchPathSegment[] = []): SimulationValuePatch[] {
   if (Object.is(previous, current)) return [];
+  if (current === undefined) return [{ path, operation: "delete" }];
   if (!isContainer(previous) || !isContainer(current) || Array.isArray(previous) !== Array.isArray(current)) {
     return [{ path, operation: "set", value: current }];
   }
@@ -163,6 +168,12 @@ export function createSimulationCommandPatch(
   const keys = new Set([...Object.keys(previous), ...Object.keys(current)]);
   keys.delete("entities");
   keys.delete("belts");
+  // These fields are produced only by the simulation runtime. The UI mirror
+  // intentionally receives them less often, so treating an older mirror as a
+  // player edit can roll history backwards or persist undefined array entries
+  // as null in the durable WAL.
+  keys.delete("productionHistory");
+  keys.delete("historyRecordedAt");
   for (const key of keys) {
     const before = (previous as unknown as Record<string, unknown>)[key];
     const afterRecord = current as unknown as Record<string, unknown>;
@@ -231,7 +242,13 @@ export function applySimulationCommandPatch(state: GameState, patch: SimulationC
     throw new Error(`不支持的模拟命令协议 ${patch.protocolVersion}`);
   }
   let next: unknown = state;
-  for (const change of patch.topLevelChanges) next = applyValuePatch(next, change);
+  for (const change of patch.topLevelChanges) {
+    const topLevelKey = change.path[0];
+    // Backwards compatibility for already-staged 1.0.45/early-1.0.46 intents:
+    // ignore runtime history patches even when their digest is otherwise valid.
+    if (topLevelKey === "productionHistory" || topLevelKey === "historyRecordedAt") continue;
+    next = applyValuePatch(next, change);
+  }
   const topLevel = next as GameState;
   return {
     ...topLevel,

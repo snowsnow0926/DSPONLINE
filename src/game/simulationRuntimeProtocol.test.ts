@@ -30,6 +30,26 @@ describe("authoritative simulation runtime protocol", () => {
     expect(() => validateSimulationStateCheckpoint(checkpoint, { entities: [], belts: null })).toThrow(/结构/);
   });
 
+  it("sanitizes legacy null production-history samples at transfer and checkpoint boundaries", () => {
+    const state = createInitialState(14_044);
+    const validSample = {
+      elapsedSeconds: 1,
+      sampleDurationSeconds: 1,
+      productionPerMinute: { iron_ore: 60 },
+      consumptionPerMinute: {},
+      inventory: {},
+      generationKw: 0,
+      demandKw: 0,
+    };
+    state.productionHistory = [null as never, validSample];
+
+    const transferred = deserializeSimulationStateTransfer(serializeSimulationStateForTransfer(state));
+    const checkpoint = serializeSimulationStateCheckpoint(state);
+    expect(transferred.productionHistory).toEqual([validSample]);
+    expect(validateSimulationStateCheckpoint(checkpoint.checkpoint, checkpoint.checkpointState).productionHistory)
+      .toEqual([validSample]);
+  });
+
   it("round-trips player commands without carrying unchanged runtime fields", () => {
     const previous = createInitialState(14_044);
     const current = structuredClone(previous);
@@ -58,6 +78,41 @@ describe("authoritative simulation runtime protocol", () => {
     expect(applied.entities[0].inputs.iron_ore).toBe(8);
     expect(applied.entities[0].inputs.copper_ore).toBe(99);
     expect(applied.entities[0].progress).toBe(0.75);
+  });
+
+  it("never writes runtime-owned production history through UI or legacy durable commands", () => {
+    const workerCurrent = createInitialState(14_044);
+    workerCurrent.productionHistory = [{
+      elapsedSeconds: 12,
+      sampleDurationSeconds: 1,
+      productionPerMinute: { iron_ore: 60 },
+      consumptionPerMinute: {},
+      inventory: {},
+      generationKw: 0,
+      demandKw: 0,
+    }];
+    workerCurrent.historyRecordedAt = 12;
+    const staleUi = structuredClone(workerCurrent);
+    staleUi.paused = !staleUi.paused;
+    staleUi.productionHistory = [undefined as never];
+    staleUi.historyRecordedAt = 0;
+
+    const patch = createSimulationCommandPatch(workerCurrent, staleUi, 9)!;
+    expect(patch.topLevelChanges.some((change) =>
+      change.path[0] === "productionHistory" || change.path[0] === "historyRecordedAt")).toBe(false);
+
+    const legacyCanonicalPatch = JSON.parse(JSON.stringify({
+      ...patch,
+      topLevelChanges: [
+        ...patch.topLevelChanges,
+        { path: ["productionHistory", 0], operation: "set", value: undefined },
+        { path: ["historyRecordedAt"], operation: "set", value: 0 },
+      ],
+    })) as typeof patch;
+    const applied = applySimulationCommandPatch(workerCurrent, legacyCanonicalPatch);
+    expect(applied.paused).toBe(staleUi.paused);
+    expect(applied.productionHistory).toEqual(workerCurrent.productionHistory);
+    expect(applied.historyRecordedAt).toBe(12);
   });
 
   it("preserves record order across additions and removals", () => {

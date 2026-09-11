@@ -24,6 +24,28 @@ const RECENT_FINE_SECONDS = 70;
 const RECENT_MEDIUM_SECONDS = 660;
 const HISTORY_RETENTION_SECONDS = 3_660;
 
+function isHistoryRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Production history is a runtime-only diagnostic cache. A stale durable
+ * command from an older client could JSON-canonicalize an undefined array
+ * entry to null. Drop malformed samples at every runtime boundary instead of
+ * allowing diagnostic data to stop simulation or offline settlement.
+ */
+export function sanitizeProductionHistorySamples(value: unknown): ProductionHistorySample[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((sample): sample is ProductionHistorySample => {
+    if (!isHistoryRecord(sample) || typeof sample.elapsedSeconds !== "number" || !Number.isFinite(sample.elapsedSeconds) || sample.elapsedSeconds < 0) return false;
+    return isHistoryRecord(sample.productionPerMinute) &&
+      isHistoryRecord(sample.consumptionPerMinute) &&
+      isHistoryRecord(sample.inventory) &&
+      typeof sample.generationKw === "number" && Number.isFinite(sample.generationKw) &&
+      typeof sample.demandKw === "number" && Number.isFinite(sample.demandKw);
+  });
+}
+
 function rounded(value: number, digits = 6): number {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
@@ -91,24 +113,25 @@ function weightedOptional(
 }
 
 export function mergeProductionHistorySamples(samples: readonly ProductionHistorySample[]): ProductionHistorySample {
-  if (samples.length === 0) throw new Error("生产统计时间桶不能为空");
-  const duration = samples.reduce((sum, sample) => sum + getProductionHistorySampleDuration(sample), 0);
-  const latest = samples.at(-1)!;
+  const validSamples = sanitizeProductionHistorySamples(samples);
+  if (validSamples.length === 0) throw new Error("生产统计时间桶不能为空");
+  const duration = validSamples.reduce((sum, sample) => sum + getProductionHistorySampleDuration(sample), 0);
+  const latest = validSamples.at(-1)!;
   return {
     elapsedSeconds: latest.elapsedSeconds,
     sampleDurationSeconds: duration,
-    productionPerMinute: mergeRateRecords(samples, (sample) => sample.productionPerMinute, duration),
-    consumptionPerMinute: mergeRateRecords(samples, (sample) => sample.consumptionPerMinute, duration),
-    planetProductionPerMinute: mergePlanetRateRecords(samples, (sample) => sample.planetProductionPerMinute, duration),
-    planetConsumptionPerMinute: mergePlanetRateRecords(samples, (sample) => sample.planetConsumptionPerMinute, duration),
+    productionPerMinute: mergeRateRecords(validSamples, (sample) => sample.productionPerMinute, duration),
+    consumptionPerMinute: mergeRateRecords(validSamples, (sample) => sample.consumptionPerMinute, duration),
+    planetProductionPerMinute: mergePlanetRateRecords(validSamples, (sample) => sample.planetProductionPerMinute, duration),
+    planetConsumptionPerMinute: mergePlanetRateRecords(validSamples, (sample) => sample.planetConsumptionPerMinute, duration),
     inventory: { ...latest.inventory },
-    generationKw: weightedOptional(samples, (sample) => sample.generationKw, duration) ?? latest.generationKw,
-    demandKw: weightedOptional(samples, (sample) => sample.demandKw, duration) ?? latest.demandKw,
-    machineEfficiency: weightedOptional(samples, (sample) => sample.machineEfficiency, duration),
-    logisticsEfficiency: weightedOptional(samples, (sample) => sample.logisticsEfficiency, duration),
-    powerEfficiency: weightedOptional(samples, (sample) => sample.powerEfficiency, duration),
-    activeMachines: Math.max(0, Math.round(weightedOptional(samples, (sample) => sample.activeMachines, duration) ?? latest.activeMachines ?? 0)),
-    blockedMachines: Math.max(0, Math.round(weightedOptional(samples, (sample) => sample.blockedMachines, duration) ?? latest.blockedMachines ?? 0)),
+    generationKw: weightedOptional(validSamples, (sample) => sample.generationKw, duration) ?? latest.generationKw,
+    demandKw: weightedOptional(validSamples, (sample) => sample.demandKw, duration) ?? latest.demandKw,
+    machineEfficiency: weightedOptional(validSamples, (sample) => sample.machineEfficiency, duration),
+    logisticsEfficiency: weightedOptional(validSamples, (sample) => sample.logisticsEfficiency, duration),
+    powerEfficiency: weightedOptional(validSamples, (sample) => sample.powerEfficiency, duration),
+    activeMachines: Math.max(0, Math.round(weightedOptional(validSamples, (sample) => sample.activeMachines, duration) ?? latest.activeMachines ?? 0)),
+    blockedMachines: Math.max(0, Math.round(weightedOptional(validSamples, (sample) => sample.blockedMachines, duration) ?? latest.blockedMachines ?? 0)),
   };
 }
 
@@ -139,7 +162,7 @@ function compactBucketsBefore(
  * one-minute buckets. One extra minute is retained for an exact rolling edge.
  */
 export function compactProductionHistory(samples: readonly ProductionHistorySample[]): ProductionHistorySample[] {
-  const history = [...samples].sort((left, right) => left.elapsedSeconds - right.elapsedSeconds);
+  const history = sanitizeProductionHistorySamples(samples).sort((left, right) => left.elapsedSeconds - right.elapsedSeconds);
   const latestElapsedSeconds = history.at(-1)?.elapsedSeconds ?? 0;
   // Worker publications can cover 1, 4, 5, 12, or more simulation seconds.
   // Compact by covered time rather than assuming every source bucket is
@@ -170,6 +193,7 @@ export function calculateProductionWindowSnapshot(
   fallbackConsumptionPerMinute: Partial<Record<ItemId, number>> = {},
   totalProduced: Partial<Record<ItemId, number>> = {},
 ): ProductionWindowSnapshot {
+  const validHistory = sanitizeProductionHistorySamples(history);
   const window = windowId === "second"
     ? PER_SECOND_WINDOW
     : PRODUCTION_STATISTICS_WINDOWS.find((entry) => entry.id === windowId) ?? PRODUCTION_STATISTICS_WINDOWS[0];
@@ -178,7 +202,7 @@ export function calculateProductionWindowSnapshot(
       Number.isFinite(value) && (value ?? 0) >= 0 ? [[itemId, Math.floor(value ?? 0)]] : [])) as Partial<Record<ItemId, number>>;
     return {
       window,
-      coveredSeconds: history.reduce((sum, sample) => sum + getProductionHistorySampleDuration(sample), 0),
+      coveredSeconds: validHistory.reduce((sum, sample) => sum + getProductionHistorySampleDuration(sample), 0),
       production,
       consumption: {},
       totalProduction: Object.values(production).reduce((sum, value) => sum + (value ?? 0), 0),
@@ -195,8 +219,8 @@ export function calculateProductionWindowSnapshot(
       target.set(itemId, (target.get(itemId) ?? 0) + (value ?? 0) * weight);
     }
   };
-  for (let index = history.length - 1; index >= 0 && remaining > 0; index -= 1) {
-    const sample = history[index];
+  for (let index = validHistory.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const sample = validHistory[index];
     const overlap = Math.min(remaining, getProductionHistorySampleDuration(sample));
     addWeighted(weightedProduction, sample.productionPerMinute, overlap);
     addWeighted(weightedConsumption, sample.consumptionPerMinute, overlap);
@@ -239,10 +263,11 @@ export function createProductionTrendSeries(
   itemId: ItemId,
   maximumPoints = 72,
 ): ProductionTrendPoint[] {
+  const validHistory = sanitizeProductionHistorySamples(history);
   const window = PRODUCTION_STATISTICS_WINDOWS.find((entry) => entry.id === windowId);
-  if (!window || window.seconds <= 0 || history.length === 0) return [];
-  const cutoff = (history.at(-1)?.elapsedSeconds ?? 0) - window.seconds;
-  const selected = history.filter((sample) => sample.elapsedSeconds > cutoff);
+  if (!window || window.seconds <= 0 || validHistory.length === 0) return [];
+  const cutoff = (validHistory.at(-1)?.elapsedSeconds ?? 0) - window.seconds;
+  const selected = validHistory.filter((sample) => sample.elapsedSeconds > cutoff);
   if (selected.length === 0) return [];
   const groupSize = Math.max(1, Math.ceil(selected.length / Math.max(2, Math.floor(maximumPoints))));
   const points: ProductionTrendPoint[] = [];

@@ -598,6 +598,11 @@ interface AutoLayoutUndoSnapshot {
   positions: Array<{ id: string; position: { x: number; y: number } }>;
 }
 
+interface GameHistoryEntry {
+  before: GameState;
+  after: GameState;
+}
+
 interface ConnectionDraft {
   nodeId: string;
   handleId: string;
@@ -1469,8 +1474,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const canvasPinchLodRef = useRef<CanvasLod>(getCanvasLod(initialViewport.zoom));
   const continuousPlacementRef = useRef<{ entityId: string; buildingId: BuildingId; planetId: PlanetId } | null>(null);
   const ctrlHeldRef = useRef(false);
-  const undoStackRef = useRef<GameState[]>([]);
-  const redoStackRef = useRef<GameState[]>([]);
+  const undoStackRef = useRef<GameHistoryEntry[]>([]);
+  const redoStackRef = useRef<GameHistoryEntry[]>([]);
   const selectedEntityIdsRef = useRef<string[]>([]);
   const selectedBeltIdRef = useRef<string | null>(null);
   const selectedBeltIdsRef = useRef<string[]>([]);
@@ -1498,7 +1503,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // in-page recovery from replaying a durable journal twice after a resync.
   const durableRecoveryBaseStateRef = useRef<GameState>(loaded.state);
   const durableWorkerRecoveryInFlightRef = useRef<Promise<boolean> | null>(null);
-  const durableRecoveryRepairRef = useRef<(resumeAfterRepair?: boolean) => void>(() => undefined);
+  const durableRecoveryRepairRef = useRef<(resumeAfterRepair?: boolean, preservePendingView?: boolean) => void>(() => undefined);
   const durableRecoveryPendingViewRef = useRef<GameState | null>(null);
   const pendingResumeAfterDurableRecoveryRef = useRef(false);
   const durableRecoveryFinalizeInFlightRef = useRef<number | null>(null);
@@ -1512,6 +1517,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const deferredDurableUiSubmissionRef = useRef<DeferredDurableUiSubmission | null>(null);
   const dispatchDurableUiCommandRef = useRef<() => void>(() => undefined);
   const durablePrimarySaveInFlightRef = useRef(false);
+  const durablePrimarySaveKindRef = useRef<RuntimePersistenceKind | null>(null);
   const allowEditsDuringSaveRef = useRef(allowEditsDuringSave);
   allowEditsDuringSaveRef.current = allowEditsDuringSave;
   const setAllowEditsDuringSavePreference = useCallback((enabled: boolean) => {
@@ -1526,6 +1532,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     if (allowEditsDuringSaveRef.current) return false;
     if (!durablePrimarySaveInFlightRef.current) return false;
+    // Automatic saves are background checkpoints. Player commands remain in
+    // the durable queue and must never be rejected every 30 seconds merely
+    // because the manual-save protection preference is off.
+    if (durablePrimarySaveKindRef.current === "autosave") return false;
     const rejection = "本次操作未应用；保存完成后即可继续编辑";
     setPrimarySaveRejectedEditCount((count) => count + 1);
     setRuntimePersistenceProgress((current) => current && !current.message.includes("本次操作未应用")
@@ -2267,6 +2277,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const dispatchDurableUiCommand = useCallback(() => {
     if (lifecycleExitStartedRef.current || durableRecoveryLifecycleRef.current !== "active" ||
       durableRecoveryStageInFlightRef.current) return;
+    // An autosave is replacing its recovery head from a verified T1. Keep UI
+    // edits responsive, but derive and stage their command only after that new
+    // head is installed. Staging against the retiring head can leave a valid
+    // command pointing at a session/generation that the rollover has removed.
+    if (durablePrimarySaveKindRef.current === "autosave") return;
     const deferred = deferredDurableUiSubmissionRef.current;
     if (deferred) {
       const activeSubmission = simulationSubmissionRef.current;
@@ -2360,7 +2375,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     const state = gameRef.current;
     const command = createSimulationCommandPatch(confirmedState, state, simulationStateRevisionRef.current);
-    if (command && durableRecoveryLifecycleRef.current === "active") {
+    const deferCommandUntilAutosaveCompletes = Boolean(command && durablePrimarySaveKindRef.current === "autosave");
+    if (command && !deferCommandUntilAutosaveCompletes && durableRecoveryLifecycleRef.current === "active") {
       // Checkpoint/sync-projection requests must never smuggle an unlogged UI
       // command directly to the authoritative Worker. Stage and finalize the
       // zero-time command first; the response handler re-dispatches this
@@ -2372,7 +2388,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const request: SimulationWorkerRequest = {
       id: simulationRequestIdRef.current + 1,
       kind: pending.mode === "checkpoint" ? "checkpoint" : "sync-projection",
-      ...(command ? { command } : {}),
+      ...(command && !deferCommandUntilAutosaveCompletes ? { command } : {}),
       simulationSeconds: 0,
       wallSeconds: 0,
       registryFingerprint: registrySnapshot.fingerprint,
@@ -2386,7 +2402,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     pending.id = request.id;
     pending.baseState = confirmedState;
     pending.state = state;
-    pending.command = command;
+    pending.command = command && !deferCommandUntilAutosaveCompletes ? command : null;
     try {
       worker.postMessage(request);
     } catch (error) {
@@ -2699,6 +2715,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return { success: false, message: "已有 durable 主存档检查点正在进行，请稍候", code: "conflict" };
     }
     durablePrimarySaveInFlightRef.current = true;
+    durablePrimarySaveKindRef.current = kind;
     const startedAt = performance.now();
     const progressId = runtimePersistenceProgressIdRef.current + 1;
     runtimePersistenceProgressIdRef.current = progressId;
@@ -2709,10 +2726,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     simulationCheckpointBarrierRef.current = true;
     let primaryWriteVerified = false;
     let repairDurableWorkerAfterSave = false;
-    // An automatic save may need an in-page recovery-head repair after T1 is
-    // verified. Preserve the pre-save running intent so the repair does not
-    // leave a healthy simulation permanently paused.
-    const resumeAfterDurableWorkerRepair = kind === "autosave" && !gameRef.current.paused;
+    const allowConcurrentEdits = kind === "autosave" || allowEditsDuringSaveRef.current;
+    let resumeAfterDurableWorkerRepair = false;
+    let preservePendingViewAfterRepair = false;
     try {
       // Even an explicit replacement state (import/slot/cloud) must first
       // drain an in-flight simulation submission. Otherwise its T1 payload
@@ -2764,7 +2780,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // operation.
       const checkpointAdvancedDuringSave = () =>
         simulationStateRevisionRef.current !== checkpointRevision ||
-        (!requestedState && allowEditsDuringSaveRef.current && gameRef.current !== saveState);
+        (!requestedState && kind !== "autosave" && allowConcurrentEdits && gameRef.current !== saveState);
       if (checkpointAdvancedDuringSave()) {
         const finalBarrierState = await requestAuthoritativeSimulationCheckpoint();
         const finalCheckpointRevision = simulationStateRevisionRef.current;
@@ -2816,6 +2832,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       latestAuthoritativeCheckpointRef.current = saveState;
       lastSimulationResultRef.current = saveState;
       simulationReplayJournalRef.current = [];
+      // The regular projection intentionally leaves diagnostic history stale.
+      // Once a full checkpoint is verified, align only those runtime-owned
+      // fields while preserving the lightweight UI entity/belt references and
+      // any concurrently accepted player view.
+      const currentView = gameRef.current;
+      if (currentView.productionHistory !== saveState.productionHistory ||
+        currentView.historyRecordedAt !== saveState.historyRecordedAt) {
+        publishRuntimeGame({
+          ...currentView,
+          productionHistory: saveState.productionHistory,
+          historyRecordedAt: saveState.historyRecordedAt,
+        }, true);
+      }
       if (result.bytes !== undefined) setPersistedPrimaryBytes(result.bytes);
       setSaveFailure(null);
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "complete", startedAt, message: "durable 主存档检查点已完成" });
@@ -2830,11 +2859,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "failed", startedAt, message: failure.message });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "failed" });
       if (kind === "autosave") completeRuntimeTransition("autosave", "save-failed");
-      if (allowEditsDuringSaveRef.current) {
+      if (allowConcurrentEdits) {
         // 保存失败时不再回滚/丢弃玩家在保存期间已接受的编辑；
         // 保留当前 UI 与 durable 队列，提示玩家导出或重试。
         setNotice(`${failure.message}；当前编辑已保留，可继续游戏或立即导出`);
         repairDurableWorkerAfterSave = primaryWriteVerified;
+        resumeAfterDurableWorkerRepair = kind === "autosave" && !gameRef.current.paused;
+        preservePendingViewAfterRepair = true;
         return failure;
       }
       const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
@@ -2847,6 +2878,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return failure;
     } finally {
       durablePrimarySaveInFlightRef.current = false;
+      durablePrimarySaveKindRef.current = null;
       simulationSaveBarrierDepthRef.current = Math.max(0, simulationSaveBarrierDepthRef.current - 1);
       if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current) {
         simulationCheckpointBarrierRef.current = false;
@@ -2856,11 +2888,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         // write is in flight. Schedule it after this finally block releases
         // the lock, otherwise a verified T1 could remain paired with a stale
         // recovery head until the player refreshes or manually retries.
-        queueMicrotask(() => durableRecoveryRepairRef.current(resumeAfterDurableWorkerRepair));
+        queueMicrotask(() => durableRecoveryRepairRef.current(resumeAfterDurableWorkerRepair, preservePendingViewAfterRepair));
+      } else if (kind === "autosave" && !lifecycleExitStartedRef.current) {
+        // Accepted edits were held while T1 replaced the old recovery head.
+        // Drain them now from the exact new authority, never from the retired
+        // session that was active when the autosave began.
+        queueMicrotask(() => dispatchDurableUiCommandRef.current());
       }
       window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
     }
-  }, [requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint]);
+  }, [publishRuntimeGame, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint]);
   persistDurablePrimaryCheckpointRef.current = persistDurablePrimaryCheckpoint;
 
   /**
@@ -2872,7 +2909,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
    * This keeps the refresh/recovery guarantee while making Continue usable
    * without forcing a page reload.
    */
-  const recoverSimulationWorkerFromDurableRecovery = useCallback(async (resume = false): Promise<boolean> => {
+  const recoverSimulationWorkerFromDurableRecovery = useCallback(async (
+    resume = false,
+    preservePendingView = false,
+  ): Promise<boolean> => {
     if (resume) pendingResumeAfterDurableRecoveryRef.current = true;
     const existing = durableWorkerRecoveryInFlightRef.current;
     if (existing) return existing;
@@ -2928,7 +2968,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         // experimental mode may have a later accepted view to re-stage after
         // the fresh Worker adopts T1.
         recoveredRevision = Math.max(recoveredRevision, simulationStateRevisionRef.current);
-        if (allowEditsDuringSaveRef.current) pendingView = setPaused(gameRef.current, true);
+        if (preservePendingView || allowEditsDuringSaveRef.current) pendingView = setPaused(gameRef.current, true);
       } else {
         const read = await readSimulationRuntimeRecoveryInPersistenceWorker(head.baseIdentity, fence);
         if (!read.ok) throw new Error(read.message);
@@ -3022,8 +3062,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     durableWorkerRecoveryInFlightRef.current = recoveryPromise;
     return recoveryPromise;
   }, [invalidateFactoryAlertProjection, saveVerifiedPrimaryCheckpoint]);
-  durableRecoveryRepairRef.current = (resumeAfterRepair = false) => {
-    void recoverSimulationWorkerFromDurableRecovery(resumeAfterRepair);
+  durableRecoveryRepairRef.current = (resumeAfterRepair = false, preservePendingView = false) => {
+    void recoverSimulationWorkerFromDurableRecovery(resumeAfterRepair, preservePendingView);
   };
 
   const persistPureIdleTerminalEnvelope = useCallback(async (
@@ -4041,7 +4081,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const current = gameRef.current;
     const next = updater(current);
     if (next === current) return false;
-    undoStackRef.current.push(current);
+    undoStackRef.current.push({ before: current, after: next });
     if (undoStackRef.current.length > HISTORY_LIMIT) undoStackRef.current.shift();
     redoStackRef.current = [];
     factoryAlertsGenerationRef.current += 1;
@@ -4124,9 +4164,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // below; deriving the target inside that updater could let the durable WAL
     // dispatcher observe the old state and silently skip the edit.
     const current = gameRef.current;
-    const previous = undoStackRef.current.pop();
-    if (!previous) return;
-    redoStackRef.current.push(current);
+    const entry = undoStackRef.current.pop();
+    if (!entry) return;
+    const command = createSimulationCommandPatch(entry.after, entry.before, simulationStateRevisionRef.current);
+    const previous = command ? applySimulationCommandPatch(current, command) : current;
+    redoStackRef.current.push(entry);
     setHistoryRevision((revision) => revision + 1);
     setNotice("已撤销上一步工厂操作");
     publishRuntimeGame(previous, true);
@@ -4139,9 +4181,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const redoGame = useCallback(() => {
     if (rejectPlayerStateEditDuringPrimarySave()) return;
     const current = gameRef.current;
-    const next = redoStackRef.current.pop();
-    if (!next) return;
-    undoStackRef.current.push(current);
+    const entry = redoStackRef.current.pop();
+    if (!entry) return;
+    const command = createSimulationCommandPatch(entry.before, entry.after, simulationStateRevisionRef.current);
+    const next = command ? applySimulationCommandPatch(current, command) : current;
+    undoStackRef.current.push(entry);
     setHistoryRevision((revision) => revision + 1);
     setNotice("已重做工厂操作");
     publishRuntimeGame(next, true);
@@ -4379,13 +4423,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationWorkerRef.current = null;
           setSimulationWorkerActive(false);
           worker.terminate();
+          const resumeAfterRecovery = !gameRef.current.paused;
           const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
           latestAuthoritativeCheckpointRef.current = stopped;
           lastSimulationResultRef.current = stopped;
           gameRef.current = stopped;
           setGame(stopped);
           setNotice("durable 模拟回执缺少可确认 revision，已暂停；刷新后将从 pending intent 精确恢复");
-          void recoverSimulationWorkerFromDurableRecovery(false);
+          void recoverSimulationWorkerFromDurableRecovery(resumeAfterRecovery);
           return;
         }
         const status = getLocalSaveWriterStatus();
@@ -4526,13 +4571,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               simulationWorkerRef.current = null;
               setSimulationWorkerActive(false);
               worker.terminate();
+              const resumeAfterRecovery = !gameRef.current.paused;
               const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
               latestAuthoritativeCheckpointRef.current = stopped;
               lastSimulationResultRef.current = stopped;
               gameRef.current = stopped;
               setGame(stopped);
               setNotice(`durable 回执检查点吸收失败（${error instanceof Error ? error.message : "未知错误"}），已暂停；刷新后精确恢复`);
-              void recoverSimulationWorkerFromDurableRecovery(false);
+              void recoverSimulationWorkerFromDurableRecovery(resumeAfterRecovery);
             }
           })();
           return;
@@ -4565,13 +4611,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationWorkerRef.current = null;
           setSimulationWorkerActive(false);
           worker.terminate();
+          const resumeAfterRecovery = !gameRef.current.paused;
           const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
           latestAuthoritativeCheckpointRef.current = stopped;
           lastSimulationResultRef.current = stopped;
           gameRef.current = stopped;
           setGame(stopped);
           setNotice(`durable 模拟回执未能写入确认（${error instanceof Error ? error.message : "未知错误"}），已暂停；刷新后精确恢复`);
-          void recoverSimulationWorkerFromDurableRecovery(false);
+          void recoverSimulationWorkerFromDurableRecovery(resumeAfterRecovery);
         });
         return;
       }
@@ -5365,12 +5412,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return;
       }
       if (durableRecoveryLifecycleRef.current === "active") {
+        const resumeAfterRecovery = !currentState.paused;
         const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
         latestAuthoritativeCheckpointRef.current = stopped;
         lastSimulationResultRef.current = stopped;
         gameRef.current = stopped;
         setGame(stopped);
-        void recoverSimulationWorkerFromDurableRecovery(false);
+        void recoverSimulationWorkerFromDurableRecovery(resumeAfterRecovery);
         return;
       }
       if (currentState.timeWarp.enabled) {

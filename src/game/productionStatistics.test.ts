@@ -6,6 +6,7 @@ import {
   formatProductionStatistic,
   getProductionHistorySampleDuration,
   PRODUCTION_HISTORY_SAMPLE_SECONDS,
+  sanitizeProductionHistorySamples,
 } from "./productionStatistics";
 import type { ProductionHistorySample } from "./types";
 
@@ -29,6 +30,19 @@ function sample(elapsedSeconds: number, rate: number, duration = 1): ProductionH
 describe("production statistics rolling buckets", () => {
   it("records a true one-second online window", () => {
     expect(PRODUCTION_HISTORY_SAMPLE_SECONDS).toBe(1);
+  });
+
+  it("drops null runtime samples before compaction, totals, and trends", () => {
+    const corrupted = [sample(1, 60), null, undefined, {}, sample(2, 120)] as unknown;
+    const sanitized = sanitizeProductionHistorySamples(corrupted);
+    expect(sanitized.map((entry) => entry.elapsedSeconds)).toEqual([1, 2]);
+    expect(compactProductionHistory(corrupted as ProductionHistorySample[])).toHaveLength(2);
+    expect(calculateProductionWindowSnapshot(corrupted as ProductionHistorySample[], "minute").production.iron_ingot).toBe(90);
+    expect(createProductionTrendSeries(corrupted as ProductionHistorySample[], "minute", "iron_ingot"))
+      .toEqual([
+        { elapsedSeconds: 1, productionPerMinute: 60, consumptionPerMinute: 0 },
+        { elapsedSeconds: 2, productionPerMinute: 120, consumptionPerMinute: 0 },
+      ]);
   });
 
   it("keeps one hour while compacting old one-second samples", () => {

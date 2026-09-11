@@ -653,13 +653,13 @@ function SettingsPanel({ game, report, productionRefreshPreference, productionRe
           label={locale === "en" ? "Allow editing while saving (experimental)" : "保存期间允许继续操作（实验性）"}
           value={allowEditsDuringSave
             ? locale === "en" ? "Device-only; saves no longer reject or undo your edits; recovery head catches up on the next save." : "仅本机；保存不再拒绝或撤销你的操作，recovery 会在下次保存时追赶。"
-            : locale === "en" ? "Off; edits are rejected while a save is in progress (fail-safe default)." : "关闭；保存进行中的操作会被拒绝（默认保护模式）。"}
+            : locale === "en" ? "Off; manual save and return operations use the fail-safe edit lock." : "关闭；手动保存与返回主页使用保护锁。"}
           icon={<ShieldCheck size={16} />}
           onChange={onAllowEditsDuringSaveChange}
         />
         <p className="settings-help">{locale === "en"
-          ? "When enabled, edits made during a save are kept in the durable queue. If a save fails, your current progress is preserved for export instead of being rolled back."
-          : "开启后，保存期间的操作会保留在 durable 队列，不会因为保存而被拒绝或回滚；保存失败时当前进度也保留，可立即导出。"}</p>
+          ? "Autosaves always keep edits in the durable queue. Enabling this also allows edits during manual save and return operations; failed saves preserve the current progress for export."
+          : "自动保存始终把操作保留在 durable 队列。开启后，手动保存与返回主页期间也可继续操作；保存失败时当前进度仍保留，可立即导出。"}</p>
       </section>
       <section className="settings-group" data-settings-category="storage">
         <header><MapPin size={14} /><span>星区与资源</span><small>种子 #{game.galaxy.seed}</small></header>

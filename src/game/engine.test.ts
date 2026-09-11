@@ -1843,6 +1843,17 @@ describe("factory simulation", () => {
     expect(stillPaused.elapsedSeconds).toBe(0);
   });
 
+  it("continues online simulation after dropping a legacy null production-history sample", () => {
+    const state = createInitialState();
+    state.paused = false;
+    state.productionHistory = [null as never];
+    state.historyRecordedAt = 0;
+    const advanced = advanceSimulation(state, 1);
+    expect(advanced.elapsedSeconds).toBe(1);
+    expect(advanced.productionHistory.length).toBeGreaterThan(0);
+    expect(advanced.productionHistory.every((sample) => sample !== null && Number.isFinite(sample.elapsedSeconds))).toBe(true);
+  });
+
   it("consumes both blue and red matrices for mixed research", () => {
     let state = createInitialState();
     state.research.completedTechIds.push("energy_matrix");

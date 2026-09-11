@@ -1,5 +1,6 @@
 import type { BeltConnection, FactoryEntity, GameState, PlanetId } from "./types";
 import type { FactoryAlertProjection } from "./alerts";
+import { sanitizeProductionHistorySamples } from "./productionStatistics";
 
 /** Versioned, UI-only projection carried alongside the authoritative state. */
 export interface SimulationProjection {
@@ -433,9 +434,12 @@ export function applySimulationProjectionToState(
   const removedBeltIds = projection.requiresFullSnapshot ? [] : projection.removedBeltIds;
   const entities = applyProjectedRecords(state.entities, projection.changedEntities, projection.entityColumns, projection.entityRemovedFields, removedEntityIds, index.entityIndexById);
   const belts = applyProjectedRecords(state.belts, projection.changedBelts, projection.beltColumns, projection.beltRemovedFields, removedBeltIds, index.beltIndexById);
+  const projectedTopLevel = projection.topLevel.productionHistory === undefined
+    ? projection.topLevel
+    : { ...projection.topLevel, productionHistory: sanitizeProductionHistorySamples(projection.topLevel.productionHistory) };
   const next = {
     ...state,
-    ...projection.topLevel,
+    ...projectedTopLevel,
     elapsedSeconds: projection.elapsedSeconds,
     activePlanetId: projection.activePlanetId,
     entities: entities.records,

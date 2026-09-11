@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Agent 指令入口：** 仓库根目录 `AGENTS.md` 负责路由；唯一正文是 `.codex/skills/develop-dspidle/SKILL.md`。线上版本、磁盘和豁免以本文带日期摘要及 `docs/releases/` 为准，不要使用 Skill 引用里的过时副本。本轮 Skill 整理没有重新探测生产。
+
 > **香港 `nutwg.com` iframe 白名单已上线（2026-08-26）**：香港正式主站活动 Nginx 在不切换 Web/API、下载或数据库指针的前提下，仅对 SPA HTML 移除 `X-Frame-Options: DENY`，并把 CSP 精确设为 `frame-ancestors https://nutwg.com`；不包含 `www`、子域名、HTTP 或通配符。候选独立语法检查、活动配置备份/哈希、原子安装、正式 `nginx -t`/reload、公网根页/index/SPA fallback、health/ready 和 `NRestarts=0 → 0` 均通过；非 HTML 响应继续拒绝 framing。回滚副本、哈希与边界见 [本次运维记录](./releases/ops-hong-kong-nutwg-iframe-allowlist-2026-08-26.md)。仓库模板的持久化仍需单独 Development 交接，未来重装模板前不得覆盖活动白名单。
 
 > **发布/运维流程加固（2026-08-25，工作区已完成，未修改服务器）**：`deploy/probe-release.mjs` 对多个下载制品采用默认 4 路有界并发并保持输入顺序汇总；`deploy/probe-node-health.mjs` 支持按已审计的备份峰值预留磁盘空间，在当前空间或快照后剩余比例低于门槛时提前失败。新增 `npm run release:probe`、`npm run ops:health` 入口和对应 ops 回归；新上海节点重新绑定必须先通过受保护加载器登记固定 host key，不能从桌面明文连接文件或未知指纹接管。详见 [部署与运维手册](./DEPLOYMENT_OPERATIONS.md) 与 [受保护发布接入](./PROTECTED_RELEASE_ACCESS.md)。

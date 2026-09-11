@@ -1,6 +1,8 @@
 # Deployment Guardrails
 
-Read `docs/DEPLOYMENT_OPERATIONS.md` in full before any server mutation.
+本文件维护生产操作流程。易变的线上版本、磁盘占用和某次豁免以带日期的 `docs/PROJECT_STATUS.md` 与 `docs/releases/` 为准，不要在这里复制成“当前基线”。
+
+**本地测试不是生产授权。** `npm run server:dev`、Playwright 在 `127.0.0.1:4319` 启动的临时 Vite、以及测试用临时 SQLite 属于隔离开发。只有变更香港/上海节点、`current` 指针、生产 SQLite、live Nginx/systemd、正式下载页或玩家数据时，才算受保护生产操作。生产操作前阅读 `docs/DEPLOYMENT_OPERATIONS.md` 中与该目标相关的章节，不要求无关的本地文档任务通读全部运维历史。
 
 ## Topology
 
@@ -37,13 +39,17 @@ These addresses are operational identifiers, not authorization. Never infer perm
 
 ## Protected Signing And Transport
 
-Read [protected-release-access.md](protected-release-access.md) and the canonical `docs/PROTECTED_RELEASE_ACCESS.md` before handling Android signing or Hong Kong/Shanghai transport. Start with the read-only capability helper; do not manually recover secret values or physical paths from transcripts:
+Read [protected-release-access.md](protected-release-access.md) and the canonical `docs/PROTECTED_RELEASE_ACCESS.md` before handling Android signing or Hong Kong/Shanghai transport. Start with the read-only capability helper **for the target this operation actually needs**; do not default to `All` on unrelated local work, and do not manually recover secret values or physical paths from transcripts:
 
 ```powershell
-pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability Android
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability HongKong
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability Shanghai
 ```
 
-For Android, use `scripts/invoke-protected-android-release.ps1`; it resolves the ACL-restricted vault through the private locator, injects the four signing variables only into the child build, and verifies the approved historical certificate. For servers, require the complete `DSP_HK_*` or `DSP_SH_*` contract and an existing fixed host-key entry. A `ready` result proves local capability only; it does not authorize signing, connecting, uploading, backing up, switching or modifying production.
+未加 `-Capability` 时脚本默认 `All`。那只适用于同时需要 Android 签名和两个节点传输的发布任务。Windows 本地文档或仅香港只读导出缺少 Android 凭据时，不要把无关目标的 `blocked` 当成任务失败，也不要向用户索取无关凭据。
+
+For Android, use `scripts/invoke-protected-android-release.ps1`; it resolves the ACL-restricted vault through the private locator, injects the four signing variables only into the child build, and verifies the approved historical certificate. For servers, require the complete `DSP_HK_*` or `DSP_SH_*` contract and an existing fixed host-key entry. A `ready` result proves local capability only; it does not authorize signing, connecting, uploading, backing up, switching or modifying production. Windows 继续明确 `NotSigned`；不要把该政策改成更宽松的自签或诊断包冒充正式签名。
 
 ## Single-Account Read-Only Cloud Save Export
 
@@ -189,10 +195,15 @@ Keep the sanitized evidence and rollback boundary in a release/operations record
 - Cloud metadata can be read using a dedicated test account when write validation is required.
 - Mobile portrait/landscape and all five font scales remain usable.
 
-## Current Production Baseline
+## Production Facts Are Dated Records
 
-Hong Kong and Shanghai Web/API run `1.0.38-351c649af9ee` with GameState v46, save envelope v2, cloud schema v7 and SQLite layout v2. Their direct code rollback is `1.0.37-853ecdb12795`; Shanghai serves `download-site-1.0.38-351c649af9ee` with the 1.0.37 download directory retained. Android 1.0.38 uses the approved long-term certificate; Windows 1.0.38 remains explicitly `NotSigned`. Production checks confirmed gzip and immutable current/rollback assets, no-cache entry points and feeds, exact 9-file public-download hashes, Range 206, six Chrome smoke scenarios, current PWA offline recovery, active services/timers and `NRestarts=0`. The user waived only this candidate's Android physical-device, low-spec Windows, 1.0.37-to-1.0.38 Windows upgrade-retention and approximately one-hour background/lock-screen gates; do not reuse that waiver or describe it as a pass.
+不要在本 Skill 引用里维护第二份“当前线上版本”或“当前磁盘占用”。发布前读取：
 
-Hong Kong now exposes the direct Web rollback `1.0.37-853ecdb12795` through immutable `/canary/1.0.37-853ecdb12795/`; `/canary/previous/` redirects there, and the former test compatibility URL redirects to `/canary/previous/`. The retired 1.0.36 public fallback path returns `410`, so an immutable historical URL never silently serves another build. The current Web/API pointers remain `1.0.38-351c649af9ee`. This route is Web-only, uses the current API, has current-worker/Cache Storage/offline-browser isolation evidence, and has an independent Nginx rollback backup.
+- `docs/PROJECT_STATUS.md` 顶部带日期的现状摘要
+- 目标版本的 `docs/releases/<version>.md`
+- `docs/DEPLOYMENT_OPERATIONS.md` 的现行步骤
+- `docs/NATIVE_APPLICATIONS.md` 的签名与包身份边界
 
-The Hong Kong database is large enough that an online Backup API run can fail to converge under active writes. Use a low-traffic maintenance window, stop the health timer and service writes, allow at least three minutes for startup health, and verify `quick_check`, schema/layout, mode and hash before mutation. A service restart also triggers an immediate large COS snapshot under the current no-window configuration; keep health timers paused until its state is `ready`, or configure and validate an explicit low-traffic backup window. Current disk usage is approximately 79% in Hong Kong and 84% in Shanghai; keep current, direct rollback and valid backups. Never create a second 3 GB Hong Kong copy on the root filesystem if that would cross the 90% protection threshold. COSFS writes and complete reads can consume a same-size root cache before it flushes: during 1.0.38 pristine escrow the root temporarily reached 92%, so the release paused until it returned to 84%, then archived two exact old snapshots with full remote hashes before switching at 79%. Budget source, cache and immediate restart backup simultaneously; do not continue any smoke or switch at 90%+. A root-owned `0600` escrow object requires privileged readback, and backup WAL/SHM files may only be removed after the isolated process is stopped and the main backup hash is exact. Read `docs/releases/1.0.38.md` for evidence and `docs/DEPLOYMENT_OPERATIONS.md` for the current procedure.
+历史豁免、历史签名策略、历史回滚目标和历史磁盘快照不得自动适用于新版本。1.0.38 及更早的生产证据仍在对应 release 记录中，只作审计。
+
+通用生产安全仍然有效：低流量窗口备份、独立验证 `quick_check`/schema/layout、保留 current 与直接回滚、根盘 90% 保护阈值、COSFS 缓存与 backup WAL/SHM 处置。具体百分比以目标操作当日探测为准，不使用过时副本。缺少签名、备份、权限或主机密钥时停止依赖该能力的动作。

@@ -1,4 +1,4 @@
 interface:
   display_name: "DSPidle Project Development"
   short_description: "Maintain DSPidle gameplay, saves, cloud, and releases"
-  default_prompt: "Use $develop-dspidle, declare feedback, develop, or release role, and follow the matching handoff and validation gates for this DSPidle2 task."
+  default_prompt: "Follow .codex/skills/develop-dspidle/SKILL.md for this DSPidle2 task. Open only the references that skill selects. Do not copy role, test, or operations contracts into this prompt."

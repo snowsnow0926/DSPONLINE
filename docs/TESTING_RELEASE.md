@@ -94,7 +94,13 @@ Playwright 使用本机 Google Chrome，串行执行，并在隔离的 `127.0.0.
 git diff --check
 ```
 
-再检查 Markdown 链接和 Skill validator。修改许可证、依赖或公开政策时还要运行 `npm run licenses:check`。无需因纯文档改动重跑浏览器测试。
+再检查改动文件中的 Markdown 链接。普通文档到此为止。Skill / `AGENTS.md` / `.codex/skills` 改动另跑：
+
+```powershell
+node .codex/skills/develop-dspidle/scripts/check-skill-docs.mjs
+```
+
+该检查只覆盖指令结构、引用路径和授权边界，不能证明游戏运行正确。修改许可证、依赖或公开政策时还要运行 `npm run licenses:check`。无需因纯文档改动重跑浏览器测试。
 
 ### 样式或单个面板
 

@@ -13,13 +13,15 @@
 
 ## 2. 未来 Agent 只使用这些入口
 
-先在仓库根目录运行只读能力检查：
+先在仓库根目录按**当前目标**运行只读能力检查，不要在无关本地任务上默认 `All`：
 
 ```powershell
-pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability Android
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability HongKong
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability Shanghai
 ```
 
-输出只包含 `ready / task-helper-managed / blocked`、布尔门禁和所需变量名，不返回真实值或路径，也不构建、不签名、不连接服务器。
+输出只包含 `ready / task-helper-managed / blocked`、布尔门禁和所需变量名，不返回真实值或路径，也不构建、不签名、不连接服务器。未使用目标缺失不构成当前任务阻塞，也不构成索取无关凭据的理由。
 
 本机 Android vault 由用户级 locator `DSP_ANDROID_SIGNING_CONFIG` 指向。这个 locator 只用于受控脚本内部解析；不要用 `Get-Content`、`Write-Output`、`Format-List`、异常堆栈或聊天消息显示它的值。若 locator 缺失，脚本只允许按固定文件名 `android-release-v1.properties` 找到唯一、ACL 受限的既有 vault；零个或多个候选都必须失败关闭。
 

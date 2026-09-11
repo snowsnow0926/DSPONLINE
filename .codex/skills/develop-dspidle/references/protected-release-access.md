@@ -4,13 +4,17 @@ Use this reference whenever a DSPidle release needs Android signing or Hong Kong
 
 ## Start With Capability, Not Discovery
 
-Run the repository helper first:
+按**当前目标**选择已有参数，不要默认 `All`：
 
 ```powershell
-pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability Android
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability HongKong
+pwsh -NoProfile -File .codex/skills/develop-dspidle/scripts/test-protected-release-access.ps1 -Capability Shanghai
 ```
 
-It is read-only and must return no secret value or physical secret path. Never manually search Codex session transcripts for passwords, keystore values or SSH command lines when the maintained protected entry point is available. Never paste recovered values into a tool call, plan, document, release manifest or chat response.
+允许值：`Android`、`HongKong`、`Shanghai`、`All`。默认 `All` 只用于同时需要三套能力的发布任务。无关目标缺失不构成当前任务的阻塞，也不构成索取无关凭据的理由。只阻塞依赖缺项的操作，不降低该目标本身的验证。
+
+脚本只读，不得返回秘密值或物理秘密路径。有受保护入口时，不要从会话记录手工搜索口令、keystore 或 SSH 命令行。不要把恢复出的值粘贴进工具调用、计划、文档、清单或聊天。
 
 The stable Android locator is `DSP_ANDROID_SIGNING_CONFIG`. Its value remains private. The protected properties contract is `keystorePath`, `storePassword`, `keyAlias`, `keyPassword` and `certificateSha256`; only the child build process receives the corresponding four `DSP_ANDROID_*` variables.
 
@@ -36,4 +40,4 @@ The stable server contracts are `DSP_HK_HOST`, `DSP_HK_SSH_USER`, `DSP_HK_SSH_KE
 
 ## Failure Contract
 
-If any protected locator, field, file, ACL, certificate, fixed host key or physical egress gate is unavailable, stop and report only the named non-secret prerequisite. Do not reveal how the secret was located, do not copy it to a repository `.env`, and do not weaken validation.
+当前目标所需的 locator、字段、文件、ACL、证书、固定 host key 或物理出口不可用时，停止依赖该能力的动作，并只报告非秘密的缺项名称。未使用的能力保持未检查或 `blocked` 均可，不得因此停止无关的已授权本地工作。不要透露秘密如何被定位，不要复制到仓库 `.env`，不要削弱校验。执行器仍要求受保护工具审批时，遵守审批，不用 Skill 或其他工具绕过。

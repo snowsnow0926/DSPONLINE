@@ -569,18 +569,33 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         .map(([key, value]) => [key, stableCanonicalSha256(value)]));
       const fieldMismatches = Object.keys(expectedFields).filter((key) =>
         advancedSummary.canonicalFields?.[key] !== expectedFields[key]);
-      const mismatchProjection = fieldMismatches.length > 0
+      const baseFieldMismatches = fieldMismatches.filter((key) => key !== "entities" && key !== "belts");
+      const mismatchProjection = baseFieldMismatches.length > 0
         ? await client.request({
           operation: "coreProjection",
           sessionId: opened.sessionId,
-          entityIds: [], beltIds: [], baseFields: fieldMismatches,
+          entityIds: [], beltIds: [], baseFields: baseFieldMismatches,
         })
         : { base: {} };
-      const mismatchDetails = fieldMismatches.flatMap((key) => firstDifferences(
+      const mismatchDetails = baseFieldMismatches.flatMap((key) => firstDifferences(
         mismatchProjection.base?.[key],
         (expected as unknown as Record<string, unknown>)[key],
         20,
       ).map((difference) => ({ ...difference, path: `${key}${difference.path ? `.${difference.path}` : ""}` }))).slice(0, 40);
+      const collectionMismatchDetails: Array<{ path: string; native: unknown; js: unknown }> = [];
+      if (fieldMismatches.includes("entities")) {
+        for (let offset = 0; offset < expected.entities.length; offset += 32) {
+          const expectedEntities = expected.entities.slice(offset, offset + 32);
+          const projection = await client.request({
+            operation: "coreProjection", sessionId: opened.sessionId,
+            entityIds: expectedEntities.map((entity) => entity.id), beltIds: [], baseFields: [],
+          });
+          if (stableCanonicalSha256(projection.entities) === stableCanonicalSha256(expectedEntities)) continue;
+          collectionMismatchDetails.push(...firstDifferences(projection.entities, expectedEntities, 40)
+            .map((difference) => ({ ...difference, path: `entities[${offset}]${difference.path ? `.${difference.path}` : ""}` })));
+          break;
+        }
+      }
       const blockedMachineGroups = fieldMismatches.includes("productionHistory")
         ? (() => {
           const lookup = createSimulationLookupContext(expected);
@@ -618,6 +633,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           observedWorkerCount: lastNativeProfileValue(client.stderrTail, "runtime-observed-workers"),
           fieldMismatches,
           mismatchDetails,
+          collectionMismatchDetails,
           blockedMachineGroups,
           nativeAdvanceDurationMs: Number(coreAdvanceDurationMs.toFixed(2)),
           jsAdvanceDurationMs: Number(jsAdvanceDurationMs.toFixed(2)),

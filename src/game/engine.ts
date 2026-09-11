@@ -12367,6 +12367,23 @@ function tryRunConstructionAutomationBatch(
     ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock)
     : canFairBatch ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock, Math.floor(fairShare / jobsPerCycle)) : 1;
   if (cycles < 1) return null;
+  if (process.env.DSP_NATIVE_CORE_TRACE_CONSTRUCTION === "1") {
+    console.log(`DSP_JS_CONSTRUCTION_BATCH\t${JSON.stringify({
+      targetIndex,
+      targetId: definition.id,
+      target,
+      current,
+      remainingWork,
+      activeTargetCount,
+      workSeconds: repeatable.workSeconds,
+      jobsPerCycle,
+      jobsForTarget,
+      jobsForWork,
+      cyclesForStock,
+      fairShare,
+      cycles,
+    })}`);
+  }
   const completed = applyConstructionAutomationBatch(state, entity.planetId, targetIndex, definition, repeatable, cycles, directEntityId);
   return { usedWork: repeatable.workSeconds * cycles, completed, jobs: cycles * jobsPerCycle };
 }

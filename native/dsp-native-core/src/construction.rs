@@ -2513,7 +2513,8 @@ fn try_run_repeatable_batch(
         batch = stable;
     }
     if !batch_can_repeat(base, planet_id, &batch)
-        || !construction_cycle_state_matches(base, planet_id, &batch)
+        || batch.jobs_per_cycle > 1
+            && !construction_cycle_state_matches(base, planet_id, &batch)
     {
         return Ok(None);
     }
@@ -2573,6 +2574,24 @@ fn try_run_repeatable_batch(
         });
     if cycles < 1.0 {
         return Ok(None);
+    }
+    if std::env::var_os("DSP_NATIVE_CORE_TRACE_CONSTRUCTION").is_some() {
+        eprintln!(
+            "DSP_RUST_CONSTRUCTION_BATCH\ttarget-index={}\ttarget-id={}\ttarget={}\tcurrent={}\tremaining-work={}\tactive-targets={}\twork-seconds={}\tjobs-per-cycle={}\tjobs-for-target={}\tjobs-for-work={}\tcycles-for-stock={}\tfair-share={}\tcycles={}",
+            target.index,
+            target.id,
+            target_stock,
+            current,
+            remaining_work,
+            active_targets,
+            batch.work_seconds,
+            jobs_per_cycle,
+            jobs_for_target,
+            jobs_for_work,
+            cycles_for_stock,
+            fair_share,
+            cycles,
+        );
     }
     let completed = apply_repeatable_batch(
         base, automation, buffers, entity_id, planet_id, target, &batch, cycles,

@@ -395,6 +395,17 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     // Match the exact representation persisted by the browser save path:
     // JSON serialization removes migration-only `undefined` properties.
     const migratedState = JSON.parse(JSON.stringify(state!)) as GameState;
+    if (process.env.DSP_NATIVE_CORE_DIAG_DISABLE_CONSTRUCTION_QUANTUM === "1") {
+      migratedState.constructionAutomation.quantumSourceEnabled = false;
+    }
+    if (process.env.DSP_NATIVE_CORE_DIAG_DISABLE_CONSTRUCTION === "1") {
+      migratedState.constructionAutomation = {
+        ...migratedState.constructionAutomation,
+        enabled: false,
+        targetStock: {},
+        jobs: {},
+      };
+    }
     const runtime = createContentPackRuntimeSnapshot(registry);
     const journal = buildChunkedSaveJournal(migratedState, {
       mode: envelope.mode,
@@ -569,18 +580,87 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         .map(([key, value]) => [key, stableCanonicalSha256(value)]));
       const fieldMismatches = Object.keys(expectedFields).filter((key) =>
         advancedSummary.canonicalFields?.[key] !== expectedFields[key]);
-      const mismatchProjection = fieldMismatches.length > 0
+      const baseFieldMismatches = fieldMismatches.filter((key) => key !== "entities" && key !== "belts");
+      const mismatchProjection = baseFieldMismatches.length > 0
         ? await client.request({
           operation: "coreProjection",
           sessionId: opened.sessionId,
-          entityIds: [], beltIds: [], baseFields: fieldMismatches,
+          entityIds: [], beltIds: [], baseFields: baseFieldMismatches,
         })
         : { base: {} };
-      const mismatchDetails = fieldMismatches.flatMap((key) => firstDifferences(
+      const mismatchDetails = baseFieldMismatches.flatMap((key) => firstDifferences(
         mismatchProjection.base?.[key],
         (expected as unknown as Record<string, unknown>)[key],
         20,
       ).map((difference) => ({ ...difference, path: `${key}${difference.path ? `.${difference.path}` : ""}` }))).slice(0, 40);
+      const collectionMismatchDetails: Array<{ path: string; native: unknown; js: unknown }> = [];
+      const collectionMismatchContext: Array<Record<string, unknown>> = [];
+      if (fieldMismatches.includes("entities")) {
+        for (let offset = 0; offset < expected.entities.length; offset += 32) {
+          const expectedEntities = expected.entities.slice(offset, offset + 32);
+          const projection = await client.request({
+            operation: "coreProjection",
+            sessionId: opened.sessionId,
+            entityIds: expectedEntities.map((entity) => entity.id),
+            beltIds: [], baseFields: [],
+          });
+          if (stableCanonicalSha256(projection.entities) === stableCanonicalSha256(expectedEntities)) continue;
+          collectionMismatchDetails.push(...firstDifferences(projection.entities, expectedEntities, 40)
+            .map((difference) => ({ ...difference, path: `entities[${offset}]${difference.path ? `.${difference.path}` : ""}` })));
+          for (let localIndex = 0; localIndex < expectedEntities.length; localIndex += 1) {
+            const nativeEntity = projection.entities[localIndex] as GameState["entities"][number] | undefined;
+            const jsEntity = expectedEntities[localIndex];
+            if (stableCanonicalSha256(nativeEntity) === stableCanonicalSha256(jsEntity)) continue;
+            const initialEntity = migratedState.entities.find((entity) => entity.id === jsEntity.id);
+            const interestingItems = [...new Set([
+              ...Object.keys(initialEntity?.inputs ?? {}), ...Object.keys(initialEntity?.outputs ?? {}),
+              ...Object.keys(jsEntity.inputs ?? {}), ...Object.keys(jsEntity.outputs ?? {}),
+              ...Object.keys(nativeEntity?.inputs ?? {}), ...Object.keys(nativeEntity?.outputs ?? {}),
+            ])].filter((itemId) =>
+              initialEntity?.inputs[itemId] !== jsEntity.inputs[itemId]
+              || initialEntity?.outputs[itemId] !== jsEntity.outputs[itemId]
+              || nativeEntity?.inputs[itemId] !== jsEntity.inputs[itemId]
+              || nativeEntity?.outputs[itemId] !== jsEntity.outputs[itemId]);
+            const inventory = (entity: GameState["entities"][number] | undefined) => Object.fromEntries(
+              interestingItems.map((itemId) => [itemId, {
+                input: entity?.inputs[itemId] ?? 0,
+                output: entity?.outputs[itemId] ?? 0,
+              }]),
+            );
+            collectionMismatchContext.push({
+              globalIndex: offset + localIndex,
+              id: jsEntity.id,
+              kind: jsEntity.kind,
+              buildingId: jsEntity.buildingId ?? null,
+              planetId: jsEntity.planetId,
+              quantumMode: jsEntity.quantumMode ?? null,
+              slots: (jsEntity.stationSlots ?? []).map((slot, slotIndex) => ({ slotIndex, ...slot })),
+              routeCount: jsEntity.stationRoutes?.length ?? 0,
+              initial: { inventory: inventory(initialEntity), stationLastTransfer: initialEntity?.stationLastTransfer ?? null },
+              native: { inventory: inventory(nativeEntity), stationLastTransfer: nativeEntity?.stationLastTransfer ?? null },
+              js: { inventory: inventory(jsEntity), stationLastTransfer: jsEntity.stationLastTransfer ?? null },
+            });
+            break;
+          }
+          break;
+        }
+      }
+      if (fieldMismatches.includes("belts") && collectionMismatchDetails.length < 40) {
+        for (let offset = 0; offset < expected.belts.length; offset += 64) {
+          const expectedBelts = expected.belts.slice(offset, offset + 64);
+          const projection = await client.request({
+            operation: "coreProjection",
+            sessionId: opened.sessionId,
+            entityIds: [],
+            beltIds: expectedBelts.map((belt) => belt.id),
+            baseFields: [],
+          });
+          if (stableCanonicalSha256(projection.belts) === stableCanonicalSha256(expectedBelts)) continue;
+          collectionMismatchDetails.push(...firstDifferences(projection.belts, expectedBelts, 40 - collectionMismatchDetails.length)
+            .map((difference) => ({ ...difference, path: `belts[${offset}]${difference.path ? `.${difference.path}` : ""}` })));
+          break;
+        }
+      }
       const blockedMachineGroups = fieldMismatches.includes("productionHistory")
         ? (() => {
           const lookup = createSimulationLookupContext(expected);
@@ -618,6 +698,8 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           observedWorkerCount: lastNativeProfileValue(client.stderrTail, "runtime-observed-workers"),
           fieldMismatches,
           mismatchDetails,
+          collectionMismatchDetails,
+          collectionMismatchContext,
           blockedMachineGroups,
           nativeAdvanceDurationMs: Number(coreAdvanceDurationMs.toFixed(2)),
           jsAdvanceDurationMs: Number(jsAdvanceDurationMs.toFixed(2)),
@@ -634,6 +716,12 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           javascriptBeltScheduler: {
             routeChecks: jsProfiler.beltRouteChecks,
             stableRoutesSkipped: jsProfiler.beltStableRoutesSkipped,
+          },
+          javascriptConstructionScheduler: {
+            iterations: jsProfiler.constructionIterations,
+            planBuilds: jsProfiler.constructionPlanBuilds,
+            jobsBatched: jsProfiler.constructionJobsBatched,
+            guardHits: jsProfiler.constructionGuardHits,
           },
         },
       });

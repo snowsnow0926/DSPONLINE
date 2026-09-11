@@ -124,7 +124,11 @@ impl InterstellarStationMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
 pub enum SystemSpaceStationIntent {
     Start {
         system_id: String,
@@ -693,7 +697,7 @@ fn upgrade_patch(
         if !eligible {
             continue;
         }
-        let output_items = elevator_output_items(state, object)?;
+        let output_items = elevator_output_items(state, object, true)?;
         object.insert("stationTier".to_owned(), Value::from(2));
         let mode = match object.get("stationOperationMode") {
             None | Some(Value::Null) => "legacy".to_owned(),
@@ -793,7 +797,7 @@ fn mode_patch(
             .to_owned(),
         ),
     );
-    let outputs = elevator_output_items(state, object)?;
+    let outputs = elevator_output_items(state, object, false)?;
     let mut patch = empty_patch(state);
     patch
         .changed_entities
@@ -858,7 +862,7 @@ fn output_patch(
     {
         bail!("native interstellar-station output target is not applicable")
     }
-    let mut outputs = elevator_output_items(state, object)?;
+    let mut outputs = elevator_output_items(state, object, false)?;
     if let Some(item_id) = item_id
         && outputs
             .iter()
@@ -998,8 +1002,12 @@ fn require_interstellar_station(object: &Map<String, Value>) -> anyhow::Result<(
 fn elevator_output_items(
     state: &CoreState,
     object: &Map<String, Value>,
+    derive_from_station_slots: bool,
 ) -> anyhow::Result<Vec<Option<String>>> {
-    if let Some(value) = object.get("elevatorOutputItems") {
+    if let Some(value) = object
+        .get("elevatorOutputItems")
+        .filter(|value| !value.is_null())
+    {
         let values = value
             .as_array()
             .ok_or_else(|| anyhow!("native interstellar-station output items are invalid"))?;
@@ -1018,11 +1026,15 @@ fn elevator_output_items(
             })
             .collect();
     }
+    if !derive_from_station_slots {
+        return Ok(vec![None; OUTPUT_PORTS]);
+    }
     let mut result = Vec::with_capacity(OUTPUT_PORTS);
-    let slots = object
-        .get("stationSlots")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("native interstellar-station slots are invalid"))?;
+    let slots = match object.get("stationSlots") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(values)) => values.as_slice(),
+        _ => bail!("native interstellar-station slots are invalid"),
+    };
     for slot in slots.iter().take(OUTPUT_PORTS) {
         let slot = slot
             .as_object()
@@ -1857,6 +1869,33 @@ mod tests {
         output.apply(&mut state, &authority()).unwrap();
         assert!(state.belt_index.get("belt-a").is_none());
         assert_eq!(state.base_value()["construction"]["conveyor_belt_mk2"], 23);
+    }
+
+    #[test]
+    fn mode_target_does_not_invent_outputs_from_legacy_station_slots() {
+        let mut legacy = elevator("station", "home", 2, "legacy", 1.0);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("elevatorOutputItems");
+        let state = state_with(
+            &[MULTI_CARGO_BUS],
+            vec![legacy],
+            vec![belt("belt-a", "station", "iron_ore", 1, 1)],
+        );
+        let prepared = prepare_system_space_station_command(
+            &state,
+            &authority(),
+            request(SystemSpaceStationIntent::ModeTarget {
+                entity_id: "station".to_owned(),
+                mode: InterstellarStationMode::Elevator,
+            }),
+        )
+        .unwrap();
+        assert!(
+            prepared.patch().changed_belts.is_empty(),
+            "mode target uses five empty outputs; only upgrade derives from legacy slots"
+        );
     }
 
     #[test]

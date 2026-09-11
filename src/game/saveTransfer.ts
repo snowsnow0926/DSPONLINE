@@ -1,4 +1,4 @@
-import { computeSaveStateChecksumFromJson } from "./saveEnvelopeIntegrity";
+import { measureSaveStateJson } from "./saveEnvelopeIntegrity";
 import type { SaveMode } from "./types";
 import { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
 export { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
@@ -23,6 +23,32 @@ export interface SaveTransferVerification {
 
 export interface SerializedSaveTransfer extends SaveTransferVerification {
   bytes: ArrayBuffer;
+}
+
+function saveEnvelopePrefix(options: SaveTransferOptions): string {
+  return [
+    `{"formatVersion":${JSON.stringify(options.formatVersion)}`,
+    `,"kind":${JSON.stringify(options.kind)}`,
+    options.reason ? `,"reason":${JSON.stringify(options.reason)}` : "",
+    `,"savedAt":${JSON.stringify(options.savedAt)}`,
+    `,"mode":${JSON.stringify(options.mode)}`,
+    `,"slot":${JSON.stringify(options.slot)}`,
+    ',"state":',
+  ].join("");
+}
+
+function saveEnvelopeSuffix(stateChecksum: string): string {
+  return `,"checksum":${JSON.stringify(stateChecksum)}}`;
+}
+
+function matchesEnvelopeFrame(raw: string, prefix: string, suffix: string): boolean {
+  return raw.startsWith(prefix) && raw.endsWith(suffix) && raw.length > prefix.length + suffix.length &&
+    raw[prefix.length] === "{" && raw[raw.length - suffix.length - 1] === "}";
+}
+
+/** Outer framing only; callers must separately verify the complete payload. */
+export function matchesSaveEnvelopeFrame(raw: string, options: SaveTransferOptions, stateChecksum: string): boolean {
+  return matchesEnvelopeFrame(raw, saveEnvelopePrefix(options), saveEnvelopeSuffix(stateChecksum));
 }
 
 function utf8Length(value: string): number {
@@ -68,18 +94,10 @@ export function computeSavePayloadChecksum(bytes: ArrayBuffer | ArrayBufferView)
 export function serializeSaveEnvelopeToTransfer(state: unknown, options: SaveTransferOptions): SerializedSaveTransfer {
   const stateJson = JSON.stringify(state);
   if (typeof stateJson !== "string") throw new Error("存档状态无法序列化");
-  const stateChecksum = computeSaveStateChecksumFromJson(options.formatVersion, stateJson);
-  const prefix = [
-    `{"formatVersion":${JSON.stringify(options.formatVersion)}`,
-    `,"kind":${JSON.stringify(options.kind)}`,
-    options.reason ? `,"reason":${JSON.stringify(options.reason)}` : "",
-    `,"savedAt":${JSON.stringify(options.savedAt)}`,
-    `,"mode":${JSON.stringify(options.mode)}`,
-    `,"slot":${JSON.stringify(options.slot)}`,
-    ',"state":',
-  ].join("");
-  const suffix = `,"checksum":${JSON.stringify(stateChecksum)}}`;
-  const byteLength = utf8Length(prefix) + utf8Length(stateJson) + utf8Length(suffix);
+  const { stateChecksum, byteLength: stateByteLength } = measureSaveStateJson(options.formatVersion, stateJson);
+  const prefix = saveEnvelopePrefix(options);
+  const suffix = saveEnvelopeSuffix(stateChecksum);
+  const byteLength = utf8Length(prefix) + stateByteLength + utf8Length(suffix);
   const bytes = new ArrayBuffer(byteLength);
   const view = new Uint8Array(bytes);
   const encoder = new TextEncoder();
@@ -89,6 +107,44 @@ export function serializeSaveEnvelopeToTransfer(state: unknown, options: SaveTra
   if (offset !== byteLength) throw new Error("存档 UTF-8 长度自检失败");
   const payloadChecksum = computeSavePayloadChecksum(bytes);
   return { bytes, byteLength, stateChecksum, payloadChecksum, integrity: "valid" };
+}
+
+/**
+ * Reuse the state JSON of a just-committed local primary as a recovery snapshot.
+ * Callers must already have verified the primary's durable read-back. Accept
+ * only the local serializer's exact v2 framing and recheck its whole payload;
+ * external/legacy framing returns null for the normal serializer fallback.
+ * The state text and its checksum remain identical, while the snapshot header
+ * and whole-payload proof are new. No state is parsed, cloned or serialized.
+ */
+export function rewrapVerifiedPrimarySaveAsSnapshot(
+  raw: string,
+  verification: SaveTransferVerification,
+  source: Pick<SaveTransferOptions, "formatVersion" | "savedAt" | "mode">,
+  savedAt: number,
+  reason: string,
+): { raw: string; verification: SaveTransferVerification } | null {
+  if (source.formatVersion !== 2 || !Number.isSafeInteger(source.savedAt) || source.savedAt < 0 ||
+    !Number.isSafeInteger(savedAt) || savedAt < 0 ||
+    (source.mode !== "normal" && source.mode !== "speedrun") || verification.integrity !== "valid" ||
+    !/^[a-f0-9]{8}$/.test(verification.stateChecksum) || !/^[a-f0-9]{8}$/.test(verification.payloadChecksum)) return null;
+  const prefix = saveEnvelopePrefix({ ...source, kind: "primary", slot: "main" });
+  const suffix = saveEnvelopeSuffix(verification.stateChecksum);
+  if (!matchesEnvelopeFrame(raw, prefix, suffix)) return null;
+  const sourcePayload = computeSavePayloadTextChecksum(raw);
+  if (sourcePayload.checksum !== verification.payloadChecksum || sourcePayload.byteLength !== verification.byteLength) return null;
+  const snapshotRaw = saveEnvelopePrefix({ ...source, kind: "snapshot", slot: "main", savedAt, reason }) +
+    raw.slice(prefix.length, raw.length - suffix.length) + suffix;
+  const payload = computeSavePayloadTextChecksum(snapshotRaw);
+  return {
+    raw: snapshotRaw,
+    verification: {
+      integrity: "valid",
+      stateChecksum: verification.stateChecksum,
+      payloadChecksum: payload.checksum,
+      byteLength: payload.byteLength,
+    },
+  };
 }
 
 export function decodeVerifiedSaveTransfer(bytes: ArrayBuffer, verification: SaveTransferVerification): string {

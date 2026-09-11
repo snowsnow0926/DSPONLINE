@@ -22,6 +22,49 @@ describe("authoritative simulation runtime protocol", () => {
     expect(deserializeSimulationStateTransfer(transfer)).toEqual(state);
   });
 
+  it("keeps native JSON bytes for large record arrays, Unicode boundaries and optional extension fields", () => {
+    const state = createInitialState(14_044);
+    state.entities = Array.from({ length: 2_000 }, (_, index) => ({
+      ...state.entities[0], id: `record-${index}`, inputs: { iron_ore: index },
+      extensionText: `${"a".repeat(index % 97)}工厂🌌\ud800\n\"\\`,
+      extensionAbsent: undefined,
+    }));
+    Object.assign(state, {
+      extensionMissing: undefined,
+      extensionArray: [undefined, , null, -0, NaN, Infinity, { toJSON(key: string) { return `row:${key}`; } }],
+      extensionObject: { 2: "numeric key", "a\"b": "escape", empty: {} },
+    });
+    const expected = new TextEncoder().encode(JSON.stringify(state));
+    const transfer = serializeSimulationStateForTransfer(state);
+    expect(new Uint8Array(transfer.buffer)).toEqual(expected);
+    expect(transfer.byteLength).toBe(expected.byteLength);
+    expect(state.entities).toHaveLength(2_000);
+    expect(Object.hasOwn(state.entities[0], "extensionAbsent")).toBe(true);
+  });
+
+  it("preserves native array and root toJSON handling without invoking them twice", () => {
+    const state = createInitialState(14_044);
+    let calls = 0;
+    Object.assign(state, {
+      extensionArray: Object.assign([1, 2], { toJSON(key: string) { calls += 1; return { key, value: 3 }; } }),
+    });
+    const expected = JSON.stringify(state);
+    calls = 0;
+    expect(new TextDecoder().decode(serializeSimulationStateForTransfer(state).buffer)).toBe(expected);
+    expect(calls).toBe(1);
+    Object.assign(state, { toJSON(key: string) { return { key, entities: [], belts: [] }; } });
+    expect(new TextDecoder().decode(serializeSimulationStateForTransfer(state).buffer)).toBe(JSON.stringify(state));
+  });
+
+  it("still rejects cyclic state and unsupported BigInt rather than emitting partial JSON", () => {
+    const state = createInitialState(14_044);
+    Object.assign(state, { extensionCycle: state });
+    expect(() => serializeSimulationStateForTransfer(state)).toThrow(TypeError);
+    delete (state as unknown as Record<string, unknown>).extensionCycle;
+    Object.assign(state, { extensionBigInt: 1n });
+    expect(() => serializeSimulationStateForTransfer(state)).toThrow(TypeError);
+  });
+
   it("creates a JSON-canonical checkpoint mirror and validates its transfer envelope", () => {
     const state = createInitialState(14_044) as ReturnType<typeof createInitialState> & { optionalDebug?: string };
     state.optionalDebug = undefined;

@@ -249,6 +249,13 @@
 .game-shell[data-mobile-shell="true"] .mobile-statistics .statistics-tabs button > svg { display: none; }
 .game-shell[data-mobile-shell="true"] .mobile-statistics :is(.statistics-content, .production-management, .network-overview) { height: auto; min-height: 0; overflow: visible !important; }
 .game-shell[data-mobile-shell="true"] .mobile-statistics .statistics-toolbar { position: sticky; z-index: 10; top: 92px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; padding: 7px 8px; background: var(--theme-surface); }
+/* Planet, search, range and sort are independent rows on the narrow shell.
+   An auto-sized search column otherwise leaves less than the range's minimum
+   content width, which spills out of the dialog even with overflow-x hidden. */
+.game-shell[data-mobile-shell="true"] .mobile-statistics .statistics-production .statistics-toolbar { position: static; grid-template-columns: minmax(0, 1fr); }
+.game-shell[data-mobile-shell="true"] .mobile-statistics .statistics-production-controls { grid-template-columns: minmax(0, 1fr); }
+.game-shell[data-mobile-shell="true"] .mobile-statistics .statistics-window-control { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.game-shell[data-mobile-shell="true"] .mobile-statistics .statistics-window-control button { min-height: 44px; height: auto; white-space: normal; }
 .game-shell[data-mobile-shell="true"] .mobile-statistics .statistics-filter { display: flex; grid-column: 1 / -1; gap: 4px; overflow: auto hidden; }
 .game-shell[data-mobile-shell="true"] .mobile-statistics .statistics-filter button { min-width: 72px; min-height: 44px; flex: 1 0 auto; }
 .game-shell[data-mobile-shell="true"] .mobile-statistics .galactic-exporter-command { display: grid; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
@@ -481,3 +488,8 @@ html:not([data-native-ui-scale])[data-ui-font-scale="200"] .game-shell[data-mobi
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-recipe,
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-statistics { scrollbar-gutter: stable; }
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-build-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.game-shell[data-mobile-shell="true"] .sidebar-edge-toggle {
+  /* The next mobile shell opens panels from its own navigation. Legacy side
+     handles otherwise float over the production-region editor in landscape. */
+  display: none !important;
+}

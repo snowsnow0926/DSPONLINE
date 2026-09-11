@@ -169,7 +169,9 @@ export function MobileSheets({ game, factoryGame, planetAlertCounts, overlay, to
   }, [overlay]);
   if (!overlay) return null;
   if (overlay.kind === "modal") {
-    if (overlay.id === "command") return null;
+    // Command and offline reports own their dialog. Only an explicit exit
+    // request may render the save-and-return confirmation here.
+    if (overlay.id !== "exit") return null;
     return <div className="mobile-next-confirm-backdrop" role="presentation"><section className="mobile-next-confirm" role="alertdialog" aria-modal="true" aria-label="保存并返回主菜单"><i><LockKeyhole size={24} /></i><span><strong>保存并返回主菜单？</strong><small>系统会先校验主存档，保存失败时不会离开当前工厂。</small></span><footer><button type="button" onClick={onDismissExit}>继续游戏</button><button className="primary" type="button" onClick={onConfirmExit}>保存并返回</button></footer></section></div>;
   }
   if (overlay.id === "planet") return <PlanetSheet game={game} planetAlertCounts={planetAlertCounts} snap={overlay.snap} onSnap={onSheetSnap} onPlanetChange={onPlanetChange} onOpenStarMap={onOpenStarMap} onClose={onClose} />;

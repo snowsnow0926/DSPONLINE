@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { verifyBuiltPlatform } from "./verify-built-platform.mjs";
 import { nativeBuildConfig } from "./native-build-config.mjs";
 
 const platform = process.argv[2];
 if (platform !== "desktop" && platform !== "android") throw new Error("Usage: node scripts/build-platform.mjs <desktop|android>");
-const config = nativeBuildConfig(platform);
+const packageMetadata = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const config = nativeBuildConfig(platform, process.env, packageMetadata.releaseChannel || "stable");
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error("build-platform.mjs must be launched from an npm script");
 const child = spawn(process.execPath, [npmCli, "run", "build"], {

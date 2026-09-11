@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-09-02-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-10-v1.2.9";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -513,21 +513,21 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
     localStorage.removeItem("dsp-idle-network.release-notes.seen.v1");
     localStorage.setItem("dsp-idle-network.ui.font-scale.v1", "2");
   });
-  await page.goto("/?menu=1");
+  await page.goto("/?menu=1&releaseNotesTest=1");
   await page.evaluate(() => {
     document.documentElement.dataset.uiFontScale = "200";
     document.documentElement.style.setProperty("--ui-font-scale", "2");
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "Windows 原生性能整合与大存档内存优化");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.7");
+  await expect(dialog).toHaveAttribute("aria-label", "多端性能优化与画布操作更新");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.9");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("1.2.6 功能原样进入原生候选");
-  await expect(dialog).toContainText("Rust 原生候选继续使用确定性边界");
-  await expect(dialog).toContainText("并发测试与 Worker 线程使用有界栈");
-  await expect(dialog).toContainText("大存档检查改用可转移字节");
-  await expect(dialog).toContainText("协议与存档边界保持兼容");
+  await expect(dialog).toContainText("保存与自动快照减少重复处理");
+  await expect(dialog).toContainText("多星球模拟减少无效扫描");
+  await expect(dialog).toContainText("WASD 平移画布视野");
+  await expect(dialog).toContainText("生产区域与节点一起移动");
+  await expect(dialog).toContainText("保留安卓云连接并改善重启恢复");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

@@ -119,10 +119,10 @@ impl ProductionHistoryInventoryRuntime {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ProductionHistoryBoundary {
-    elapsed: f64,
-    duration: f64,
-    refresh: bool,
+pub(crate) struct ProductionHistoryBoundary {
+    pub(crate) elapsed: f64,
+    pub(crate) duration: f64,
+    pub(crate) refresh: bool,
 }
 
 type RateAccumulator = HashMap<String, f64>;
@@ -308,7 +308,7 @@ fn pure_idle_replication_telemetry(
     }))
 }
 
-fn production_history_boundary(
+pub(crate) fn production_history_boundary(
     base: &Map<String, Value>,
 ) -> anyhow::Result<Option<ProductionHistoryBoundary>> {
     let elapsed = finite_number(base.get("elapsedSeconds")).unwrap_or(0.0);
@@ -947,6 +947,16 @@ fn compact_history(history: &mut Vec<Value>) -> anyhow::Result<()> {
         history.remove(0);
     }
     Ok(())
+}
+
+/// Appends one real or independently proved exact sample using the public
+/// recorder's existing ordering, weighted buckets and retention rules.
+pub(crate) fn append_production_history_sample(
+    history: &mut Vec<Value>,
+    sample: Value,
+) -> anyhow::Result<()> {
+    history.push(sample);
+    compact_history(history)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
@@ -2219,8 +2229,7 @@ impl CoreState {
             Some(Value::Array(history)) => history,
             _ => bail!("native production history changed while sampling"),
         };
-        next.push(sample);
-        compact_history(&mut next)?;
+        append_production_history_sample(&mut next, sample)?;
         base.insert("productionHistory".to_owned(), Value::Array(next));
         base.insert("historyRecordedAt".to_owned(), Value::from(elapsed));
         profile_last!("compact");

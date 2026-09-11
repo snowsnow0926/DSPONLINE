@@ -1,6 +1,12 @@
 # 原生应用构建与更新
 
-> **当前 Android stable：1.2.8 / 1002008（2026-09-09）**。云服务与更新地址漏配已修复，APK 长期证书和 1.2.7 覆盖升级通过。官方构建启用 `DSP_ANDROID_BUILD_PROFILE=official` 并要求完整 HTTPS 地址；社区离线默认保留。实体手机未测试，模拟器结果不代替真机。主分支现有 Windows 开发版本不在本次版本调整范围，后续 Android code 必须大于 1002008。见 [发布记录](./releases/1.2.8-android-cloud-hotfix.md)。
+> **当前正式下载（2026-09-11）**：Android stable 为 **1.2.9 / 1002009**，包名 `cn.dsponline.network`，APK 5,672,736 B、SHA-256 `06d0043a542faab0f7e3e2be2fad18b7d2da43c672e66da88ccf7255fe953bf7`；APK v2/v3、zipalign 与 APK/AAB 长期证书连续性通过，最低支持代码仍为 1000002。正式 1.2.8 直接覆盖、旧档进入、新进度明确保存与冷重开通过，设备为后台匿名模拟器，实体手机和长时门禁未计作通过。下载 current 为 `download-site-1.2.9-0521eb63f179-r2`，previous 为 1.2.8；Windows 安装器/4 个更新文件保持 1.2.6 原字节，API 也保持 1.2.6。网页与安卓使用共享优化，不包含 Rust 跨端接入。见 [1.2.9 发布记录](./releases/1.2.9.md)；以下带日期的旧包与旧门禁均为历史。
+
+历史 Android 修复：[1.2.8 云服务地址热修](./releases/1.2.8-android-cloud-hotfix.md) 保留官方构建地址门禁、证书连续性与覆盖升级证据。当前下载版本以上方 1.2.9 为准。
+
+> **当前正式下载（2026-09-08）**：Android stable 已发布 `1.2.7 / 1002007`（`cn.dsponline.network`），沿用历史证书，v2/v3、zipalign、APK/AAB 证书连续性和公网 APK 完整哈希通过，minimumSupportedVersionCode 保持 1000002。共享保存、导入及挂机恢复修复已包含；正式 APK 的模拟器保存/后台/重开通过，实体设备及最终直接从 1.2.6 升级仍未验证。Windows stable 保持 1.2.6 `NotSigned`；下方 1.2.7 Windows 包是开发候选。Rust 跨端接入留待后续，详情见 [1.2.7 发布记录](./releases/1.2.7.md)。
+
+> **1.2.7 第三轮本地验证候选（2026-09-07）**：目录打包生成内部 `desktop-build-evidence.json`，绑定源码 SHA、Build ID、edition/channel 及 app.asar、Host 和目录文件摘要；正式收集入口进一步验证安装器、YAML 和 feed 引用。`npm run test:desktop-package` 先验证 clean source 对应的离线性能包，缺包/错包退出 2，并为每次运行建立独立证据目录。该内部清单不是签名或发布许可；冻结新包 1.2.7+27c4f15fd621 的真实桌面旅程已 8/8 通过，见 [第三轮开发记录](./reviews/1.2.7-round3-development-2026-09-07.md)。
 
 > **Campaign / Galaxy 原生玩家壳边界（2026-09-01，开发候选）**：当前 Windows Host 新增 `native-core-campaign-workspace-projection-v1` 与 `native-core-galaxy-account-workspace-projection-v1` capability。preload 只接受 exact-key `{sessionId,runId,expectedRevision,expectedRegistryFingerprint}`；main 只把请求路由到当前 normal-main 玩家权威 broker，不允许回落到 renderer shadow 会话。返回分别受 256 KiB 与 64 KiB 硬预算，renderer boundary 拒绝截断、额外键、重复 ID、计数漂移和 lineage 漂移。
 >

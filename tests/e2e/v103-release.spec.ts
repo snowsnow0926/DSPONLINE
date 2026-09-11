@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-09-02-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-10-v1.2.9";
 
 async function seedReleaseFactory(page: Page, options: { theme?: "dark" | "light"; locale?: "zh-CN" | "en"; paused?: boolean; mobileUi?: "legacy" | "next" } = {}) {
   await page.addInitScript(({ releaseNoteId, theme, locale, paused, mobileUi }) => {
@@ -171,8 +171,11 @@ async function dismissIncidentalOfflineReport(page: Page) {
   const report = page.getByRole("dialog", { name: "离线结算报告" });
   await report.waitFor({ state: "visible", timeout: 1_500 }).catch(() => undefined);
   if (!await report.isVisible().catch(() => false)) return;
-  await expect(report.locator(".offline-runtime > strong")).toHaveText("1 秒");
-  await expect(report.locator(".offline-runtime > small")).toHaveText("实际提交 1 秒");
+  // The running fixture can spend more than one second loading on a CI host.
+  // Its incidental exact settlement must commit the same whole-second duration.
+  const duration = report.locator(".offline-runtime > strong");
+  await expect(duration).toHaveText(/^[1-9]\d* 秒$/);
+  await expect(report.locator(".offline-runtime > small")).toHaveText(`实际提交 ${await duration.innerText()}`);
   const method = report.locator(".offline-report-method");
   await expect(method).toHaveClass(/offline-report-method--exact/);
   await expect(method.locator("header strong")).toHaveText("精确结算");

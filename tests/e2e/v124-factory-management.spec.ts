@@ -137,7 +137,7 @@ async function seedManagementFixture(page: Page, options: FixtureOptions = {}) {
       paused: true,
     };
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-02-v1.2.7");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     if (mobileUi) window.localStorage.setItem("dsp-idle-network.mobile-ui.v1", mobileUi);
@@ -247,7 +247,9 @@ test("logistics management searches and edits a remote station without changing 
   dialog = page.locator(".game-dialog");
   await dialog.getByRole("button", { name: "确认修改" }).click();
   await expect(itemSelect).toHaveValue("copper_ingot");
-  await expect(page.getByRole("status")).toContainText("已远程修改");
+  // Verify edit feedback and the selected value. The open workspace isolates
+  // this background notice, so this does not assert live-region accessibility.
+  await expect(page.locator(".game-notice")).toContainText("已远程修改");
 
   await manager.getByLabel("搜索物流塔").fill("");
   await manager.getByLabel("物流塔类型筛选").selectOption("collector");
@@ -411,4 +413,3 @@ test.describe("touch and responsive management", () => {
     });
   }
 });
-

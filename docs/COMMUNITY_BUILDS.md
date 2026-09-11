@@ -67,3 +67,7 @@ node scripts/create-native-update-manifests.mjs `
 - 限流、日志轮换、监控、恢复演练和安全报告入口。
 
 仓库中的 `deploy/` 是当前官方拓扑的参考实现，不会替自建实例自动配置密钥、证书或合规材料。
+
+Official Android builds through the protected signing helper require all three
+explicit endpoint variables above. The official profile rejects incomplete or
+insecure configuration; community offline builds do not enable that profile.

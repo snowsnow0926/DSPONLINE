@@ -17,7 +17,7 @@ const ROOT_HASH = "a".repeat(64);
 const GENERATION = 3;
 const REVISION = 9;
 const SAVED_AT = 1_000;
-const SETTLED_SECONDS = 60;
+const SETTLED_SECONDS = 30;
 
 function summary(
   state: GameState,
@@ -89,7 +89,7 @@ function fixture() {
       revision: REVISION + 1,
       algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1",
       exactCalibrationSeconds: 30,
-      approximatedSeconds: 30,
+      approximatedSeconds: 0,
       summary: candidateSummary,
     },
     export: {
@@ -149,6 +149,16 @@ function fixture() {
 }
 
 describe("Windows native offline startup", () => {
+  it("keeps productive long intervals on the JS decision path without opening a native candidate", async () => {
+    const current = fixture();
+    current.loaded.offlineSeconds = 600;
+    const original = structuredClone(current.loaded.state);
+    const result = await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop });
+    expect(result).toMatchObject({ status: "fallback", reason: expect.stringContaining("产出一致性") });
+    expect(current.desktop.openNativeCore).not.toHaveBeenCalled();
+    expect(current.prepareNativeOfflineStartup).not.toHaveBeenCalled();
+    expect(current.loaded.state).toEqual(original);
+  });
   it("adopts a verified read-only candidate and closes the source session", async () => {
     const current = fixture();
     let now = 10;
@@ -167,11 +177,11 @@ describe("Windows native offline startup", () => {
     expect(result.state).toEqual(current.candidateState);
     expect(result.loaded.offlineSeconds).toBe(SETTLED_SECONDS);
     expect(result.approximation).toMatchObject({
-      mode: "approximate",
+      mode: "exact",
       calibrationWindowSeconds: 30,
-      approximatedSeconds: 30,
-      maxEstimatedError: 1,
-      settlementStatus: "approximate",
+      approximatedSeconds: 0,
+      maxEstimatedError: 0,
+      settlementStatus: "bounded-exact",
     });
     expect(progress).toEqual(["checking", "calculating", "verifying"]);
     expect(current.closeNativeCore).toHaveBeenCalledWith({ sessionId: "core-session-7" });
@@ -179,6 +189,16 @@ describe("Windows native offline startup", () => {
     expect(request).not.toHaveProperty("observedNowMs");
     expect(request).not.toHaveProperty("exportId");
     expect(request.expectedRevision).toBe(REVISION);
+  });
+
+  it("rejects a supported but frozen tail from an older Host", async () => {
+    const current = fixture();
+    const result = await current.prepareNativeOfflineStartup({} as DesktopNativeOfflineStartupRequest);
+    if (!result.prepared) throw new Error("missing test candidate");
+    result.advance.approximatedSeconds = 1;
+    current.prepareNativeOfflineStartup.mockResolvedValueOnce(result);
+    expect(await tryNativeOfflineStartupSettlement({ loaded: current.loaded, runtime: current.runtime }, { desktop: current.desktop })).toMatchObject({ status: "fallback" });
+    expect(current.closeNativeCore).toHaveBeenCalledOnce();
   });
 
   it("falls back before opening when the native savedAt differs", async () => {

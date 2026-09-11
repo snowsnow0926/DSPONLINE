@@ -31,6 +31,23 @@ const [version, android, desktop, desktopFeed, template] = await Promise.all([
 ]);
 
 const yamlValue = (name) => new RegExp(`^${name}:\\s*['\\"]?([^'\\"\\r\\n]+)['\\"]?\\s*$`, "m").exec(desktopFeed)?.[1]?.trim() || "";
+const requiredVersion = (value, label) => {
+  // Keep the same version-name format accepted by the native update client.
+  if (typeof value !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value)) {
+    throw new Error(`${label} must contain a valid version`);
+  }
+  return value;
+};
+const desktopVersion = requiredVersion(desktop.version, "Desktop release manifest version");
+if ([...desktopFeed.matchAll(/^version:/gm)].length !== 1) {
+  throw new Error("Desktop latest.yml must contain exactly one version");
+}
+const desktopFeedVersion = requiredVersion(yamlValue("version"), "Desktop latest.yml version");
+if (desktopFeedVersion !== desktopVersion) throw new Error("Desktop latest.yml version does not match release manifest version");
+const androidVersion = requiredVersion(android.versionName, "Android manifest versionName");
+if (!Number.isSafeInteger(android.versionCode) || android.versionCode <= 0 || android.versionCode > 2_100_000_000) {
+  throw new Error("Android manifest versionCode must be a positive Android-compatible integer");
+}
 const desktopFile = path.basename(yamlValue("path"));
 const desktopRecord = desktop.files.find((file) => file.name === desktopFile);
 if (!desktopFile || !desktopRecord) throw new Error("Desktop release manifest does not contain latest.yml artifact");
@@ -59,14 +76,16 @@ if (requestedSummary && (requestedSummary.length < 8 || requestedSummary.length 
   throw new Error("--summary must contain between 8 and 600 characters");
 }
 const notes = requestedSummary
-  || `${version.version} 稳定版更新；完整改动与兼容性说明请查看应用内版本公告`;
+  || `网页版 ${version.version}；Windows ${desktopVersion}；Android ${androidVersion}。完整改动与兼容性说明请查看应用内版本公告`;
 const values = {
   __VERSION__: version.version,
   __BUILD_ID__: version.buildId,
+  __DESKTOP_VERSION__: desktopVersion,
   __DESKTOP_SIZE_HUMAN__: humanSize(desktopStats.size),
   __DESKTOP_SIZE__: desktopStats.size,
   __DESKTOP_FILE__: desktopFile,
   __DESKTOP_SHA256__: desktopSha,
+  __ANDROID_VERSION__: androidVersion,
   __ANDROID_SIZE_HUMAN__: humanSize(androidStats.size),
   __ANDROID_SIZE__: androidStats.size,
   __ANDROID_CODE__: android.versionCode,

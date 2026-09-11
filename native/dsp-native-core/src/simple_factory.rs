@@ -5482,7 +5482,8 @@ fn simulate_step(
         );
     }
     let elapsed_before_step = finite_number(base.get("elapsedSeconds"));
-    let projected_elapsed = rounded(elapsed_before_step + seconds, 4);
+    let projected_elapsed =
+        crate::simulation::exact_elapsed_after_step(elapsed_before_step, seconds);
     let first_quantum_boundary = (elapsed_before_step / 5.0).floor() as u64 + 1;
     let last_quantum_boundary = (projected_elapsed / 5.0).floor() as u64;
     let crossed_quantum_boundary = first_quantum_boundary <= last_quantum_boundary;

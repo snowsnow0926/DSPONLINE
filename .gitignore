@@ -1,6 +1,7 @@
 node_modules/
 native/target/
 dist/
+desktop/preload.bundle.cjs
 test-results/
 playwright-report/
 artifacts/

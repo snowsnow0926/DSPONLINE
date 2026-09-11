@@ -1363,8 +1363,27 @@ test("real Rust host prepares a read-only offline candidate export without advan
     catalog: fixture.catalog,
   });
   const sourceBefore = await registry.status(17, opened.sessionId);
+  const recoveryBefore = await client.request({ operation: "saveRecover", slot: "normal-main" });
+  assert.equal(recoveryBefore.walEntryCount, 0);
+  const readSourceFiles = (relative = "") => fs.readdirSync(path.join(root, "normal-main", relative), {
+    withFileTypes: true,
+  }).sort((left, right) => left.name.localeCompare(right.name)).flatMap((entry) => {
+    const entryPath = path.join(relative, entry.name);
+    return entry.isDirectory()
+      ? [[entryPath, "directory"], ...readSourceFiles(entryPath)]
+      : [[entryPath, sha256(fs.readFileSync(path.join(root, "normal-main", entryPath)))]];
+  });
+  const sourceFilesBefore = readSourceFiles();
+  const assertSourceUnchanged = async () => {
+    assert.deepEqual(await registry.status(17, opened.sessionId), sourceBefore);
+    assert.deepEqual(
+      await client.request({ operation: "saveRecover", slot: "normal-main" }),
+      recoveryBefore,
+    );
+    assert.deepEqual(readSourceFiles(), sourceFilesBefore, "checkpoint and WAL bytes must remain unchanged");
+  };
   const exportId = "offlinecandidateintegration";
-  const candidate = await registry.prepareOfflineSettlementExport(17, {
+  const request = {
     sessionId: opened.sessionId,
     expectedGeneration: checkpoint.generation,
     expectedRootHash: checkpoint.rootHash,
@@ -1373,12 +1392,16 @@ test("real Rust host prepares a read-only offline candidate export without advan
     expectedCanonicalSha256: opened.summary.canonicalSha256,
     expectedDomainSha256: opened.summary.domainSha256,
     strategy: "macro-v1",
-  }, 60_001, exportId);
+  };
+  const candidate = await registry.prepareOfflineSettlementExport(17, request, 30_001, exportId);
   assert.equal(candidate.prepared, true);
   assert.equal(candidate.sourceSavedAtMs, 1);
-  assert.equal(candidate.settledAtMs, 60_001);
-  assert.equal(candidate.settledSeconds, 60);
+  assert.equal(candidate.settledAtMs, 30_001);
+  assert.equal(candidate.settledSeconds, 30);
   assert.equal(candidate.export.exportId, exportId);
+  assert.equal(candidate.advance.supported, true);
+  assert.equal(candidate.advance.exactCalibrationSeconds, 30);
+  assert.equal(candidate.advance.approximatedSeconds, 0);
   assert.equal(candidate.advance.previousRevision, checkpoint.revision);
   assert.ok(candidate.advance.revision > checkpoint.revision);
   assert.equal(candidate.advance.revision, candidate.candidateSummary.revision);
@@ -1388,11 +1411,49 @@ test("real Rust host prepares a read-only offline candidate export without advan
   assert.equal(raw.byteLength, candidate.export.result.byteLength);
   assert.equal(sha256(raw), candidate.export.result.envelopeSha256);
   const envelope = JSON.parse(raw.toString("utf8"));
-  assert.equal(envelope.state.elapsedSeconds, fixture.state.elapsedSeconds + 60);
+  assert.equal(envelope.savedAt, 30_001);
+  assert.equal(envelope.state.elapsedSeconds, fixture.state.elapsedSeconds + 30);
   const sourceAfter = await registry.status(17, opened.sessionId);
   assert.equal(sourceAfter.revision, sourceBefore.revision);
   assert.equal(sourceAfter.canonicalSha256, sourceBefore.canonicalSha256);
   assert.equal(sourceAfter.domainSha256, sourceBefore.domainSha256);
+  await assertSourceUnchanged();
+
+  for (const seconds of [31, 600, 28_800]) {
+    await t.test(`rejects ${seconds} seconds without exporting or changing source checkpoint, WAL or session`, async () => {
+      const rejectedExportId = `offlinecandidaterejected${seconds}`;
+      const rejected = await registry.prepareOfflineSettlementExport(
+        17, request, 1 + seconds * 1_000, rejectedExportId,
+      );
+      assert.equal(rejected.prepared, false);
+      assert.equal(rejected.sourceSavedAtMs, 1);
+      assert.equal(rejected.settledAtMs, 1 + seconds * 1_000);
+      assert.equal(rejected.settledSeconds, seconds);
+      assert.match(rejected.reason, /requires an exact interval of 1 to 30 seconds/);
+      assert.equal(Object.hasOwn(rejected, "advance"), false);
+      assert.equal(Object.hasOwn(rejected, "export"), false);
+      assert.equal(Object.hasOwn(rejected, "candidateSummary"), false);
+      assert.deepEqual(rejected.sourceSummary, sourceBefore);
+      for (const extension of ["json", "part"]) {
+        assert.equal(fs.existsSync(path.join(root, "exports", `${rejectedExportId}.${extension}`)), false);
+      }
+      await assertSourceUnchanged();
+    });
+  }
+
+  for (const proofField of ["expectedCanonicalSha256", "expectedDomainSha256"]) {
+    await t.test(`rejects forged ${proofField} before exporting or changing the source`, async () => {
+      const forgedExportId = `offlinecandidateforged${proofField}`;
+      await assert.rejects(registry.prepareOfflineSettlementExport(17, {
+        ...request,
+        [proofField]: "0".repeat(64),
+      }, 30_001, forgedExportId), /differs from the verified browser primary/);
+      for (const extension of ["json", "part"]) {
+        assert.equal(fs.existsSync(path.join(root, "exports", `${forgedExportId}.${extension}`)), false);
+      }
+      await assertSourceUnchanged();
+    });
+  }
   assert.equal((await registry.close(17, opened.sessionId)).closed, true);
 });
 

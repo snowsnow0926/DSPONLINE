@@ -219,6 +219,8 @@ struct DurableWalIntent {
     wall_seconds: f64,
     #[serde(default)]
     advance_mode: CoreAdvanceMode,
+    #[serde(default)]
+    offline_algorithm_version: Option<String>,
     #[allow(dead_code)]
     #[serde(default)]
     approximate: bool,
@@ -229,7 +231,11 @@ struct DurableWalIntent {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind")]
 enum AcceptedWalPayload {
-    #[serde(rename = "stable-operation-v1", rename_all = "camelCase")]
+    #[serde(
+        rename = "stable-operation-v1",
+        alias = "stable-offline-operation-v2",
+        rename_all = "camelCase"
+    )]
     Stable {
         base_state_revision: u64,
         result_state_revision: u64,
@@ -238,9 +244,15 @@ enum AcceptedWalPayload {
         wall_seconds: f64,
         #[serde(default)]
         advance_mode: CoreAdvanceMode,
+        #[serde(default)]
+        offline_algorithm_version: Option<String>,
         registry: WalRegistryIdentity,
     },
-    #[serde(rename = "durable-operation-v1", rename_all = "camelCase")]
+    #[serde(
+        rename = "durable-operation-v1",
+        alias = "durable-offline-operation-v2",
+        rename_all = "camelCase"
+    )]
     Durable {
         intent: DurableWalIntent,
         result_state_revision: u64,
@@ -254,6 +266,7 @@ struct ReplayOperation {
     simulation_seconds: f64,
     wall_seconds: f64,
     advance_mode: CoreAdvanceMode,
+    offline_algorithm_version: Option<String>,
     registry_fingerprint: String,
 }
 
@@ -279,6 +292,16 @@ fn validate_operation_numbers(operation: &ReplayOperation) -> anyhow::Result<()>
         || operation.wall_seconds < 0.0
     {
         bail!("native core WAL operation bounds are invalid");
+    }
+    // The first 30 seconds retain the same exact calibration semantics. A
+    // longer operation can contain a changed macro tail, so legacy unbound
+    // operations must not be silently recomputed by this binary on reopen.
+    if operation.advance_mode == CoreAdvanceMode::OfflineMacroV1
+        && operation.simulation_seconds > 30.0
+        && operation.offline_algorithm_version.as_deref()
+            != Some(dsp_native_core::offline_macro_algorithm_version())
+    {
+        bail!("native core WAL offline algorithm version is missing or incompatible");
     }
     Ok(())
 }
@@ -329,6 +352,7 @@ fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
             simulation_seconds,
             wall_seconds,
             advance_mode,
+            offline_algorithm_version,
             registry,
         } => ReplayOperation {
             base_revision: base_state_revision,
@@ -337,6 +361,7 @@ fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
             simulation_seconds,
             wall_seconds,
             advance_mode,
+            offline_algorithm_version,
             registry_fingerprint: registry.fingerprint,
         },
         AcceptedWalPayload::Durable {
@@ -366,11 +391,21 @@ fn decode_wal_operation(entry: &WalEntry) -> anyhow::Result<ReplayOperation> {
                 simulation_seconds: intent.simulation_seconds,
                 wall_seconds: intent.wall_seconds,
                 advance_mode: intent.advance_mode,
+                offline_algorithm_version: intent.offline_algorithm_version,
                 registry_fingerprint: intent.registry.fingerprint,
             }
         }
     };
     validate_operation_numbers(&operation)?;
+    if operation.advance_mode == CoreAdvanceMode::OfflineMacroV1
+        && operation.simulation_seconds > 30.0
+        && !matches!(
+            entry.payload.get("kind").and_then(Value::as_str),
+            Some("stable-offline-operation-v2" | "durable-offline-operation-v2")
+        )
+    {
+        bail!("native core WAL offline algorithm version requires a versioned payload kind");
+    }
     if operation.base_revision != entry.base_revision || operation.result_revision != entry.revision
     {
         bail!("native core WAL payload revision range does not match its envelope");
@@ -4819,22 +4854,6 @@ impl CoreRegistry {
             .saturating_sub(source.saved_at_ms)
             .min(offline_limit_milliseconds)
             / 1_000;
-        if settled_seconds == 0 {
-            return Ok(CorePrepareOfflineSettlementExportResult {
-                prepared: false,
-                strategy: "macro-v1",
-                source_saved_at_ms: source.saved_at_ms,
-                settled_at_ms: source.saved_at_ms,
-                settled_seconds: 0,
-                reason: Some(
-                    "native offline interval is shorter than one complete second".to_owned(),
-                ),
-                advance: None,
-                export: None,
-                source_summary,
-                candidate_summary: None,
-            });
-        }
         let settled_at_ms = source
             .saved_at_ms
             .checked_add(
@@ -4844,6 +4863,26 @@ impl CoreRegistry {
             )
             .filter(|value| *value <= MAX_SAFE_INTEGER)
             .ok_or_else(|| anyhow!("native offline candidate clock overflowed"))?;
+        // OfflineMacroV1 may truthfully report support while freezing an
+        // unproven productive tail. Such a candidate must never bypass the
+        // browser's conservative-settlement decision. Qualify longer intervals
+        // separately; the first 30 seconds use the exact calibration path.
+        if settled_seconds == 0 || settled_seconds > 30 {
+            return Ok(CorePrepareOfflineSettlementExportResult {
+                prepared: false,
+                strategy: "macro-v1",
+                source_saved_at_ms: source.saved_at_ms,
+                settled_at_ms,
+                settled_seconds,
+                reason: Some(
+                    "native offline automatic adoption requires an exact interval of 1 to 30 seconds".to_owned(),
+                ),
+                advance: None,
+                export: None,
+                source_summary,
+                candidate_summary: None,
+            });
+        }
         let mut candidate = source_state.clone();
         let advance = candidate.advance(&CoreAdvanceRequest {
             base_revision: source.revision,
@@ -5310,7 +5349,7 @@ impl CoreRegistry {
                 .map(CoreLeaseAuthorization::lease),
             result_revision,
         )?;
-        let payload = json!({
+        let mut payload = json!({
             "kind": "stable-operation-v1",
             "baseStateRevision": request.base_revision,
             "resultStateRevision": result_revision,
@@ -5321,6 +5360,16 @@ impl CoreRegistry {
             "approximate": request.advance_mode != CoreAdvanceMode::Exact,
             "registry": { "fingerprint": fingerprint },
         });
+        if request.advance_mode == CoreAdvanceMode::OfflineMacroV1 {
+            payload["offlineAlgorithmVersion"] =
+                Value::from(dsp_native_core::offline_macro_algorithm_version());
+            if request.simulation_seconds > 30.0 {
+                // Older hosts ignore extra JSON fields but reject unknown
+                // payload kinds. This also prevents a downgrade from silently
+                // replaying the newly accepted long-tail semantics as v1.
+                payload["kind"] = Value::from("stable-offline-operation-v2");
+            }
+        }
         let receipt = match lease_authorization.as_ref() {
             Some(CoreLeaseAuthorization::Experiment(lease)) => store
                 .append_wal_idempotent_exact_realtime(
@@ -8230,6 +8279,154 @@ mod tests {
         }
     }
 
+    fn offline_productive_settlement_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        CoreImportV47Result,
+        Value,
+    ) {
+        offline_productive_settlement_fixture_with_upload(true)
+    }
+
+    fn offline_productive_settlement_fixture_with_upload(
+        with_upload: bool,
+    ) -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        CoreImportV47Result,
+        Value,
+    ) {
+        // Positive long-tail WAL cases need a physically steady source/smelter/
+        // upload chain. Retain the old two-miner, no-station state as a negative
+        // fixture: enabled quantum storage alone does not prove a stable flow.
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        let state = &mut envelope["state"];
+        state["historyRecordedAt"] = state["elapsedSeconds"].clone();
+        state["quantumLogisticsNetwork"]["enabled"] = json!(true);
+        state["quantumLogisticsNetwork"]["itemCapacities"] = json!({
+            "iron_ore": "10000000000", "iron_ingot": "10000000000"
+        });
+        state["campaign"]["completedTaskIds"] = json!([
+            "mine_first_ore",
+            "smelt_iron",
+            "deploy_miner",
+            "lay_first_belt"
+        ]);
+        state["campaign"]["rewardedTaskIds"] = state["campaign"]["completedTaskIds"].clone();
+        let entities = state["entities"].as_array_mut().unwrap();
+        entities[0]["powerGridId"] = json!("grid-a");
+        entities[0]["outputs"]["iron_ore"] = json!(0);
+        entities[0]["resourceCapacity"] = json!(1000000);
+        entities[0]["resourceRemaining"] = json!(1000000);
+        entities[0]["resourceDepletionRemainder"] = json!(0);
+        entities.push(json!({
+            "id": "offline-wind", "kind": "power", "planetId": "home", "powerGridId": "grid-a",
+            "buildingId": "wind_turbine", "machineCount": 1, "minerCount": 0,
+            "position": {"x": 0, "y": 0}, "inputs": {}, "outputs": {}, "progress": 0,
+            "routingCursor": 0, "utilization": 0, "productionRate": 0,
+        }));
+        if with_upload {
+            entities[0]["minerCount"] = json!(1);
+            entities.push(json!({
+                "id": "offline-smelter", "kind": "machine", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "arc_smelter", "recipeId": "iron_ingot",
+                "machineCount": 1, "minerCount": 0, "position": {"x": 3, "y": 0},
+                "inputs": {"iron_ore": 20}, "outputs": {"iron_ingot": 0},
+                "progress": 0, "routingCursor": 0, "utilization": 0, "productionRate": 0,
+            }));
+            let mut slots = vec![json!({
+                "itemId": "iron_ingot", "localMode": "storage", "remoteMode": "supply",
+                "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000,
+                "priority": 1, "routePolicy": "direct", "warperBudget": 0,
+            })];
+            slots.extend((0..4).map(|_| {
+                json!({
+                    "itemId": null, "localMode": "storage", "remoteMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000,
+                    "priority": 1, "routePolicy": "direct", "warperBudget": 0,
+                })
+            }));
+            entities.push(json!({
+                "id": "offline-upload", "kind": "station", "planetId": "home",
+                "powerGridId": "grid-a", "buildingId": "interstellar_logistics_station",
+                "stationTier": 2, "quantumMode": "quantum", "machineCount": 1,
+                "position": {"x": 4, "y": 0}, "stationSlots": slots,
+                "stationRoutes": [], "stationDrones": 0, "stationVessels": 0,
+                "stationWarpEnabled": false, "stationWarpers": 0,
+                "stationDispatchCursor": 0, "stationLastSupplyPeerBySlot": {},
+                "stationProgress": 0, "stationCongestion": 0, "stationTrips": 0,
+                "stationLastTransfer": 0, "inputs": {"iron_ingot": 0}, "outputs": {"iron_ingot": 0},
+                "progress": 0, "routingCursor": 0, "utilization": 0, "productionRate": 0,
+            }));
+            state["belts"] = json!([
+                {
+                    "id": "offline-ore-feed", "planetId": "home", "source": "vein",
+                    "target": "offline-smelter", "itemId": "iron_ore", "lanes": 1, "tier": 1,
+                    "priority": 1, "progress": 0, "lastFlow": 0, "totalTransferred": 0,
+                },
+                {
+                    "id": "offline-upload-feed", "planetId": "home", "source": "offline-smelter",
+                    "target": "offline-upload", "itemId": "iron_ingot", "lanes": 1, "tier": 1,
+                    "priority": 1, "progress": 0, "lastFlow": 0, "totalTransferred": 0,
+                }
+            ]);
+        }
+        let body = serde_json::to_string(state).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{body}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let mut catalog = import_catalog();
+        catalog["buildings"].as_array_mut().unwrap().push(json!({
+            "id": "wind_turbine", "kind": "power", "speed": 1,
+            "inputCapacity": 0, "outputCapacity": 0, "powerDemandKw": 0, "powerGenerationKw": 1000,
+        }));
+        if with_upload {
+            catalog["buildings"].as_array_mut().unwrap().push(json!({
+                "id": "interstellar_logistics_station", "kind": "station", "speed": 1,
+                "inputCapacity": 1000000, "outputCapacity": 1000000,
+                "powerDemandKw": 1, "powerGenerationKw": 0,
+            }));
+        }
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let mut imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                catalog.clone(),
+            )
+            .unwrap();
+        if with_upload {
+            // The real offline request adds its own 30-second prefix; together
+            // these 60 seconds let the belt diagnostics reach their fixed point.
+            let warmup = registry
+                .advance(
+                    &imported.session_id,
+                    &CoreAdvanceRequest {
+                        base_revision: imported.summary.revision,
+                        simulation_seconds: 30.0,
+                        wall_seconds: 30.0,
+                        advance_mode: CoreAdvanceMode::Exact,
+                        include_diagnostics: true,
+                    },
+                )
+                .unwrap();
+            assert!(warmup.supported, "{warmup:?}");
+            let checkpoint = registry
+                .checkpoint(&mut store, &imported.session_id, 42)
+                .unwrap();
+            imported.checkpoint = checkpoint.checkpoint;
+            imported.summary = checkpoint.summary;
+        }
+        (root, store, registry, imported, catalog)
+    }
+
     fn offline_candidate_request(
         source: &crate::save_store::SaveRecoveryResult,
         summary: &CoreStateSummary,
@@ -8409,7 +8606,8 @@ mod tests {
 
     #[test]
     fn offline_settlement_derives_one_x_budget_and_publishes_one_checkpoint() {
-        let (_root, mut store, mut registry, imported, _catalog) = offline_settlement_fixture();
+        let (_root, mut store, mut registry, imported, _catalog) =
+            offline_productive_settlement_fixture();
         let source = store.recover("normal-main").unwrap().unwrap();
         assert_eq!(source.saved_at_ms, 42);
         let result = registry
@@ -8439,12 +8637,56 @@ mod tests {
                 &[],
             )
             .unwrap();
-        assert_eq!(state["base"]["elapsedSeconds"].as_f64(), Some(602.0));
+        assert_eq!(state["base"]["elapsedSeconds"].as_f64(), Some(632.0));
+    }
+
+    #[test]
+    fn offline_settlement_rejects_unsteady_quantum_source_before_wal_or_checkpoint() {
+        let (_root, mut store, mut registry, imported, _catalog) =
+            offline_productive_settlement_fixture_with_upload(false);
+        let source = store.recover("normal-main").unwrap().unwrap();
+        let before = registry.status(&imported.session_id).unwrap();
+        let wal_before =
+            serde_json::to_value(store.read_wal("normal-main", source.revision).unwrap()).unwrap();
+        let error = registry
+            .commit_offline_settlement(
+                &mut store,
+                &imported.session_id,
+                offline_settlement_request(&source, source.saved_at_ms + 600_000),
+            )
+            .unwrap_err();
+        let reason = error.to_string();
+        assert!(reason.contains("unsupported domain"), "{reason}");
+        assert!(reason.contains("offline flow"), "{reason}");
+        let after = registry.status(&imported.session_id).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.canonical_sha256, before.canonical_sha256);
+        assert_eq!(after.domain_sha256, before.domain_sha256);
+        let recovered = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(
+            (
+                recovered.generation,
+                recovered.root_hash,
+                recovered.revision,
+                recovered.saved_at_ms,
+            ),
+            (
+                source.generation,
+                source.root_hash,
+                source.revision,
+                source.saved_at_ms,
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(store.read_wal("normal-main", source.revision).unwrap()).unwrap(),
+            wal_before
+        );
     }
 
     #[test]
     fn offline_settlement_reuses_a_wal_synced_budget_after_cold_reopen() {
-        let (_root, mut store, mut registry, imported, catalog) = offline_settlement_fixture();
+        let (_root, mut store, mut registry, imported, catalog) =
+            offline_productive_settlement_fixture();
         let source = store.recover("normal-main").unwrap().unwrap();
         let command_id = format!(
             "offline-main-g{}-r{}-s{}",
@@ -8466,6 +8708,15 @@ mod tests {
             )
             .unwrap();
         let committed_hash = committed.summary.as_ref().unwrap().canonical_sha256.clone();
+        let accepted_wal = store.read_wal("normal-main", source.revision).unwrap();
+        assert_eq!(
+            accepted_wal[0].payload["offlineAlgorithmVersion"],
+            dsp_native_core::offline_macro_algorithm_version()
+        );
+        assert_eq!(
+            accepted_wal[0].payload["kind"],
+            "stable-offline-operation-v2"
+        );
         registry.close_all();
 
         let mut reopened = CoreRegistry::default();
@@ -8497,6 +8748,166 @@ mod tests {
         let published = store.recover("normal-main").unwrap().unwrap();
         assert_eq!(published.saved_at_ms, source.saved_at_ms + 600_000);
         assert_eq!(published.revision, committed.revision);
+    }
+
+    #[test]
+    fn offline_wal_algorithm_binding_checks_stable_and_digested_durable_payloads() {
+        for durable in [false, true] {
+            for (seconds, version, accepted) in [
+                (30.0, None, true),
+                (31.0, None, false),
+                (
+                    600.0,
+                    Some("native-offline-macro-v1-closed-ledger-one-shot-v1"),
+                    false,
+                ),
+                (
+                    600.0,
+                    Some("native-offline-macro-v1-closed-ledger-one-shot-v2-boundary-exact"),
+                    false,
+                ),
+                (600.0, Some("unknown-future-algorithm"), false),
+                (
+                    600.0,
+                    Some(dsp_native_core::offline_macro_algorithm_version()),
+                    true,
+                ),
+            ] {
+                let mut operation = json!({
+                    "baseStateRevision": 7,
+                    "command": null,
+                    "simulationSeconds": seconds,
+                    "wallSeconds": seconds,
+                    "advanceMode": "offline-macro-v1",
+                    "registry": { "fingerprint": "builtin:test" },
+                });
+                if let Some(version) = version {
+                    operation["offlineAlgorithmVersion"] = Value::from(version);
+                }
+                let payload = if durable {
+                    operation["schemaVersion"] = json!(1);
+                    operation["sessionId"] = json!("offline-replay-test");
+                    operation["generation"] = json!(1);
+                    operation["sequence"] = json!(1);
+                    operation["committedAtMs"] = json!(123);
+                    operation["intentSha256"] = Value::from(canonical_sha256(&operation));
+                    json!({ "kind": if seconds > 30.0 { "durable-offline-operation-v2" } else { "durable-operation-v1" },
+                        "intent": operation, "resultStateRevision": 8 })
+                } else {
+                    operation["kind"] = json!(if seconds > 30.0 {
+                        "stable-offline-operation-v2"
+                    } else {
+                        "stable-operation-v1"
+                    });
+                    operation["resultStateRevision"] = json!(8);
+                    operation
+                };
+                let entry = WalEntry {
+                    base_revision: 7,
+                    revision: 8,
+                    command_id: "offline-replay-test".to_owned(),
+                    payload,
+                    previous_hash: String::new(),
+                    entry_hash: String::new(),
+                };
+                let decoded = decode_wal_operation(&entry);
+                assert_eq!(
+                    decoded.is_ok(),
+                    accepted,
+                    "durable={durable}, seconds={seconds}, version={version:?}"
+                );
+                if !accepted {
+                    assert!(
+                        decoded
+                            .err()
+                            .unwrap()
+                            .to_string()
+                            .contains("offline algorithm version")
+                    );
+                } else if seconds > 30.0 {
+                    let mut legacy_kind = entry.clone();
+                    legacy_kind.payload["kind"] = Value::from(if durable {
+                        "durable-operation-v1"
+                    } else {
+                        "stable-operation-v1"
+                    });
+                    assert!(
+                        decode_wal_operation(&legacy_kind)
+                            .err()
+                            .unwrap()
+                            .to_string()
+                            .contains("versioned payload kind")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn offline_wal_incompatible_tail_reopen_keeps_checkpoint_log_and_live_source_unchanged() {
+        for version in [
+            None,
+            Some("native-offline-macro-v1-closed-ledger-one-shot-v1"),
+            Some("native-offline-macro-v1-closed-ledger-one-shot-v2-boundary-exact"),
+        ] {
+            let (_root, store, mut registry, imported, catalog) = offline_settlement_fixture();
+            let source = store.recover("normal-main").unwrap().unwrap();
+            let before = registry.status(&imported.session_id).unwrap();
+            let mut payload = json!({
+                "kind": "stable-operation-v1",
+                "baseStateRevision": source.revision,
+                "resultStateRevision": source.revision + 1,
+                "command": null,
+                "simulationSeconds": 600,
+                "wallSeconds": 600,
+                "advanceMode": "offline-macro-v1",
+                "registry": { "fingerprint": source.registry_fingerprint },
+            });
+            if let Some(version) = version {
+                payload["offlineAlgorithmVersion"] = Value::from(version);
+            }
+            store
+                .append_wal_idempotent(
+                    "normal-main",
+                    source.revision,
+                    source.revision + 1,
+                    "legacy-offline-tail",
+                    payload,
+                )
+                .unwrap();
+            let wal_before =
+                serde_json::to_value(store.read_wal("normal-main", source.revision).unwrap())
+                    .unwrap();
+            let error = registry
+                .open(
+                    &store,
+                    "normal-main",
+                    source.generation,
+                    &source.root_hash,
+                    source.revision,
+                    &source.registry_fingerprint,
+                    catalog,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("offline algorithm version"));
+            assert_eq!(
+                registry
+                    .status(&imported.session_id)
+                    .unwrap()
+                    .canonical_sha256,
+                before.canonical_sha256
+            );
+            let after = store.recover("normal-main").unwrap().unwrap();
+            assert_eq!(
+                (after.generation, after.root_hash, after.revision),
+                (source.generation, source.root_hash, source.revision)
+            );
+            assert_eq!(
+                serde_json::to_value(store.read_wal("normal-main", source.revision).unwrap())
+                    .unwrap(),
+                wal_before
+            );
+        }
     }
 
     #[test]
@@ -8535,14 +8946,14 @@ mod tests {
                 offline_candidate_request(
                     &source,
                     &before,
-                    source.saved_at_ms + 600_999,
+                    source.saved_at_ms + 30_999,
                     "offline-candidate-one",
                 ),
             )
             .unwrap();
         assert!(result.prepared);
-        assert_eq!(result.settled_seconds, 600);
-        assert_eq!(result.settled_at_ms, source.saved_at_ms + 600_000);
+        assert_eq!(result.settled_seconds, 30);
+        assert_eq!(result.settled_at_ms, source.saved_at_ms + 30_000);
         assert_eq!(
             result.source_summary.canonical_sha256,
             before.canonical_sha256
@@ -8560,7 +8971,11 @@ mod tests {
         assert_eq!(bytes.len() as u64, exported.result.byte_length);
         let envelope: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(envelope["savedAt"].as_u64(), Some(result.settled_at_ms));
-        assert_eq!(envelope["state"]["elapsedSeconds"].as_f64(), Some(602.0));
+        assert_eq!(envelope["state"]["elapsedSeconds"].as_f64(), Some(32.0));
+        assert_eq!(
+            result.advance.as_ref().unwrap().approximated_seconds,
+            Some(0.0)
+        );
 
         let after = registry.status(&imported.session_id).unwrap();
         assert_eq!(after.revision, before.revision);
@@ -8627,7 +9042,9 @@ mod tests {
                 ),
             )
             .unwrap();
-        assert!(result.prepared);
+        assert!(!result.prepared);
+        assert!(result.advance.is_none());
+        assert!(result.export.is_none());
         assert_eq!(result.settled_seconds, 7 * 24 * 60 * 60);
         assert_eq!(
             result.settled_at_ms,
@@ -8636,6 +9053,49 @@ mod tests {
         let after = registry.status(&imported.session_id).unwrap();
         assert_eq!(after.revision, before.revision);
         assert_eq!(after.canonical_sha256, before.canonical_sha256);
+    }
+
+    #[test]
+    fn offline_candidate_rejects_unqualified_tail_without_spending_or_publishing() {
+        let (root, store, registry, imported, _catalog) = offline_settlement_fixture();
+        let source = store.recover("normal-main").unwrap().unwrap();
+        let before = registry.status(&imported.session_id).unwrap();
+        for seconds in [31, 600, 28_800] {
+            let result = registry
+                .prepare_offline_settlement_export(
+                    &store,
+                    &imported.session_id,
+                    offline_candidate_request(
+                        &source,
+                        &before,
+                        source.saved_at_ms + seconds * 1_000,
+                        "unqualified-tail",
+                    ),
+                )
+                .unwrap();
+            assert!(!result.prepared);
+            assert!(result.advance.is_none());
+            assert!(result.export.is_none());
+            assert!(result.reason.unwrap().contains("1 to 30 seconds"));
+            assert_eq!(
+                registry
+                    .status(&imported.session_id)
+                    .unwrap()
+                    .canonical_sha256,
+                before.canonical_sha256
+            );
+            assert_eq!(
+                store.recover("normal-main").unwrap().unwrap().root_hash,
+                source.root_hash
+            );
+            assert!(
+                store
+                    .read_wal("normal-main", source.revision)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!root.path().join("exports/unqualified-tail.json").exists());
+        }
     }
 
     fn player_authority_fixture_with_probe(

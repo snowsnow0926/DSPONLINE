@@ -4,7 +4,7 @@ async function prepare(page: import("@playwright/test").Page) {
   await page.addInitScript(() => {
     // Match the current release-note id so the announcement dialog cannot
     // intercept the new-factory controls during this feature test.
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-02-v1.2.7");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.mobile-ui.v1", "next");
     window.localStorage.removeItem("dsp-idle-network.ui.speedrun-panel-collapsed.v1");
@@ -93,4 +93,3 @@ test("speedrun leaderboard identifies server-verified infinite-mineral results",
   await expect(row).toContainText("已验证 · 无限矿物");
   await expect(galaxy).not.toContainText("无限资源模式不能进入速通正式榜");
 });
-

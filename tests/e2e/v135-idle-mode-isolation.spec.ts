@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-09-02-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-10-v1.2.9";
 
 async function prepare(page: import("@playwright/test").Page): Promise<void> {
   await page.addInitScript((releaseNoteId) => {
@@ -86,4 +86,3 @@ test("普通与速通本地槽位同时存在，速通只能单向复制到空�
     sourceFactoryId: "e2e_mode_isolation_factory",
   });
 });
-

@@ -261,6 +261,7 @@ let pendingWriteError: unknown = null;
 // legacy string writes; otherwise a queued legacy write can overtake the
 // proof/CAS revision head while the large payload is committing.
 let authoritativeSaveQueue: Promise<void> = Promise.resolve();
+let writerClosing = false;
 let startupConflictId: string | null = null;
 let startupConflictCreatedAt = -1;
 const LOCAL_SAVE_WRITER_CONTINUATION_MAX_AGE_MS = 120_000;
@@ -799,8 +800,10 @@ async function readCoordinationValue(db: IDBDatabase, key: string): Promise<stri
   return (await readRecord(db, key))?.value ?? null;
 }
 
-function putStoredValue(store: IDBObjectStore, key: string, value: string, now = Date.now()): void {
-  store.put({ key, value, updatedAt: now, bytes: byteLength(value), ...(isSaveKey(key) ? { summary: classifySaveRecord(key, value) } : {}) } satisfies StoredSaveRecord);
+function putStoredValue(store: IDBObjectStore, key: string, value: string, now = Date.now(), measuredBytes?: number): void {
+  // The freshly built catalog has already measured these exact payload bytes.
+  // Re-encoding a large save just for its length allocates another full copy.
+  store.put({ key, value, updatedAt: now, bytes: measuredBytes ?? byteLength(value), ...(isSaveKey(key) ? { summary: classifySaveRecord(key, value) } : {}) } satisfies StoredSaveRecord);
 }
 
 function putCatalogRecord(store: IDBObjectStore, catalog: LocalSaveCatalog, now = Date.now()): void {
@@ -816,7 +819,7 @@ function putSaveValueAndCatalog(
   now = Date.now(),
   preparedCatalog?: LocalSaveCatalog,
 ): LocalSaveCatalog | null {
-  putStoredValue(store, key, value, now);
+  putStoredValue(store, key, value, now, preparedCatalog?.key === key ? preparedCatalog.byteLength : undefined);
   if (!isCatalogedSaveKey(key)) return null;
   if (!preparedCatalog || preparedCatalog.key !== key) throw new Error("Catalog is required for save payload writes");
   const catalog = { ...preparedCatalog, revision };
@@ -832,7 +835,7 @@ async function writeRecord(db: IDBDatabase, key: string, value: string): Promise
   const done = transactionDone(transaction);
   const now = Date.now();
   const store = transaction.objectStore(RECORD_STORE);
-  putStoredValue(store, key, value, now);
+  putStoredValue(store, key, value, now, catalog?.byteLength);
   if (catalog) putCatalogRecord(store, catalog, now);
   await done;
   const stored = await readRecord(db, key);
@@ -892,11 +895,21 @@ async function withBrowserCoordinationLockRetry<T>(operation: () => Promise<T>, 
   return { acquired: false };
 }
 
-async function writeLease(db: IDBDatabase, lease: LocalSaveWriterLease): Promise<void> {
+async function writeLease(
+  db: IDBDatabase,
+  lease: LocalSaveWriterLease,
+  expectedPrevious?: Pick<LocalSaveWriterLease, "ownerId" | "fencingToken">,
+): Promise<void> {
   const transaction = db.transaction(RECORD_STORE, "readwrite");
   const done = transactionDone(transaction);
   const store = transaction.objectStore(RECORD_STORE);
   const current = parseLocalSaveWriterLease((await requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>))?.value);
+  if (expectedPrevious && (current?.ownerId !== expectedPrevious.ownerId || current.fencingToken !== expectedPrevious.fencingToken ||
+    current.expiresAt > Date.now() || writerClosing || document.visibilityState === "hidden")) {
+    transaction.abort();
+    void done.catch(() => undefined);
+    throw new LocalSaveReadOnlyError();
+  }
   if (current && current.ownerId !== writerId && current.expiresAt > lease.heartbeatAt) {
     transaction.abort();
     void done.catch(() => undefined);
@@ -1254,7 +1267,7 @@ export async function inspectLocalSaveNativeAuthorityHandoff(
   return { storage: "indexeddb", journalState: journal.phase, writerLease, journal };
 }
 
-async function claimWriterLease(): Promise<boolean> {
+async function claimWriterLease(expectedPrevious?: Pick<LocalSaveWriterLease, "ownerId" | "fencingToken">): Promise<boolean> {
   const now = Date.now();
   if (backend !== "indexeddb" || !database) {
     publishWriterStatus({ role: "primary", writerId, fencingToken: 1, leaseExpiresAt: Number.MAX_SAFE_INTEGER, reason: "当前环境使用兼容存储后端" });
@@ -1262,9 +1275,13 @@ async function claimWriterLease(): Promise<boolean> {
   }
   const attempt = await withBrowserCoordinationLock(async () => {
     const previous = parseLocalSaveWriterLease(await readCoordinationValue(database!, LOCAL_SAVE_WRITER_LEASE_KEY));
+    if (expectedPrevious && (document.visibilityState === "hidden" || writerClosing ||
+      previous?.ownerId !== expectedPrevious.ownerId || previous.fencingToken !== expectedPrevious.fencingToken)) {
+      return { ok: false as const, previous };
+    }
     if (!canClaimLocalSaveWriterLease(previous, writerId, now)) return { ok: false as const, previous };
     const lease = createLocalSaveWriterLease(writerId, previous, now);
-    await writeLease(database!, lease);
+    await writeLease(database!, lease, expectedPrevious);
     return { ok: true as const, previous, lease };
   });
   if (!attempt.acquired) {
@@ -1296,6 +1313,26 @@ async function claimWriterLease(): Promise<boolean> {
   return true;
 }
 
+async function retryInitialAndroidWriterLease(blocked: LocalSaveWriterLease | null): Promise<void> {
+  const canWait = () => writerStatus.role === "secondary" && !writerClosing && document.visibilityState !== "hidden";
+  if (__APP_PLATFORM__ !== "android" || backend !== "indexeddb" || !database ||
+    !canWait()) return;
+  if (!blocked || blocked.ownerId === writerId) return;
+  const remainingMs = Math.max(0, blocked.expiresAt - Date.now());
+  // Native authority and anomalously distant leases must never become short
+  // timers or an implicit takeover. Only the ordinary 15-second lease applies.
+  if (remainingMs > LOCAL_SAVE_LEASE_DURATION_MS) return;
+  const deadline = performance.now() + remainingMs + 500;
+  while (performance.now() < deadline && canWait()) {
+    const current = parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY));
+    if (!current || current.ownerId !== blocked.ownerId || current.fencingToken !== blocked.fencingToken) return;
+    // A live writer renewing its lease is not an interrupted Android document.
+    if (current.expiresAt > blocked.expiresAt) return;
+    if (current.expiresAt <= Date.now() && await claimWriterLease(blocked)) return;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
+  }
+}
+
 async function releaseWriterLeaseForReload(): Promise<void> {
   if (backend !== "indexeddb" || !database) {
     publishWriterStatus({ ...writerStatus, role: "initializing", reason: "正在重新载入最新持久存档" });
@@ -1317,7 +1354,7 @@ async function releaseWriterLeaseForReload(): Promise<void> {
 }
 
 async function renewWriterLease(): Promise<void> {
-  if (writerStatus.role !== "primary" || backend !== "indexeddb" || !database) return;
+  if (writerClosing || writerStatus.role !== "primary" || backend !== "indexeddb" || !database) return;
   const now = Date.now();
   const renewed = await withBrowserCoordinationLock(async () => {
     const transaction = database!.transaction(RECORD_STORE, "readwrite");
@@ -1867,7 +1904,16 @@ export function initializeLocalSaveStore(): Promise<void> {
       initializeFallback();
     }
     installCoordinationListeners();
-    await claimWriterLease();
+    const initialAndroidLease = __APP_PLATFORM__ === "android" && backend === "indexeddb" && database
+      ? parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY))
+      : null;
+    const claimed = await claimWriterLease();
+    // main.tsx awaits this initialization before mounting any menu or loading
+    // candidate. A prior Android document's lease can outlive that document;
+    // retry here only, never after a read-only page has captured player state.
+    if (!claimed && !startupConflictId) {
+      await retryInitialAndroidWriterLease(initialAndroidLease).catch(() => undefined); // Keep the original read-only boundary on storage failure.
+    }
     if (startupConflictId) {
       publishWriterStatus({ ...writerStatus, role: "conflict", reason: "检测到旧标签页留下的急救存档，已保留双方版本", conflictId: startupConflictId });
     }
@@ -1950,7 +1996,7 @@ export async function takeOverLocalSaveWriter(): Promise<boolean> {
 }
 
 export function canWriteLocalSaves(): boolean {
-  return writerStatus.role === "primary";
+  return !writerClosing && writerStatus.role === "primary";
 }
 
 export async function getLocalSaveConflicts(): Promise<LocalSaveConflictSummary[]> {
@@ -2425,7 +2471,7 @@ export async function commitLocalSaveInternalRecords(records: readonly LocalSave
   }
 }
 
-/** Keep a user-selected payload available to synchronous lifecycle saves. */
+/** Retain persisted bytes as the expected base for synchronous lifecycle saves. */
 export function retainLocalSavePayload(key: string, value: string): boolean {
   cache.delete(key);
   cache.set(key, value);
@@ -2450,6 +2496,7 @@ export function clearLocalSaveRawPayloadCache(): void {
 }
 
 function enqueue(operation: () => Promise<void>, key?: string): void {
+  if (writerClosing) throw new LocalSaveReadOnlyError("正在安全退出，已停止新存档写入");
   // Capture the current proof queue at enqueue time. Reading a mutable queue
   // later inside the callback can deadlock when a proof commit is waiting for
   // the legacy queue that contains this operation.
@@ -2467,6 +2514,7 @@ function enqueueAuthoritativeSave<T>(
   priorLegacyWrites: Promise<void>,
   operation: () => Promise<T>,
 ): Promise<T> {
+  if (writerClosing) return Promise.reject(new LocalSaveReadOnlyError("正在安全退出，已停止新存档写入"));
   const priorProof = authoritativeSaveQueue;
   const queued = priorProof.catch(() => undefined).then(async () => {
     await priorLegacyWrites;
@@ -2479,6 +2527,7 @@ function enqueueAuthoritativeSave<T>(
 }
 
 export function setLocalSaveValue(key: string, value: string): void {
+  if (writerClosing) throw new LocalSaveReadOnlyError("正在安全退出，已停止新存档写入");
   if (!isSaveKey(key)) throw new Error(`Unsupported local save key: ${key}`);
   ensureSynchronousFallback();
   if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError(writerStatus.reason);
@@ -2582,6 +2631,7 @@ export async function setLocalSavePayloadWithProof<Payload extends WorkerBinaryP
 }
 
 export function removeLocalSaveValue(key: string): void {
+  if (writerClosing) throw new LocalSaveReadOnlyError("正在安全退出，已停止新存档写入");
   if (!isSaveKey(key)) return;
   ensureSynchronousFallback();
   if (writerStatus.role !== "primary") throw new LocalSaveReadOnlyError(writerStatus.reason);
@@ -2612,7 +2662,7 @@ export function removeLocalSaveValue(key: string): void {
 
 export function writePrimarySaveEmergencyMirror(value: string): boolean {
   ensureSynchronousFallback();
-  if (backend !== "indexeddb" || writerStatus.role !== "primary") return false;
+  if (writerClosing || backend !== "indexeddb" || writerStatus.role !== "primary") return false;
   try {
     let mode: LocalSaveMode = "normal";
     try {
@@ -2646,6 +2696,16 @@ export function clearPrimarySaveEmergencyMirror(committedValue: string): void {
   ensureSynchronousFallback();
   if (backend !== "indexeddb" || preserveDevelopmentMirror()) return;
   try {
+    // Most saves have no emergency copy. Avoid parsing the entire committed
+    // factory just to choose a mode when neither mode has anything to clean up.
+    // Metadata-only entries still need the existing orphan reconciliation.
+    const hasEmergencyMirror = (["normal", "speedrun"] as const).some((candidateMode) => {
+      const keys = localSaveEmergencyMirrorKeys(candidateMode);
+      return window.localStorage.getItem(keys.payload) !== null ||
+        window.localStorage.getItem(keys.metadata) !== null;
+    });
+    const legacyKey = `${SAVE_KEY}.speedrun.emergency`;
+    if (!hasEmergencyMirror && !knownSaveKeys.has(legacyKey) && !cache.has(legacyKey)) return;
     let mode: LocalSaveMode = "normal";
     try {
       const parsed = JSON.parse(committedValue) as { mode?: unknown; state?: { mode?: unknown } };
@@ -2663,7 +2723,6 @@ export function clearPrimarySaveEmergencyMirror(committedValue: string): void {
     // Remove the pre-1.0.40 speedrun emergency key after its content is known
     // to be no newer than the committed primary. Old readers remain supported.
     if (mode === "speedrun") {
-      const legacyKey = `${SAVE_KEY}.speedrun.emergency`;
       const legacy = getLocalSaveValue(legacyKey);
       if (legacy !== null && savedAt(legacy) <= savedAt(committedValue)) removeLocalSaveValue(legacyKey);
     }
@@ -2682,6 +2741,59 @@ export async function flushLocalSaveWrites(): Promise<void> {
     }
     throw error;
   }
+}
+
+/** Quiesce both save queues, then release only our unchanged durable head. */
+export async function closeLocalSaveWriter(signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  if (writerClosing) throw new Error("Writer close is already pending");
+  const owner = { ...writerStatus };
+  writerClosing = true;
+  let committed = false;
+  try {
+    await authoritativeSaveQueue;
+    await flushLocalSaveWrites();
+    signal.throwIfAborted();
+    if (backend !== "indexeddb" || !database || owner.role !== "primary") {
+      committed = true; // Read-only windows never release another owner's lease.
+      return;
+    }
+    const heads = (["normal", "speedrun"] as const).map((mode) => ({
+      key: primaryKeyForMode(mode), revision: getPrimaryLocalSaveRevision(mode),
+      identity: getVerifiedPrimaryLocalSaveIdentity(mode), known: knownSaveKeys.has(primaryKeyForMode(mode)),
+    }));
+    const transaction = database.transaction(RECORD_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    const abort = () => { try { transaction.abort(); } catch { /* already completed */ } };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      const store = transaction.objectStore(RECORD_STORE);
+      const read = (key: string) => requestResult(store.get(key) as IDBRequest<StoredSaveRecord | undefined>);
+      const [leaseRecord, ...revisions] = await Promise.all([read(LOCAL_SAVE_WRITER_LEASE_KEY), ...heads.map((head) => read(localSaveRevisionKey(head.key)))]);
+      const lease = parseLocalSaveWriterLease(leaseRecord?.value);
+      signal.throwIfAborted();
+      if (lease?.ownerId !== owner.writerId || lease.fencingToken !== owner.fencingToken || writerStatus.role !== "primary") throw new Error("Writer changed during close");
+      for (let index = 0; index < heads.length; index += 1) {
+        const head = heads[index];
+        const revision = parseLocalSaveRevision(revisions[index]?.value);
+        const matchesContent = head.known
+          ? Boolean(head.identity && !revision?.deleted && revision?.checksum === head.identity.stateChecksum)
+          : head.revision === 0 || Boolean(revision?.deleted && revision.checksum === null);
+        if ((revision?.revision ?? 0) !== head.revision ||
+          (revision && revision.saveKey !== head.key) || !matchesContent) throw new Error("Durable primary changed during close");
+      }
+      const now = Date.now();
+      putStoredValue(store, LOCAL_SAVE_WRITER_LEASE_KEY, JSON.stringify({ ...lease, heartbeatAt: now, expiresAt: now }), now);
+      await done;
+      committed = true;
+      if (writerHeartbeat !== null) { window.clearInterval(writerHeartbeat); writerHeartbeat = null; }
+      publishWriterStatus({ ...owner, role: "unavailable", leaseExpiresAt: now, reason: "存档已确认，正在退出" });
+    } catch (error) {
+      abort();
+      await done.catch(() => undefined);
+      throw error;
+    } finally { signal.removeEventListener("abort", abort); }
+  } finally { if (!committed) writerClosing = false; }
 }
 
 export async function readPersistedLocalSaveValue(key: string): Promise<string | null> {
@@ -2927,7 +3039,13 @@ export async function getLocalSaveStorageEstimate(): Promise<LocalSaveStorageEst
 }
 
 export async function hasLocalSaveCapacity(key: string, nextValue: string): Promise<{ ok: boolean; requiredBytes: number; availableBytes: number | null }> {
-  const requiredBytes = Math.max(0, byteLength(nextValue) - (storageEntryCache.get(key)?.bytes ?? 0));
+  return hasLocalSaveCapacityForBytes(key, byteLength(nextValue));
+}
+
+/** Capacity estimate for callers already holding the exact UTF-8 byte length. */
+export async function hasLocalSaveCapacityForBytes(key: string, nextBytes: number): Promise<{ ok: boolean; requiredBytes: number; availableBytes: number | null }> {
+  if (!Number.isSafeInteger(nextBytes) || nextBytes < 0) throw new TypeError("Invalid measured save byte length");
+  const requiredBytes = Math.max(0, nextBytes - (storageEntryCache.get(key)?.bytes ?? 0));
   try {
     const estimate = await navigator.storage?.estimate?.();
     if (typeof estimate?.quota !== "number" || typeof estimate.usage !== "number") return { ok: true, requiredBytes, availableBytes: null };

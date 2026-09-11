@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-02-v1.2.7");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
   });
 });
 
@@ -80,6 +80,10 @@ test("settings opens a category overview and returns without changing the select
 });
 
 test("each planet restores its last canvas viewport", async ({ page }) => {
+  const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
+  await page.addLocatorHandler(offlineReport, async () => {
+    await offlineReport.getByRole("button", { name: "确认结算" }).click();
+  });
   await openFactory(page);
   await page.getByTitle("保存并返回主菜单").click();
   await expect(page.locator(".start-menu")).toBeVisible();

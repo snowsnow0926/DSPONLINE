@@ -25,6 +25,8 @@ import {
 } from "@xyflow/react";
 import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { Activity, AlertTriangle, ArrowUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Focus, Map as MapIcon, PanelRightClose, RefreshCw, Route, Satellite, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
+import { useCanvasKeyboardPan } from "./hooks/useCanvasKeyboardPan";
+import { enclosedCanvasRegionIds, moveCanvasSelection } from "./game/canvasRegionSelection";
 import {
   ConstructionDock,
   HeaderControls,
@@ -443,6 +445,8 @@ import {
   takeOverLocalSaveWriter,
 } from "./game/localSaveStore";
 import { registerCurrentTabTakeoverHandler } from "./game/localSaveTakeover";
+import { desktopCloseCompleted, registerDesktopCloseHandler } from "./game/desktopGracefulClose";
+import { closeLocalSaveWriter } from "./game/localSaveStore";
 import type {
   LocalSaveNativeAuthorityCheckpoint,
   LocalSaveNativeAuthorityLeaseReceipt,
@@ -2247,6 +2251,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [regionDraft, setRegionDraft] = useState<CanvasRegionRectangle | null>(null);
   const [regionResizePreview, setRegionResizePreview] = useState<{ regionId: string; rectangle: CanvasRegionRectangle } | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const [includeRegionsInSelection, setIncludeRegionsInSelection] = useState(false);
+  const [selectedRegionIds, setSelectedRegionIds] = useState<string[]>([]);
+  const selectedRegionIdsRef = useRef<string[]>([]);
+  const regionSelectionStartRef = useRef<{ point: { x: number; y: number }; previous: string[] } | null>(null);
+  const [regionGroupMovePreview, setRegionGroupMovePreview] = useState<{ regionIds: string[]; x: number; y: number } | null>(null);
+  selectedRegionIdsRef.current = selectedRegionIds;
   const [miningEntityId, setMiningEntityId] = useState<string | null>(null);
   const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuides>({ x: null, y: null });
   const [connectionDraft, setConnectionDraft] = useState<ConnectionDraft | null>(null);
@@ -2292,6 +2302,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     primaryId: string;
     primaryPosition: { x: number; y: number };
     members: Array<{ id: string; position: { x: number; y: number } }>;
+    regions: CanvasRegion[];
     nativeIdentity: null | {
       sessionId: string;
       runId: string;
@@ -2362,6 +2373,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [saveFailure, setSaveFailure] = useState<SaveGameResult | null>(null);
   const [runtimePersistenceProgress, setRuntimePersistenceProgress] = useState<RuntimePersistenceProgress | null>(null);
   const [primarySaveRejectedEditCount, setPrimarySaveRejectedEditCount] = useState(0);
+  const [primarySaveRejectedProgressId, setPrimarySaveRejectedProgressId] = useState<number | null>(null);
   const runtimePersistenceProgressIdRef = useRef(0);
   const authorityWorkspaceSyncIdRef = useRef(0);
   const [eventHistory, setEventHistory] = useState<Array<{ id: number; text: string }>>([]);
@@ -2617,6 +2629,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   // boolean because lifecycle/manual/autosave requests may briefly overlap;
   // the fail-safe lock must remain active until the last verified write ends.
   const verifiedPrimarySaveInFlightDepthRef = useRef(0);
+  const desktopClosePendingRef = useRef(false);
   // A Rust-owned checkpoint is an independent single-writer transaction. It
   // must reject renderer commands even when the legacy "edit while saving"
   // preference is enabled, because there is no JavaScript state to rebase.
@@ -2689,6 +2702,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     writeAllowEditsDuringSavePreference(enabled);
   }, []);
   const rejectPlayerStateEditDuringPrimarySave = useCallback((): boolean => {
+    if (desktopClosePendingRef.current) return true;
     if (nativePlayerAuthorityMacroReadOnlyRef.current) {
       setNotice("Windows 原生宏观结算正在推进权威状态；当前画面只读，本次操作未应用");
       return true;
@@ -2705,9 +2719,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (!durablePrimarySaveInFlightRef.current && verifiedPrimarySaveInFlightDepthRef.current === 0) return false;
     const rejection = "本次操作未应用；保存完成后即可继续编辑";
     setPrimarySaveRejectedEditCount((count) => count + 1);
-    setRuntimePersistenceProgress((current) => current && !current.message.includes("本次操作未应用")
-      ? { ...current, message: `${current.message} ${rejection}` }
-      : current);
+    setPrimarySaveRejectedProgressId(runtimePersistenceProgressIdRef.current);
     setNotice(`正在创建权威主存档，${rejection}`);
     return true;
   }, []);
@@ -5095,6 +5107,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const cloudAutoSyncAbortRef = useRef<AbortController | null>(null);
   const cloudAutoSyncInFlightRef = useRef(false);
   const pureIdleStopTargetRef = useRef<{ sessionId: string; targetWallSeconds: number } | null>(null);
+  // Retain exactly one verified terminal result while persistence is retried.
+  // Its frozen timeline and authority lease must never cross a new idle run.
+  const pureIdleStopCandidateRef = useRef<({
+    sessionId: string;
+    authorityLease: LegacyAuthorityAsyncLeaseToken;
+    targetWallSeconds: number;
+    normalOfflineSeconds: number;
+    background: boolean;
+    primaryCommitted: boolean;
+  } & (
+    | { kind: "state"; state: GameState; summary: PureIdleMacroSummary; saved?: SaveGameResult }
+    | { kind: "envelope"; finalized: PureIdleMacroFinalEnvelopeResult }
+  )) | null>(null);
+  useEffect(() => {
+    if (!pureIdleActive || nativePlayerAuthorityOwnsRuntime) pureIdleStopCandidateRef.current = null;
+  }, [nativePlayerAuthorityOwnsRuntime, pureIdleActive]);
   // Visibility and interval callbacks can race while a background recovery
   // Worker is being rebuilt. Keep this boundary single-flight so a candidate
   // is never finalized or saved twice.
@@ -5114,6 +5142,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     pureIdleMacroClientRef.current = null;
     pureIdleMacroActiveRef.current = false;
     pureIdleActiveRef.current = false;
+    pureIdleStopCandidateRef.current = null;
     pureIdleBackgroundOfflineAbortRef.current?.abort();
     pureIdleBackgroundOfflineAbortRef.current = null;
     const recovery = pureIdleRecoveryRef.current;
@@ -5279,6 +5308,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setTimeWarpComputeState(next);
   }, []);
   const { screenToFlowPosition, setCenter, setViewport, fitView, getViewport, zoomIn, zoomOut } = useReactFlow();
+  useCanvasKeyboardPan({
+    getViewport,
+    setViewport: (viewport) => setViewport(viewport, { duration: 0 }),
+    enabled: () => Boolean(factoryCanvasRef.current?.isConnected) && !gameRef.current.timeWarp.enabled &&
+      !nodeDragActiveRef.current && !regionPointerRef.current && !regionResizeRef.current &&
+      !regionSelectionStartRef.current && !flowStore.getState().userSelectionRect && !canvasMultiTouchRef.current &&
+      (!nextMobileShell || mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay),
+  });
+  useEffect(() => {
+    setSelectedRegionIds([]);
+    setRegionGroupMovePreview(null);
+    regionSelectionStartRef.current = null;
+  }, [game.activePlanetId]);
+  useEffect(() => {
+    if (!includeRegionsInSelection) setSelectedRegionIds([]);
+  }, [includeRegionsInSelection]);
+  useEffect(() => {
+    if (selectedEntityIds.length === 0) setSelectedRegionIds((current) => current.length ? [] : current);
+  }, [selectedEntityIds]);
   const flowStore = useStoreApi<FactoryFlowNode, FactoryFlowEdge>();
   const updateConnectionCandidateNode = useCallback((nodeId: string | null) => {
     if (connectionCandidateNodeIdRef.current === nodeId) return;
@@ -5471,29 +5519,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setCommandPaletteOpen(false);
   }, [closeAllWorkspaces]);
   const mobileNavigation = useMobileNavigation({ enabled: nextMobileShell, onFactoryRequested: returnMobileToFactory });
-  const offlineMobileModalRef = useRef(false);
+  const offlineMobileModalRef = useRef<"closed" | "opening" | "open">("closed");
   useEffect(() => {
-    if (!nextMobileShell) {
-      offlineMobileModalRef.current = false;
+    // Retain the report until the idle overlay releases modal ownership.
+    // A hidden report must not make the visible recovery controls inert.
+    if (pureIdleActive) return;
+    if (!nextMobileShell || !offlineReport) {
+      offlineMobileModalRef.current = "closed";
       return;
     }
-    if (offlineReport && !offlineMobileModalRef.current) {
-      offlineMobileModalRef.current = true;
+    if (offlineMobileModalRef.current === "closed") {
+      offlineMobileModalRef.current = "opening";
       mobileNavigation.openModal("offline");
       return;
     }
-    if (offlineReport && offlineMobileModalRef.current &&
-      !(mobileNavigation.overlay?.kind === "modal" && mobileNavigation.overlay.id === "offline")) {
-      offlineMobileModalRef.current = false;
+    if (mobileNavigation.overlay?.kind === "modal" && mobileNavigation.overlay.id === "offline") {
+      offlineMobileModalRef.current = "open";
+      return;
+    }
+    // An effect replay can run before openModal's state update commits. Only
+    // a previously observed open modal can be dismissed by navigation.
+    if (offlineMobileModalRef.current === "open") {
+      offlineMobileModalRef.current = "closed";
       setOfflineReport(null);
     }
-  }, [mobileNavigation.openModal, mobileNavigation.overlay, nextMobileShell, offlineReport]);
+  }, [mobileNavigation.openModal, mobileNavigation.overlay, nextMobileShell, offlineReport, pureIdleActive]);
   const closeOfflineReport = useCallback(() => {
     if (nextMobileShell && mobileNavigation.overlay?.kind === "modal" && mobileNavigation.overlay.id === "offline") {
       mobileNavigation.requestBack();
       return;
     }
-    offlineMobileModalRef.current = false;
+    offlineMobileModalRef.current = "closed";
     setOfflineReport(null);
   }, [mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell]);
   const activeMobileWorkspace: MobileWorkspaceId | null = technologyOpen ? "technology"
@@ -6846,6 +6902,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (lifecycleExitStartedRef.current) {
       return { success: false, message: "页面正在退出，已保留 durable recovery 供下次精确恢复", code: "conflict" };
     }
+    if (desktopClosePendingRef.current && (kind === "autosave" || kind === "lifecycle")) {
+      return { success: false, message: "正在安全退出", code: "conflict" };
+    }
     if (durablePrimarySaveInFlightRef.current) {
       return { success: false, message: "已有 durable 主存档检查点正在进行，请稍候", code: "conflict" };
     }
@@ -7331,6 +7390,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "failed", startedAt, message: saved.message });
         return saved;
       }
+      const candidate = pureIdleStopCandidateRef.current;
+      if (candidate?.sessionId === record.sessionId) candidate.primaryCommitted = true;
       const mode = identity.mode;
       const primaryIdentity = getPrimaryLocalSaveRecoveryIdentity(mode);
       const writer = getLocalSaveWriterStatus();
@@ -7813,6 +7874,40 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
   persistPrimarySaveRef.current = persistPrimarySave;
 
+  useEffect(() => registerDesktopCloseHandler(async (signal) => {
+    if (readNativeAuthorityPersistenceBoundary().protected || pureIdleMacroActiveRef.current) {
+      setNotice("请先安全结束原生权威或纯挂机会话，再退出应用");
+      throw new Error("Runtime requires its own verified stop boundary");
+    }
+    desktopClosePendingRef.current = true;
+    simulationSaveBarrierDepthRef.current += 1;
+    simulationCheckpointBarrierRef.current = true;
+    let released = false;
+    try {
+      // Wait for the actual checkpoint owner, not an autosave coalescing ACK.
+      while (durablePrimarySaveInFlightRef.current || verifiedPrimarySaveInFlightDepthRef.current > 0) {
+        signal.throwIfAborted();
+        await new Promise((resolve) => window.setTimeout(resolve, 20));
+      }
+      signal.throwIfAborted();
+      const result = await persistPrimarySaveRef.current(undefined, "manual");
+      if (!result.success || result.skippedUnchanged) throw new Error(result.message);
+      signal.throwIfAborted();
+      await closeLocalSaveWriter(signal);
+      released = true;
+      lifecycleExitStartedRef.current = true;
+    } catch (error) {
+      setNotice("退出前保存尚未确认；窗口和原存档保持不变，请等待保存完成或处理存档错误后重试");
+      throw error;
+    } finally {
+      if (!released) {
+        desktopClosePendingRef.current = false;
+        simulationSaveBarrierDepthRef.current = Math.max(0, simulationSaveBarrierDepthRef.current - 1);
+        if (simulationSaveBarrierDepthRef.current === 0 && !simulationCheckpointRequestRef.current) simulationCheckpointBarrierRef.current = false;
+      }
+    }
+  }), [readNativeAuthorityPersistenceBoundary]);
+
   useEffect(() => registerCurrentTabTakeoverHandler(async () => {
     const before = getLocalSaveWriterStatus();
     if (before.role === "primary") {
@@ -8109,7 +8204,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nowMs = Date.now(),
   ): Promise<"continued" | "completed" | "not-backgrounded"> => {
     if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
-    const plan = getPureIdleBackgroundPlan(record, nowMs);
+    const retained = pureIdleStopCandidateRef.current;
+    const candidate = retained?.sessionId === record.sessionId && retained.background &&
+      legacyJavaScriptAuthorityLeaseIsCurrent(retained.authorityLease) ? retained : null;
+    // A retry owns the original stop boundary, including the ordinary-speed
+    // remainder. Time spent waiting for storage must not enlarge that result.
+    const stoppedAtMs = candidate
+      ? record.startedAtMs + (candidate.targetWallSeconds + candidate.normalOfflineSeconds) * 1_000
+      : record.stopReason === "background-grace-expired" && record.targetWallSeconds !== undefined
+        ? record.stopRequestedAtMs ?? nowMs : nowMs;
+    const plan = getPureIdleBackgroundPlan(record, stoppedAtMs);
     if (!plan.backgrounded) return "not-backgrounded";
     if (pureIdleStoppingRef.current || pureIdleBackgroundRecoveryRef.current) return "completed";
     pureIdleBackgroundRecoveryRef.current = true;
@@ -8160,22 +8264,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     await persistPureIdleTransition(record, {
       stopReason: "background-grace-expired",
       phase: "finalizing",
-      stopRequestedAtMs: nowMs,
+      stopRequestedAtMs: stoppedAtMs,
       targetWallSeconds: plan.highWallSeconds,
     }, authorityLease, nowMs);
     if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
     setPureIdleRecoveryStatus("后台宽限已结束，正在切换普通离线结算");
     setNotice("后台超过 5 分钟，剩余时间将按普通离线规则结算");
-    const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+    const finalizer = candidate ? pureIdleMacroClientRef.current
+      : pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
     if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
-    if (!finalizer) {
+    if (!finalizer && !candidate) {
       pureIdleStoppingRef.current = false;
       pureIdleBackgroundRecoveryRef.current = false;
       return "completed";
     }
     const abortController = new AbortController();
     pureIdleBackgroundOfflineAbortRef.current = abortController;
-    let macroFinalized = false;
+    let macroFinalized = candidate !== null;
     try {
       if (!durableSimulationRuntimeEnabled) {
         // The stable 1.0.43-compatible runtime deliberately has no durable
@@ -8184,8 +8289,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         // save chain as a normal pure-idle stop instead of entering the
         // 1.0.44-only envelope/head handoff below.
         setPureIdleRecoveryStatus("正在复用已校准会话推进后台宽限边界");
-        const legacyFinalized = await finalizer.finalize(plan.highWallSeconds);
+        const legacyFinalized = candidate?.kind === "state" ? candidate : await finalizer!.finalize(plan.highWallSeconds);
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
+        if (abortController.signal.aborted) throw new DOMException("后台结算已取消", "AbortError");
         macroFinalized = true;
         await persistPureIdleTransition(record, {
           stopReason: "background-grace-expired",
@@ -8193,8 +8299,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           finalizedAtMs: Date.now(),
         }, authorityLease);
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
+        if (abortController.signal.aborted) throw new DOMException("后台结算已取消", "AbortError");
         let ordinaryState = legacyFinalized.state;
-        if (plan.normalOfflineSeconds >= 1) {
+        if (!candidate && plan.normalOfflineSeconds >= 1) {
           setPureIdleRecoveryStatus("后台普通离线结果正在由后台 Worker 核对");
           const { runOfflineSimulationInWorkerDetailed } = await importWithRecovery(
             () => import("./game/offlineSimulation"),
@@ -8207,6 +8314,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             registry: contentPackRuntimeSnapshotRef.current,
           });
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
+          if (abortController.signal.aborted) throw new DOMException("后台结算已取消", "AbortError");
           if (ordinary.status !== "complete") {
             throw new Error(ordinary.approximation.fallbackReason ?? "后台普通离线结算需要玩家确认");
           }
@@ -8218,24 +8326,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           record.state.totalProduced,
           ordinaryState.totalProduced,
         );
-        const restored = setPaused(
+        const restored = candidate?.kind === "state" ? candidate.state : setPaused(
           {
             ...settleCompletedResearchBoundaries(ordinaryState),
             idleSettlement: finishIdleRun(settledIdle),
           },
           record.startedPaused,
         );
+        const pending = candidate?.kind === "state" ? candidate : {
+          kind: "state" as const, state: restored, summary: legacyFinalized.summary,
+          sessionId: record.sessionId, authorityLease, targetWallSeconds: plan.highWallSeconds,
+          normalOfflineSeconds: plan.normalOfflineSeconds, background: true, primaryCommitted: false,
+          saved: undefined as SaveGameResult | undefined,
+        };
+        pureIdleStopCandidateRef.current = pending;
+        finalizer?.close();
+        if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
         setPureIdleRecoveryStatus("后台候选已验证，正在按稳定存档链写入并复核主存档");
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
-        const saved = await persistPrimarySave(restored, "pure-idle-stop");
+        const saved = pending.saved ?? await persistPrimarySave(restored, "pure-idle-stop");
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (lifecycleExitStartedRef.current) return "completed";
         if (!saved.success) {
           setPureIdleRecoveryContinueState(true);
-          setPureIdleRecoveryStatus("后台普通离线候选有效，但主存档写入失败；恢复日志已保留");
-          setNotice("后台离线结算未完成保存，请重试；原主存档保持不变");
+          setPureIdleRecoveryStatus(`后台结算结果已保留，保存未完成：${saved.message}`);
+          setNotice("请重试保存；将复用本次后台结算结果，也可先导出恢复数据");
           return "completed";
         }
+        pending.saved = saved;
+        pending.primaryCommitted = true;
         const marked = await persistPureIdleTransition(record, {
           stopReason: "save-finalized",
           phase: "finalizing",
@@ -8246,6 +8365,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         if (!marked) throw new Error("纯挂机恢复日志提交标记未获得持久化确认");
         const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
+        pureIdleStopCandidateRef.current = null;
 
         // The macro Worker owned the old time-warp checkpoint.  Reinstall the
         // ordinary simulation Worker from the verified stable state before the
@@ -8273,7 +8393,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         setPureIdleRecoveryStatus(cleared ? "后台宽限已结束，普通离线结算已保存" : "普通离线结算已保存；旧恢复日志将在下次启动时覆盖");
         setNotice(`后台宽限结束，已按普通离线规则结算 ${Math.floor(plan.normalOfflineSeconds)} 秒`);
         setSimulationWorkerGeneration((generation) => generation + 1);
-        finalizer.close();
+        finalizer?.close();
         if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
         return "completed";
       }
@@ -8283,11 +8403,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       // applies the normal-offline remainder + terminal idle/research/pause
       // settle and returns a fresh verified envelope.
       setPureIdleRecoveryStatus("正在复用已校准会话推进后台宽限边界");
-      const finalized = await finalizer.finalizeEnvelope(plan.highWallSeconds, {
+      const finalized = candidate?.kind === "envelope" ? candidate.finalized : await finalizer!.finalizeEnvelope(plan.highWallSeconds, {
         terminal: false,
         binaryTransport: "blob",
       });
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
+      if (abortController.signal.aborted) throw new DOMException("后台结算已取消", "AbortError");
       macroFinalized = true;
       await persistPureIdleTransition(record, {
         stopReason: "background-grace-expired",
@@ -8295,13 +8416,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         finalizedAtMs: Date.now(),
       }, authorityLease);
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
+      if (abortController.signal.aborted) throw new DOMException("后台结算已取消", "AbortError");
       setPureIdleRecoveryStatus("后台普通离线结果正在由后台 Worker 核对并生成终止存档");
       const { runOfflineBackgroundTerminalFinalize } = await importWithRecovery(
         () => import("./game/offlineSimulation"),
         "后台普通离线结算模块",
       );
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
-      const settled = await runOfflineBackgroundTerminalFinalize({
+      const settled = candidate?.kind === "envelope" ? candidate.finalized : await runOfflineBackgroundTerminalFinalize({
         sourceEnvelope: finalized.finalEnvelope.payloadBytes,
         sourceVerification: finalized.finalEnvelope.verification,
         baseline: {
@@ -8315,6 +8437,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         approximate: readOfflineApproximationEnabled(),
       });
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
+      if (abortController.signal.aborted) throw new DOMException("后台结算已取消", "AbortError");
       // Reuse the same proof-bound persistence + durable head roll + committed
       // journal mark + simulation-Worker rebase + exact recovery clear as a
       // normal pure-idle stop. The old recovery journal stays authoritative
@@ -8325,14 +8448,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         rawBytes: settled.finalEnvelope.verification.byteLength,
         durationMs: settled.durationMs,
       };
+      pureIdleStopCandidateRef.current = candidate ?? {
+        kind: "envelope", finalized: backgroundFinalized, sessionId: record.sessionId, authorityLease,
+        targetWallSeconds: plan.highWallSeconds, normalOfflineSeconds: plan.normalOfflineSeconds,
+        background: true, primaryCommitted: false,
+      };
+      finalizer?.close();
+      if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
       setPureIdleRecoveryStatus("后台候选已验证，正在由保存 Worker 写入并重新读取主存档");
       const saved = await persistPureIdleTerminalEnvelope(record, backgroundFinalized, authorityLease);
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
       if (lifecycleExitStartedRef.current) return "completed";
       if (!saved.success) {
         setPureIdleRecoveryContinueState(true);
-        setPureIdleRecoveryStatus("后台普通离线候选有效，但主存档写入失败；恢复日志已保留");
-        setNotice("后台离线结算未完成保存，请重试；原主存档保持不变");
+        setPureIdleRecoveryStatus(`后台结算结果已保留，保存或接管未完成：${saved.message}`);
+        setNotice("请重试保存；将复用本次后台结算结果，也可先导出恢复数据");
         return "completed";
       }
       // persistPureIdleTerminalEnvelope performed the durable commit marker,
@@ -8344,6 +8474,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       pureIdleActiveRef.current = false;
       pureIdleRecoveryRef.current = null;
       pureIdleStopTargetRef.current = null;
+      pureIdleStopCandidateRef.current = null;
       deferNextCanvasSnapshotPublicationRef.current = true;
       startTransition(() => {
         setPureIdleActive(false);
@@ -8354,7 +8485,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         invalidateFactoryAlertProjection();
         setNotice(`后台宽限结束，已按普通离线规则结算 ${Math.floor(plan.normalOfflineSeconds)} 秒`);
       });
-      finalizer.close();
+      finalizer?.close();
       if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
       return "completed";
     } catch (error) {
@@ -8363,14 +8494,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "后台纯挂机恢复失败", authorityLease, pureIdleStopReasonForError(error));
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return "completed";
         if (restartCount >= PURE_IDLE_WORKER_RESTART_LIMIT) setPureIdleRecoveryContinueState(true);
-        finalizer.close();
+        finalizer?.close();
         if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
       }
       const message = error instanceof DOMException && error.name === "AbortError"
         ? "后台普通离线结算已取消"
         : error instanceof Error ? error.message : "后台普通离线结算失败";
-      setPureIdleRecoveryStatus(`${message}；恢复日志与原主存档保持不变`);
-      setNotice(`${message}；未提交后台候选时间，原主存档保持不变`);
+      setPureIdleRecoveryContinueState(true);
+      setPureIdleRecoveryStatus(`${message}；恢复日志已保留${pureIdleStopCandidateRef.current ? "，本次候选可重试保存" : ""}`);
+      setNotice(`${message}；可以重试保存或导出恢复数据`);
       return "completed";
     } finally {
       if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
@@ -8759,7 +8891,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       }
       const stoppedAtMs = Date.now();
       const backgroundPlan = getPureIdleBackgroundPlan(record, stoppedAtMs);
-      if (backgroundPlan.backgrounded && backgroundPlan.graceExpired) {
+      const retained = pureIdleStopCandidateRef.current;
+      const candidate = retained?.sessionId === record.sessionId &&
+        legacyJavaScriptAuthorityLeaseIsCurrent(retained.authorityLease) ? retained : null;
+      if (!candidate) pureIdleStopCandidateRef.current = null;
+      if (candidate?.background || (!candidate && backgroundPlan.backgrounded && backgroundPlan.graceExpired &&
+        record.stopReason !== "user-stop-requested")) {
         pureIdleStoppingRef.current = false;
         await settlePureIdleBackgroundRecovery(record, authorityLease, stoppedAtMs);
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
@@ -8768,9 +8905,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       const targetWallSeconds = backgroundPlan.backgrounded
         ? backgroundPlan.highWallSeconds
         : Math.max(0, (stoppedAtMs - record.startedAtMs) / 1_000);
-      const frozenTarget = pureIdleStopTargetRef.current?.sessionId === record.sessionId
+      const frozenTarget = candidate?.targetWallSeconds ?? (pureIdleStopTargetRef.current?.sessionId === record.sessionId
         ? pureIdleStopTargetRef.current.targetWallSeconds
-        : targetWallSeconds;
+        : targetWallSeconds);
       pureIdleStopTargetRef.current = { sessionId: record.sessionId, targetWallSeconds: frozenTarget };
       await persistPureIdleTransition(record, {
         stopReason: "user-stop-requested",
@@ -8784,20 +8921,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         setPureIdleRecoveryStatus("正在复用已校准会话推进最后结算边界");
         setNotice("正在停止纯挂机；恢复日志会保留到主存档验证成功");
       });
-      const finalizer = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
+      const finalizer = candidate ? pureIdleMacroClientRef.current
+        : pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
-      if (!finalizer) {
+      if (!finalizer && !candidate) {
         pureIdleStoppingRef.current = false;
         return;
       }
-      let macroFinalized = false;
+      let macroFinalized = candidate !== null;
       try {
         if (!durableSimulationRuntimeEnabled) {
           // 1.0.43-compatible pure-idle handoff: the macro Worker returns a
           // validated state, the ordinary primary save verifies it, and only
           // then is the independent recovery log marked committed/cleared.
-          const legacyFinalized = await finalizer.finalize(frozenTarget);
+          const legacyFinalized = candidate?.kind === "state" ? candidate : await finalizer!.finalize(frozenTarget);
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+          if (pureIdleStopTargetRef.current?.sessionId !== record.sessionId) return;
           macroFinalized = true;
           await persistPureIdleTransition(record, {
             stopReason: "user-stop-requested",
@@ -8805,42 +8944,57 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             finalizedAtMs: Date.now(),
           }, authorityLease);
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
-          const settledIdle = settleIdleRun(
-            record.state.idleSettlement,
-            frozenTarget,
-            record.state.totalProduced,
-            legacyFinalized.state.totalProduced,
-          );
-          const restored = setPaused(
+          if (pureIdleStopTargetRef.current?.sessionId !== record.sessionId) return;
+          const restored = candidate?.kind === "state" ? candidate.state : setPaused(
             {
               ...settleCompletedResearchBoundaries(legacyFinalized.state),
-              idleSettlement: finishIdleRun(settledIdle),
+              idleSettlement: finishIdleRun(settleIdleRun(
+                record.state.idleSettlement,
+                frozenTarget,
+                record.state.totalProduced,
+                legacyFinalized.state.totalProduced,
+              )),
             },
             record.startedPaused,
           );
+          const pending = candidate?.kind === "state" ? candidate : {
+            kind: "state" as const, state: restored, summary: legacyFinalized.summary,
+            sessionId: record.sessionId, authorityLease, targetWallSeconds: frozenTarget,
+            normalOfflineSeconds: 0, background: false, primaryCommitted: false,
+            saved: undefined as SaveGameResult | undefined,
+          };
+          pureIdleStopCandidateRef.current = pending;
+          // The frozen result is sufficient for every save retry. Release the
+          // large simulation graph in the macro Worker before persistence.
+          finalizer?.close();
+          if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
           setPureIdleRecoveryStatus("候选已序列化验证，正在写入并重新读取主存档");
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
-          const saved = await persistPrimarySave(restored, "pure-idle-stop");
+          const saved = pending.saved ?? await persistPrimarySave(restored, "pure-idle-stop");
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (!saved.success) {
             setPureIdleRecoveryContinueState(true);
-            setPureIdleRecoveryStatus("候选状态有效，但主存档写入失败；恢复日志已保留");
-            setNotice("挂机结果尚未完成保存，请重试停止或先导出当前主存档");
+            setPureIdleRecoveryStatus(`结算结果已保留，保存未完成：${saved.message}`);
+            setNotice("请重试保存；将复用本次结算结果，也可先导出恢复数据");
             return;
           }
-          await persistPureIdleTransition(record, {
+          pending.saved = saved;
+          pending.primaryCommitted = true;
+          const marked = await persistPureIdleTransition(record, {
             stopReason: "save-finalized",
             phase: "finalizing",
             committed: true,
             committedAtMs: Date.now(),
           }, authorityLease);
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+          if (!marked) throw new Error("主存档已验证，恢复日志提交确认失败；请重试保存收口");
           const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           pureIdleMacroActiveRef.current = false;
           pureIdleActiveRef.current = false;
           pureIdleRecoveryRef.current = null;
           pureIdleStopTargetRef.current = null;
+          pureIdleStopCandidateRef.current = null;
           setPureIdleActive(false);
           setPureIdleStartedAt(null);
           setPureIdleRecoveryContinueState(false);
@@ -8849,7 +9003,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           gameRef.current = restored;
           setGame(restored);
           setNotice(`纯挂机已停止，${Math.floor(frozenTarget)} 秒墙钟收益已校验保存`);
-          finalizer.close();
+          finalizer?.close();
           if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
           return;
         }
@@ -8859,11 +9013,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         // state transfer to the simulation Worker for the authority rebase.
         const terminalFinalizeStartedAt = performance.now();
         recordRuntimeTransitionPhase("pure-idle-terminal-finalize-dispatched", terminalFinalizeStartedAt, 0);
-        const finalized = await finalizer.finalizeEnvelope(frozenTarget, {
+        const finalized = candidate?.kind === "envelope" ? candidate.finalized : await finalizer!.finalizeEnvelope(frozenTarget, {
           terminal: true,
           binaryTransport: "blob",
         });
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+        if (pureIdleStopTargetRef.current?.sessionId !== record.sessionId) return;
         recordRuntimeTransitionPhase(
           "pure-idle-terminal-finalize-received",
           terminalFinalizeStartedAt,
@@ -8871,6 +9026,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           { bytes: finalized.rawBytes },
         );
         macroFinalized = true;
+        pureIdleStopCandidateRef.current = candidate ?? {
+          kind: "envelope", finalized, sessionId: record.sessionId, authorityLease,
+          targetWallSeconds: frozenTarget, normalOfflineSeconds: 0, background: false, primaryCommitted: false,
+        };
+        finalizer?.close();
+        if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
         await persistPureIdleTransition(record, {
           stopReason: "user-stop-requested",
           phase: "validating",
@@ -8893,8 +9054,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         if (lifecycleExitStartedRef.current) return;
         if (!saved.success) {
           setPureIdleRecoveryContinueState(true);
-          setPureIdleRecoveryStatus("候选状态有效，但主存档写入失败；恢复日志已保留");
-          setNotice("挂机结果尚未完成保存，请重试停止或先导出当前主存档");
+          setPureIdleRecoveryStatus(`结算结果已保留，保存或接管未完成：${saved.message}`);
+          setNotice("请重试保存；将复用本次结算结果，也可先导出恢复数据");
           return;
         }
         // persistPureIdleTerminalEnvelope performs the durable commit marker,
@@ -8906,6 +9067,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         pureIdleActiveRef.current = false;
         pureIdleRecoveryRef.current = null;
         pureIdleStopTargetRef.current = null;
+        pureIdleStopCandidateRef.current = null;
         deferNextCanvasSnapshotPublicationRef.current = true;
         startTransition(() => {
           setPureIdleActive(false);
@@ -8915,7 +9077,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           setPureIdleRecoveryStatus(cleared ? "主存档与模拟 Worker 已同步，恢复日志已清理" : "主存档与模拟 Worker 已同步；旧恢复日志将在下次启动时覆盖");
           setNotice(`纯挂机已停止，${Math.floor(frozenTarget)} 秒墙钟收益已校验保存`);
         });
-        finalizer.close();
+        finalizer?.close();
         if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
       } catch (error) {
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
@@ -8923,12 +9085,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "纯挂机停止结算失败", authorityLease, pureIdleStopReasonForError(error));
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (restartCount >= PURE_IDLE_WORKER_RESTART_LIMIT) setPureIdleRecoveryContinueState(true);
-          finalizer.close();
+          finalizer?.close();
           if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
         }
         const message = error instanceof Error ? error.message : "纯挂机停止结算失败";
-        setPureIdleRecoveryStatus(`${message}；恢复日志和原主存档保持不变`);
-        setNotice(`${message}；可以重试停止，未结算时间没有被清空`);
+        setPureIdleRecoveryContinueState(true);
+        setPureIdleRecoveryStatus(`${message}；恢复日志已保留${pureIdleStopCandidateRef.current ? "，本次候选可重试保存" : ""}`);
+        setNotice(`${message}；可以重试保存或导出恢复数据`);
       } finally {
         if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) pureIdleStoppingRef.current = false;
       }
@@ -8994,7 +9157,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     setNotice("纯挂机已停止，Worker 权威进度已校验保存");
     pureIdleStoppingRef.current = false;
-  }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleTerminalGameBehindOverlay, requestAuthoritativeSimulationCheckpoint, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
+  }, [durableSimulationRuntimeEnabled, initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPrimarySave, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleTerminalGameBehindOverlay, requestAuthoritativeSimulationCheckpoint, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
 
   const nativeRendererReleasedIdentityRef = useRef<string | null>(null);
   const releaseNativeRendererState = useCallback((sessionId: string, runId: string) => {
@@ -9627,6 +9790,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const authorityLease = issueLegacyJavaScriptAuthorityLease();
     if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleStoppingRef.current) return;
+    if (pureIdleStopCandidateRef.current) {
+      setNotice("结算计算已完成，正在确认保存边界；结果和恢复日志会保留，请等待保存完成或重试");
+      return;
+    }
     const record = pureIdleRecoveryRef.current;
     pureIdleStopTargetRef.current = null;
     pureIdleBackgroundOfflineAbortRef.current?.abort();
@@ -9656,6 +9823,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     setPureIdleRecoveryContinueState(false);
+    const candidate = pureIdleStopCandidateRef.current;
+    if (candidate?.sessionId === record.sessionId && legacyJavaScriptAuthorityLeaseIsCurrent(candidate.authorityLease)) {
+      setPureIdleRecoveryStatus("正在重试保存已完成的结算结果，不重复计算");
+      await stopPureIdle(authorityLease);
+      return;
+    }
     setPureIdleRecoveryStatus("正在从权威检查点重试恢复 Worker");
     const client = pureIdleMacroClientRef.current ?? await initializePureIdleMacroClient(record, authorityLease);
     if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
@@ -9678,7 +9851,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice("找不到纯挂机恢复检查点，主存档未改变");
       return;
     }
+    if (pureIdleStopCandidateRef.current?.primaryCommitted || record.committed) {
+      setNotice("本次结算主存档已经写入，尚需确认恢复收口；请重试保存，不能回退到旧检查点");
+      return;
+    }
     pureIdleStoppingRef.current = true;
+    pureIdleStopCandidateRef.current = null;
     const abandonedWallSeconds = Math.max(
       0,
       (Date.now() - record.startedAtMs) / 1_000 - (record.summary?.settledWallSeconds ?? record.settledWallSeconds),
@@ -12186,6 +12364,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setPureIdleRecoveryStatus(loaded.state.speedrun?.enabled ? "速通工厂继续使用独立精确规则" : "未运行纯挂机");
       return;
     }
+    if (!gameRef.current.timeWarp.enabled || pureIdleStoppingRef.current ||
+      pureIdleRecoveryRef.current || pureIdleStopCandidateRef.current) return;
     const authorityLease = issueLegacyJavaScriptAuthorityLease();
     if (!authorityLease) return;
     let cancelled = false;
@@ -12292,10 +12472,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice(`${message}；未结算会话仍保留在恢复日志中`);
     });
     return () => { cancelled = true; };
-    // Recovery starts once only after the main-owned authority bootstrap has
-    // proved that JavaScript still owns this save.
+    // This is an application/authority boot effect, not a persistence update.
+    // Save-size changes recreate persistPrimarySave and its callers; depending
+    // on those callbacks reclaims an in-flight stop as an interrupted boot.
+    // A change of authority still cancels this continuation via its lease.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityBootstrapPending, nativePlayerAuthorityOwnsRuntime, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
+  }, [nativePlayerAuthorityBootstrapPending, nativePlayerAuthorityOwnsRuntime]);
 
   useEffect(() => {
     if (!pureIdleActive || !pureIdleMacroActiveRef.current) return;
@@ -12729,6 +12911,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const saveBeforeUnload = (_event: Event) => {
       if (lifecycleSaveStarted) return;
       lifecycleSaveStarted = true;
+      if (desktopCloseCompleted()) return;
       // Mark the exit before checking recovery mode. A visibility/native
       // callback may already be queued behind this synchronous event; it must
       // not enqueue a new primary write after pagehide chose the recovery path.
@@ -16481,7 +16664,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "semanticSupported" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
     const progress = technology ? canvasGame.research.progressByTech[technology.id] ?? {} : {};
-    const planetProfile = getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
+    // During the first main-process authority pull there is deliberately no
+    // confirmed native planet. Native rows carry their own power telemetry;
+    // never resolve a pending/native ID through the legacy planet registry.
+    const planetProfile = nativePlayerAuthorityOwnsRuntime ? null : getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
     return {
       readOnly: nativePlayerAuthorityOwnsRuntime,
       manualMiningEnabled: nativeManualMiningEnabled,
@@ -16512,9 +16698,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       completedTechIds: canvasGame.research.completedTechIds,
       paused: nativePlayerAuthorityOwnsRuntime ? factoryRunStatusReadModel.paused : canvasGame.paused,
       powerDemandMultiplier: getDifficultyDefinition(canvasGame.settings.difficulty).powerDemandMultiplier,
-      solarGenerationMultiplier: getPlanetSolarPowerMultiplier(canvasGame, factoryCanvasPlanetId),
-      windGenerationMultiplier: planetProfile.windMultiplier,
-      geothermalGenerationMultiplier: planetProfile.geothermalMultiplier,
+      solarGenerationMultiplier: nativePlayerAuthorityOwnsRuntime ? 0 : getPlanetSolarPowerMultiplier(canvasGame, factoryCanvasPlanetId),
+      windGenerationMultiplier: planetProfile?.windMultiplier ?? 0,
+      geothermalGenerationMultiplier: planetProfile?.geothermalMultiplier ?? 0,
       activeLogisticsEntityIds: beltNodeIndex.activeEntityIds,
       dysonSwarm: canvasGame.dysonSwarm,
       dysonSphere: canvasGame.dysonSphere,
@@ -17148,12 +17334,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     for (const belt of canvasTopology.belts) {
       const sourceHandle = getCanvasHandleEndpoint(lookup, belt.source, `out:${belt.itemId}`, "source");
       const targetHandle = getCanvasHandleEndpoint(lookup, belt.target, getFactoryBeltTargetHandleId(belt, canvasEntityBuildingById.get(belt.target)), "target");
-      if (!sourceHandle || !targetHandle) continue;
+      if (!sourceHandle && !targetHandle) continue;
       next.set(belt.id, {
-        sourceX: sourceHandle.x,
-        sourceY: sourceHandle.y,
-        targetX: targetHandle.x,
-        targetY: targetHandle.y,
+        sourceX: sourceHandle?.x,
+        sourceY: sourceHandle?.y,
+        targetX: targetHandle?.x,
+        targetY: targetHandle?.y,
       });
     }
     return next;
@@ -18333,6 +18519,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const onNodeDrag = useCallback((_event: MouseEvent | TouchEvent, node: FactoryFlowNode, draggedNodes: FactoryFlowNode[]) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
+    const group = multiDragStartRef.current;
+    if (group?.regions.length) setRegionGroupMovePreview({ regionIds: group.regions.map((region) => region.id),
+      x: node.position.x - group.primaryPosition.x, y: node.position.y - group.primaryPosition.y });
     const threshold = 7 / Math.max(0.3, viewportZoom);
     const index = dragAlignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
     const moving = (draggedNodes.length > 0 ? draggedNodes : [node]).map((candidate) => ({
@@ -18572,6 +18761,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [activeEntityById, setNodes]);
 
   const cancelPendingTouchAction = useCallback(() => {
+    regionSelectionStartRef.current = null;
+    setRegionGroupMovePreview(null);
     stopCanvasPointerMotion();
     blockCanvasTouchRef.current = true;
     nodeDragActiveRef.current = false;
@@ -21440,7 +21631,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       };
     }
     const primary = members.find((member) => member.id === node.id) ?? { id: node.id, position: { ...node.position } };
-    multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members, nativeIdentity };
+    const regions = !nativeIdentity && selectedEntityIdsRef.current.includes(node.id)
+      ? gameRef.current.canvasRegions.filter((region) => region.planetId === gameRef.current.activePlanetId && selectedRegionIdsRef.current.includes(region.id))
+      : [];
+    multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members, regions, nativeIdentity };
     setDraggedEntityIds([node.id, ...members.map((member) => member.id).filter((id) => id !== node.id)]);
     if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragActiveCount = String(Math.max(1, members.length));
     nodeDragActiveRef.current = true;
@@ -21448,6 +21642,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     dragAlignmentSpatialIndexRef.current = alignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
   }, [activeEntityById, alignmentSpatialIndex, factoryCanvasPlanetId]);
   const handleFactoryNodeDragStop = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node, draggedNodes) => {
+    setRegionGroupMovePreview(null);
     const dragGestureEpoch = nodeDragGestureEpochRef.current;
     nodeDragGestureEpochRef.current = null;
     nodeDragActiveRef.current = false;
@@ -21475,7 +21670,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const positions = multiDrag && multiDrag.members.length > 1
       ? multiDrag.members.map((member) => ({
           id: member.id,
-          position: snapFlowPosition({
+          position: (multiDrag.regions.length ? (position: { x: number; y: number }) => position : snapFlowPosition)({
             x: member.position.x + snappedPrimary.x - multiDrag.primaryPosition.x,
             y: member.position.y + snappedPrimary.y - multiDrag.primaryPosition.y,
           }),
@@ -21537,7 +21732,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragOverlapBlocked = "false";
-    if (!commitGame((current) => moveEntities(current, positions))) {
+    if (!commitGame((current) => multiDrag?.regions.length
+      ? moveCanvasSelection(current, positions, multiDrag.regions, {
+        x: snappedPrimary.x - multiDrag.primaryPosition.x, y: snappedPrimary.y - multiDrag.primaryPosition.y,
+      }) : moveEntities(current, positions))) {
       restoreCanvasEntityPositions();
       return;
     }
@@ -21627,6 +21825,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     blueprintPlacementId ?? "",
     blueprintAllowOverlap,
     selectedRegionId ?? "",
+    includeRegionsInSelection,
+    selectedRegionIds.join("|"),
+    regionGroupMovePreview ? `${regionGroupMovePreview.x}:${regionGroupMovePreview.y}` : "",
     regionDraft ? `${regionDraft.x}:${regionDraft.y}:${regionDraft.width}:${regionDraft.height}` : "",
     regionResizePreview ? `${regionResizePreview.rectangle.x}:${regionResizePreview.rectangle.y}:${regionResizePreview.rectangle.width}:${regionResizePreview.rectangle.height}` : "",
     minimapCollapsed,
@@ -22421,6 +22622,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
             onPointerCancelCapture={(event) => {
               if (syntheticTouchCancelRef.current) return;
+              regionSelectionStartRef.current = null;
+              setRegionGroupMovePreview(null);
               longPressBindings.onPointerCancelCapture?.(event);
               stopCanvasPointerMotion();
               if (endCanvasMultiTouch(event)) return;
@@ -22490,6 +22693,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             edgeTypes={EDGE_TYPES}
             onNodesChange={handleNodesChange}
             onSelectionChange={onSelectionChange}
+            onSelectionStart={(event) => {
+              if (!includeRegionsInSelection || nativePlayerAuthorityOwnsRuntimeRef.current) return;
+              const rectangle = flowStore.getState().userSelectionRect;
+              regionSelectionStartRef.current = { point: rectangle ? { x: rectangle.startX, y: rectangle.startY }
+                : screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+                previous: event.shiftKey ? selectedRegionIdsRef.current : [] };
+              setSelectedRegionId(null);
+            }}
+            onSelectionEnd={(event) => {
+              const selection = regionSelectionStartRef.current;
+              regionSelectionStartRef.current = null;
+              if (!selection || !includeRegionsInSelection || nativePlayerAuthorityOwnsRuntimeRef.current) return;
+              const ids = enclosedCanvasRegionIds(gameRef.current.canvasRegions, gameRef.current.activePlanetId,
+                selection.point, screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+              setSelectedRegionIds([...new Set([...selection.previous, ...ids])]);
+            }}
             onConnect={onConnect}
             onConnectStart={onConnectStart}
             onConnectEnd={onConnectEnd}
@@ -22603,6 +22822,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
                 regions={factoryCanvasRegions}
                 draft={regionDraft}
                 selectedRegionId={selectedRegionId}
+                groupedRegionIds={selectedRegionIds}
+                groupMovePreview={regionGroupMovePreview}
                 resizePreview={regionResizePreview}
                 resizeHandleSize={(coarsePointer ? 34 : 14) / Math.max(0.25, viewportZoom)}
                 onSelect={(regionId) => { setSelectedRegionId(regionId); setRegionMode(false); }}
@@ -22667,6 +22888,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           </div> : <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />}
 
           <CanvasSelectionTools
+            includeRegions={includeRegionsInSelection}
+            selectedRegionCount={selectedRegionIds.length}
+            onIncludeRegionsChange={nativePlayerAuthorityOwnsRuntime ? undefined : setIncludeRegionsInSelection}
             selectionMode={selectionMode}
             regionMode={regionMode}
             lineFindMode={lineFindMode}
@@ -22775,6 +22999,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           </section> : null}
           {factoryCanvasRegions.find((region) => region.id === selectedRegionId) ? <CanvasRegionEditor
             region={factoryCanvasRegions.find((region) => region.id === selectedRegionId)!}
+            onSelectContents={nativePlayerAuthorityOwnsRuntime ? undefined : () => {
+              const region = gameRef.current.canvasRegions.find((candidate) => candidate.id === selectedRegionId);
+              if (!region) return;
+              const measured = new Map(nodes.map((node) => [node.id, node.measured]));
+              const ids = gameRef.current.entities.filter((entity) => {
+                const size = measured.get(entity.id);
+                return entity.planetId === region.planetId && !entity.interactionLocked &&
+                  entity.position.x >= region.x && entity.position.y >= region.y &&
+                  entity.position.x + (size?.width ?? 256) <= region.x + region.width &&
+                  entity.position.y + (size?.height ?? 180) <= region.y + region.height;
+              }).map((entity) => entity.id);
+              if (!ids.length) { setNotice("该生产区域内没有完整包含的可移动节点"); return; }
+              const beltIds = collectCanvasSelectionBeltIds(activePlanetBeltsRef.current, ids, []);
+              selectedEntityIdsRef.current = ids;
+              selectedBeltIdsRef.current = beltIds;
+              selectedRegionIdsRef.current = [region.id];
+              setSelectedEntityIds(ids);
+              setSelectedBeltIds(beltIds);
+              setSelectedBeltId(null);
+              setIncludeRegionsInSelection(true);
+              setSelectedRegionIds([region.id]);
+              setSelectedRegionId(null);
+              setSelectionMode(!coarsePointer);
+              if (nextMobileShell) setMobileCanvasMode("layout");
+              setNotice(isEnglish ? `Selected region and ${ids.length} nodes` : `已选中区域与 ${ids.length} 个节点`);
+            }}
             onChange={(changes) => {
               if (nativePlayerAuthorityOwnsRuntime) {
                 const frame = nativeAuthoritativeFactoryWorkspaceFrame;
@@ -24217,7 +24467,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
           />
         ) : null}
-        {offlineReport ? <OfflineReportWorkspace report={offlineReport} onClose={closeOfflineReport} /> : null}
+        {offlineReport && !pureIdleActive ? <OfflineReportWorkspace report={offlineReport} onClose={closeOfflineReport} /> : null}
         {tutorialOpen ? <TutorialWorkspace open mobile={nextMobileShell} initialSectionId={tutorialSectionId} onClose={() => { setTutorialOpen(false); setTutorialSectionId(undefined); }} /> : null}
       </Suspense>
       <button className="mobile-backdrop" type="button" aria-label="关闭侧栏" onClick={() => setMobilePanel(null)} />
@@ -24316,7 +24566,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         <header><Activity size={13} /><span>运行记录</span><button type="button" onClick={() => setEventHistory([])} title="清空运行记录" aria-label="清空运行记录"><X size={12} /></button></header>
         <div>{eventHistory.map((event) => <p key={event.id}>{event.text}</p>)}</div>
       </aside> : null}
-      {runtimePersistenceProgress ? <div className={`game-notice game-notice--${runtimePersistenceProgress.phase === "failed" ? "danger" : runtimePersistenceProgress.phase === "complete" ? "success" : "warning"} runtime-persistence-progress`} role="status" data-persistence-progress>{runtimePersistenceProgress.message}</div>
+      {runtimePersistenceProgress ? <div className={`game-notice game-notice--${runtimePersistenceProgress.phase === "failed" ? "danger" : runtimePersistenceProgress.phase === "complete" ? "success" : "warning"} runtime-persistence-progress`} role="status" data-persistence-progress>
+        {runtimePersistenceProgress.message}
+        {runtimePersistenceProgress.id === primarySaveRejectedProgressId
+          ? runtimePersistenceProgress.phase === "complete" ? " 本次操作未应用；现在可以重新操作" : " 本次操作未应用；保存完成后请重新操作"
+          : ""}
+      </div>
         : notice && (showRunLog || isPersistentNotice(notice)) ? <div className={`game-notice game-notice--${getNoticeTone(notice)}`} role="status" data-notice-tone={getNoticeTone(notice)}>{notice}</div> : null}
       {pureIdleActive ? <TimeWarpIdleOverlay
         game={game}

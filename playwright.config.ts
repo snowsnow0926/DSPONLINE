@@ -33,6 +33,8 @@ export default defineConfig({
   ],
   use: {
     baseURL,
+    headless: true,
+    launchOptions: { args: ["--mute-audio"] },
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },

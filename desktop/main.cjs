@@ -1,5 +1,8 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell, session } = require("electron");
+require("./isolated-test-network.cjs").installIsolatedTestNetwork({ app, session, shell, metadata: require("../package.json") });
 const { createHash, randomUUID } = require("node:crypto");
+const { createGracefulClose } = require("./graceful-close.cjs");
+const windowCloseCoordinators = new WeakMap();
 const fs = require("node:fs");
 const nodeOs = require("node:os");
 const path = require("node:path");
@@ -1615,7 +1618,7 @@ function createWindow() {
     title: desktopRuntimeIdentity.productName,
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: path.join(__dirname, "preload.bundle.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -1624,6 +1627,18 @@ function createWindow() {
     },
   });
   mainWindow = window;
+  const closeCoordinator = createGracefulClose({
+    send: (channel, payload) => { if (!window.isDestroyed()) window.webContents.send(channel, payload); },
+    close: () => { if (!window.isDestroyed()) window.close(); },
+    failure: (message) => { if (!window.isDestroyed()) void dialog.showMessageBox(window, { type: "warning", message, buttons: ["返回游戏"] }); },
+  });
+  windowCloseCoordinators.set(window, closeCoordinator);
+  window.on("close", (event) => {
+    if (closeCoordinator.approved) return;
+    event.preventDefault();
+    closeCoordinator.request();
+  });
+  window.once("closed", () => closeCoordinator.dispose());
   window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalUrl(url);
     return { action: "deny" };
@@ -3477,6 +3492,12 @@ ipcMain.handle("desktop:update-ready", (event) => {
   updateShutdownResolve = null;
 });
 
+ipcMain.handle("desktop:close-ready", (event, result) => {
+  if (!trustedSender(event)) return false;
+  const window = BrowserWindow.fromWebContents(event.sender);
+  return windowCloseCoordinators.get(window)?.acknowledge(result) ?? false;
+});
+
 async function requestRendererSaveBeforeUpdate() {
   const window = mainWindow;
   if (!window || window.isDestroyed()) return;
@@ -3554,6 +3575,14 @@ if (!hasSingleInstanceLock) {
 }
 
 app.on("before-quit", (event) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const coordinator = windowCloseCoordinators.get(mainWindow);
+    if (coordinator && !coordinator.approved) {
+      event.preventDefault();
+      coordinator.request();
+      return;
+    }
+  }
   persistWindowState();
   resetNativePlayerAuthorityRetryCoordinators();
   nativePlayerAuthorityRuntime?.shutdownForProcessExit();

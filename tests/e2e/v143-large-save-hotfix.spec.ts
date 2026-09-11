@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
 const BACKUP_KEY = `${SAVE_KEY}.backup`;
-const RELEASE_NOTE_ID = "2026-09-02-v1.2.7";
+const RELEASE_NOTE_ID = "2026-09-10-v1.2.9";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(({ releaseNoteId }) => {
@@ -122,4 +122,3 @@ test("running simulation that advances during return receives one final cleanup 
   // debt instead of synchronously advancing a large state on the main thread.
   expect(after.primaryElapsed + after.primaryPending).toBeGreaterThan(after.backupElapsed + after.backupPending);
 });
-

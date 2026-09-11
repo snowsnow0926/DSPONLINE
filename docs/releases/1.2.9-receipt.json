@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "status": "PUBLISHED_AND_VERIFIED",
+  "recordedAt": "2026-09-10T17:44:56.197820+00:00",
+  "appVersion": "1.2.9",
+  "buildId": "1.2.9+0521eb63f179",
+  "runtimeSha": "0521eb63f179c78421b2dbed7216f46903d6a684",
+  "webArtifact": {
+    "releaseId": "1.2.9-0521eb63f179",
+    "buildId": "1.2.9+0521eb63f179",
+    "gitSha": "0521eb63f179c78421b2dbed7216f46903d6a684",
+    "archiveSha256": "9ffe45bdd4de097f7d87118a593148f6cbd88bbc495d195fe04d31b72412812c",
+    "archiveBytes": 2201094,
+    "manifestSha256": "62daa5d3d63518e2d3910f4262c846398bf092da7dab0d18da1ec61b2d26568b",
+    "aggregateSha256": "f5af572e789453b19175e86c4a761dcc3321b4e2513602f6629a8bffa87fd661",
+    "fileCount": 196
+  },
+  "android": {
+    "versionCode": 1002009,
+    "apkSize": 5672736,
+    "apkSha256": "06d0043a542faab0f7e3e2be2fad18b7d2da43c672e66da88ccf7255fe953bf7",
+    "aabSha256": "612b045047938306038133939f156651ee26994c102db6e1a75a202fcf609b2a",
+    "physicalDeviceTested": false,
+    "direct128UpgradeAndExplicitSaveRestartPassed": true
+  },
+  "nodes": {
+    "HongKong": {
+      "web": "1.2.9-0521eb63f179",
+      "previousWeb": "1.2.7-fccaa35e6b41",
+      "api": "api-1.2.6-df828869e276",
+      "generation": 51,
+      "proxyGeneration": 192,
+      "servicesUnchanged": true,
+      "health": 200,
+      "ready": 200,
+      "observedAt": "2026-09-10T17:40:52.224056+00:00",
+      "samples": 6,
+      "maximumHealthMs": 9172.54
+    },
+    "Shanghai": {
+      "web": "1.2.9-0521eb63f179",
+      "previousWeb": "1.2.7-dab2ff5066b7",
+      "api": "api-1.2.6-df828869e276",
+      "generation": 34,
+      "proxyGeneration": 92,
+      "servicesUnchanged": true,
+      "health": 200,
+      "ready": 200,
+      "observedAt": "2026-09-10T17:40:51.808788+00:00",
+      "samples": 6,
+      "maximumHealthMs": 4.29
+    }
+  },
+  "download": {
+    "current": "/var/www/dsp-idle-downloads/releases/download-site-1.2.9-0521eb63f179-r2",
+    "previous": "/var/www/dsp-idle-downloads/releases/download-site-1.2.8-aa1f970a677b",
+    "filesVerified": 12,
+    "manifestSha256": "c2fe84aa658adee3f9cce0f4a3d2080316e56c6bb7f4055bee8c2ed5171b7359",
+    "windowsUnchanged": "1.2.6"
+  },
+  "fallback": {
+    "path": "/canary/1.2.7-fccaa35e6b41/",
+    "backupBasename": "dsp-idle-app.conf.pre-previous-fallback-1.2.7-fccaa35e6b41-for-1.2.9-0521eb63f179",
+    "originalSnippetSha256": "eb1c5156390be5a15419504c4670cdc8cef3b13e8c6c92e38a40b4a20053d83a",
+    "activeSnippetSha256": "38d80b6ec30a00709e7ece20fa028387a1a5de748e58db64a4037cb5562c3002",
+    "rootCacheIsolationPassed": true
+  },
+  "databaseMutation": false,
+  "apiRestart": false,
+  "productionTestAccountWrites": false,
+  "limitations": [
+    "Cloud E2E retains four failures and two flaky cases; complete local suite and unchanged-assertion followups cover 461 eligible cases, with 33 conditional skips.",
+    "Android evidence is from an anonymous headless emulator; physical handsets, battery, thermal and long-duration behavior were not measured.",
+    "Prior AVD database corruption remains an unexplained historical test failure; the final direct-upgrade session preserved its save.",
+    "One HK health sample took 9172.54 ms; five following samples were below 3 ms, without API restart.",
+    "This release shares JavaScript optimizations with Web and Android and does not enable a cross-platform Rust runtime."
+  ],
+  "validation": {
+    "unitPassed": 3183,
+    "unitSkipped": 36,
+    "localE2EUniqueCasesPassed": 461,
+    "localE2EConditionalSkips": 33,
+    "cloudE2EAllGreen": false
+  }
+}

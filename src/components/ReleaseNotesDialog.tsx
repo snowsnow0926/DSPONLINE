@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
 import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotes118, getReleaseNotes119, getReleaseNotes120, getReleaseNotes121, getReleaseNotes122, getReleaseNotes123, getReleaseNotes124, getReleaseNotes125, getReleaseNotes126, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
+import { getReleaseNotes127, getReleaseNotes128 } from "../i18n/releaseNotes";
 import { AccessibleDialog } from "./AccessibleDialog";
 export { hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen, RELEASE_NOTES_SEEN_KEY } from "./releaseNotesSeen";
 
@@ -87,11 +88,12 @@ const RELEASE_NOTE_ICONS: Record<string, LucideIcon> = {
   "v125-no-automatic-rollback": LockKeyhole,
   "v125-blueprint-detail-layout": Check,
   "v125-compatibility-boundary": Database,
-  "v127-126-native-integration": Database,
-  "v127-native-boundaries": Gauge,
-  "v127-bounded-thread-stack": ShieldCheck,
-  "v127-transferable-save-inspection": CloudUpload,
-  "v127-compatibility-boundary": LockKeyhole,
+  "v127-save-import": CloudUpload,
+  "v127-automatic-snapshots": History,
+  "v127-offline-preparation": Gauge,
+  "v127-idle-recovery": History,
+  "v127-gameplay-compatibility": ShieldCheck,
+  "v127-release-scope": Info,
   "construction-offline-timewarp": Gauge,
   "pure-idle-rate-replication": History,
   "windows-native-stable-integration": Database,
@@ -195,6 +197,8 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  getReleaseNotes128("zh-CN"),
+  getReleaseNotes127("zh-CN"),
   RELEASE_NOTES_1_2_6,
   RELEASE_NOTES_1_2_5,
   RELEASE_NOTES_1_2_4,
@@ -590,6 +594,8 @@ export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: 
   const selectedReleaseRecord = RELEASE_NOTES_HISTORY.find((release) => release.id === selectedReleaseId) ?? CURRENT_RELEASE_NOTES;
   const selectedRelease = selectedReleaseRecord.id === CURRENT_RELEASE_NOTES.id
     ? localizedCurrentRelease
+    : selectedReleaseRecord.version === "1.2.8" ? getReleaseNotes128(locale)
+    : selectedReleaseRecord.version === "1.2.7" ? getReleaseNotes127(locale)
     : selectedReleaseRecord.id === RELEASE_NOTES_1_2_6.id ? localizedRelease126
     : selectedReleaseRecord.id === RELEASE_NOTES_1_2_5.id ? localizedRelease125
     : selectedReleaseRecord.id === RELEASE_NOTES_1_1_8.id ? localizedRelease118

@@ -23,11 +23,14 @@ function computeSaveChecksumChunks(chunks: readonly string[]): string {
   let hash = 0x811c9dc5;
   for (const chunk of chunks) {
     for (let index = 0; index < chunk.length; index += 1) {
-      hash ^= chunk.charCodeAt(index);
-      hash = Math.imul(hash, 0x01000193);
+      hash = appendSaveChecksumCodeUnit(hash, chunk.charCodeAt(index));
     }
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function appendSaveChecksumCodeUnit(hash: number, codeUnit: number): number {
+  return Math.imul(hash ^ codeUnit, 0x01000193);
 }
 
 /**
@@ -40,6 +43,37 @@ export function computeSaveStateChecksumFromJson(formatVersion: number, stateJso
     stateJson,
     "}",
   ]);
+}
+
+/**
+ * The transfer serializer needs both the v2 UTF-16 checksum and the UTF-8
+ * allocation size. Read the large state JSON once for both, while retaining
+ * both UTF-16 code units in the checksum of each four-byte surrogate pair.
+ * byteLength describes stateJson only, excluding the checksum wrapper.
+ */
+export function measureSaveStateJson(formatVersion: number, stateJson: string): { stateChecksum: string; byteLength: number } {
+  const prefix = `{"formatVersion":${JSON.stringify(formatVersion)},"state":`;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < prefix.length; index += 1) {
+    hash = appendSaveChecksumCodeUnit(hash, prefix.charCodeAt(index));
+  }
+  let byteLength = 0;
+  for (let index = 0; index < stateJson.length; index += 1) {
+    const code = stateJson.charCodeAt(index);
+    hash = appendSaveChecksumCodeUnit(hash, code);
+    if (code <= 0x7f) byteLength += 1;
+    else if (code <= 0x7ff) byteLength += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < stateJson.length) {
+      const low = stateJson.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        hash = appendSaveChecksumCodeUnit(hash, low);
+        byteLength += 4;
+        index += 1;
+      } else byteLength += 3;
+    } else byteLength += 3;
+  }
+  hash = appendSaveChecksumCodeUnit(hash, 0x7d);
+  return { stateChecksum: (hash >>> 0).toString(16).padStart(8, "0"), byteLength };
 }
 
 export function inspectSaveEnvelopeChecksum(raw: string): SaveEnvelopeChecksumInspection {

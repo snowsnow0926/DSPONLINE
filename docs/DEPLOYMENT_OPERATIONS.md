@@ -1,8 +1,10 @@
 # 部署与运维手册
 
-> **Android-only 下载切换（2026-09-09）**：使用新上海受保护通道，下载 current=`download-site-1.2.8-aa1f970a677b`，previous=`download-site-1.2.7-dab2ff5066b7`。APK/stable 为 1.2.8 / 1002008，Windows stable 为 1.2.6；Web/API、数据库、服务进程未切换。11 文件远端复算、8 文件公网完整哈希与 3 文件 Range 通过；下载回退独立于 Web/API/数据。见 [完整证据](./releases/1.2.8-android-cloud-hotfix.md)。
+> **当前生产基线（2026-09-11，1.2.9）**：香港/新上海 Web current 为 `1.2.9-0521eb63f179`；previous 分别为 `1.2.7-fccaa35e6b41` / `1.2.7-dab2ff5066b7`。API current/previous 保持 `api-1.2.6-df828869e276`，green/4322；generation/proxy 为 51/192、34/92，原 API/proxy PID 和 `NRestarts=0` 保留，health/ready 200、无 pending switch。下载 current/previous 为 `download-site-1.2.9-0521eb63f179-r2` / `download-site-1.2.8-aa1f970a677b`；Android stable 1002009，Windows 1.2.6。香港 previous-stable 为不可变 `1.2.7-fccaa35e6b41`，独立 Nginx 备份和恢复次序必须遵循 [1.2.9 发布记录](./releases/1.2.9.md)。新上海仍由 `DSP_SH_NEW_*` 在子进程内映射；旧机停写。本次只更新静态 Web/下载，未切换 API 或数据库，无新增生产数据库快照。磁盘约 73%/45%；一次香港 health 9.17 秒后五次恢复到 3 ms 以下。下方带日期的旧基线仅作历史记录。
 
-> **2026-09-08 香港 Web 展示补偿**：current Web `1.2.7-fccaa35e6b41`，API 保持 `api-1.2.6-df828869e276`，generation 50。用户指定累计界面固定增加 3,700（2026-08-14—09-07），属于客户端展示估算，公开 API 和真实身份记录不加数。后续发布应携带主工作树提交 `3589b7c2`；如迁至 API 计算，须同步删除前端补偿。直接 Web 回滚与 `/canary/previous/` 均保留 `1.2.7-dab2ff5066b7`，新 Nginx SHA `eb1c5156390be5a15419504c4670cdc8cef3b13e8c6c92e38a40b4a20053d83a`。详见 [发布、验收与回滚记录](./releases/ops-hk-player-display-3700-2026-09-08.md)。
+历史运维补充：[2026-09-08 玩家计数恢复](./releases/ops-hk-player-count-recovery-2026-09-08.md) 和 [累计玩家展示补偿](./releases/ops-hk-player-display-3700-2026-09-08.md) 记录了 presence 熔断撤销、计数口径及独立 Web 回滚证据。后续检查应核对有效 Nginx 规则与真实心跳持久化，避免恢复旧 presence 静态 202 熔断。
+
+> **当前生产基线（2026-09-08，1.2.7 发布后）**：香港/新上海 Web current 均为目录 `1.2.7-dab2ff5066b7`，Web 回退目录为 `web-1.2.6-df828869e276`；API current 与 switch-state previous 都保持 `api-1.2.6-df828869e276`。generation/proxy 分别 49/192、33/92，green/4322，health/ready 200、API/proxy PID 未变、重启数 0。新上海下载 current/previous 为 `download-site-1.2.7-dab2ff5066b7` / `download-site-1.2.6-df828869e276`；安卓 1002007，Windows 1.2.6。香港 fallback 为不可变 1.2.6，回退根 Web 前须先恢复其独立 Nginx 备份。新上海继续受保护 `DSP_SH_NEW_*` 子进程映射并保留迁移 validator/drop-in；旧机停写。本次未动 API/数据库，无新生产快照，磁盘最终约 67%/44%。详情及验证限制见 [1.2.7 发布记录](./releases/1.2.7.md)；下方带日期的旧状态按历史解读。
 
 > 公开仓库脱敏说明：本文及 `deploy/` 模板中的节点地址、证书主机名和对象存储标识均使用示例占位符。实际值只应从受保护的运维环境注入，不能提交到 Git。
 

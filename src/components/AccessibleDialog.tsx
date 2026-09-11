@@ -83,6 +83,9 @@ interface ModalStackEntry {
   token: symbol;
   ownerDocument: Document;
   surface: HTMLElement;
+  backgroundElements: () => HTMLElement[];
+  interactionRoots: () => HTMLElement[];
+  returnTarget: HTMLElement | null;
   sequence: number;
 }
 
@@ -109,6 +112,7 @@ const FOCUSABLE_SELECTOR = [
 ].join(",");
 
 const inertSnapshots = new WeakMap<HTMLElement, InertSnapshot>();
+const documentInertElements = new WeakMap<Document, HTMLElement[]>();
 const scrollLockSnapshots = new WeakMap<Document, ScrollLockSnapshot>();
 const modalStack: ModalStackEntry[] = [];
 let modalSequence = 0;
@@ -226,22 +230,65 @@ function unlockDocumentScroll(ownerDocument: Document): void {
   ownerDocument.documentElement.style.overscrollBehavior = snapshot.rootOverscrollBehavior;
 }
 
-function registerModal(token: symbol, ownerDocument: Document, surface: HTMLElement): void {
-  modalStack.push({ token, ownerDocument, surface, sequence: ++modalSequence });
+function topModal(ownerDocument: Document, closingToken?: symbol): ModalStackEntry | null {
+  let top: ModalStackEntry | null = null;
+  for (const entry of modalStack) {
+    if (entry.ownerDocument !== ownerDocument || (!entry.surface.isConnected && entry.token !== closingToken)) continue;
+    if (!top || entry.sequence > top.sequence) top = entry;
+  }
+  return top;
+}
+
+/** Only the current top surface owns isolation; lower surfaces cannot inert it. */
+function refreshDocumentIsolation(ownerDocument: Document): void {
+  const top = topModal(ownerDocument);
+  const next = new Set<HTMLElement>();
+  if (top) {
+    const roots = top.interactionRoots();
+    const isolate = (element: HTMLElement): void => {
+      if (roots.some((root) => root === element || root.contains(element))) return;
+      if (roots.some((root) => element.contains(root))) {
+        // An external focus root exempts its own branch, not its whole parent.
+        for (const child of Array.from(element.children)) {
+          if (child instanceof HTMLElement) isolate(child);
+        }
+      } else {
+        next.add(element);
+      }
+    };
+    for (const entry of modalStack) {
+      if (entry.ownerDocument === ownerDocument && entry.surface.isConnected) {
+        for (const element of entry.backgroundElements()) isolate(element);
+      }
+    }
+  }
+  for (const element of (documentInertElements.get(ownerDocument) ?? []).reverse()) releaseInert(element);
+  for (const element of next) acquireInert(element);
+  if (next.size) documentInertElements.set(ownerDocument, [...next]);
+  else documentInertElements.delete(ownerDocument);
+}
+
+function registerModal(entry: Omit<ModalStackEntry, "sequence">): ModalStackEntry {
+  const registered = { ...entry, sequence: ++modalSequence };
+  modalStack.push(registered);
+  refreshDocumentIsolation(entry.ownerDocument);
+  return registered;
 }
 
 function unregisterModal(token: symbol): void {
   const index = modalStack.findIndex((entry) => entry.token === token);
-  if (index >= 0) modalStack.splice(index, 1);
+  if (index < 0) return;
+  const [entry] = modalStack.splice(index, 1);
+  for (const remaining of modalStack) {
+    if (remaining.ownerDocument === entry.ownerDocument && remaining.returnTarget && entry.surface.contains(remaining.returnTarget)) {
+      remaining.returnTarget = entry.returnTarget;
+    }
+  }
+  refreshDocumentIsolation(entry.ownerDocument);
 }
 
 function isTopModal(token: symbol, ownerDocument: Document): boolean {
-  let top: ModalStackEntry | null = null;
-  for (const entry of modalStack) {
-    if (entry.ownerDocument !== ownerDocument || !entry.surface.isConnected) continue;
-    if (!top || entry.sequence > top.sequence) top = entry;
-  }
-  return top?.token === token;
+  return topModal(ownerDocument)?.token === token;
 }
 
 /**
@@ -332,10 +379,6 @@ export function useAccessibleModalSurface({
       : null;
     const explicitReturnTarget = latestRef.current.returnFocusRef?.current ?? null;
     const returnTarget = explicitReturnTarget ?? activeElement;
-    const backgroundElements = resolveBackgroundElements(
-      boundary,
-      latestRef.current.getBackgroundElements,
-    );
     const resolveAdditionalFocusRoots = (): HTMLElement[] => [...new Set(
       latestRef.current.getAdditionalFocusRoots
         ? Array.from(latestRef.current.getAdditionalFocusRoots(surface))
@@ -359,7 +402,14 @@ export function useAccessibleModalSurface({
     let redirectingFocus = false;
     let escapeRequested = false;
 
-    registerModal(token, ownerDocument, surface);
+    const stackEntry = registerModal({
+      token,
+      ownerDocument,
+      surface,
+      backgroundElements: () => resolveBackgroundElements(boundary, latestRef.current.getBackgroundElements),
+      interactionRoots: () => [boundary, surface, ...resolveAdditionalFocusRoots()],
+      returnTarget,
+    });
     lockDocumentScroll(ownerDocument);
 
     const preferredInitialFocus = latestRef.current.initialFocusRef?.current ?? null;
@@ -373,12 +423,6 @@ export function useAccessibleModalSurface({
       && surface.contains(ownerDocument.activeElement)
       ? ownerDocument.activeElement
       : surface;
-
-    const initialAdditionalFocusRoots = resolveAdditionalFocusRoots();
-    const inertElements = backgroundElements.filter((element) => !initialAdditionalFocusRoots.some((root) => (
-      element === root || element.contains(root) || root.contains(element)
-    )));
-    for (const element of inertElements) acquireInert(element);
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isTopModal(token, ownerDocument)) return;
@@ -450,17 +494,15 @@ export function useAccessibleModalSurface({
       ownerDocument.removeEventListener("keyup", onKeyUp, true);
       ownerDocument.removeEventListener("focusin", onFocusIn, true);
       if (externalCloseEventName) ownerDocument.defaultView?.removeEventListener(externalCloseEventName, onExternalClose, true);
+      // React may remove the portal DOM before running this layout cleanup.
+      const wasTop = topModal(ownerDocument, token)?.token === token;
       unregisterModal(token);
-      for (const element of inertElements.reverse()) releaseInert(element);
       unlockDocumentScroll(ownerDocument);
       lastFocusedInsideRef.current = null;
-      if (
-        returnTarget
-        && returnTarget.isConnected
-        && !isDisabled(returnTarget)
-        && !isHiddenOrInert(returnTarget)
-      ) {
-        focusWithoutScrolling(returnTarget);
+      const restoredReturnTarget = stackEntry.returnTarget;
+      if (wasTop && !focusWithoutScrolling(restoredReturnTarget)) {
+        const remaining = topModal(ownerDocument);
+        if (remaining) focusWithoutScrolling(getTabbableElements(remaining.surface)[0] ?? remaining.surface);
       }
     };
   }, [boundaryRef, externalCloseEventName, lifecycleKey, open, surfaceRef]);

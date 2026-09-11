@@ -80,12 +80,21 @@ function skipJsonValue(raw: string, start: number, end: number): number {
   return cursor;
 }
 
-function objectPropertyRanges(raw: string, range: JsonRange): Map<string, JsonRange> {
+interface JsonObjectScan {
+  properties: Map<string, JsonRange>;
+  end: number;
+}
+
+function scanObjectProperties(
+  raw: string,
+  range: JsonRange,
+  inspectValue?: (key: string, range: JsonRange) => number | undefined,
+): JsonObjectScan {
   let cursor = skipWhitespace(raw, range.start, range.end);
   if (raw[cursor] !== "{") throw new Error("expected JSON object");
   cursor = skipWhitespace(raw, cursor + 1, range.end);
   const properties = new Map<string, JsonRange>();
-  if (raw[cursor] === "}") return properties;
+  if (raw[cursor] === "}") return { properties, end: cursor + 1 };
   while (cursor < range.end) {
     const keyStart = cursor;
     const keyEnd = skipJsonString(raw, keyStart, range.end);
@@ -96,14 +105,19 @@ function objectPropertyRanges(raw: string, range: JsonRange): Map<string, JsonRa
     cursor = skipWhitespace(raw, keyEnd, range.end);
     if (raw[cursor] !== ":") throw new Error("missing JSON colon");
     const valueStart = skipWhitespace(raw, cursor + 1, range.end);
-    const valueEnd = skipJsonValue(raw, valueStart, range.end);
+    const valueEnd = inspectValue?.(key, { start: valueStart, end: range.end }) ??
+      skipJsonValue(raw, valueStart, range.end);
     properties.set(key, { start: valueStart, end: valueEnd });
     cursor = skipWhitespace(raw, valueEnd, range.end);
-    if (raw[cursor] === "}") return properties;
+    if (raw[cursor] === "}") return { properties, end: cursor + 1 };
     if (raw[cursor] !== ",") throw new Error("missing JSON comma");
     cursor = skipWhitespace(raw, cursor + 1, range.end);
   }
   throw new Error("unterminated JSON object");
+}
+
+function objectPropertyRanges(raw: string, range: JsonRange): Map<string, JsonRange> {
+  return scanObjectProperties(raw, range).properties;
 }
 
 function requiredRange(properties: Map<string, JsonRange>, key: string): JsonRange {
@@ -142,22 +156,26 @@ function saveSlot(value: unknown): "main" | 1 | 2 | 3 {
   return value;
 }
 
-function countArrayElements(raw: string, range: JsonRange): number {
+function scanArrayElements(raw: string, range: JsonRange): { count: number; end: number } {
   let cursor = skipWhitespace(raw, range.start, range.end);
   if (raw[cursor] !== "[") throw new Error("expected JSON array");
   cursor = skipWhitespace(raw, cursor + 1, range.end);
-  if (raw[cursor] === "]") return 0;
+  if (raw[cursor] === "]") return { count: 0, end: cursor + 1 };
   let count = 0;
   while (cursor < range.end) {
     cursor = skipJsonValue(raw, cursor, range.end);
     count += 1;
     if (!Number.isSafeInteger(count)) throw new Error("JSON array too large");
     cursor = skipWhitespace(raw, cursor, range.end);
-    if (raw[cursor] === "]") return count;
+    if (raw[cursor] === "]") return { count, end: cursor + 1 };
     if (raw[cursor] !== ",") throw new Error("missing JSON array comma");
     cursor = skipWhitespace(raw, cursor + 1, range.end);
   }
   throw new Error("unterminated JSON array");
+}
+
+function countArrayElements(raw: string, range: JsonRange): number {
+  return scanArrayElements(raw, range).count;
 }
 
 function checksumRange(formatVersion: number, raw: string, state: JsonRange): string {
@@ -181,7 +199,25 @@ function checksumRange(formatVersion: number, raw: string, state: JsonRange): st
  */
 function inspectCanonicalSaveEnvelopeUnsafe(raw: string): CanonicalSaveEnvelopeInspection {
     const envelopeRange = { start: 0, end: raw.length };
-    const envelope = objectPropertyRanges(raw, envelopeRange);
+    let scannedState: Map<string, JsonRange> | undefined;
+    let entityCount: number | undefined;
+    let beltCount: number | undefined;
+    // Discover state fields and count the two large collections while finding
+    // the envelope boundary. Previously the same records were scanned once
+    // for the envelope, again for state fields, and again for array counts.
+    // The independent checksum still covers every original state character.
+    const envelope = scanObjectProperties(raw, envelopeRange, (key, range) => {
+      if (key !== "state") return undefined;
+      const state = scanObjectProperties(raw, range, (stateKey, stateRange) => {
+        if (stateKey !== "entities" && stateKey !== "belts") return undefined;
+        const collection = scanArrayElements(raw, stateRange);
+        if (stateKey === "entities") entityCount = collection.count;
+        else beltCount = collection.count;
+        return collection.end;
+      });
+      scannedState = state.properties;
+      return state.end;
+    }).properties;
     const formatVersion = finiteInteger(parseScalar(raw, requiredRange(envelope, "formatVersion")));
     const kind = saveKind(parseScalar(raw, requiredRange(envelope, "kind")));
     const savedAt = finiteInteger(parseScalar(raw, requiredRange(envelope, "savedAt")));
@@ -192,7 +228,7 @@ function inspectCanonicalSaveEnvelopeUnsafe(raw: string): CanonicalSaveEnvelopeI
       throw new Error("invalid recorded checksum");
     }
     const stateRange = requiredRange(envelope, "state");
-    const state = objectPropertyRanges(raw, stateRange);
+    const state = scannedState ?? objectPropertyRanges(raw, stateRange);
     const stateMode = saveMode(parseScalar(raw, requiredRange(state, "mode")));
     const research = objectPropertyRanges(raw, requiredRange(state, "research"));
     const dysonSphere = objectPropertyRanges(raw, requiredRange(state, "dysonSphere"));
@@ -210,8 +246,8 @@ function inspectCanonicalSaveEnvelopeUnsafe(raw: string): CanonicalSaveEnvelopeI
         mode: stateMode,
         version: finiteInteger(parseScalar(raw, requiredRange(state, "version"))),
         activePlanetId,
-        entityCount: countArrayElements(raw, requiredRange(state, "entities")),
-        beltCount: countArrayElements(raw, requiredRange(state, "belts")),
+        entityCount: entityCount ?? countArrayElements(raw, requiredRange(state, "entities")),
+        beltCount: beltCount ?? countArrayElements(raw, requiredRange(state, "belts")),
         elapsedSeconds: finiteNonNegativeFloor(parseScalar(raw, requiredRange(state, "elapsedSeconds"))),
         completedTechCount: countArrayElements(raw, requiredRange(research, "completedTechIds")),
         structurePoints: finiteInteger(parseScalar(raw, requiredRange(dysonSphere, "structurePoints"))),

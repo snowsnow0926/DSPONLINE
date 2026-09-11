@@ -34,7 +34,7 @@ async function seedAnonymousCanvas(page: Page, storageCount: number, preference?
   };
 
   await page.addInitScript(({ key, rawPreference, extremeMode, anonymousFixture }) => {
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-02-v1.2.7");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     if (extremeMode) {
@@ -373,4 +373,3 @@ test("dense Chromium connection viewport meets the desktop frame gate and report
   expect(expandAllCounts.logicalFull).toBe(expandAllCounts.active);
   expect(expandAllCounts.logicalFull).toBeGreaterThan(boundedCounts.logicalFull);
 });
-

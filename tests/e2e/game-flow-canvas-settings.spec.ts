@@ -8,7 +8,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-02-v1.2.7");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
     }
   });
 }
@@ -2844,6 +2844,16 @@ test("performance mode keeps a 500-device 1000-line factory responsive", async (
     requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - started)));
   }));
   expect(frameLatency).toBeLessThan(500);
+
+  // DOM evaluation does not run locator handlers; dismiss a pending report
+  // and wait for its modal background lock to release before hit-testing.
+  const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
+  await expect.poll(async () => {
+    if (await offlineReport.isVisible()) {
+      await offlineReport.getByRole("button", { name: "确认结算" }).click({ force: true });
+    }
+    return page.locator(".react-flow__pane").evaluate((pane) => pane.closest("[inert]") === null);
+  }).toBe(true);
 
   const blankPoint = await page.evaluate(() => {
     const pane = document.querySelector<HTMLElement>(".react-flow__pane");

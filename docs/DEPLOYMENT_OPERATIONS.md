@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **香港 Web 当前基线（2026-09-22，1.3.0）**：current/previous 为 `1.3.0-e8c44f8d7160` / `1.2.9-0521eb63f179`，generation/proxy 52/192；API 仍为 `api-1.2.6-df828869e276`、green/4322。health/ready 200，可写、无 pending，API/代理 PID 不变且零重启，约 25.3% 磁盘可用。`/canary/previous/` 已指向不可变 1.2.9，根 worker 拒绝与缓存隔离通过。Web 配置备份、独立 Nginx 回滚点和恢复顺序见 [1.3.0 发布记录](./releases/1.3.0.md)。本次无 API/数据库切换、无新增数据库快照；上海与下载/原生版本未操作，以下 1.2.9 状态是对应历史记录。
+
 > **当前生产基线（2026-09-11，1.2.9）**：香港/新上海 Web current 为 `1.2.9-0521eb63f179`；previous 分别为 `1.2.7-fccaa35e6b41` / `1.2.7-dab2ff5066b7`。API current/previous 保持 `api-1.2.6-df828869e276`，green/4322；generation/proxy 为 51/192、34/92，原 API/proxy PID 和 `NRestarts=0` 保留，health/ready 200、无 pending switch。下载 current/previous 为 `download-site-1.2.9-0521eb63f179-r2` / `download-site-1.2.8-aa1f970a677b`；Android stable 1002009，Windows 1.2.6。香港 previous-stable 为不可变 `1.2.7-fccaa35e6b41`，独立 Nginx 备份和恢复次序必须遵循 [1.2.9 发布记录](./releases/1.2.9.md)。新上海仍由 `DSP_SH_NEW_*` 在子进程内映射；旧机停写。本次只更新静态 Web/下载，未切换 API 或数据库，无新增生产数据库快照。磁盘约 73%/45%；一次香港 health 9.17 秒后五次恢复到 3 ms 以下。下方带日期的旧基线仅作历史记录。
 
 历史运维补充：[2026-09-08 玩家计数恢复](./releases/ops-hk-player-count-recovery-2026-09-08.md) 和 [累计玩家展示补偿](./releases/ops-hk-player-display-3700-2026-09-08.md) 记录了 presence 熔断撤销、计数口径及独立 Web 回滚证据。后续检查应核对有效 Nginx 规则与真实心跳持久化，避免恢复旧 presence 静态 202 熔断。

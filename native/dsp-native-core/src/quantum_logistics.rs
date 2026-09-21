@@ -37,6 +37,7 @@ pub(crate) struct BoundaryFlow {
     global_download_per_minute: f64,
     quantum_tower_stacks: f64,
     quantum_collector_stacks: f64,
+    construction_deliveries: Option<Map<String, Value>>,
 }
 
 impl BoundaryFlow {
@@ -49,6 +50,34 @@ impl BoundaryFlow {
     }
 
     fn estimated_bytes(&self) -> usize {
+        fn value_bytes(value: &Value) -> usize {
+            size_of::<Value>()
+                + match value {
+                    Value::String(text) => text.capacity(),
+                    Value::Array(values) => values.iter().map(value_bytes).sum(),
+                    Value::Object(values) => values
+                        .iter()
+                        .map(|(key, value)| {
+                            key.capacity()
+                                + size_of::<String>()
+                                + size_of::<usize>() * 4
+                                + value_bytes(value)
+                        })
+                        .sum(),
+                    _ => 0,
+                }
+        }
+        let delivery_bytes = self.construction_deliveries.as_ref().map_or(0, |receipts| {
+            receipts
+                .iter()
+                .map(|(key, value)| {
+                    key.capacity()
+                        + size_of::<String>()
+                        + size_of::<usize>() * 4
+                        + value_bytes(value)
+                })
+                .sum::<usize>()
+        });
         [&self.uploaded, &self.downloaded]
             .into_iter()
             .flat_map(|record| record.iter())
@@ -61,7 +90,8 @@ impl BoundaryFlow {
                     + item_id.capacity()
                     + amount.bits().div_ceil(8) as usize
             })
-            .sum()
+            .sum::<usize>()
+            + delivery_bytes
     }
 }
 
@@ -616,6 +646,7 @@ impl Default for QuantumLogisticsDirectory {
 #[derive(Debug, Clone, Default)]
 struct Network {
     enabled: bool,
+    download_cursor: Option<u64>,
     inventory: BTreeMap<String, BigUint>,
     item_capacities: BTreeMap<String, BigUint>,
     routing_cursors: BTreeMap<String, u64>,
@@ -1164,6 +1195,7 @@ impl Network {
         }
     }
 
+    #[cfg(test)]
     fn advance_routing_cursor(&mut self, item_id: &str) {
         advance_routing_cursor(&mut self.routing_cursors, item_id);
         self.dirty_routing_cursors.insert(item_id.to_owned());
@@ -1375,6 +1407,10 @@ fn parse_flow(value: Option<&Value>) -> Option<BoundaryFlow> {
         global_download_per_minute: finite_number(flow.get("globalDownloadPerMinute")),
         quantum_tower_stacks: finite_number(flow.get("quantumTowerStacks")),
         quantum_collector_stacks: finite_number(flow.get("quantumCollectorStacks")),
+        construction_deliveries: flow
+            .get("constructionDeliveries")
+            .and_then(Value::as_object)
+            .cloned(),
     })
 }
 
@@ -1439,7 +1475,9 @@ fn canonical_flow_matches(raw: Option<&Value>, flow: &BoundaryFlow) -> bool {
     let Some(raw) = raw.and_then(Value::as_object) else {
         return false;
     };
-    raw.len() == 7
+    raw.len() == 7 + usize::from(flow.construction_deliveries.is_some())
+        && raw.get("constructionDeliveries").and_then(Value::as_object)
+            == flow.construction_deliveries.as_ref()
         && canonical_f64_matches(raw.get("boundarySecond"), flow.boundary_second)
         && canonical_quantity_record_matches(raw.get("uploaded"), &flow.uploaded, false)
         && canonical_quantity_record_matches(raw.get("downloaded"), &flow.downloaded, false)
@@ -1459,9 +1497,12 @@ fn canonical_flow_matches(raw: Option<&Value>, flow: &BoundaryFlow) -> bool {
 }
 
 fn canonical_network_record_matches(raw: &Map<String, Value>, network: &Network) -> bool {
-    let expected_fields = 5 + usize::from(network.runtime_flow.is_some());
+    let expected_fields = 5
+        + usize::from(network.runtime_flow.is_some())
+        + usize::from(network.download_cursor.is_some());
     raw.len() == expected_fields
         && raw.get("enabled") == Some(&Value::Bool(network.enabled))
+        && raw.get("downloadCursor").and_then(Value::as_u64) == network.download_cursor
         && canonical_quantity_record_matches(raw.get("inventory"), &network.inventory, false)
         && canonical_quantity_record_matches(
             raw.get("itemCapacities"),
@@ -1572,7 +1613,13 @@ fn sparse_network_header(
         (None, None) => None,
         _ => return None,
     };
-    (raw.len() == 5 + usize::from(runtime_flow.is_some())).then_some((enabled, runtime_flow))
+    let cursor_fields = usize::from(
+        raw.get("downloadCursor")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value <= MAX_SAFE_INTEGER),
+    );
+    (raw.len() == 5 + usize::from(runtime_flow.is_some()) + cursor_fields)
+        .then_some((enabled, runtime_flow))
 }
 
 fn cached_runtime_flow_shape_matches(raw: &Value, cached: &BoundaryFlow) -> bool {
@@ -1580,7 +1627,9 @@ fn cached_runtime_flow_shape_matches(raw: &Value, cached: &BoundaryFlow) -> bool
         return false;
     };
     let scalar_matches = |key: &str, expected: f64| canonical_f64_matches(raw.get(key), expected);
-    raw.len() == 7
+    raw.len() == 7 + usize::from(cached.construction_deliveries.is_some())
+        && raw.get("constructionDeliveries").and_then(Value::as_object)
+            == cached.construction_deliveries.as_ref()
         && raw
             .get("uploaded")
             .and_then(Value::as_object)
@@ -1623,6 +1672,10 @@ fn parse_sparse_network(
     )?;
     Some(Network {
         enabled,
+        download_cursor: raw
+            .get("downloadCursor")
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= MAX_SAFE_INTEGER),
         inventory,
         item_capacities,
         routing_cursors,
@@ -1709,6 +1762,10 @@ fn parse_network(base: &Map<String, Value>) -> anyhow::Result<Network> {
         .saturating_add(upload_routing_cursors.len());
     let mut network = Network {
         enabled: raw.get("enabled").and_then(Value::as_bool) == Some(true),
+        download_cursor: raw
+            .get("downloadCursor")
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= MAX_SAFE_INTEGER),
         inventory,
         item_capacities: capacities,
         routing_cursors,
@@ -1744,6 +1801,12 @@ fn flow_value(flow: &BoundaryFlow) -> anyhow::Result<Value> {
     set_number(&mut value, "boundarySecond", flow.boundary_second)?;
     value.insert("uploaded".to_owned(), quantity_record(&flow.uploaded));
     value.insert("downloaded".to_owned(), quantity_record(&flow.downloaded));
+    if let Some(deliveries) = &flow.construction_deliveries {
+        value.insert(
+            "constructionDeliveries".to_owned(),
+            Value::Object(deliveries.clone()),
+        );
+    }
     set_number(
         &mut value,
         "globalUploadPerMinute",
@@ -1771,6 +1834,9 @@ fn write_network_full(base: &mut Map<String, Value>, network: &Network) -> anyho
     }
     let mut value = Map::new();
     value.insert("enabled".to_owned(), Value::Bool(network.enabled));
+    if let Some(cursor) = network.download_cursor {
+        value.insert("downloadCursor".to_owned(), Value::from(cursor));
+    }
     value.insert("inventory".to_owned(), quantity_record(&network.inventory));
     value.insert(
         "itemCapacities".to_owned(),
@@ -1895,6 +1961,11 @@ fn write_network_with_scan(
         .get_mut("quantumLogisticsNetwork")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| anyhow!("native quantum logistics network is missing"))?;
+    if let Some(cursor) = network.download_cursor {
+        raw.insert("downloadCursor".to_owned(), Value::from(cursor));
+    } else {
+        raw.remove("downloadCursor");
+    }
     patch_quantity_record(
         raw.get_mut("inventory")
             .and_then(Value::as_object_mut)
@@ -3293,6 +3364,10 @@ fn create_flow_with_bandwidth(
         global_download_per_minute: bandwidth.per_minute,
         quantum_tower_stacks: bandwidth.tower_stacks,
         quantum_collector_stacks: bandwidth.collector_stacks,
+        construction_deliveries: network
+            .runtime_flow
+            .as_ref()
+            .and_then(|flow| flow.construction_deliveries.clone()),
     }
 }
 
@@ -3360,6 +3435,15 @@ fn allocate_proportionally(budget: &BigUint, requests: &[Request], cursor: u64) 
 }
 
 fn allocate_with_priority(budget: &BigUint, requests: &[Request], cursor: u64) -> Allocation {
+    allocate_priority_groups(budget, requests, cursor, false)
+}
+
+fn allocate_priority_groups(
+    budget: &BigUint,
+    requests: &[Request],
+    cursor: u64,
+    independent_groups: bool,
+) -> Allocation {
     let mut groups = BTreeMap::<i64, Vec<Request>>::new();
     for request in requests {
         groups
@@ -3376,7 +3460,15 @@ fn allocate_with_priority(budget: &BigUint, requests: &[Request], cursor: u64) -
         if remaining.is_zero() {
             break;
         }
-        let allocation = allocate_proportionally(&remaining, requests, result.next_cursor);
+        let allocation = allocate_proportionally(
+            &remaining,
+            requests,
+            if independent_groups {
+                cursor
+            } else {
+                result.next_cursor
+            },
+        );
         result.values.extend(allocation.values);
         result.total += &allocation.total;
         remaining -= allocation.total;
@@ -3557,43 +3649,67 @@ fn settle_outputs(
     requests: &[Request],
     cap: &BigUint,
 ) -> HashMap<String, BigUint> {
-    let global = allocate_with_priority(cap, requests, 0);
     let mut by_item = BTreeMap::<String, Vec<Request>>::new();
     for request in requests {
-        let mut request = request.clone();
-        request.amount = global.values.get(&request.key).cloned().unwrap_or_default();
         by_item
             .entry(request.item_id.clone())
             .or_default()
-            .push(request);
+            .push(request.clone());
     }
-    let mut values = HashMap::new();
+    let mut feasible = HashMap::new();
+    let mut feasible_total = BigUint::zero();
     for (item_id, item_requests) in &mut by_item {
         item_requests.sort_by(request_lexical_order);
         let available = network.inventory.get(item_id).cloned().unwrap_or_default();
-        let planned = item_requests
-            .iter()
-            .fold(BigUint::zero(), |sum, request| sum + &request.amount);
-        let item_budget = available.clone().min(planned.clone());
-        let allocation = allocate_proportionally(
-            &item_budget,
+        let allocation = allocate_priority_groups(
+            &available,
             item_requests,
             network.routing_cursors.get(item_id).copied().unwrap_or(0),
+            true,
         );
-        for request in item_requests.iter() {
-            values.insert(
-                request.key.clone(),
-                allocation
-                    .values
-                    .get(&request.key)
-                    .cloned()
-                    .unwrap_or_default(),
-            );
+        feasible.extend(allocation.values);
+        feasible_total += allocation.total;
+    }
+    let feasible_requests = requests
+        .iter()
+        .map(|request| {
+            let mut request = request.clone();
+            request.amount = feasible.get(&request.key).cloned().unwrap_or_default();
+            request
+        })
+        .collect::<Vec<_>>();
+    let cursor = network.download_cursor.unwrap_or(0);
+    let global = allocate_priority_groups(cap, &feasible_requests, cursor, true);
+    let mut values = HashMap::new();
+    for (item_id, item_requests) in &by_item {
+        let mut delivered = BigUint::zero();
+        for request in item_requests {
+            let amount = global.values.get(&request.key).cloned().unwrap_or_default();
+            values.insert(request.key.clone(), amount.clone());
+            delivered += amount;
         }
-        network.set_inventory_amount(item_id, saturated(available - &allocation.total));
-        if allocation.total < planned && !item_requests.is_empty() {
-            network.advance_routing_cursor(item_id);
+        let available = network.inventory.get(item_id).cloned().unwrap_or_default();
+        let requested = item_requests
+            .iter()
+            .fold(BigUint::zero(), |sum, request| sum + &request.amount);
+        network.set_inventory_amount(item_id, saturated(&available - &delivered));
+        if !delivered.is_zero() && available < requested && item_requests.len() > 1 {
+            let current = network.routing_cursors.get(item_id).copied().unwrap_or(0);
+            let next = if current < MAX_SAFE_INTEGER {
+                current + 1
+            } else {
+                0
+            };
+            network.routing_cursors.insert(item_id.clone(), next);
+            network.dirty_routing_cursors.insert(item_id.clone());
         }
+    }
+    if !global.total.is_zero() && global.total < feasible_total {
+        network.download_cursor = Some(if cursor < MAX_SAFE_INTEGER {
+            cursor + 1
+        } else {
+            0
+        });
     }
     values
 }
@@ -4254,6 +4370,30 @@ pub(crate) fn receive_supply_material_in_session(
     Ok(accepted_total)
 }
 
+fn construction_delivery_flow(
+    demands: &BTreeMap<String, crate::construction::QuantumDemand>,
+    delivered: &HashMap<String, BigUint>,
+    boundary_second: f64,
+) -> Option<Map<String, Value>> {
+    let mut receipts = Map::new();
+    for (key, demand) in demands {
+        let receipt = receipts.entry(demand.entity_id.clone()).or_insert_with(|| {
+            serde_json::json!({
+                "boundarySecond": boundary_second, "needed": {}, "requested": {}, "delivered": {}
+            })
+        });
+        receipt["needed"][&demand.item_id] = Value::from(demand.needed_amount);
+        if demand.amount > 0 {
+            receipt["requested"][&demand.item_id] = Value::from(demand.amount);
+        }
+        let amount = delivered.get(key).and_then(BigUint::to_u64).unwrap_or(0);
+        if amount > 0 {
+            receipt["delivered"][&demand.item_id] = Value::from(amount);
+        }
+    }
+    (!receipts.is_empty()).then_some(receipts)
+}
+
 fn settle_downloads_with_request_count(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -4316,16 +4456,24 @@ fn settle_downloads_with_request_count(
             );
         }
     }
-    let construction_demands = crate::construction::quantum_demands(state, base, entities)?
-        .into_iter()
-        .map(|demand| {
-            (
-                structured_request_key("construction-direct", &demand.entity_id, &demand.item_id),
-                demand,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let construction_demands =
+        crate::construction::quantum_demands(state, base, entities, boundary_second)?
+            .into_iter()
+            .map(|demand| {
+                (
+                    structured_request_key(
+                        "construction-direct",
+                        &demand.entity_id,
+                        &demand.item_id,
+                    ),
+                    demand,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
     for demand in construction_demands.values() {
+        if demand.amount == 0 {
+            continue;
+        }
         upsert_request_in_stable_order(
             &mut requests,
             &mut request_positions,
@@ -4340,6 +4488,8 @@ fn settle_downloads_with_request_count(
         &allocation_requests,
         &boundary_capacity(flow.global_download_per_minute, seconds),
     );
+    flow.construction_deliveries =
+        construction_delivery_flow(&construction_demands, &delivered, boundary_second);
     for request in &requests {
         let amount = delivered.get(&request.key).cloned().unwrap_or_default();
         let amount_number = amount.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
@@ -4542,6 +4692,7 @@ pub(crate) fn settle_active_downloads(
         entities,
         &center_indices,
         &indexed_construction_rows,
+        boundary_second,
     )?;
     if construction_demands.iter().any(|demand| {
         !directory.construction_demand_is_indexable(state, demand)
@@ -4674,6 +4825,9 @@ pub(crate) fn settle_active_downloads(
         .collect::<BTreeMap<_, _>>();
     let station_request_count = requests.len();
     for demand in construction_demands.values() {
+        if demand.amount == 0 {
+            continue;
+        }
         let previous_len = requests.len();
         upsert_request_in_stable_order(
             &mut requests,
@@ -4714,6 +4868,8 @@ pub(crate) fn settle_active_downloads(
         &allocation_requests,
         &boundary_capacity(flow.global_download_per_minute, seconds),
     );
+    flow.construction_deliveries =
+        construction_delivery_flow(&construction_demands, &delivered, boundary_second);
     for request in &requests {
         let amount = delivered.get(&request.key).cloned().unwrap_or_default();
         let amount_number = amount.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
@@ -6143,6 +6299,7 @@ mod tests {
             global_download_per_minute: 5_000.0,
             quantum_tower_stacks: 1.0,
             quantum_collector_stacks: 0.0,
+            construction_deliveries: None,
         };
         base.get_mut("quantumLogisticsNetwork")
             .and_then(Value::as_object_mut)
@@ -6221,10 +6378,11 @@ mod tests {
                         .unwrap_or_default(),
                 );
             }
+            let inventory_limited = available < planned;
             network
                 .inventory
                 .insert(item_id.clone(), saturated(available - &allocation.total));
-            if allocation.total < planned && !item_requests.is_empty() {
+            if !allocation.total.is_zero() && inventory_limited && item_requests.len() > 1 {
                 *network.routing_cursors.entry(item_id.clone()).or_default() += 1;
             }
         }
@@ -6687,6 +6845,7 @@ mod tests {
             global_download_per_minute: 5_000.0,
             quantum_tower_stacks: 1.0,
             quantum_collector_stacks: -0.0,
+            construction_deliveries: None,
         });
 
         let scan = write_network_with_scan(&mut sparse_base, &network).expect("sparse write");
@@ -6958,6 +7117,7 @@ mod tests {
             global_download_per_minute: 5_000.0,
             quantum_tower_stacks: 1.0,
             quantum_collector_stacks: -0.0,
+            construction_deliveries: None,
         })
         .expect("canonical fallback-test flow");
         let mut missing_flow_field = baseline.clone();
@@ -7052,6 +7212,75 @@ mod tests {
             legacy.upload_routing_cursors
         );
         assert_eq!(optimized.item_capacities, legacy.item_capacities);
+    }
+
+    #[test]
+    fn runtime_memory_accounts_for_construction_delivery_receipts() {
+        let mut flow = BoundaryFlow::default();
+        let before = flow.estimated_bytes();
+        let long_item = "water".repeat(200);
+        flow.construction_deliveries = Some(Map::from_iter([(
+            "center".to_owned(),
+            serde_json::json!({
+                "boundarySecond": 5, "needed": {long_item: 16}, "requested": {"water": 16}, "delivered": {}
+            }),
+        )]));
+        assert!(flow.estimated_bytes() >= before + 1000 + size_of::<Value>());
+    }
+
+    #[test]
+    fn absent_and_partial_high_priority_stock_do_not_waste_download_bandwidth() {
+        for hydrogen in [0_u64, 10] {
+            let mut network = Network {
+                enabled: true,
+                inventory: BTreeMap::from([
+                    ("water".to_owned(), BigUint::from(100_u64)),
+                    ("hydrogen".to_owned(), BigUint::from(hydrogen)),
+                ]),
+                ..Network::default()
+            };
+            let mut requests = vec![
+                item_request("tower", "hydrogen", 10_000, 2),
+                item_request("center", "water", 100, 1),
+            ];
+            sorted_requests(&mut requests);
+            let delivered = settle_outputs(&mut network, &requests, &BigUint::from(50_u64));
+            assert_eq!(delivered["tower"], BigUint::from(hydrogen));
+            assert_eq!(delivered["center"], BigUint::from(50 - hydrogen));
+            assert_eq!(network.inventory["water"], BigUint::from(50 + hydrogen));
+        }
+    }
+
+    #[test]
+    fn download_remainder_rotates_across_save_roundtrips_and_priority_groups() {
+        let mut network = Network {
+            enabled: true,
+            inventory: BTreeMap::from([
+                ("water".to_owned(), BigUint::from(100_u64)),
+                ("hydrogen".to_owned(), BigUint::from(100_u64)),
+                ("stone".to_owned(), BigUint::from(100_u64)),
+            ]),
+            ..Network::default()
+        };
+        let mut requests = vec![
+            item_request("a", "water", 1, 1),
+            item_request("b", "hydrogen", 1, 1),
+            item_request("c", "water", 1, 1),
+            item_request("high", "stone", 1, 2),
+        ];
+        sorted_requests(&mut requests);
+        let mut totals = [0_u64; 3];
+        for _ in 0..9 {
+            let delivered = settle_outputs(&mut network, &requests, &BigUint::from(2_u64));
+            for (index, key) in ["a", "b", "c"].iter().enumerate() {
+                totals[index] += delivered[*key].to_u64().unwrap();
+            }
+            let mut base = Map::new();
+            write_network_full(&mut base, &network).unwrap();
+            network = parse_network(&base).unwrap();
+        }
+        assert_eq!(totals, [3, 3, 3]);
+        assert_eq!(network.download_cursor, Some(9));
     }
 
     #[test]
@@ -7978,10 +8207,13 @@ mod tests {
         );
         let mut sorted_ids = center_ids;
         sorted_ids.sort_unstable();
+        // At boundary five the reservation order rotates by one center. Keep
+        // the scarce set with its first owner instead of stranding partial jobs.
+        sorted_ids.rotate_left(1);
         for (position, center_id) in sorted_ids.into_iter().enumerate() {
             assert_eq!(
                 construction_quantum_buffer_amount(&base, center_id, "iron_ore"),
-                u64::from(position < 2),
+                if position == 0 { 2 } else { 0 },
                 "scarce remainder winner {center_id}"
             );
         }

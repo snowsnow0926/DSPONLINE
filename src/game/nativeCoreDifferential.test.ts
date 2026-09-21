@@ -3496,6 +3496,54 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     await client.request({ operation: "coreClose", sessionId: segmentedOpened.sessionId });
   });
 
+  it.each(["water", "intermediates", "blocked-target"] as const)("matches recovered construction quantum flow: %s", async (scenario) => {
+    let initial = noJobQuantumConstructionState();
+    initial.elapsedSeconds = 0;
+    initial.historyRecordedAt = 0;
+    initial.research.completedTechIds = Object.values(TECHNOLOGIES).map(technology => technology.id);
+    initial.entities = initial.entities.filter(entity => entity.buildingId === "wind_turbine" || entity.buildingId === "construction_center" || entity.buildingId === "interstellar_logistics_station");
+    initial.belts = [];
+    const tower = initial.entities.find(entity => entity.buildingId === "interstellar_logistics_station")!;
+    tower.machineCount = 1;
+    let completedId: "arc_smelter" | "geothermal_power_station" | "plane_smelter" = "arc_smelter";
+    if (scenario === "water") {
+      completedId = "geothermal_power_station";
+      initial.constructionAutomation.targetStock = { geothermal_power_station: 1 };
+      initial.tray = { steel: 23, titanium_ingot: 8, refined_oil: 24, stone: 32, processor: 4 };
+      initial.planetTrays.home = initial.tray;
+      initial.quantumLogisticsNetwork.inventory = { water: "1000000" };
+      initial = setStationSlotItem(initial, tower.id, 0, "hydrogen");
+      initial = setStationSlotMode(initial, tower.id, 0, "remote", "demand");
+      initial = setStationSlotPriority(initial, tower.id, 0, 2);
+    } else if (scenario === "intermediates") {
+      initial.quantumLogisticsNetwork.inventory = { iron_ingot: "4", stone_brick: "2", circuit_board: "4", magnetic_coil: "2" };
+      initial.constructionAutomation.targetStock = { arc_smelter: 1 };
+    } else {
+      completedId = "plane_smelter";
+      initial.constructionAutomation.targetStock = { arc_smelter: 1, plane_smelter: 1 };
+      initial.quantumLogisticsNetwork.inventory = Object.fromEntries(getConstructionDefinition("plane_smelter")!.costs.map(cost => [cost.itemId, String(cost.amount)]));
+    }
+    initial.construction.arc_smelter = 0;
+    initial.construction[completedId] = 0;
+    const checkpoint = await seed(initial, 206);
+    const opened = await open(checkpoint);
+    try {
+      let expected = initial;
+      for (let second = 1; second <= 20; second += 1) {
+        expected = advanceSimulationBudget(expected, 1, 1);
+        const advanced = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId, request: { baseRevision: checkpoint.revision + second - 1, simulationSeconds: 1, wallSeconds: 1 } });
+        expect(advanced.supported, `${scenario}/${second}: ${advanced.reason ?? ""}`).toBe(true);
+        const projection = await client.request({ operation: "coreProjection", sessionId: opened.sessionId, entityIds: [], beltIds: [], baseFields: ["constructionAutomation", "quantumLogisticsNetwork"] });
+        expect(projection.base.constructionAutomation, `${scenario}/${second} construction`).toEqual(JSON.parse(JSON.stringify(expected.constructionAutomation)));
+        expect(projection.base.quantumLogisticsNetwork, `${scenario}/${second} quantum`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
+        expect(advanced.summary.canonicalSha256, `${scenario}/${second} complete state`).toBe(canonicalSha256(expected));
+      }
+      expect(expected.construction[completedId]).toBe(1);
+    } finally {
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  });
+
   it("matches five-second batch prefetch for an existing construction job", async () => {
     const initial = existingJobQuantumPrefetchState();
     const expected = advanceSimulationBudget(initial, 1, 1);

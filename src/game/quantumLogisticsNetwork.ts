@@ -271,7 +271,12 @@ export function normalizeQuantumLogisticsNetworkState(value: unknown): QuantumLo
       }
     }
   }
-  return { enabled: raw.enabled === true, inventory, itemCapacities, routingCursors, uploadRoutingCursors };
+  const downloadCursor = typeof raw.downloadCursor === "number" && Number.isSafeInteger(raw.downloadCursor) && raw.downloadCursor >= 0
+    ? raw.downloadCursor : 0;
+  return {
+    enabled: raw.enabled === true, inventory, itemCapacities, routingCursors, uploadRoutingCursors,
+    ...(downloadCursor > 0 ? { downloadCursor } : {}),
+  };
 }
 
 export interface QuantumSettlementInput {
@@ -459,6 +464,7 @@ function allocateWithPriority(
   budget: bigint,
   requests: readonly { key: string; amount: bigint; priority?: number }[],
   cursor: number,
+  independentGroups = false,
 ): { values: Record<string, bigint>; total: bigint; nextCursor: number } {
   const values: Record<string, bigint> = {};
   let remaining = budget > 0n ? budget : 0n;
@@ -475,7 +481,7 @@ function allocateWithPriority(
   for (const priority of priorities) {
     if (remaining <= 0n) break;
     const group = requestsByPriority.get(priority)!;
-    const allocation = allocateProportionally(remaining, group, nextCursor);
+    const allocation = allocateProportionally(remaining, group, independentGroups ? cursor : nextCursor);
     Object.assign(values, allocation.values);
     total += allocation.total;
     remaining -= allocation.total;
@@ -534,28 +540,48 @@ function allocateOutputs(
   cap: DecimalIntegerString | number | undefined,
 ): { values: Record<string, bigint>; delivered: bigint; requested: bigint; blockedBandwidth: bigint; blockedInventory: bigint; activeItems: ItemId[] } {
   const values: Record<string, bigint> = {};
-  let delivered = 0n;
   const requested = prepared.requestedOutput;
-  let blockedBandwidth = 0n;
   let blockedInventory = 0n;
-  const globalAllocation = allocateWithPriority(requestBudget(cap, requested), prepared.outputs, 0);
-  blockedBandwidth = requested > globalAllocation.total ? requested - globalAllocation.total : 0n;
+  let feasibleTotal = 0n;
+  const feasible: Record<string, bigint> = {};
+  // Reserve only inventory that can actually be delivered. Otherwise an empty
+  // high-priority slot consumes the entire global budget without moving cargo.
   for (const [itemId, itemRequests] of prepared.outputsByItem) {
     const available = integer(state.inventory[itemId]);
-    const planned = itemRequests.reduce((sum, request) => sum + (globalAllocation.values[request.key] ?? 0n), 0n);
-    const itemBudget = available < planned ? available : planned;
-    const allocation = allocateProportionally(
-      itemBudget,
-      itemRequests.map((request) => ({ key: request.key, amount: globalAllocation.values[request.key] ?? 0n })),
-      state.routingCursors[itemId] ?? 0,
-    );
-    for (const request of itemRequests) values[request.key] = allocation.values[request.key] ?? 0n;
-    delivered += allocation.total;
-    state.inventory[itemId] = decimal(available - allocation.total);
-    if (allocation.total < planned && itemRequests.length > 0) state.routingCursors[itemId] = (state.routingCursors[itemId] ?? 0) + 1;
-    blockedInventory += planned > allocation.total ? planned - allocation.total : 0n;
+    const allocation = allocateWithPriority(available, itemRequests, state.routingCursors[itemId] ?? 0, true);
+    Object.assign(feasible, allocation.values);
+    feasibleTotal += allocation.total;
+    blockedInventory += itemRequests.reduce((sum, request) => sum + request.amount, 0n) - allocation.total;
   }
-  return { values, delivered, requested, blockedBandwidth, blockedInventory, activeItems: prepared.activeItems };
+  const cursor = Number.isSafeInteger(state.downloadCursor) && state.downloadCursor! >= 0 ? state.downloadCursor! : 0;
+  const global = allocateWithPriority(
+    requestBudget(cap, feasibleTotal),
+    prepared.outputs.map((request) => ({ ...request, amount: feasible[request.key] ?? 0n })),
+    cursor,
+    true,
+  );
+  for (const [itemId, itemRequests] of prepared.outputsByItem) {
+    const delivered = itemRequests.reduce((sum, request) => {
+      const amount = global.values[request.key] ?? 0n;
+      values[request.key] = amount;
+      return sum + amount;
+    }, 0n);
+    const available = integer(state.inventory[itemId]);
+    state.inventory[itemId] = decimal(available - delivered);
+    const itemRequested = itemRequests.reduce((sum, request) => sum + request.amount, 0n);
+    if (delivered > 0n && available < itemRequested && itemRequests.length > 1) {
+      const current = state.routingCursors[itemId] ?? 0;
+      state.routingCursors[itemId] = current < Number.MAX_SAFE_INTEGER ? current + 1 : 0;
+    }
+  }
+  if (global.total > 0n && global.total < feasibleTotal) {
+    state.downloadCursor = cursor < Number.MAX_SAFE_INTEGER ? cursor + 1 : 0;
+  }
+  return {
+    values, delivered: global.total, requested,
+    blockedBandwidth: feasibleTotal - global.total,
+    blockedInventory, activeItems: prepared.activeItems,
+  };
 }
 
 /**
@@ -632,6 +658,7 @@ function isOrbitalCollector(entity: FactoryEntity | undefined): entity is Factor
 function cloneNetwork(network: QuantumLogisticsNetworkState): QuantumLogisticsNetworkState {
   return {
     enabled: network.enabled,
+    ...(network.downloadCursor !== undefined ? { downloadCursor: network.downloadCursor } : {}),
     inventory: { ...network.inventory },
     itemCapacities: { ...network.itemCapacities },
     routingCursors: { ...network.routingCursors },

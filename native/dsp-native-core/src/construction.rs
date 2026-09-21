@@ -49,6 +49,7 @@ pub(crate) struct QuantumDemand {
     pub entity_id: String,
     pub item_id: String,
     pub amount: u64,
+    pub needed_amount: u64,
 }
 
 /// Runtime-only reverse-wake evidence for the quantum construction demand
@@ -1712,6 +1713,16 @@ fn select_target(
     automation: &Map<String, Value>,
     jobs: &Map<String, Value>,
 ) -> Option<crate::construction_planner::Target> {
+    select_target_skipping(state, base, automation, jobs, &HashSet::new())
+}
+
+fn select_target_skipping(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    skipped: &HashSet<String>,
+) -> Option<crate::construction_planner::Target> {
     let targets = crate::construction_planner::targets(state);
     if targets.is_empty() {
         return None;
@@ -1725,6 +1736,9 @@ fn select_target(
     let target_stock = automation.get("targetStock").and_then(Value::as_object)?;
     for offset in 0..targets.len() {
         let target = &targets[(cursor + offset) % targets.len()];
+        if skipped.contains(&target.id) {
+            continue;
+        }
         let desired = floor_amount(finite_number(target_stock.get(&target.id)));
         let current =
             current_stock(base, &target.id) + pending_stock_in_jobs(state, jobs, &target.id);
@@ -3683,17 +3697,22 @@ pub(crate) fn run_centers(
             let mut worked = false;
             let mut plan_budget_exhausted = false;
             let mut direct_resolved_by_target = HashMap::<String, ResolvedConstructionPlan>::new();
+            let mut blocked_targets = HashSet::new();
             while remaining_work > EPSILON && budget.remaining_iterations > 0 {
                 budget.remaining_iterations -= 1;
                 if job.is_none() {
-                    let Some(target) = select_target(state, base, &automation, &jobs) else {
+                    let Some(target) =
+                        select_target_skipping(state, base, &automation, &jobs, &blocked_targets)
+                    else {
                         let buffered = buffers
                             .get(&entity_id)
                             .and_then(Value::as_object)
                             .is_some_and(|inventory| !inventory.is_empty());
-                        refund_quantum_buffer(base, &mut buffers, &entity_id, &planet_id)?;
-                        if buffered {
-                            wake_centers.insert(entity_index);
+                        if select_target(state, base, &automation, &jobs).is_none() {
+                            refund_quantum_buffer(base, &mut buffers, &entity_id, &planet_id)?;
+                            if buffered {
+                                wake_centers.insert(entity_index);
+                            }
                         }
                         break;
                     };
@@ -3734,7 +3753,14 @@ pub(crate) fn run_centers(
                         else {
                             wait_for_planet_inventory = true;
                             wait_for_planner_cursor = true;
-                            break;
+                            blocked_targets.insert(target.id.clone());
+                            let count = crate::construction_planner::targets(state).len().max(1);
+                            set_number(
+                                &mut automation,
+                                "cursor",
+                                ((target.index + 1) % count) as f64,
+                            )?;
+                            continue;
                         };
                         if has_direct_buffer
                             && resolved.batch.as_ref().is_some_and(|batch| {
@@ -3749,7 +3775,14 @@ pub(crate) fn run_centers(
                     if resolved.plan.steps.is_empty() {
                         wait_for_planet_inventory = true;
                         wait_for_planner_cursor = true;
-                        break;
+                        blocked_targets.insert(target.id.clone());
+                        let count = crate::construction_planner::targets(state).len().max(1);
+                        set_number(
+                            &mut automation,
+                            "cursor",
+                            ((target.index + 1) % count) as f64,
+                        )?;
+                        continue;
                     }
                     let target_count = crate::construction_planner::targets(state).len().max(1);
                     set_number(
@@ -4092,14 +4125,51 @@ fn remaining_job_plan(
     })
 }
 
+fn quantum_warehouse_inventory(base: &Map<String, Value>) -> anyhow::Result<Map<String, Value>> {
+    let mut result = Map::new();
+    if let Some(inventory) = base
+        .get("quantumLogisticsNetwork")
+        .and_then(|network| network.get("inventory"))
+        .and_then(Value::as_object)
+    {
+        for (item, raw) in inventory {
+            if let Some(amount) = raw
+                .as_str()
+                .and_then(|text| text.parse::<f64>().ok())
+                .filter(|amount| *amount > 0.0)
+            {
+                set_inventory_amount(&mut result, item, amount.floor().min(MAX_SAFE_INTEGER))?;
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn combine_quantum_planning_inventory(
+    sources: &[&Map<String, Value>],
+) -> anyhow::Result<Map<String, Value>> {
+    let mut result = Map::new();
+    for source in sources {
+        for item in source.keys() {
+            let amount = safe_add(
+                inventory_amount(&result, item),
+                inventory_amount(source, item),
+            );
+            set_inventory_amount(&mut result, item, amount)?;
+        }
+    }
+    Ok(result)
+}
+
 fn no_job_quantum_missing_materials(
     state: &CoreState,
     base: &Map<String, Value>,
     automation: &Map<String, Value>,
     jobs: &Map<String, Value>,
     center: &Map<String, Value>,
+    warehouse: &Map<String, Value>,
 ) -> anyhow::Result<BTreeMap<String, f64>> {
-    let Some(target) = select_target(state, base, automation, jobs) else {
+    let Some(mut target) = select_target(state, base, automation, jobs) else {
         return Ok(BTreeMap::new());
     };
     let entity_id = string_at(center, "id").unwrap_or_default();
@@ -4107,7 +4177,31 @@ fn no_job_quantum_missing_materials(
     let empty = Map::new();
     let planet_tray = tray(base, planet_id).unwrap_or(&empty);
     let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
-    let mut virtual_quantum = quantum.clone();
+    let mut virtual_quantum = combine_quantum_planning_inventory(&[quantum, warehouse])?;
+    let mut selection_automation = automation.clone();
+    let mut skipped = HashSet::new();
+    for _ in 0..64 {
+        let Some(candidate) =
+            select_target_skipping(state, base, &selection_automation, jobs, &skipped)
+        else {
+            break;
+        };
+        let inventory =
+            crate::construction_planner::inventory_from_sources(planet_tray, &virtual_quantum);
+        if matches!(
+            crate::construction_planner::probe_plan(state, base, &candidate, inventory),
+            crate::construction_planner::PlanOutcome::Ready(_)
+        ) {
+            target = candidate;
+            break;
+        }
+        skipped.insert(candidate.id.clone());
+        set_number(
+            &mut selection_automation,
+            "cursor",
+            (candidate.index + 1) as f64,
+        )?;
+    }
     let mut seed_missing = BTreeMap::<String, f64>::new();
     let mut complete_plan = None;
     for _ in 0..128 {
@@ -4168,6 +4262,7 @@ fn no_job_quantum_missing_materials(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn probe_quantum_demands(
     state: &CoreState,
     base: &Map<String, Value>,
@@ -4176,6 +4271,7 @@ fn probe_quantum_demands(
     entity_index: usize,
     active_row: Option<usize>,
     center: &Map<String, Value>,
+    warehouse: &Map<String, Value>,
 ) -> anyhow::Result<Vec<QuantumDemand>> {
     if center
         .get("powerFactor")
@@ -4214,7 +4310,23 @@ fn probe_quantum_demands(
                 .into_iter()
                 .find(|target| target.id == construction_id)
         }) {
-            let remaining_plan = remaining_job_plan(job, step_index)?;
+            let mut remaining_plan = remaining_job_plan(job, step_index)?;
+            if !requirements_available(
+                job_inventory,
+                planet_tray,
+                quantum,
+                &requirements(state, &step)?,
+            ) {
+                let available =
+                    combine_quantum_planning_inventory(&[quantum, warehouse, job_inventory])?;
+                let inventory =
+                    crate::construction_planner::inventory_from_sources(planet_tray, &available);
+                if let Some(repaired) =
+                    crate::construction_planner::build_plan(state, base, &target, inventory)
+                {
+                    remaining_plan = repaired;
+                }
+            }
             if let Some(batch) = analyze_repeatable_plan(state, base, &target, &remaining_plan)? {
                 return Ok(quantum_missing_for_batch(
                     state,
@@ -4240,6 +4352,7 @@ fn probe_quantum_demands(
                         entity_id: entity_id.to_owned(),
                         item_id,
                         amount,
+                        needed_amount: amount,
                     })
                 })
                 .collect());
@@ -4264,7 +4377,7 @@ fn probe_quantum_demands(
         }
         missing
     } else {
-        no_job_quantum_missing_materials(state, base, automation, jobs, center)?
+        no_job_quantum_missing_materials(state, base, automation, jobs, center, warehouse)?
     };
     Ok(missing
         .into_iter()
@@ -4277,6 +4390,7 @@ fn probe_quantum_demands(
                 entity_id: entity_id.to_owned(),
                 item_id,
                 amount,
+                needed_amount: amount,
             })
         })
         .collect())
@@ -4289,6 +4403,7 @@ fn collect_quantum_demands_with_runtime(
     automation: &Map<String, Value>,
     jobs: &Map<String, Value>,
     entities: &[Value],
+    boundary_second: f64,
 ) -> anyhow::Result<Vec<QuantumDemand>> {
     let mut indexed_centers = entities
         .iter()
@@ -4305,10 +4420,10 @@ fn collect_quantum_demands_with_runtime(
         .iter()
         .map(|(_, center)| *center)
         .collect::<Vec<_>>();
-    // A center probe only reads its saved job and the immutable inventory
-    // snapshot. The later quantum-logistics replay still allocates the shared
-    // stock in this exact ID order, so worker scheduling cannot change which
-    // center wins a scarce item.
+    let warehouse = quantum_warehouse_inventory(base)?;
+    // Parallel probes only read saved jobs and the immutable inventory snapshot.
+    // The sequential reservation pass applies the boundary rotation and existing
+    // ownership, so worker scheduling cannot change which center wins stock.
     let planned = plan_construction_center_probes(runtime, &centers, |index, center| {
         probe_quantum_demands(
             state,
@@ -4318,14 +4433,22 @@ fn collect_quantum_demands_with_runtime(
             indexed_centers[index].0,
             None,
             center,
+            &warehouse,
         )
     })?;
-    let demand_count = planned.iter().map(Vec::len).sum();
-    let mut result = Vec::with_capacity(demand_count);
-    for demands in planned {
-        result.extend(demands);
-    }
-    Ok(result)
+    reserve_quantum_demands(
+        &QuantumDemandProbeInputs {
+            state,
+            base,
+            automation,
+            jobs,
+        },
+        entities,
+        &centers,
+        planned,
+        warehouse,
+        boundary_second,
+    )
 }
 
 struct QuantumDemandProbeInputs<'a> {
@@ -4335,12 +4458,88 @@ struct QuantumDemandProbeInputs<'a> {
     jobs: &'a Map<String, Value>,
 }
 
+fn reserve_quantum_demands(
+    inputs: &QuantumDemandProbeInputs<'_>,
+    entities: &[Value],
+    centers: &[&Map<String, Value>],
+    mut planned: Vec<Vec<QuantumDemand>>,
+    mut warehouse: Map<String, Value>,
+    boundary_second: f64,
+) -> anyhow::Result<Vec<QuantumDemand>> {
+    let mut all_ids = inputs
+        .state
+        .factory_topology
+        .construction_center_indices
+        .iter()
+        .filter_map(|&index| {
+            entities
+                .get(index)
+                .and_then(Value::as_object)
+                .and_then(|center| string_at(center, "id"))
+        })
+        .collect::<Vec<_>>();
+    all_ids.sort();
+    let count = all_ids.len().max(1);
+    let offset = ((boundary_second.max(0.0) / 5.0).floor() as usize) % count;
+    let has_reservation = |center: &Map<String, Value>| {
+        let id = string_at(center, "id").unwrap_or_default();
+        inputs.jobs.contains_key(id)
+            || quantum_buffer(inputs.automation, id).is_some_and(|inventory| !inventory.is_empty())
+    };
+    let mut order = (0..centers.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| {
+        let position = all_ids
+            .binary_search(&string_at(centers[index], "id").unwrap_or_default())
+            .unwrap_or(index);
+        (
+            !has_reservation(centers[index]),
+            (position + count - offset) % count,
+        )
+    });
+    let mut result = Vec::new();
+    for index in order {
+        let mut demands = std::mem::take(&mut planned[index]);
+        if demands.iter().any(|demand| {
+            inventory_amount(&warehouse, &demand.item_id) < demand.needed_amount as f64
+        }) && let Some(first) = demands.first()
+        {
+            demands = probe_quantum_demands(
+                inputs.state,
+                inputs.base,
+                inputs.automation,
+                inputs.jobs,
+                first.entity_index,
+                first.active_row,
+                centers[index],
+                &warehouse,
+            )?;
+        }
+        for mut demand in demands {
+            let available = floor_amount(inventory_amount(&warehouse, &demand.item_id)) as u64;
+            demand.amount = demand.needed_amount.min(available);
+            set_inventory_amount(
+                &mut warehouse,
+                &demand.item_id,
+                (available - demand.amount) as f64,
+            )?;
+            result.push(demand);
+        }
+    }
+    result.sort_by(|left, right| {
+        left.entity_id
+            .cmp(&right.entity_id)
+            .then_with(|| left.item_id.cmp(&right.item_id))
+    });
+    Ok(result)
+}
+
 fn collect_quantum_demands_for_center_indices_with_runtime(
     runtime: &DeterministicRuntime,
     inputs: &QuantumDemandProbeInputs<'_>,
     entities: &[Value],
     center_indices: &[usize],
     active_rows: &[usize],
+    boundary_second: f64,
 ) -> anyhow::Result<Vec<QuantumDemand>> {
     if active_rows.len() != center_indices.len() {
         bail!("native construction quantum active row directory is stale");
@@ -4355,6 +4554,7 @@ fn collect_quantum_demands_for_center_indices_with_runtime(
                 .ok_or_else(|| anyhow!("native construction center index is stale"))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let warehouse = quantum_warehouse_inventory(inputs.base)?;
     let planned = plan_construction_center_probes(runtime, &centers, |index, center| {
         probe_quantum_demands(
             inputs.state,
@@ -4364,14 +4564,17 @@ fn collect_quantum_demands_for_center_indices_with_runtime(
             center_indices[index],
             Some(active_rows[index]),
             center,
+            &warehouse,
         )
     })?;
-    let demand_count = planned.iter().map(Vec::len).sum();
-    let mut result = Vec::with_capacity(demand_count);
-    for demands in planned {
-        result.extend(demands);
-    }
-    Ok(result)
+    reserve_quantum_demands(
+        inputs,
+        entities,
+        &centers,
+        planned,
+        warehouse,
+        boundary_second,
+    )
 }
 
 pub(crate) fn quantum_demands_for_center_indices(
@@ -4380,6 +4583,7 @@ pub(crate) fn quantum_demands_for_center_indices(
     entities: &[Value],
     center_indices: &[usize],
     active_rows: &[usize],
+    boundary_second: f64,
 ) -> anyhow::Result<Vec<QuantumDemand>> {
     let automation = automation(base)?;
     if automation.get("enabled").and_then(Value::as_bool) != Some(true)
@@ -4405,6 +4609,7 @@ pub(crate) fn quantum_demands_for_center_indices(
         entities,
         center_indices,
         active_rows,
+        boundary_second,
     )
 }
 
@@ -4412,6 +4617,7 @@ pub(crate) fn quantum_demands(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
+    boundary_second: f64,
 ) -> anyhow::Result<Vec<QuantumDemand>> {
     let automation = automation(base)?;
     if automation.get("enabled").and_then(Value::as_bool) != Some(true)
@@ -4433,6 +4639,7 @@ pub(crate) fn quantum_demands(
         automation,
         jobs,
         entities,
+        boundary_second,
     )
 }
 
@@ -4718,6 +4925,7 @@ mod tests {
             "activePlanetId": "planet-a",
             "tray": { "copper": 0, "iron": 1 },
             "planetTrays": {},
+            "quantumLogisticsNetwork": { "enabled": true, "inventory": { "iron": "1000000000", "copper": "1000000000" } },
         }));
         let mut jobs = Map::new();
         let mut buffers = Map::new();
@@ -5582,6 +5790,7 @@ mod tests {
             entity_id: center_id,
             item_id: "iron".to_owned(),
             amount: 1,
+            needed_amount: 1,
         };
         assert_eq!(
             apply_quantum_delivery(&mut base, &demand, 1).expect("direct quantum delivery"),
@@ -5910,6 +6119,7 @@ mod tests {
             &automation,
             jobs,
             &entities,
+            5.0,
         )
         .expect("serial construction demand probe");
         let expected_projection = demand_projection(&expected);
@@ -5932,6 +6142,7 @@ mod tests {
                 &automation,
                 jobs,
                 &entities,
+                5.0,
             )
             .expect("construction demand worker matrix");
             assert_eq!(demand_projection(&actual), expected_projection);
@@ -5954,6 +6165,7 @@ mod tests {
             &automation,
             jobs,
             &entities,
+            5.0,
         )
         .expect("serial no-job quantum prefetch");
         let powered_center_count = entities
@@ -5978,6 +6190,7 @@ mod tests {
                 &automation,
                 jobs,
                 &entities,
+                5.0,
             )
             .expect("no-job quantum worker matrix");
             assert_eq!(demand_bytes(&actual), expected_bytes);
@@ -5999,6 +6212,7 @@ mod tests {
             &automation,
             jobs,
             &entities,
+            5.0,
         )
         .expect("existing-job quantum prefetch");
         assert_eq!(
@@ -6027,6 +6241,7 @@ mod tests {
             &entities,
             &center_indices,
             &active_rows,
+            5.0,
         )
         .expect("indexed construction demand probe");
         assert!(!demands.is_empty());
@@ -6071,6 +6286,7 @@ mod tests {
                 &automation,
                 jobs,
                 &entities,
+                5.0,
             )
             .expect_err("malformed construction probe must fail");
             assert_eq!(

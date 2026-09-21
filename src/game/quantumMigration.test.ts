@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { createPlayerInitialState } from "./engine";
 import { exportGame, migrateGame } from "./storage";
+import { depositIntoQuantumInventory, normalizeQuantumLogisticsNetworkState } from "./quantumLogisticsNetwork";
 
 describe("quantum GameState migration", () => {
+  it("preserves the additive v47 download cursor through deposits and saves", () => {
+    const state = createPlayerInitialState();
+    state.quantumLogisticsNetwork.enabled = true;
+    state.quantumLogisticsNetwork.downloadCursor = 11;
+    state.quantumLogisticsNetwork = depositIntoQuantumInventory(state.quantumLogisticsNetwork, "water", 100).state;
+    const loaded = migrateGame(JSON.parse(exportGame(state)).state)!;
+    expect(loaded.version).toBe(47);
+    expect(loaded.quantumLogisticsNetwork.downloadCursor).toBe(11);
+    expect(loaded.quantumLogisticsNetwork.inventory.water).toBe("100");
+    for (const invalid of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "12", null, Number.POSITIVE_INFINITY]) {
+      expect(normalizeQuantumLogisticsNetworkState({ ...state.quantumLogisticsNetwork, downloadCursor: invalid }).downloadCursor).toBeUndefined();
+    }
+  });
   it("migrates v42 with an empty disabled network and keeps legacy station data", () => {
     const state = createPlayerInitialState();
     (state as { version: number }).version = 42;

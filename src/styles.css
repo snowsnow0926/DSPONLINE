@@ -24041,7 +24041,7 @@ input:focus-visible,
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: minmax(64px, auto) auto auto minmax(0, 1fr);
+  grid-template-rows: minmax(64px, auto) auto auto auto minmax(0, 1fr);
   overflow: hidden;
   background: #0b100e;
 }
@@ -24283,19 +24283,32 @@ input:focus-visible,
 .construction-center-status {
   display: flex;
   min-height: 36px;
+  max-height: min(25vh, 140px);
+  flex-wrap: wrap;
   align-items: center;
   gap: 18px;
   padding: 6px 14px;
   border-bottom: 1px solid var(--line);
   background: #101613;
-  overflow-x: auto;
-  white-space: nowrap;
+  overflow: auto;
+  white-space: normal;
 }
 
 .construction-center-status span {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+.construction-center-status [data-construction-center-id] {
+  display: block;
+  flex: 1 1 100%;
+  overflow-wrap: anywhere;
+}
+
+.construction-center-status [aria-label="量子配送状态"] {
+  display: block;
+  color: var(--text-soft);
 }
 
 .construction-center-status strong {
@@ -24731,7 +24744,7 @@ html[data-ui-font-scale="200"] .release-notes-footer {
 
   .construction-center-workspace {
     inset: var(--shell-header-height) 0 var(--shell-dock-height);
-    grid-template-rows: auto auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
   }
 
   .construction-center-header {

@@ -566,6 +566,8 @@ export interface QuantumLogisticsNetworkState {
   itemCapacities: Partial<Record<ItemId, DecimalIntegerString>>;
   routingCursors: Partial<Record<ItemId, number>>;
   uploadRoutingCursors: Partial<Record<ItemId, number>>;
+  /** Optional in v47 saves; rotates equal-priority global download remainders. */
+  downloadCursor?: number;
   /** Runtime-only diagnostics. Save serialization deliberately removes this. */
   runtimeFlow?: QuantumLogisticsRuntimeFlow;
 }
@@ -578,6 +580,15 @@ export interface QuantumLogisticsRuntimeFlow {
   globalDownloadPerMinute: number;
   quantumTowerStacks: number;
   quantumCollectorStacks: number;
+  /** Per-center receipts from the simulation, omitted with runtimeFlow on save. */
+  constructionDeliveries?: Record<string, ConstructionQuantumDeliveryFlow>;
+}
+
+export interface ConstructionQuantumDeliveryFlow {
+  boundarySecond: number;
+  needed: Partial<Record<ItemId, number>>;
+  requested: Partial<Record<ItemId, number>>;
+  delivered: Partial<Record<ItemId, number>>;
 }
 
 export interface SystemHubItemPolicy {

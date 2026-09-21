@@ -1,7 +1,7 @@
 import { Check, Factory, Layers3, Minus, PackageOpen, Plus, Power, Search, Truck, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { CONSTRUCTION, ITEMS, getConstructionDefinition, getPlanet, getRecipe, getTechnology, isConveyorBeltId } from "../game/content";
-import { PORTABLE_FLEET_ITEM_IDS, getConstructionAutomationCycleSeconds, getConstructionAutomationMaterialSeconds, getConstructionAutomationStatus, getConstructionAutomationStockLimit, isPortableFleetItem, isTechnologyCompleted } from "../game/engine";
+import { PORTABLE_FLEET_ITEM_IDS, getConstructionAutomationCycleSeconds, getConstructionAutomationMaterialSeconds, getConstructionAutomationStatus, getConstructionAutomationStockLimit, getConstructionQuantumDeliveryStatus, isPortableFleetItem, isTechnologyCompleted } from "../game/engine";
 import type { FactoryConstructionWorkspaceReadModel } from "../game/factoryReadModels";
 import type { ConstructionAutomationTargetId, ConstructionId, GameState, ItemId, PortableFleetItemId, TechId } from "../game/types";
 import { formatQuantityCompact } from "../game/quantityFormat";
@@ -143,10 +143,11 @@ export function ConstructionCenterWorkspace({ open, game, constructionReadModel,
     return totals;
   }, {});
   const quantumBufferTotal = Object.values(quantumBufferTotals).reduce((sum, amount) => sum + (amount ?? 0), 0);
+  const sourceBuffer = centers[0] ? game.constructionAutomation.quantumMaterialBuffer?.[centers[0].id] ?? {} : {};
   const displayedMaterialInventory = quantumSourceEnabled
-    ? Object.fromEntries(Object.keys({ ...sourceTray, ...quantumBufferTotals }).map((itemId) => [
+    ? Object.fromEntries(Object.keys({ ...sourceTray, ...sourceBuffer }).map((itemId) => [
       itemId,
-      Math.floor((sourceTray[itemId as ItemId] ?? 0) + (quantumBufferTotals[itemId as ItemId] ?? 0)),
+      Math.floor((sourceTray[itemId as ItemId] ?? 0) + (sourceBuffer[itemId as ItemId] ?? 0)),
     ])) as Partial<Record<ItemId, number>>
     : sourceTray;
   const term = query.trim().toLocaleLowerCase("zh-CN");
@@ -236,11 +237,20 @@ export function ConstructionCenterWorkspace({ open, game, constructionReadModel,
       >
         <span><PackageOpen size={14} />取料行星 <strong>{getPlanet(sourcePlanetId).name}</strong></span>
         <span>量子直供 <strong>{!quantumNetworkEnabled ? "未启用" : quantumSourceEnabled ? "已启用" : "未启用"}</strong></span>
-        {quantumSourceEnabled && quantumBufferTotal > 0 ? <span>中心直供缓存 <strong><QuantityValue value={quantumBufferTotal} /></strong></span> : null}
+        {quantumSourceEnabled && quantumBufferTotal > 0 ? <span>各中心缓存合计 <strong><QuantityValue value={quantumBufferTotal} /></strong><small> · 材料预览仅计首个中心可用库存</small></span> : null}
         <span>累计制造 <strong><QuantityValue value={constructionReadModel.automation.totalCrafted} /></strong></span>
         <span>最近完成 <strong>{constructionReadModel.automation.lastCraftedId ? isPortableFleetItem(constructionReadModel.automation.lastCraftedId) ? ITEMS[constructionReadModel.automation.lastCraftedId].name : getConstructionDefinition(constructionReadModel.automation.lastCraftedId)?.name ?? "未知" : "尚无"}</strong></span>
         {centers.map((center) => {
           const status = getConstructionAutomationStatus(game, center.id);
+          const delivery = quantumSourceEnabled ? getConstructionQuantumDeliveryStatus(game, center.id, status) : null;
+          const deliveryLabel = delivery ? {
+            disabled: "量子直供未启用",
+            "no-bandwidth": "量子下载额度为零，请接入量子塔",
+            "missing-stock": "量子仓库也缺少当前物料",
+            "waiting-boundary": "等待下一次五秒配送",
+            "waiting-allocation": "等待共享配送额度",
+            received: "量子物料已送达",
+          }[delivery.state] : null;
           const displayJob = displayJobs?.get(center.id);
           const wipItems = displayJob
             ? displayJob.inventory.rows.map((item) => ({ itemId: item.itemId as ItemId, amount: item.amount }))
@@ -252,7 +262,18 @@ export function ConstructionCenterWorkspace({ open, game, constructionReadModel,
           const destroyedCount = destroyedItems.reduce((sum, item) => sum + item.amount, 0);
           const wipDetail = wipItems.map((item) => `${ITEMS[item.itemId].name} ${formatQuantityCompact(item.amount)}`).join("、");
           const destroyedDetail = destroyedItems.map((item) => `${ITEMS[item.itemId].name} ${formatQuantityCompact(item.amount)}`).join("、");
-          return <span key={center.id}>{getPlanet(center.planetId).name} <strong>{status.stage}</strong>{` · WIP ${formatQuantityCompact(wipCount)}${wipDetail ? `（${wipDetail}）` : ""} · 已销毁副产物 ${formatQuantityCompact(destroyedCount)}${destroyedDetail ? `（${destroyedDetail}）` : ""}`}{status.missingItemId ? ` · 缺${ITEMS[status.missingItemId].name} ${formatQuantityCompact(status.missingAmount ?? 1)}` : status.etaSeconds > 0 ? ` · ${status.etaSeconds.toFixed(1)}s` : ""}{status.recipeFallbackReason ? ` · 已回退：${status.recipeFallbackReason}` : ""}</span>;
+          const deliveryDetail = delivery ? [
+            deliveryLabel,
+            delivery.itemId ? `量子库${ITEMS[delivery.itemId].name} ${formatQuantityCompact(delivery.warehouseAmount)} · 本中心缓存 ${formatQuantityCompact(delivery.bufferAmount)}` : null,
+            delivery.boundarySecond !== undefined ? `第 ${delivery.boundarySecond} 秒请求 ${formatQuantityCompact(delivery.requested)} / 送达 ${formatQuantityCompact(delivery.delivered)}` : null,
+          ].filter(Boolean).join(" · ") : "";
+          return <span key={center.id} data-construction-center-id={center.id}>
+            {getPlanet(center.planetId).name} <strong>{status.stage}</strong>
+            {` · WIP ${formatQuantityCompact(wipCount)}${wipDetail ? `（${wipDetail}）` : ""} · 已销毁副产物 ${formatQuantityCompact(destroyedCount)}${destroyedDetail ? `（${destroyedDetail}）` : ""}`}
+            {status.missingItemId ? ` · 本中心缺${ITEMS[status.missingItemId].name} ${formatQuantityCompact(status.missingAmount ?? 1)}` : status.etaSeconds > 0 ? ` · ${status.etaSeconds.toFixed(1)}s` : ""}
+            {status.recipeFallbackReason ? ` · 已回退：${status.recipeFallbackReason}` : ""}
+            {delivery && (status.missingItemId || delivery.requested > 0) ? <small aria-label="量子配送状态"> · {deliveryDetail}</small> : null}
+          </span>;
         })}
         {centers.length === 0 ? <em>需要先在画布放置建筑制造中心</em> : null}
       </div>

@@ -168,3 +168,22 @@ jobs:
           path: shard-reports
       - name: Merge shard timing JSON and print top 20
         run: node scripts/report-slowest-tests.mjs shard-reports/playwright-json-shard-1/playwright-report.json shard-reports/playwright-json-shard-2/playwright-report.json --limit 20
+
+  verify:
+    name: verify
+    if: ${{ always() }}
+    needs: [unit, server-ops-native, build, e2e-shard-1, e2e-shard-2, e2e-report]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          REQUIRED_JOB_RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          node --input-type=module -e '
+            const results = (process.env.REQUIRED_JOB_RESULTS || "").split(",");
+            if (results.length !== 6 || results.some(result => result !== "success")) {
+              console.error("Required CI jobs did not all succeed:", results);
+              process.exit(1);
+            }
+            console.log("All required CI jobs passed.");
+          '

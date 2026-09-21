@@ -1,6 +1,7 @@
 import type { AppLocale } from "./locale";
 export { getCurrentReleaseNotes } from "./currentReleaseNotes";
 export { getReleaseNotes127 } from "./releaseNotes127";
+export { getReleaseNotes129 } from "./releaseNotes129";
 
 export interface LocalizedReleaseNoteRecord {
   id: string;

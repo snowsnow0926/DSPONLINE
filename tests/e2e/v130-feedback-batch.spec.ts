@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { injectOneConservativeDecision } from "./offline-decision-test-helpers";
 
-const RELEASE_NOTE_ID = "2026-09-10-v1.2.9";
+const RELEASE_NOTE_ID = "2026-09-22-v1.3.0";
 
 async function seedBatchSave(page: Page, options: { offlineSeconds?: number; paused?: boolean; topology?: boolean; bypassMenu?: boolean } = {}) {
   await page.addInitScript(({ offlineSeconds, paused, topology, bypassMenu, releaseNoteId }) => {

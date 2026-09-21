@@ -62,7 +62,7 @@ for (const [layout, viewport] of Object.entries({ desktop: { width: 1440, height
       state.settings.fontScale = scale;
       await page.addInitScript((seed) => {
         sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-        localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-10-v1.2.9");
+        localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-09-22-v1.3.0");
         localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
         localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state: seed }));
       }, state);

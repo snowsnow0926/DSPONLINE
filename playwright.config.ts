@@ -34,7 +34,6 @@ export default defineConfig({
   use: {
     baseURL,
     headless: true,
-    launchOptions: { args: ["--mute-audio"] },
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },
@@ -44,9 +43,13 @@ export default defineConfig({
       use: {
         ...devices["Desktop Chrome"],
         channel: "chrome",
-        ...(requestedRendererHeapMb === null ? {} : {
-          launchOptions: { args: [`--js-flags=--max-old-space-size=${requestedRendererHeapMb}`] },
-        }),
+        // WebKit on Linux rejects Chromium-only command-line switches.
+        launchOptions: {
+          args: [
+            "--mute-audio",
+            ...(requestedRendererHeapMb === null ? [] : [`--js-flags=--max-old-space-size=${requestedRendererHeapMb}`]),
+          ],
+        },
       },
     },
   ],

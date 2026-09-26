@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **浏览器兼容性 CI 维护（2026-09-27）**：`Nightly Browser Compatibility` 改为仅手动 `workflow_dispatch`，取消每日计划，避免重复失败通知；普通提交/PR 的 CI 触发规则保留。[Linux 失败日志](https://github.com/snowsnow0926/DSPONLINE/actions/runs/36192772241) 确认 WebKit 在启动时拒绝共享的 `--mute-audio` 参数，Firefox 通过；该参数已移至 Chromium 项目专用配置，仍保留可选 renderer heap 参数。本机 Windows 上 Firefox/WebKit 2/2、Chromium 同一交互旅程 1/1 通过，并检查实际启动日志中 Firefox/WebKit 不再携带 Chromium 参数。Windows 修复前也能通过，不将其声称为 Linux 失败复现；本次未宣称 Linux 重新运行成功，也未把其他既有 CI 失败标记为已修复。
+
 > **1.3.0 香港 Web 正式验收（2026-09-22）**：运行源码 `e8c44f8d7160` 完成 clean 安装、类型、许可证、构建与 196 文件冻结/远端复算；Vitest 3,208/35 跳过，server 390/2 + station 4/4，Ops 56/6，Native Node 635/1，完整 Chromium 474/33（13.1 分钟），均无失败。正式 1.2.9 冻结文件到 1.3.0 的合成存档/PWA 升级、离线重开和公网新旧入口缓存隔离通过，生产测试写请求本地拦截。首次元数据/验证驱动问题及修正、跳过与范围边界见 [发布记录](./releases/1.3.0.md)；未构建或发布原生安装器。
 
 > **量子直供修复验证（2026-09-21，本地开发，未发布）**：新回归覆盖缺货高优先级槽、部分现货、同级余数轮转、量子现成中间件、多中心紧带宽、旧任务后缀、缺料目标跳过、保存重载与退款。完整 Vitest 3,208 通过 / 35 跳过；Chromium 完整 474 通过 / 33 条件跳过，状态区五行布局修正后另外复验 23 项可见性、字号和交互（包含已执行用例，不叠加为唯一用例数）。Native Node 635 通过 / 1 条件跳过；Rust 与最终制品复验详情见 [开发记录](./feedback/2026-09-21-v1.2.9-construction-quantum-fix.md)。这些是本地开发结果，不是新发布或玩家原档现场验收。

@@ -1,9 +1,8 @@
 name: Nightly Browser Compatibility
 
 on:
+  # Run on demand; do not send repetitive failures from a daily schedule.
   workflow_dispatch:
-  schedule:
-    - cron: "23 18 * * *"
 
 permissions:
   contents: read

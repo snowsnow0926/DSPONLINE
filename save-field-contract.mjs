@@ -161,23 +161,46 @@ export function inspectSaveContractRecord(scope, record, gameStateVersion) {
   return { valid: errors.length === 0, fields, errors };
 }
 
+function compileProjectionPlan(scope, gameStateVersion) {
+  const dynamic = [];
+  const entries = listSaveContractFields(scope, gameStateVersion, "projection").map((field) => {
+    const descriptor = getSaveFieldDefinition(scope, field).default;
+    const constant = descriptor.kind === "literal" || descriptor.kind === "empty-object" || descriptor.kind === "empty-array";
+    const entry = Object.freeze({ field, descriptor,
+      // Empty containers are matched structurally; they need no fresh object.
+      value: descriptor.kind === "literal" ? descriptor.value : undefined,
+      dynamicIndex: constant ? -1 : dynamic.length,
+    });
+    if (!constant) dynamic.push(entry);
+    return entry;
+  });
+  return Object.freeze({ entries: Object.freeze(entries), dynamic: Object.freeze(dynamic) });
+}
+
+// The contract is deeply frozen. Compile only its finite, declared versions;
+// caller-supplied versions must not create an unbounded process-wide cache.
+const projectionPlans = new Map(Object.entries(SAVE_FIELD_CONTRACT.scopes).map(([scope, definitions]) => {
+  const versions = new Set(Object.values(definitions).flatMap((definition) => definition.projection?.omitDefaultVersions ?? []));
+  return [scope, new Map([undefined, ...versions].map((version) => [version, compileProjectionPlan(scope, version)]))];
+}));
+
 export function omitSaveContractDefaults(record, scope, gameStateVersion) {
   if (!record || typeof record !== "object" || Array.isArray(record)) return record;
-  const fields = listSaveContractFields(scope, gameStateVersion, "projection");
-  const defaults = new Map(fields.map((field) => {
-    const definition = getSaveFieldDefinition(scope, field);
-    return [field, definition ? resolveDefaultDescriptor(definition.default, record) : undefined];
-  }));
-  for (const field of fields) {
-    const definition = getSaveFieldDefinition(scope, field);
+  const plan = projectionPlans.get(scope)?.get(gameStateVersion);
+  if (!plan) return record;
+  // Read sibling-derived defaults before deleting anything (e.g. sorterTier
+  // depends on tier). No record or record-derived value is kept in the plan.
+  const dynamicValues = plan.dynamic.length
+    ? plan.dynamic.map(({ descriptor }) => resolveDefaultDescriptor(descriptor, record)) : null;
+  for (const { field, descriptor, value, dynamicIndex } of plan.entries) {
     const own = ownDataValue(record, field);
     if (own.kind === "undefined") {
       delete record[field];
       continue;
     }
-    if (!definition || own.kind === "invalid-record" || own.kind === "accessor" || own.kind === "missing") continue;
-    const defaultValue = defaults.get(field);
-    if (exactDefaultMatch(own.value, definition.default, defaultValue)) delete record[field];
+    if (own.kind === "invalid-record" || own.kind === "accessor" || own.kind === "missing") continue;
+    const defaultValue = dynamicIndex < 0 ? value : dynamicValues[dynamicIndex];
+    if (exactDefaultMatch(own.value, descriptor, defaultValue)) delete record[field];
   }
   return record;
 }

@@ -1,0 +1,209 @@
+{
+  "schemaVersion": 1,
+  "status": "development-candidate-regressions-running",
+  "runtimeFile": "save-field-contract.mjs",
+  "runtimeFileSha256": "08f5b47bd061a7034956d30b427a0114a13cd96ea161d8322938bc2b3bcd8de4",
+  "benchmark": {
+    "scope": "Chrome persistent projection and compatibility serialization; excludes load, initial state transfer and database I/O",
+    "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "browser": "147.0.7727.138",
+    "order": [
+      "a1",
+      "b1",
+      "b2",
+      "a2"
+    ],
+    "baseline": {
+      "samples": 6,
+      "projectionMs": 1213.25,
+      "serializationMs": 770.9500000476837,
+      "verifyDecodeMs": 246.44999998807907,
+      "reencodeMs": 253.69999998807907,
+      "totalMs": 2534.600000023842
+    },
+    "candidate": {
+      "samples": 6,
+      "projectionMs": 505.4500000476837,
+      "serializationMs": 785.7999999523163,
+      "verifyDecodeMs": 240.39999997615814,
+      "reencodeMs": 257.00000005960464,
+      "totalMs": 1839.8500000238419
+    },
+    "projectionReductionPercent": 58.33917164247404,
+    "totalReductionPercent": 27.410636786611885,
+    "finalHashes": [
+      "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+    ],
+    "serializedBytes": 110789823,
+    "runs": [
+      {
+        "run": "a1",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "9af159f1b38e16019a95685ef61f1aa236664932",
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "persistent projection, transfer serialization and compatibility decode; no storage I/O",
+        "samples": [
+          {
+            "projectionMs": 1310,
+            "serializationMs": 742.5,
+            "verifyDecodeMs": 231.80000007152557,
+            "reencodeMs": 252.5,
+            "totalMs": 2536.8000000715256,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          },
+          {
+            "projectionMs": 1215.8999999761581,
+            "serializationMs": 764.2000000476837,
+            "verifyDecodeMs": 251.29999995231628,
+            "reencodeMs": 251.90000009536743,
+            "totalMs": 2483.3000000715256,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          },
+          {
+            "projectionMs": 1188.2999999523163,
+            "serializationMs": 1658.1000000238419,
+            "verifyDecodeMs": 1104.2000000476837,
+            "reencodeMs": 266,
+            "totalMs": 4216.600000023842,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          }
+        ]
+      },
+      {
+        "run": "b1",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "460e122d13246322bea4dc8f02b4a7aa47bd762d",
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "persistent projection, transfer serialization and compatibility decode; no storage I/O",
+        "samples": [
+          {
+            "projectionMs": 574.3999999761581,
+            "serializationMs": 766.3000000715256,
+            "verifyDecodeMs": 229.69999992847443,
+            "reencodeMs": 257.7000000476837,
+            "totalMs": 1828.1000000238419,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          },
+          {
+            "projectionMs": 506,
+            "serializationMs": 786,
+            "verifyDecodeMs": 239.19999992847443,
+            "reencodeMs": 256.3000000715256,
+            "totalMs": 1787.5,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          },
+          {
+            "projectionMs": 493.5,
+            "serializationMs": 1652.3000000715256,
+            "verifyDecodeMs": 1102.1000000238419,
+            "reencodeMs": 258.7999999523163,
+            "totalMs": 3506.7000000476837,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          }
+        ]
+      },
+      {
+        "run": "b2",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "460e122d13246322bea4dc8f02b4a7aa47bd762d",
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "persistent projection, transfer serialization and compatibility decode; no storage I/O",
+        "samples": [
+          {
+            "projectionMs": 588.7000000476837,
+            "serializationMs": 777.5999999046326,
+            "verifyDecodeMs": 237.30000007152557,
+            "reencodeMs": 248,
+            "totalMs": 1851.6000000238419,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          },
+          {
+            "projectionMs": 504.90000009536743,
+            "serializationMs": 785.5999999046326,
+            "verifyDecodeMs": 241.60000002384186,
+            "reencodeMs": 259.10000002384186,
+            "totalMs": 1791.2000000476837,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          },
+          {
+            "projectionMs": 493.39999997615814,
+            "serializationMs": 1630,
+            "verifyDecodeMs": 1099.3999999761581,
+            "reencodeMs": 252.60000002384186,
+            "totalMs": 3475.399999976158,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          }
+        ]
+      },
+      {
+        "run": "a2",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "9af159f1b38e16019a95685ef61f1aa236664932",
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "persistent projection, transfer serialization and compatibility decode; no storage I/O",
+        "samples": [
+          {
+            "projectionMs": 1305.2000000476837,
+            "serializationMs": 738.1000000238419,
+            "verifyDecodeMs": 233,
+            "reencodeMs": 256.09999990463257,
+            "totalMs": 2532.399999976158,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          },
+          {
+            "projectionMs": 1210.6000000238419,
+            "serializationMs": 777.7000000476837,
+            "verifyDecodeMs": 241.60000002384186,
+            "reencodeMs": 254.89999997615814,
+            "totalMs": 2484.8000000715256,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          },
+          {
+            "projectionMs": 1195.2999999523163,
+            "serializationMs": 1682.7000000476837,
+            "verifyDecodeMs": 1085.2000000476837,
+            "reencodeMs": 245.79999995231628,
+            "totalMs": 4209,
+            "stateChecksum": "21f90aa1",
+            "payloadChecksum": "339f5052",
+            "serializedBytes": 110789823,
+            "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+          }
+        ]
+      }
+    ]
+  }
+}

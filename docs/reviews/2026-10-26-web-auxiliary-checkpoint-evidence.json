@@ -1,0 +1,261 @@
+{
+  "schemaVersion": 1,
+  "sampleCountPerVariantAndAction": 3,
+  "input": {
+    "bytes": 205464026,
+    "sha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "entities": 110042,
+    "belts": 233300,
+    "paused": true,
+    "timeWarpEnabled": false,
+    "autosaveIntervalSeconds": 0
+  },
+  "verification": {
+    "canonicalFieldsSha256": "372522226c1f1b0a7033122bc2ab121bd2d170f6dd750d368f132d26be165cff",
+    "comparedTopLevelFields": 49,
+    "stateBytes": 110673590,
+    "originalOrderSha256": "6941b172116c60ff3912e32271852a71db458eb9686fd9be68a723fa6c6912b0",
+    "candidates": [
+      {
+        "name": "app-slot-checkpoint-canonical",
+        "stateBytes": 110673590,
+        "originalOrderSha256": "2d3a398c359336100136bf30a59ae476b8709bd9166e24eccfa79f7aa9b3317e",
+        "canonicalFieldsSha256": "372522226c1f1b0a7033122bc2ab121bd2d170f6dd750d368f132d26be165cff",
+        "changedFields": []
+      },
+      {
+        "name": "app-snapshot-checkpoint-canonical",
+        "stateBytes": 110673590,
+        "originalOrderSha256": "2d3a398c359336100136bf30a59ae476b8709bd9166e24eccfa79f7aa9b3317e",
+        "canonicalFieldsSha256": "372522226c1f1b0a7033122bc2ab121bd2d170f6dd750d368f132d26be165cff",
+        "changedFields": []
+      }
+    ]
+  },
+  "actions": {
+    "slot": {
+      "baseline": {
+        "samples": [
+          {
+            "name": "app-slot-baseline-1",
+            "durationMs": 7381,
+            "maxFrameGapMs": 632.3000000715256,
+            "longTaskTotalMs": 2434,
+            "largestStateCopyMs": 354.7999999523163,
+            "rendererLifetimePeakWorkingSetBytes": 4090986496,
+            "rendererFinalPrivateBytes": 2300002304,
+            "stateChecksum": "6a1bb9b7",
+            "appAssets": [
+              "/assets/index-DV8GQnI7.js"
+            ]
+          },
+          {
+            "name": "app-slot-baseline-2",
+            "durationMs": 7233.099999904633,
+            "maxFrameGapMs": 631.6000000238419,
+            "longTaskTotalMs": 2367,
+            "largestStateCopyMs": 360.7000000476837,
+            "rendererLifetimePeakWorkingSetBytes": 4040249344,
+            "rendererFinalPrivateBytes": 2297724928,
+            "stateChecksum": "6a1bb9b7",
+            "appAssets": [
+              "/assets/index-DV8GQnI7.js"
+            ]
+          },
+          {
+            "name": "app-slot-baseline-3",
+            "durationMs": 7322.899999976158,
+            "maxFrameGapMs": 643.1000000238419,
+            "longTaskTotalMs": 2390,
+            "largestStateCopyMs": 359.60000002384186,
+            "rendererLifetimePeakWorkingSetBytes": 4060753920,
+            "rendererFinalPrivateBytes": 2297176064,
+            "stateChecksum": "6a1bb9b7",
+            "appAssets": [
+              "/assets/index-DV8GQnI7.js"
+            ]
+          }
+        ],
+        "medians": {
+          "durationMs": 7322.899999976158,
+          "maxFrameGapMs": 632.3000000715256,
+          "longTaskTotalMs": 2390,
+          "largestStateCopyMs": 359.60000002384186,
+          "rendererLifetimePeakWorkingSetBytes": 4060753920,
+          "rendererFinalPrivateBytes": 2297724928
+        }
+      },
+      "checkpoint": {
+        "samples": [
+          {
+            "name": "app-slot-checkpoint-1",
+            "durationMs": 6447.5,
+            "maxFrameGapMs": 101,
+            "longTaskTotalMs": 0,
+            "largestStateCopyMs": 0,
+            "rendererLifetimePeakWorkingSetBytes": 3011854336,
+            "rendererFinalPrivateBytes": 2514833408,
+            "stateChecksum": "f51ab707",
+            "appAssets": [
+              "/assets/index-BldsjQ96.js"
+            ]
+          },
+          {
+            "name": "app-slot-checkpoint-2",
+            "durationMs": 6462.600000023842,
+            "maxFrameGapMs": 101.10000002384186,
+            "longTaskTotalMs": 0,
+            "largestStateCopyMs": 0,
+            "rendererLifetimePeakWorkingSetBytes": 2579111936,
+            "rendererFinalPrivateBytes": 2065969152,
+            "stateChecksum": "f51ab707",
+            "appAssets": [
+              "/assets/index-BldsjQ96.js"
+            ]
+          },
+          {
+            "name": "app-slot-checkpoint-3",
+            "durationMs": 6452.199999928474,
+            "maxFrameGapMs": 100.39999997615814,
+            "longTaskTotalMs": 0,
+            "largestStateCopyMs": 0,
+            "rendererLifetimePeakWorkingSetBytes": 2582331392,
+            "rendererFinalPrivateBytes": 2070360064,
+            "stateChecksum": "f51ab707",
+            "appAssets": [
+              "/assets/index-BldsjQ96.js"
+            ]
+          }
+        ],
+        "medians": {
+          "durationMs": 6452.199999928474,
+          "maxFrameGapMs": 101,
+          "longTaskTotalMs": 0,
+          "largestStateCopyMs": 0,
+          "rendererLifetimePeakWorkingSetBytes": 2582331392,
+          "rendererFinalPrivateBytes": 2070360064
+        }
+      },
+      "changePercent": {
+        "durationMs": -11.8900981858351,
+        "maxFrameGapMs": -84.02656966810456,
+        "longTaskTotalMs": -100,
+        "largestStateCopyMs": -100,
+        "rendererLifetimePeakWorkingSetBytes": -36.407587288618565,
+        "rendererFinalPrivateBytes": -9.895216839463213
+      }
+    },
+    "snapshot": {
+      "baseline": {
+        "samples": [
+          {
+            "name": "app-snapshot-baseline-1",
+            "durationMs": 5646.5,
+            "maxFrameGapMs": 624.1999999284744,
+            "longTaskTotalMs": 1850,
+            "largestStateCopyMs": 368.39999997615814,
+            "rendererLifetimePeakWorkingSetBytes": 3983159296,
+            "rendererFinalPrivateBytes": 3284680704,
+            "stateChecksum": "6a1bb9b7",
+            "appAssets": [
+              "/assets/index-DV8GQnI7.js"
+            ]
+          },
+          {
+            "name": "app-snapshot-baseline-2",
+            "durationMs": 5493.700000047684,
+            "maxFrameGapMs": 613.1000000238419,
+            "longTaskTotalMs": 1901,
+            "largestStateCopyMs": 361.2999999523163,
+            "rendererLifetimePeakWorkingSetBytes": 3990900736,
+            "rendererFinalPrivateBytes": 3284475904,
+            "stateChecksum": "6a1bb9b7",
+            "appAssets": [
+              "/assets/index-DV8GQnI7.js"
+            ]
+          },
+          {
+            "name": "app-snapshot-baseline-3",
+            "durationMs": 5566.700000047684,
+            "maxFrameGapMs": 610.4000000953674,
+            "longTaskTotalMs": 1876,
+            "largestStateCopyMs": 370.60000002384186,
+            "rendererLifetimePeakWorkingSetBytes": 3784753152,
+            "rendererFinalPrivateBytes": 3439546368,
+            "stateChecksum": "6a1bb9b7",
+            "appAssets": [
+              "/assets/index-DV8GQnI7.js"
+            ]
+          }
+        ],
+        "medians": {
+          "durationMs": 5566.700000047684,
+          "maxFrameGapMs": 613.1000000238419,
+          "longTaskTotalMs": 1876,
+          "largestStateCopyMs": 368.39999997615814,
+          "rendererLifetimePeakWorkingSetBytes": 3983159296,
+          "rendererFinalPrivateBytes": 3284680704
+        }
+      },
+      "checkpoint": {
+        "samples": [
+          {
+            "name": "app-snapshot-checkpoint-1",
+            "durationMs": 6459.900000095367,
+            "maxFrameGapMs": 100.39999997615814,
+            "longTaskTotalMs": 0,
+            "largestStateCopyMs": 0,
+            "rendererLifetimePeakWorkingSetBytes": 2584137728,
+            "rendererFinalPrivateBytes": 2070818816,
+            "stateChecksum": "f51ab707",
+            "appAssets": [
+              "/assets/index-BldsjQ96.js"
+            ]
+          },
+          {
+            "name": "app-snapshot-checkpoint-2",
+            "durationMs": 6452.300000071526,
+            "maxFrameGapMs": 103,
+            "longTaskTotalMs": 0,
+            "largestStateCopyMs": 0,
+            "rendererLifetimePeakWorkingSetBytes": 2595594240,
+            "rendererFinalPrivateBytes": 2083803136,
+            "stateChecksum": "f51ab707",
+            "appAssets": [
+              "/assets/index-BldsjQ96.js"
+            ]
+          },
+          {
+            "name": "app-snapshot-checkpoint-3",
+            "durationMs": 6454.700000047684,
+            "maxFrameGapMs": 101.39999997615814,
+            "longTaskTotalMs": 0,
+            "largestStateCopyMs": 0,
+            "rendererLifetimePeakWorkingSetBytes": 2588696576,
+            "rendererFinalPrivateBytes": 2073739264,
+            "stateChecksum": "f51ab707",
+            "appAssets": [
+              "/assets/index-BldsjQ96.js"
+            ]
+          }
+        ],
+        "medians": {
+          "durationMs": 6454.700000047684,
+          "maxFrameGapMs": 101.39999997615814,
+          "longTaskTotalMs": 0,
+          "largestStateCopyMs": 0,
+          "rendererLifetimePeakWorkingSetBytes": 2588696576,
+          "rendererFinalPrivateBytes": 2073739264
+        }
+      },
+      "changePercent": {
+        "durationMs": 15.952000287286786,
+        "maxFrameGapMs": -83.46109933579922,
+        "longTaskTotalMs": -100,
+        "largestStateCopyMs": -100,
+        "rendererLifetimePeakWorkingSetBytes": -35.00896189113899,
+        "rendererFinalPrivateBytes": -36.866336460811745
+      }
+    }
+  }
+}

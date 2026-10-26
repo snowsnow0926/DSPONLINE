@@ -15705,6 +15705,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return { success: true, message: "云存档已恢复，原工厂已保留为本地快照" };
   }, [persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
+  const takeAuxiliaryCheckpointTransfer = useCallback((state: GameState) => {
+    const checkpoint = latestAuthoritativeCheckpointTransferRef.current;
+    if (!checkpoint || checkpoint.state !== state) return undefined;
+    // Two operations may await the same full checkpoint. Only the first can
+    // own its buffer; the other still has a complete, safe state fallback.
+    latestAuthoritativeCheckpointTransferRef.current = null;
+    return {
+      stateTransfer: checkpoint.transfer,
+      ...(checkpoint.checkpointOverlay ? { checkpointOverlay: checkpoint.checkpointOverlay } : {}),
+      ...(checkpoint.expectedStateIdentity ? { expectedStateIdentity: checkpoint.expectedStateIdentity } : {}),
+    };
+  }, []);
+
   const saveToSlot = useCallback(async (slotId: SaveSlotId) => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
       setNotice("Windows 原生权威接管期间不能把旧 JavaScript 镜像写入本地槽位；槽位和当前工厂均未改变");
@@ -15716,7 +15729,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice("页面正在退出，槽位保存未执行");
       return;
     }
-    const result = await saveGameSlotVerified(slotId, checkpoint);
+    const result = await saveGameSlotVerified(slotId, checkpoint, takeAuxiliaryCheckpointTransfer(checkpoint));
     if (lifecycleExitStartedRef.current) {
       setNotice("页面正在退出，槽位保存未执行");
       return;
@@ -15724,7 +15737,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     refreshSaveData();
     setNotice(result.message);
     playTone(result.success ? "confirm" : "alert");
-  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
 
   const loadFromSlot = useCallback(async (slotId: SaveSlotId) => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
@@ -15774,7 +15787,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice("页面正在退出，快照未创建");
       return;
     }
-    const snapshot = await saveGameSnapshotVerified(checkpoint, "手动快照");
+    const snapshot = await saveGameSnapshotVerified(checkpoint, "手动快照", takeAuxiliaryCheckpointTransfer(checkpoint));
     if (lifecycleExitStartedRef.current) {
       setNotice("页面正在退出，快照结果未提交");
       return;
@@ -15782,7 +15795,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     refreshSaveData();
     setNotice(snapshot ? "手动快照已创建" : "快照创建失败：本地存储空间不足");
     playTone(snapshot ? "confirm" : "alert");
-  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
 
   const addSecondUnipolarVein = useCallback(async () => {
     if (readNativeAuthorityPersistenceBoundary().protected) {

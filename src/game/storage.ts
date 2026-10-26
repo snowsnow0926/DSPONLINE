@@ -4167,10 +4167,77 @@ export function saveGameSlot(slotId: SaveSlotId, state: GameState): void {
   setLocalSaveValue(key, serializeEnvelope(state, Date.now(), "slot", undefined, loadContentPackRegistry(), slotId));
 }
 
-export async function saveGameSlotVerified(slotId: SaveSlotId, state: GameState): Promise<SaveGameResult> {
+export interface SaveCheckpointTransfer {
+  stateTransfer: SimulationStateTransfer;
+  checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
+  expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
+}
+
+/** The caller must own this checkpoint exclusively and keep a complete state for compatibility fallback. */
+async function saveAuxiliaryCheckpointWithProof(
+  state: GameState,
+  checkpoint: SaveCheckpointTransfer,
+  target: { key: string; kind: "slot" | "snapshot"; savedAt: number; slot?: SaveSlotId; reason?: string },
+): Promise<SaveGameResult | null> {
+  try {
+    await initializeLocalSaveStore();
+    // Compatibility stores retain the existing full-state serializer. Never
+    // take ownership of the transfer until the proof-capable backend is ready.
+    if (getLocalSaveBackend() !== "indexeddb" || typeof Worker === "undefined") return null;
+    const expectedStateIdentity = checkpoint.expectedStateIdentity ?? {
+      mode: state.mode,
+      version: state.version,
+      activePlanetId: state.activePlanetId,
+      entityCount: state.entities.length,
+      beltCount: state.belts.length,
+      elapsedSeconds: state.elapsedSeconds,
+    };
+    if (saveModeForState(state) !== expectedStateIdentity.mode) {
+      return failedSave("verification", "权威检查点模式与请求保存模式不一致");
+    }
+    const writer = getLocalSaveWriterStatus();
+    if (writer.role !== "primary") return failedSave("read-only", writer.reason);
+    const expectedRevision = getLocalSaveRevision(target.key);
+    const serialized = await serializeAuthoritativeSaveStateTransferInWorker(checkpoint.stateTransfer, {
+      savedAt: target.savedAt,
+      kind: target.kind,
+      slot: target.slot ?? "main",
+      reason: target.reason,
+      expectedStateIdentity,
+      ...(checkpoint.checkpointOverlay ? { checkpointOverlay: checkpoint.checkpointOverlay } : {}),
+    });
+    const capacity = await hasLocalSaveCapacityForBytes(target.key, serialized.proof.byteLength);
+    if (!capacity.ok) return failedSave("quota", "本地存储空间不足，存档尚未保存。", serialized.proof.byteLength);
+    const committed = await setLocalSavePayloadWithProof({
+      key: target.key,
+      bytes: serialized.bytes,
+      proof: serialized.proof,
+      seed: serialized.catalogSeed,
+      expectedRevision,
+      fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
+    });
+    if (!committed.result.ok) return authoritativePersistenceFailure(committed.result, serialized.proof.byteLength);
+    invalidateSaveSummaryCache(target.key);
+    snapshotMetadataCache.delete(target.key);
+    return { success: true, message: target.kind === "slot" ? `本地槽位 ${target.slot} 已保存` : "快照已创建",
+      savedAt: target.savedAt, bytes: serialized.proof.byteLength };
+  } catch (error) {
+    await recoverLocalSaveCache();
+    const coordination = localCoordinationFailure(error);
+    if (coordination) return coordination;
+    return failedSave(isQuotaExceededError(error) ? "quota" : "unavailable",
+      isQuotaExceededError(error) ? "本地存储空间不足，存档尚未保存。" : "权威检查点保存未能完成校验，请重试");
+  }
+}
+
+export async function saveGameSlotVerified(slotId: SaveSlotId, state: GameState, checkpoint?: SaveCheckpointTransfer): Promise<SaveGameResult> {
   const savedAt = Date.now();
   const mode = saveModeForState(state);
   const key = saveSlotKey(slotId, mode);
+  if (checkpoint) {
+    const result = await saveAuxiliaryCheckpointWithProof(state, checkpoint, { key, kind: "slot", slot: slotId, savedAt });
+    if (result) return result;
+  }
   let raw: string | undefined;
   try {
     const serialized = await serializeEnvelopeInWorker(state, savedAt, "slot", undefined, slotId);
@@ -4734,14 +4801,15 @@ export function saveGameSnapshot(state: GameState, reason = "自动快照"): Sav
   }
 }
 
-export async function saveGameSnapshotVerified(state: GameState, reason = "自动快照"): Promise<SaveSnapshotSummary | null> {
-  return saveGameSnapshotVerifiedInternal(state, reason);
+export async function saveGameSnapshotVerified(state: GameState, reason = "自动快照", checkpoint?: SaveCheckpointTransfer): Promise<SaveSnapshotSummary | null> {
+  return saveGameSnapshotVerifiedInternal(state, reason, undefined, checkpoint);
 }
 
 async function saveGameSnapshotVerifiedInternal(
   state: GameState,
   reason: string,
   primary?: VerifiedPrimarySnapshotSource,
+  checkpoint?: SaveCheckpointTransfer,
 ): Promise<SaveSnapshotSummary | null> {
   const mode = saveModeForState(state);
   const savedAt = Date.now();
@@ -4749,6 +4817,17 @@ async function saveGameSnapshotVerifiedInternal(
   const id = `${savedAt}-${sequence}`;
   const key = `${snapshotSavePrefix(mode)}.${id}`;
   try {
+    if (checkpoint) {
+      const result = await saveAuxiliaryCheckpointWithProof(state, checkpoint, { key, kind: "snapshot", reason, savedAt });
+      if (result) {
+        if (!result.success) return null;
+        if (reason === "自动快照") {
+          trimAutomaticSnapshots(AUTOMATIC_SAVE_SNAPSHOT_LIMIT, mode);
+          await flushLocalSaveWrites();
+        }
+        return getSnapshotSummaryForKey(key, undefined, mode);
+      }
+    }
     // Only the automatic snapshot following this invocation's successful
     // primary commit receives this immutable, read-back-verified source.
     const reframed = primary ? await rewrapVerifiedPrimarySaveAsSnapshotInWorker(primary.raw, primary.verification, {

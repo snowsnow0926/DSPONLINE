@@ -6822,7 +6822,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       // buffer indefinitely. Identity mismatch already prevents reuse; clear
       // the stale 35+ MiB ownership here as well.
       if (checkpoint) latestAuthoritativeCheckpointTransferRef.current = null;
-      result = await saveGameVerified(state, undefined, undefined, options);
+      // A large replacement checkpoint has no transferable authority buffer.
+      // Keep its envelope/catalog verification in the Workers as well; the
+      // legacy string commit scans both 100+ MB payloads on the UI thread.
+      result = await saveGameVerified(state, undefined, undefined, {
+        ...options,
+        ...(isLargeRuntimeState(state) ? { preferWorkerProof: true } : {}),
+      });
     } else {
       // Ownership passes synchronously with postMessage inside the storage
       // boundary. Never offer this same buffer to a later, rebased save.

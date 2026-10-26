@@ -1,0 +1,237 @@
+{
+  "schemaVersion": 1,
+  "task": "web-primary-checkpoint-20261027",
+  "fixture": {
+    "private": true,
+    "preparedBytes": 205464026,
+    "preparedSha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "entityCount": 110042,
+    "beltCount": 233300
+  },
+  "browser": "147.0.7727.138",
+  "builds": {
+    "baseline": "1.3.1+1fa77ea8bbc5",
+    "measuredCandidate": "1.3.1+1b3bc9819185.dirty",
+    "identicalSimulationWorkerSha256": "92523ff34f4a342ad37164ecc81e4571615195588ea6c572f1d26adfbb5e450d"
+  },
+  "isolation": {
+    "loopbackOnly": true,
+    "privateTemporaryChrome": true,
+    "serviceWorkersBlocked": true,
+    "apiRequestsIntercepted": true,
+    "originalSaveReadOnly": true
+  },
+  "runs": [
+    {
+      "name": "live-stock-warmed",
+      "version": "baseline",
+      "unsubmittedNormalDebt": "retained",
+      "pageCpuProfile": true,
+      "workerCpuProfile": false,
+      "outcome": "completed",
+      "observationSeconds": 30,
+      "stopMs": 23076,
+      "frameGapsMs": {
+        "warmup": {
+          "samples": 11072,
+          "p95": 7.100000023841858,
+          "max": 172.20000004768372
+        },
+        "starting": {
+          "samples": 717,
+          "p95": 49.299999952316284,
+          "max": 2192.3000000715256
+        },
+        "running": {
+          "samples": 4304,
+          "p95": 7.100000023841858,
+          "max": 77.39999997615814
+        },
+        "stopping": {
+          "samples": 1828,
+          "p95": 7.899999976158142,
+          "max": 1374.3000000715256
+        }
+      },
+      "maxRendererPeakWorkingSetBytes": null,
+      "actualMultiplier": 8,
+      "validationFailures": 0,
+      "settledWallSeconds": 90.49769995117188,
+      "settledSimulationSeconds": 723.981599609375,
+      "constructionCompleted": 370679,
+      "constructionComputeLimited": true,
+      "durableCatalog": null,
+      "rawEvidenceSha256": "6f57d9ab478214718daaa5f9b7ddfa13195da5e44ddcc49090bffeb68d18029e"
+    },
+    {
+      "name": "live-stock-worker-proof",
+      "version": "candidate",
+      "unsubmittedNormalDebt": "retained",
+      "pageCpuProfile": true,
+      "workerCpuProfile": false,
+      "outcome": "completed",
+      "observationSeconds": 30,
+      "stopMs": 19275,
+      "frameGapsMs": {
+        "warmup": {
+          "samples": 11117,
+          "p95": 7.100000023841858,
+          "max": 167.5
+        },
+        "starting": {
+          "samples": 1254,
+          "p95": 8,
+          "max": 1171.0999999046326
+        },
+        "running": {
+          "samples": 4427,
+          "p95": 7.100000023841858,
+          "max": 106.59999990463257
+        },
+        "stopping": {
+          "samples": 2172,
+          "p95": 7.100000023841858,
+          "max": 1348.7999999523163
+        }
+      },
+      "maxRendererPeakWorkingSetBytes": 5695868928,
+      "actualMultiplier": 8,
+      "validationFailures": 0,
+      "settledWallSeconds": 85.55860009765625,
+      "settledSimulationSeconds": 684.46880078125,
+      "constructionCompleted": 350449,
+      "constructionComputeLimited": true,
+      "durableCatalog": null,
+      "rawEvidenceSha256": "6ccf9489a32bd6fb3ffe8a2761e44781c2223f64155e7fc1dca758ef4a243725"
+    },
+    {
+      "name": "live-candidate-unprofiled-01",
+      "version": "candidate",
+      "unsubmittedNormalDebt": "cleared",
+      "pageCpuProfile": false,
+      "workerCpuProfile": false,
+      "outcome": "completed",
+      "observationSeconds": 30,
+      "stopMs": 28679,
+      "frameGapsMs": {
+        "warmup": {
+          "samples": 11576,
+          "p95": 7.100000023841858,
+          "max": 152.5
+        },
+        "starting": {
+          "samples": 1941,
+          "p95": 7.300000071525574,
+          "max": 1990.5
+        },
+        "running": {
+          "samples": 4442,
+          "p95": 7.100000023841858,
+          "max": 182.60000002384186
+        },
+        "stopping": {
+          "samples": 3133,
+          "p95": 7.100000023841858,
+          "max": 2186.100000023842
+        }
+      },
+      "maxRendererPeakWorkingSetBytes": 5257007104,
+      "actualMultiplier": 8,
+      "validationFailures": 0,
+      "settledWallSeconds": 51.051,
+      "settledSimulationSeconds": 408.408,
+      "constructionCompleted": 209105,
+      "constructionComputeLimited": true,
+      "durableCatalog": null,
+      "rawEvidenceSha256": "5e091d1746d48c81f59a2bde2c7266ab4cbdf55632d55a3c38f98218205d84db"
+    },
+    {
+      "name": "live-candidate-unprofiled-02",
+      "version": "candidate",
+      "unsubmittedNormalDebt": "cleared",
+      "pageCpuProfile": false,
+      "workerCpuProfile": false,
+      "outcome": "completed",
+      "observationSeconds": 30,
+      "stopMs": 28349,
+      "frameGapsMs": {
+        "warmup": {
+          "samples": 12866,
+          "p95": 7.100000023841858,
+          "max": 166.89999997615814
+        },
+        "starting": {
+          "samples": 1904,
+          "p95": 7.799999952316284,
+          "max": 1970.7999999523163
+        },
+        "running": {
+          "samples": 4452,
+          "p95": 7.299999952316284,
+          "max": 190.69999992847443
+        },
+        "stopping": {
+          "samples": 3089,
+          "p95": 7.200000047683716,
+          "max": 2141.2000000476837
+        }
+      },
+      "maxRendererPeakWorkingSetBytes": 5413924864,
+      "actualMultiplier": 8,
+      "validationFailures": 0,
+      "settledWallSeconds": 51.007,
+      "settledSimulationSeconds": 408.056,
+      "constructionCompleted": 208925,
+      "constructionComputeLimited": true,
+      "durableCatalog": {
+        "integrity": "valid",
+        "byteLength": 110710656,
+        "entityCount": 110042,
+        "beltCount": 233300,
+        "stateVersion": 47,
+        "paused": "true",
+        "autosaveIntervalSeconds": 0
+      },
+      "rawEvidenceSha256": "e84dec5a247f2a0029cf812e9c718c5329551b5f8587f9d4d31d10a4bc6be840"
+    },
+    {
+      "name": "live-transition-baseline-01",
+      "version": "baseline",
+      "unsubmittedNormalDebt": "cleared",
+      "pageCpuProfile": true,
+      "workerCpuProfile": false,
+      "outcome": "start-timeout",
+      "timeoutMs": 120000,
+      "error": "TimeoutError: locator.waitFor: Timeout 120000ms exceeded.",
+      "pageErrors": [],
+      "rawEvidenceSha256": "d34da9565d34231c2ea311778e8decf4ec82d31dbb0ccf3bf1f70721d144cce4"
+    },
+    {
+      "name": "live-baseline-unprofiled-debug",
+      "version": "baseline",
+      "unsubmittedNormalDebt": "cleared",
+      "pageCpuProfile": false,
+      "workerCpuProfile": false,
+      "outcome": "start-timeout",
+      "timeoutMs": 120000,
+      "error": "TimeoutError: locator.waitFor: Timeout 120000ms exceeded.",
+      "pageErrors": [],
+      "rawEvidenceSha256": "d34da9565d34231c2ea311778e8decf4ec82d31dbb0ccf3bf1f70721d144cce4"
+    }
+  ],
+  "excluded": [
+    {
+      "name": "live-stock-baseline",
+      "reason": "Initial probe had no post-load 30-second production window; test setup, not a runtime failure."
+    },
+    {
+      "name": "live-stock-profile-baseline",
+      "reason": "Experimental Worker-attached CDP diagnostic timed out during stop; not included in page-only comparisons."
+    }
+  ],
+  "limits": [
+    "Real-clock terminal totals differ by session duration; this is not a deterministic engine A/B.",
+    "Do not infer whole-game FPS, input latency, a general speed percentage, or lower memory from these samples.",
+    "Explicit-checkpoint stability improved in two cleared-debt candidate runs, but 1-2 second transition gaps and roughly 5 GB process peaks remain."
+  ]
+}

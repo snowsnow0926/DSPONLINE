@@ -31,7 +31,7 @@ import { getInfiniteResearchCostBigInt, getInfiniteResearchMaximumLevel } from "
 import { normalizeDecimalIntegerString } from "./quantityFormat";
 import { ACTIVITY_MATERIAL_IDS } from "./activity";
 import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
-import { decodeVerifiedSaveTransferChunked } from "./saveTransferDecode";
+import { decodeVerifiedSaveTransferChunked, yieldSaveTransferWork } from "./saveTransferDecode";
 import {
   computeSavePayloadTextChecksum,
   decodeVerifiedSaveTransfer,
@@ -1109,6 +1109,14 @@ function normalizeGalacticHubNetwork(saved: Record<string, any>): GalacticHubNet
 }
 
 export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegistry = loadContentPackRegistry()): GameState | null {
+  const steps = migrateGameSteps(value, contentPackRegistry);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+/** One canonical migration; callers choose synchronous or cooperative driving. */
+function* migrateGameSteps(value: unknown, contentPackRegistry: ContentPackRegistry): Generator<void, GameState | null> {
   if (!value || typeof value !== "object") return null;
   const saved = value as Record<string, any>;
   if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47].includes(saved.version) || !Array.isArray(saved.entities)) return null;
@@ -1137,8 +1145,7 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
     ? new Map(initial.entities.filter((entity) => entity.kind === "vein").map((entity) => [entity.id, entity] as const))
     : null;
   const galaxy = normalizeGalaxyState(saved.version >= 20 ? saved.galaxy : { seed: initial.galaxy.seed }, saved.version < 20);
-  const entities = saved.entities.filter((entity: FactoryEntity) =>
-    entity?.buildingId !== "orbital_cargo_terminal" || saved.version >= 47 && saved.mode !== "speedrun").map((entity: FactoryEntity) => {
+  const normalizeEntity = (entity: FactoryEntity) => {
     // `quantumTarget` was briefly written to every building by an older
     // client. Keep it only for interstellar stations; ordinary buildings
     // must not carry the extension back into the next cloud save.
@@ -1346,7 +1353,14 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
         ? entity.extractorBuildingId ?? getExtractorBuildingId(entity.resourceId!)
         : entity.extractorBuildingId,
     };
-  }) as FactoryEntity[];
+  };
+  const eligibleEntities = saved.entities.filter((entity: FactoryEntity) =>
+    entity?.buildingId !== "orbital_cargo_terminal" || saved.version >= 47 && saved.mode !== "speedrun");
+  const entities = new Array<FactoryEntity>(eligibleEntities.length);
+  for (let index = 0; index < eligibleEntities.length; index += 1) {
+    entities[index] = normalizeEntity(eligibleEntities[index]) as FactoryEntity;
+    if ((index + 1) % 1_024 === 0) yield;
+  }
 
   const terminalByPlanet = new Map<PlanetId, FactoryEntity>();
   let duplicateTerminalRefunds = 0;
@@ -1420,6 +1434,7 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
   const entityById = new Map<string, FactoryEntity>();
   const materialDeliveryHubById = new Map<string, FactoryEntity>();
   const orbitalCargoTerminalById = new Map<string, FactoryEntity>();
+  let indexedEntities = 0;
   for (const entity of entities) {
     if (!entityById.has(entity.id)) entityById.set(entity.id, entity);
     if (entity.buildingId === "material_delivery_hub" && !materialDeliveryHubById.has(entity.id)) {
@@ -1428,8 +1443,9 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
     if (entity.buildingId === "orbital_cargo_terminal" && !orbitalCargoTerminalById.has(entity.id)) {
       orbitalCargoTerminalById.set(entity.id, entity);
     }
+    if (++indexedEntities % 4_096 === 0) yield;
   }
-  const migratedBelts: BeltConnection[] = Array.isArray(saved.belts) ? saved.belts.map((belt: Record<string, any>) => {
+  const normalizeBelt = (belt: Record<string, any>): BeltConnection => {
     const source = entityById.get(belt.source);
     const target = entityById.get(belt.target);
     const tier = saved.version >= 8 && validBeltTier(belt.tier) ? belt.tier : 1;
@@ -1468,8 +1484,16 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
         return undefined;
       })(),
     } as BeltConnection;
-  }) : [];
+  };
+  const sourceBelts = Array.isArray(saved.belts) ? saved.belts : [];
+  const migratedBelts = new Array<BeltConnection>(sourceBelts.length);
+  for (let index = 0; index < sourceBelts.length; index += 1) {
+    migratedBelts[index] = normalizeBelt(sourceBelts[index]);
+    if ((index + 1) % 2_048 === 0) yield;
+  }
+  let visitedBelts = 0;
   for (const belt of migratedBelts) {
+    if (++visitedBelts % 4_096 === 0) yield;
     const target = materialDeliveryHubById.get(belt.target);
     if (!target) continue;
     const slots = target.deliverySlots ?? normalizeMaterialDeliverySlots(target, saved.version);
@@ -1488,7 +1512,9 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
     target.deliverySlots = slots;
     target.deliveryItemIds = [...new Set(slots.flatMap((slot) => slot.itemId ? [slot.itemId] : []))];
   }
+  visitedBelts = 0;
   for (const belt of migratedBelts) {
+    if (++visitedBelts % 4_096 === 0) yield;
     const target = orbitalCargoTerminalById.get(belt.target);
     if (!target) continue;
     const ports = getOrbitalCargoPortItems(target);
@@ -1508,7 +1534,9 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
   const occupiedBlackHolePorts = new Set<string>();
   const belts: BeltConnection[] = [];
   const rejectedBelts: BeltConnection[] = [];
+  visitedBelts = 0;
   for (const belt of migratedBelts) {
+    if (++visitedBelts % 2_048 === 0) yield;
     const source = entityById.get(belt.source);
     const target = entityById.get(belt.target);
     let accepted = Boolean(source && target && source.planetId === target.planetId && belt.planetId === source.planetId);
@@ -2778,12 +2806,11 @@ export function inspectSave(raw: string, contentPackRegistry?: ContentPackRegist
  * this path performs one JSON parse plus the normal version migration without
  * recomputing the same 20+ MB state checksum on the UI thread.
  */
-export function parseTrustedWorkerEnvelope(
+function readTrustedWorkerEnvelope(
   raw: string,
   verification: SaveTransferVerification,
-  contentPackRegistry: ContentPackRegistry = loadContentPackRegistry(),
-  options: { persistentProjection?: boolean } = {},
-): GameState {
+  contentPackRegistry: ContentPackRegistry,
+): { state: Record<string, any>; mode: SaveMode } {
   if (verification.integrity !== "valid" || !verification.stateChecksum) {
     throw new Error("Worker 存档缺少完整性证明");
   }
@@ -2806,6 +2833,16 @@ export function parseTrustedWorkerEnvelope(
     : [];
   const missingPacks = getMissingContentPackRequirements(requiredPacks, contentPackRegistry);
   if (missingPacks.length > 0) throw new MissingContentPacksError(missingPacks);
+  return { state: parsed.state, mode: parsed.mode };
+}
+
+export function parseTrustedWorkerEnvelope(
+  raw: string,
+  verification: SaveTransferVerification,
+  contentPackRegistry: ContentPackRegistry = loadContentPackRegistry(),
+  options: { persistentProjection?: boolean } = {},
+): GameState {
+  const parsed = readTrustedWorkerEnvelope(raw, verification, contentPackRegistry);
   if (options.persistentProjection === false) {
     const state = parsed.state as unknown as GameState;
     if (state.mode !== parsed.mode || !Number.isFinite(state.version) ||
@@ -2818,6 +2855,37 @@ export function parseTrustedWorkerEnvelope(
   const state = migrateGame(parsed.state, contentPackRegistry);
   if (!state || state.mode !== parsed.mode) throw new Error("Worker 存档迁移或模式校验失败");
   return state;
+}
+
+/** Keep canonical repair and validation while yielding between bounded batches. */
+export async function parseTrustedWorkerEnvelopeChunked(
+  raw: string,
+  verification: SaveTransferVerification,
+  contentPackRegistry: ContentPackRegistry = loadContentPackRegistry(),
+  options: { signal?: AbortSignal; yieldControl?: () => Promise<void> } = {},
+): Promise<GameState> {
+  const yieldControl = options.yieldControl ?? yieldSaveTransferWork;
+  const checkAbort = () => {
+    if (options.signal?.aborted) throw options.signal.reason ?? new DOMException("Save normalization aborted", "AbortError");
+  };
+  checkAbort();
+  await yieldControl();
+  checkAbort();
+  const parsed = readTrustedWorkerEnvelope(raw, verification, contentPackRegistry);
+  await yieldControl();
+  checkAbort();
+  const steps = migrateGameSteps(parsed.state, contentPackRegistry);
+  try {
+    let step = steps.next();
+    while (!step.done) {
+      await yieldControl();
+      checkAbort();
+      step = steps.next();
+    }
+    const state = step.value;
+    if (!state || state.mode !== parsed.mode) throw new Error("Worker 存档迁移或模式校验失败");
+    return state;
+  } finally { steps.return(null); }
 }
 
 export interface SaveRepairResult {

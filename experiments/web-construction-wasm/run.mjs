@@ -12,16 +12,19 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "terminal-parity"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "terminal-parity", "terminal-decode", "terminal-decode-cooperative"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
 const callable = entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
-      : entry === "terminal-parity" ? "runTerminalParityProbe" : "runConstructionWasmProbe";
+      : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
+        : entry === "terminal-decode-cooperative" ? "runTerminalDecodeCooperativeProbe" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
 const decoderFiles = ["src/game/storage.ts", "src/game/saveTransferDecode.ts"];
 const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["decoder-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
+if (entry === "terminal-decode-cooperative" && decoderReference) throw new Error("Use terminal-decode/sync for a frozen decoder reference");
+const migrationPhases = entry === "terminal-decode" && options["migration-phases"] === "1";
 const runtimeFiles = ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts"];
 const runtimeReference = options["runtime-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["runtime-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
@@ -36,11 +39,27 @@ const inputHash = fixtureMode ? await fileHash(options.prepared) : null;
 const wasmPath = options.wasm ?? resolve(output, "target/wasm32-unknown-unknown/release/dsp_web_construction_probe.wasm");
 await mkdir(output, { recursive: true });
 const bundle = await build({ root, configFile: false, publicDir: false, logLevel: "error",
-  plugins: decoderReference || runtimeReference ? [{ name: "frozen-runtime-reference", enforce: "pre", load(id) {
+  plugins: decoderReference || runtimeReference || migrationPhases ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
     const relative = id.replaceAll("\\", "/").replace(`${sourceRoot.replaceAll("\\", "/")}/`, "").split("?")[0];
     const reference = runtimeFiles.includes(relative) ? runtimeReference : decoderFiles.includes(relative) ? decoderReference : null;
-    if (reference) return execFileSync("git", ["show", `${reference}:${relative}`],
-      { cwd: sourceRoot, encoding: "utf8" });
+    if (!reference && !(migrationPhases && relative === "src/game/storage.ts")) return;
+    let code = reference ? execFileSync("git", ["show", `${reference}:${relative}`],
+      { cwd: sourceRoot, encoding: "utf8" }) : await readFile(resolve(sourceRoot, relative), "utf8");
+    if (migrationPhases && relative === "src/game/storage.ts") {
+      for (const [anchor, phase] of [
+        [code.includes("  const entities = saved.entities.filter") ? "  const entities = saved.entities.filter" : "  const normalizeEntity =", "setup"],
+        ["  const terminalByPlanet = new Map<PlanetId, FactoryEntity>();", "entity-normalization"],
+        ["  for (const resource of initial.entities.filter", "terminal-deduplication"],
+        ["  const construction = Object.fromEntries(Object.keys(initial.construction)", "resource-restoration"],
+        [code.includes("  const migratedBelts: BeltConnection[]") ? "  const migratedBelts: BeltConnection[]" : "  const normalizeBelt =", "construction-and-entity-index"],
+        ["  for (const belt of migratedBelts) {", "belt-normalization"],
+        ["  const completedTechIds = Array.isArray(saved.research", "belt-repair-and-validation"],
+      ]) {
+        if (!code.includes(anchor)) throw new Error(`Migration phase anchor changed: ${phase}`);
+        code = code.replace(anchor, `  globalThis.__terminalMigrationPhases?.push({ phase: ${JSON.stringify(phase)}, at: performance.now() });\n${anchor}`);
+      }
+    }
+    return code;
   } }] : [],
   resolve: { alias: [{ find: /^\.\.\/\.\.\/src\/game\//, replacement: `${sourceRoot.replaceAll("\\", "/")}/src/game/` }] },
   define: { "process.env.NODE_ENV": '"production"' },
@@ -72,19 +91,22 @@ try {
     args: options.memory ? ["--enable-precise-memory-info"] : [] });
   const page = await browser.newPage();
   if (options.memory) await page.addInitScript(() => { globalThis.recordHeapMeasurements = true; });
+  if (options["persisted-proof"]) await page.addInitScript(() => { globalThis.recordTerminalPersistedProof = true; });
   if (options["collect-memory"]) {
     const pageCdp = await page.context().newCDPSession(page);
     await page.exposeFunction("collectSaveProbeGarbage", () => pageCdp.send("HeapProfiler.collectGarbage"));
   }
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  if (entry === "save-responsiveness") await page.exposeFunction("requestSaveInputProbe", () => page.mouse.click(20, 20));
+  if (entry === "save-responsiveness" || entry.startsWith("terminal-decode")) await page.exposeFunction("requestSaveInputProbe", () => page.mouse.click(20, 20));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction((name) => typeof globalThis[name] === "function", callable);
   const result = entry === "terminal-parity"
     ? await page.evaluate(({ name, path, scenario }) => globalThis[name](path, scenario),
       { name: callable, path: options["terminal-path"] ?? "legacy", scenario: options["research-case"] ?? "natural" })
-    : await page.evaluate((name) => globalThis[name](), callable);
+    : entry === "terminal-decode"
+      ? await page.evaluate(({ name, mode }) => globalThis[name](mode), { name: callable, mode: options["decode-mode"] ?? "profile" })
+      : await page.evaluate((name) => globalThis[name](), callable);
   let rendererMemory;
   if (options.memory && process.platform === "win32") {
     const cdp = await browser.newBrowserCDPSession();
@@ -101,6 +123,10 @@ try {
     bundleSha256: createHash("sha256").update(code).digest("hex"),
     ...(rendererMemory ? { rendererMemory } : {}),
     ...(decoderReference ? { decoderReference, decoderFiles } : {}),
+    ...(entry.startsWith("terminal-decode") ? { migrationPhases, decoderSourceHashes: Object.fromEntries(await Promise.all(decoderFiles.map(async (file) => [file,
+      decoderReference ? createHash("sha256").update(execFileSync("git", ["show", `${decoderReference}:${file}`], { cwd: sourceRoot })).digest("hex")
+        : await fileHash(resolve(sourceRoot, file)),
+    ]))) } : {}),
     ...(entry === "terminal-parity" ? { saveSourceFiles: Object.fromEntries(await Promise.all([
       "src/game/authoritativeSaveSerializationClient.ts", "src/game/save.worker.ts", "src/game/storage.ts",
       "src/game/pureIdleMacroClient.ts", "src/App.tsx",

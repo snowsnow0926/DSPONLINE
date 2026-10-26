@@ -3,5 +3,5 @@
   "compilerOptions": {
     "tsBuildInfoFile": "../../node_modules/.tmp/web-construction-wasm.tsbuildinfo"
   },
-  "include": ["probe.ts", "large-save.ts", "save-profile.ts", "save-responsiveness.ts", "quantum-runtime.ts", "power-snapshot.ts", "terminal-parity.ts", "../../src/vite-env.d.ts"]
+  "include": ["probe.ts", "large-save.ts", "save-profile.ts", "save-responsiveness.ts", "quantum-runtime.ts", "power-snapshot.ts", "terminal-parity.ts", "terminal-decode.ts", "terminal-decode.worker.ts", "terminal-decode-cooperative.ts", "../../src/vite-env.d.ts"]
 }

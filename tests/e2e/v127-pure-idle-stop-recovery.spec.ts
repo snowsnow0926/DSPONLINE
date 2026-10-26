@@ -22,6 +22,9 @@ type StopProbe = {
   validatingJournalBlocked: boolean;
   holdTerminalCommit: boolean;
   terminalCommitBlocked: boolean;
+  holdTerminalDecode: boolean;
+  terminalDecodeBlocked: boolean;
+  terminalEnvelopeBytes: number;
   terminalChecksums: string[];
   postFinalizeCheckpoints: number;
   latestFactoryElapsed: number | null;
@@ -39,7 +42,8 @@ async function installProbe(page: Page): Promise<void> {
       failedWrites: 0, primaryWrites: 0, failJournalCommit: false, failedJournalCommits: 0,
       failCancelJournal: false, failedCancelJournals: 0,
       backgroundRuns: 0, holdValidatingJournal: false, validatingJournalBlocked: false,
-      holdTerminalCommit: false, terminalCommitBlocked: false, terminalChecksums: [],
+      holdTerminalCommit: false, terminalCommitBlocked: false,
+      holdTerminalDecode: false, terminalDecodeBlocked: false, terminalEnvelopeBytes: 0, terminalChecksums: [],
       postFinalizeCheckpoints: 0, latestFactoryElapsed: null,
     };
     sessionStorage.removeItem("v127-stop-fail-next-boot");
@@ -87,6 +91,9 @@ async function installProbe(page: Page): Promise<void> {
         if (this.workerName === "factory-simulation") this.addEventListener("message", ({ data }) => {
           const elapsed = data.projection?.elapsedSeconds ?? data.deferredElapsedSeconds ?? data.state?.elapsedSeconds;
           if (Number.isFinite(elapsed)) probe.latestFactoryElapsed = elapsed;
+        });
+        if (this.workerName === "pure-idle-macro") this.addEventListener("message", ({ data }) => {
+          if (data.finalEnvelope?.verification) probe.terminalEnvelopeBytes = data.finalEnvelope.verification.byteLength;
         });
       }
 
@@ -156,14 +163,31 @@ async function installProbe(page: Page): Promise<void> {
     }\n`;
     await route.fulfill({ response, body });
   });
+  await page.route("**/src/game/saveTransferDecode.ts*", async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const boundary = "function yieldSaveTransferWork(";
+    if (!source.includes(boundary)) throw new Error("terminal decode observation boundary changed");
+    const body = source.replace(boundary, "function observedYieldSaveTransferWork(") + `
+      export async function yieldSaveTransferWork() {
+        const probe = globalThis.__stopRecoveryProbe;
+        if (probe?.holdTerminalDecode && probe.finalizes > 0) {
+          probe.terminalDecodeBlocked = true;
+          await new Promise(resolve => { globalThis.__releaseStopDecode = resolve; });
+        }
+        return observedYieldSaveTransferWork();
+      }
+    `;
+    await route.fulfill({ response, body });
+  });
 }
 
-async function seedRecoverableRun(page: Page, startedPaused: boolean, expiredBackground = false, withOrdinaryReport = false): Promise<{ primary: string; inventory: unknown }> {
+async function seedRecoverableRun(page: Page, startedPaused: boolean, expiredBackground = false, withOrdinaryReport = false, largeDecode = false): Promise<{ primary: string; inventory: unknown }> {
   await page.route("**/__v127_stop_seed.html", (route) => route.fulfill({
     contentType: "text/html; charset=utf-8", body: '<!doctype html><html><head><script type="module" src="/@vite/client"></script></head><body>public synthetic stop recovery seed</body></html>',
   }));
   await page.goto("/__v127_stop_seed.html");
-  return page.evaluate(async ({ pausedBeforeStart, background, ordinaryReport }) => {
+  return page.evaluate(async ({ pausedBeforeStart, background, ordinaryReport, large }) => {
     const engine = await import("/src/game/engine.ts");
     const storage = await import("/src/game/storage.ts");
     const local = await import("/src/game/localSaveStore.ts");
@@ -178,6 +202,11 @@ async function seedRecoverableRun(page: Page, startedPaused: boolean, expiredBac
     state.entities.push({
       id: "stop-recovery-warp", kind: "machine", planetId: "home", position: { x: 0, y: 0 },
       buildingId: "time_warp_device", machineCount: 1, minerCount: 0, inputs: {}, outputs: {},
+      progress: 0, routingCursor: 0, utilization: 0, productionRate: 0, interactionLocked: false,
+    });
+    if (large) for (let index = 0; index < 7_000; index += 1) state.entities.push({
+      id: `stop-decode-machine-${index}`, kind: "machine", planetId: "home", position: { x: 10_000 + index * 100, y: 10_000 },
+      buildingId: "assembling_machine_mk1", machineCount: 1, minerCount: 0, inputs: {}, outputs: {},
       progress: 0, routingCursor: 0, utilization: 0, productionRate: 0, interactionLocked: false,
     });
     state.research.completedTechIds.push("universe_matrix", "time_warp_engineering");
@@ -222,7 +251,7 @@ async function seedRecoverableRun(page: Page, startedPaused: boolean, expiredBac
     if (!primary) throw new Error("synthetic recovery primary was not committed");
     await recovery.releasePureIdleRecoveryLease(created.record.sessionId, owner);
     return { primary, inventory: JSON.parse(primary).state.tray };
-  }, { pausedBeforeStart: startedPaused, background: expiredBackground, ordinaryReport: withOrdinaryReport });
+  }, { pausedBeforeStart: startedPaused, background: expiredBackground, ordinaryReport: withOrdinaryReport, large: largeDecode });
 }
 
 async function readProbe(page: Page): Promise<StopProbe> {
@@ -644,6 +673,33 @@ test("a failed cancellation marker blocks the pending save and visibly requires 
   expect(await readRecovery(page)).toBeNull();
   expect((await readPrimary(page)).totalIdleTime).toBe(0);
   expect((await readPrimary(page)).inventory).toEqual(seeded.inventory);
+});
+
+test("cancelling a cooperative terminal decode cannot later write its completed candidate", async ({ page }) => {
+  test.skip(durableMode, "This mode keeps the terminal envelope outside the UI decoder.");
+  test.setTimeout(90_000);
+  await installProbe(page);
+  const seeded = await seedRecoverableRun(page, true, false, false, true);
+  await openRecovery(page, seeded);
+  const primaryWrites = (await readProbe(page)).primaryWrites;
+  await page.evaluate(() => {
+    (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.holdTerminalDecode = true;
+  });
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect.poll(async () => (await readProbe(page)).terminalEnvelopeBytes).toBeGreaterThanOrEqual(1024 * 1024);
+  await expect.poll(async () => (await readProbe(page)).terminalDecodeBlocked).toBe(true);
+  await overlay.getByRole("button", { name: "取消结算并保留原存档", exact: true }).click();
+  await expect.poll(async () => (await readRecovery(page))?.stopReason).toBe("user-cancelled");
+  await page.evaluate(() => {
+    const runtime = window as typeof window & { __stopRecoveryProbe: StopProbe; __releaseStopDecode: () => void };
+    runtime.__stopRecoveryProbe.holdTerminalDecode = false;
+    runtime.__releaseStopDecode();
+  });
+  await expect(overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true })).toBeEnabled();
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  expect((await readProbe(page)).primaryWrites).toBe(primaryWrites);
+  expect((await readRecovery(page))?.committed).toBe(false);
 });
 
 test("failed-stop recovery export downloads a diagnostic without mutating storage and fits both mobile orientations", async ({ page }, testInfo) => {

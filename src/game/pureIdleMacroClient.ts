@@ -14,7 +14,8 @@ import type {
 } from "./pureIdleMacroProtocol";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 import { decodeVerifiedSaveTransfer } from "./saveTransfer";
-import { parseTrustedWorkerEnvelope } from "./storage";
+import { parseTrustedWorkerEnvelope, parseTrustedWorkerEnvelopeChunked } from "./storage";
+import { decodeVerifiedSaveTransferChunked } from "./saveTransferDecode";
 import {
   isWorkerBinaryPayload,
   workerBinaryPayloadByteLength,
@@ -284,20 +285,24 @@ export class PureIdleMacroClient {
     const result = await this.finalizeEnvelope(targetWallSeconds, options);
     if (options.closeBeforeDecode) this.close();
     const { finalEnvelope } = result;
+    const cooperative = finalEnvelope.verification.byteLength >= 1024 * 1024;
     let raw: string;
     try {
-      raw = decodeVerifiedSaveTransfer(
-        await workerBinaryPayloadToArrayBuffer(finalEnvelope.payloadBytes),
-        finalEnvelope.verification,
-      );
+      const bytes = await workerBinaryPayloadToArrayBuffer(finalEnvelope.payloadBytes);
+      raw = cooperative
+        ? await decodeVerifiedSaveTransferChunked(bytes, finalEnvelope.verification, { lowMemory: true, signal: options.signal })
+        : decodeVerifiedSaveTransfer(bytes, finalEnvelope.verification);
     } catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason ?? error;
       throw new PureIdleMacroClientError(
         "operation",
         error instanceof Error ? error.message : "纯挂机 Worker 最终存档字节校验失败",
       );
     }
     try {
-      const state = parseTrustedWorkerEnvelope(raw, finalEnvelope.verification);
+      const state = cooperative
+        ? await parseTrustedWorkerEnvelopeChunked(raw, finalEnvelope.verification, undefined, { signal: options.signal })
+        : parseTrustedWorkerEnvelope(raw, finalEnvelope.verification);
       const identityMismatch = finalizedIdentityMismatch(state, finalEnvelope.identity);
       if (identityMismatch ||
         result.summary.algorithmVersion !== finalEnvelope.identity.algorithmVersion ||
@@ -310,6 +315,7 @@ export class PureIdleMacroClient {
         ...result,
       };
     } catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason ?? error;
       throw new PureIdleMacroClientError(
         "operation",
         error instanceof Error ? error.message : "纯挂机 Worker 最终存档无法重载",

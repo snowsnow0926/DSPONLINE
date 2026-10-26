@@ -65,7 +65,23 @@ node experiments/web-construction-wasm/run.mjs --entry=power-snapshot --prepared
 node experiments/web-construction-wasm/run.mjs --entry=power-snapshot --prepared=D:/private/prepared.json --name=power-new
 ```
 
-## 当前结论
+## 终态解码与分段迁移
+
+`terminal-decode` 对固定准备态编码后，分别测量同步解码、只分段校验、后台解析及各迁移阶段。
+`terminal-decode-cooperative` 使用生产代码的分段校验和分批迁移。原始存档约 105 MiB，
+输入的 205.46 MB 是展开并预热后的运行态测试副本，不能把两者混称。
+各次使用新 Chrome，旧/新交替串行；准备输入和最终完整 SHA-256 不计入解码时间。
+初始排队点击的响应是单次探针，最长画面间隔也不等于整个游戏的 FPS。
+`--persisted-proof=1` 在计时结束后调用真实保存 Worker，解压后比较完整正文 SHA-256。
+内存峰值若采集会包含这些额外校验，不能据此当作游戏净内存收益。
+
+```powershell
+node experiments/web-construction-wasm/run.mjs --entry=terminal-decode --decode-mode=sync --decoder-ref=d2eeba23 --prepared=D:/private/prepared.json --name=decode-old
+node experiments/web-construction-wasm/run.mjs --entry=terminal-decode-cooperative --prepared=D:/private/prepared.json --name=decode-new
+node experiments/web-construction-wasm/run.mjs --entry=terminal-decode --decode-mode=profile --migration-phases=1 --decoder-ref=d2eeba23 --prepared=D:/private/prepared.json --name=decode-phases
+```
+
+## 已有终态一致性探针
 
 `--entry=terminal-parity` 使用同一只读大档对照旧结算顺序和保留的 Worker 终态结算顺序，
 分别计算界面状态和最终持久状态的完整 SHA-256。`natural` 保留原科研条件，
@@ -78,5 +94,7 @@ node experiments/web-construction-wasm/run.mjs --entry=power-snapshot --prepared
 node experiments/web-construction-wasm/run.mjs --entry=terminal-parity --terminal-path=legacy --research-case=natural --prepared=D:/private/prepared.json --name=terminal-old
 node experiments/web-construction-wasm/run.mjs --entry=terminal-parity --terminal-path=terminal-safe --research-case=natural --prepared=D:/private/prepared.json --name=terminal-new
 ```
+
+## Rust/WASM 结论
 
 现有 Rust 代码可在浏览器中运行，但这个 JSON 适配器尚无接入收益：简单计算的速度优势被传输和转换抵消；递归分支还会提前计算许多用不到的路线。继续前应验证按需规划、紧凑输入/输出及 JS 回退；不能仅因采用 Rust 就宣布更快。具体数值及候选身份见 [循环记录](../../docs/reviews/2026-10-26-web-performance-loop.md)。

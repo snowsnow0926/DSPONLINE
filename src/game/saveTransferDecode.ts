@@ -16,7 +16,7 @@ export interface SaveTransferDecodeOptions {
   lowMemory?: boolean;
 }
 
-function defaultYieldControl(): Promise<void> {
+export function yieldSaveTransferWork(): Promise<void> {
   const scheduler = (globalThis as typeof globalThis & { scheduler?: { yield?: () => Promise<void> } }).scheduler;
   if (typeof scheduler?.yield === "function") {
     if (typeof document === "undefined" || document.visibilityState !== "visible") return scheduler.yield();
@@ -47,7 +47,7 @@ export async function decodeVerifiedSaveTransferChunked(
   }
   const requestedChunkBytes = options.chunkBytes ?? DEFAULT_SAVE_TRANSFER_DECODE_CHUNK_BYTES;
   const chunkBytes = Math.max(16 * 1024, Math.floor(requestedChunkBytes));
-  const yieldControl = options.yieldControl ?? defaultYieldControl;
+  const yieldControl = options.yieldControl ?? yieldSaveTransferWork;
   const source = new Uint8Array(bytes);
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const decoded: string[] = [];

@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "release": "1.3.2",
+  "scope": "Hong Kong Web only",
+  "runtime": {
+    "releaseId": "1.3.2-34f3dd45e467",
+    "buildId": "1.3.2+34f3dd45e467",
+    "git": {
+      "sha": "34f3dd45e467cb3578c9be6415667ec861eb61f3",
+      "clean": true
+    },
+    "fileCount": 196,
+    "aggregateSha256": "3f3d3926381a6c2d5699703075dfe4aafab72932adc2566c66f7c6df9b669833",
+    "manifestSha256": "96537c71c923f1fd32be6632a4d113dc30c37646e2873f33fae54cf4a4ae1c83",
+    "archiveSha256": "dc5f1447172b28eaa7a6f5b64e11960e849f1094bc788032445f5a48442043f7",
+    "simulationWorkerUnchanged": true
+  },
+  "validation": {
+    "unit": {
+      "passed": 3562,
+      "skipped": 38
+    },
+    "browser": {
+      "startTime": "2026-10-26T17:47:53.338Z",
+      "duration": 469488.882,
+      "expected": 484,
+      "skipped": 33,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "server": {
+      "passed": 411,
+      "skipped": 2,
+      "stationPassed": 4
+    },
+    "ops": {
+      "passed": 60,
+      "skipped": 6
+    },
+    "native": {
+      "passed": 634,
+      "skipped": 2
+    },
+    "pwa": {
+      "passed": 1
+    },
+    "upgrade": {
+      "from": "1.3.1+9af159f1b38e",
+      "to": "1.3.2+34f3dd45e467",
+      "saveBytes": 90399,
+      "saveSha256": "d4763903939e840762f9229299dca956e17af5c42fa9142a9154de6901acfefb",
+      "saveBytesUnchanged": true,
+      "offlineReloadPassed": true,
+      "explicitUpdateActivation": true
+    }
+  },
+  "publishedAt": "2026-10-27T01:56:38.370070+08:00",
+  "observedAt": "2026-10-27T01:58:03.416083+08:00",
+  "deployment": {
+    "web": "1.3.2-34f3dd45e467",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "stateCurrentWeb": "1.3.2-34f3dd45e467",
+    "statePreviousWeb": "1.3.1-9af159f1b38e",
+    "statePreviousApi": "api-1.3.0-4c8d0c13a714",
+    "generation": 56,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "apiProcessUnchanged": true,
+    "proxyProcessUnchanged": true,
+    "databaseIdentityPreserved": true,
+    "writable": true,
+    "schema": 8,
+    "layout": 3,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "missingCurrentMainPayloadRows": 2,
+    "nginxValid": true,
+    "nginxSha256": "34a62fe328024897f01e4ead52724cdc105a4dd3474e8cafda0267d8489b9edf",
+    "rootDiskUsedPercent": 78.3
+  },
+  "publicArtifacts": {
+    "filesVerified": 196,
+    "allMatchedImmutableManifest": true,
+    "api": {
+      "healthStatus": 200,
+      "readyStatus": 200,
+      "writable": true,
+      "backupState": "disabled",
+      "schema": 8,
+      "layout": 3
+    }
+  },
+  "publicBrowser": {
+    "currentVersion": "1.3.2",
+    "previousVersion": "1.3.1",
+    "currentWorkerPreserved": true,
+    "currentCacheUnchanged": true,
+    "offlineCurrentRootPassed": true,
+    "visitedStableAndImmutableFallback": true
+  },
+  "observation": {
+    "samples": 12,
+    "windowSeconds": 55,
+    "allHealthy": true,
+    "backupDisabled": true,
+    "sameApiProcess": true,
+    "web": "1.3.2-34f3dd45e467"
+  },
+  "fallback": {
+    "published": true,
+    "previousWeb": "1.3.1-9af159f1b38e",
+    "rootWeb": "1.3.2-34f3dd45e467",
+    "nginxSha256": "34a62fe328024897f01e4ead52724cdc105a4dd3474e8cafda0267d8489b9edf",
+    "previousHtmlByteExact": true,
+    "oldWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "backup": "/var/backups/dsp-idle/1.3.2-34f3dd45e467/fallback/original-app.conf"
+  },
+  "priorReleaseStateReconciled": true,
+  "releaseControlEntrypoint": "/usr/local/sbin/dsp-idle-switch-release",
+  "firstEntrypointAttempt": {
+    "result": "FileNotFoundError",
+    "webStayedOn": "1.3.1-9af159f1b38e",
+    "apiUnchanged": true
+  },
+  "databaseBackupCreated": false,
+  "databaseOperationPerformed": false,
+  "backupScope": "Web pointers, release-control metadata and Nginx configuration only",
+  "nativePublicationPerformed": false,
+  "shanghaiPublicationPerformed": false,
+  "performanceMeasurements": "Reuse the recorded development measurements; no new overall FPS or memory claim."
+}

@@ -131,6 +131,7 @@ interface TimeWarpRollingCertificate {
   requestedMultiplier: number;
   /** Exact-proven power dispatch plus its finite, physically debited fuel bank. */
   powerTail: PureIdlePowerTailCertificate;
+  constructionPowerCertificate: PureIdleConstructionPowerCertificate;
 }
 
 const TIME_WARP_ROLLING_CERTIFICATE_VALIDATION_WALL_SECONDS = 10;
@@ -215,10 +216,10 @@ const FAST_OFFLINE_CALIBRATION_SLICE_SECONDS = 10;
 const FAST_OFFLINE_VALIDATION_SECONDS = 5;
 /** Bounded exact preview used only when no valid calibration candidate exists. */
 export const FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS = 1;
-export const FAST_OFFLINE_ALGORITHM_VERSION = "fast-30s-v6-final-conservation-gate";
+export const FAST_OFFLINE_ALGORITHM_VERSION = "fast-30s-v7-construction-power";
 export const FAST_OFFLINE_DESKTOP_DEADLINE_MS = 30_000;
 export const FAST_OFFLINE_MOBILE_DEADLINE_MS = 60_000;
-export const TIME_WARP_APPROXIMATION_ALGORITHM_VERSION = "time-warp-rolling-v6-final-conservation-gate";
+export const TIME_WARP_APPROXIMATION_ALGORITHM_VERSION = "time-warp-rolling-v7-construction-power";
 // Realtime slices already repeat continuously. Two independent half-second
 // checkpoints retain a real exact tail verifier while halving the per-slice
 // endgame cost versus the historical 1s + 1s pair.
@@ -688,6 +689,7 @@ function cacheIsAwayFromBoundary(state: GameState): string | null {
 
 interface ExactSimulationWindowOptions {
   isolateConstructionAutomation?: boolean;
+  onPowerPlan?: (sample: SimulationPowerAuditSample) => void;
 }
 
 function runExact(
@@ -720,8 +722,11 @@ function runExact(
     const session = createSimulationAdvanceSession(state, chunkSeconds, {
       mutateState: true,
       wallSeconds: chunkWallSeconds,
-      ...(options.isolateConstructionAutomation ? {
-        contractExperiment: { isolateConstructionAutomation: true },
+      ...(options.isolateConstructionAutomation || options.onPowerPlan ? {
+        contractExperiment: {
+          ...(options.isolateConstructionAutomation ? { isolateConstructionAutomation: true } : {}),
+          ...(options.onPowerPlan ? { onPowerPlan: options.onPowerPlan } : {}),
+        },
       } : {}),
     });
     while (session.remainingSeconds > EPSILON || session.remainingWallSeconds > EPSILON) {
@@ -2023,22 +2028,18 @@ function constructionQuantumMacroFingerprint(state: GameState): string | null {
   if (centers.length === 0) return null;
 
   const activeTargets = Object.entries(state.constructionAutomation.targetStock)
-    .filter(([targetId, rawTarget]) => {
-      const target = Math.max(0, Math.floor(rawTarget ?? 0));
-      const current = Object.prototype.hasOwnProperty.call(state.portableFleet, targetId)
-        ? Math.max(0, Math.floor(state.portableFleet[targetId as keyof typeof state.portableFleet] ?? 0))
-        : Math.max(0, Math.floor(state.construction[targetId as keyof typeof state.construction] ?? 0));
-      return target > current;
-    })
+    // Bind the configured goals, not the changing deficit. Completing one
+    // goal must not revoke the same shared grant from all remaining goals.
+    .filter(([, rawTarget]) => Math.max(0, Math.floor(rawTarget ?? 0)) > 0)
     .map(([id, rawTarget]) => [id, Math.max(0, Math.floor(rawTarget ?? 0))] as const)
     .sort(([left], [right]) => left.localeCompare(right));
-  // One active recursive recipe keeps the bounded construction-only replay
-  // stable. Multiple targets keep the normal fair scheduler and therefore do
-  // not receive a shared-network replay grant.
-  if (activeTargets.length !== 1) return null;
-  const activeTargetId = activeTargets[0]![0];
+  // Replay uses the authoritative fair scheduler at each five-second boundary,
+  // so multiple targets require no extrapolated recipe assumption. Keep the
+  // complete target set in the grant and reject jobs outside that set.
+  if (activeTargets.length === 0) return null;
+  const activeTargetIds = new Set(activeTargets.map(([id]) => id));
   if (Object.values(state.constructionAutomation.jobs).some((job) =>
-    job.constructionId !== activeTargetId)) return null;
+    !activeTargetIds.has(job.constructionId))) return null;
 
   const quantumTowers = state.entities
     .filter((entity) => entity.kind === "station" &&
@@ -4044,7 +4045,13 @@ function requirePureIdleCombinedCheckpoint(
 
 export function capturePureIdleCombinedConservationCheckpoint(
   state: GameState,
+  options: { constructionReplaySeconds?: number } = {},
 ): PureIdleCombinedConservationCheckpoint {
+  // Online time-warp buckets are at most 128 simulation seconds. Keep their
+  // delivery timeline intact without turning a long offline request into an
+  // unbounded five-second replay loop; ordinary offline callers retain 30s.
+  const requestedReplay = options.constructionReplaySeconds ?? PURE_IDLE_CONSTRUCTION_QUANTUM_REPLAY_SECONDS;
+  if (!Number.isFinite(requestedReplay) || requestedReplay < 0) throw new Error("建筑制造量子重放时长无效");
   const checkpoint = Object.freeze({
     [PURE_IDLE_COMBINED_CHECKPOINT_BRAND]: true as const,
   });
@@ -4063,7 +4070,7 @@ export function capturePureIdleCombinedConservationCheckpoint(
       meteredCrafted: 0n,
       exactAuthorizedCrafted: 0n,
     },
-    constructionQuantumReplayRemainingSeconds: PURE_IDLE_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+    constructionQuantumReplayRemainingSeconds: Math.min(128, requestedReplay),
   });
   return checkpoint;
 }
@@ -4194,6 +4201,8 @@ export interface ConstructionAutomationMacroReceiptOptions {
   allowUnmeteredPowerForTest?: boolean;
   powerCertificate?: PureIdleConstructionPowerCertificate;
   contract?: PureIdleAffineContract;
+  /** Exact start of a caller-owned bucket that has not advanced its clock yet. */
+  quantumTimelineStartSeconds?: number;
 }
 
 export function advanceConstructionAutomationMacroWithReceiptInPlace(
@@ -4239,7 +4248,7 @@ export function advanceConstructionAutomationMacroWithReceiptInPlace(
       powerFactorByCenterId: allocation.powerFactorByCenterId,
       ...(allocation.quantumDownloadPerBoundary !== undefined ? {
         quantumDownloadPerBoundary: allocation.quantumDownloadPerBoundary,
-        quantumTimelineStartSeconds: allocation.quantumTimelineStartSeconds ?? state.elapsedSeconds - simulationSeconds,
+        quantumTimelineStartSeconds: options.quantumTimelineStartSeconds ?? allocation.quantumTimelineStartSeconds ?? state.elapsedSeconds - simulationSeconds,
         quantumReplaySeconds: quantumReplaySeconds ?? 0,
       } : {}),
     } : {},
@@ -5965,6 +5974,8 @@ function storeTimeWarpRollingCertificate(
   researchLedger: ResearchMacroLedger,
   lastCriticalError: number,
   powerTail: PureIdlePowerTailCertificate,
+  constructionPowerAudit: ConstructionPowerAuditAccumulator,
+  auditedSimulationSeconds: number,
 ): void {
   const availablePowerSeconds = availablePureIdlePowerTailSeconds(state, powerTail);
   if (powerTail.rejectionReason || availablePowerSeconds === 0 ||
@@ -5974,13 +5985,17 @@ function storeTimeWarpRollingCertificate(
     freezePureIdleLightweightStoreReplenishment(sampledContract),
     powerTail,
   );
-  if (closed.deltas.length === 0 || !closed.deltas.every(isClosedPureIdleLightweightDelta)) return;
+  if ((closed.deltas.length === 0 && !isFastLightweightConstructionOnly(state)) ||
+    !closed.deltas.every(isClosedPureIdleLightweightDelta)) return;
   const maximumSimulationSecondsByItem = calculatePureIdleLightweightBoundaries(state, sampledContract);
   const contract = maximumSimulationSecondsByItem
     ? { ...closed, maximumSimulationSecondsByItem }
     : closed;
   timeWarpRollingCertificates.set(state, {
     contract,
+    constructionPowerCertificate: issuePureIdleConstructionPowerCertificate(
+      state, contract, constructionPowerAudit, auditedSimulationSeconds,
+    ),
     researchLedger,
     researchRemainder: 0n,
     researchInflowRemainders: {},
@@ -6018,7 +6033,7 @@ function runTimeWarpRollingCertificateInPlace(
     timeWarpRollingCertificates.delete(state);
     return null;
   }
-  const combinedBefore = capturePureIdleCombinedConservationCheckpoint(state);
+  const combinedBefore = capturePureIdleCombinedConservationCheckpoint(state, { constructionReplaySeconds: simulationSeconds });
   const availablePowerSeconds = availablePureIdlePowerTailSeconds(state, certificate.powerTail);
   const powerProductiveSeconds = Math.min(
     simulationSeconds,
@@ -6076,6 +6091,11 @@ function runTimeWarpRollingCertificateInPlace(
     state,
     powerProductiveSeconds,
     combinedBefore,
+    {
+      contract: certificate.contract,
+      powerCertificate: certificate.constructionPowerCertificate,
+      quantumTimelineStartSeconds: state.elapsedSeconds,
+    },
   );
   state.elapsedSeconds += simulationSeconds;
   if (desiredSpeedrunElapsed !== undefined && state.speedrun?.enabled) {
@@ -6149,12 +6169,13 @@ function runTimeWarpApproximateSettlementUnsafe(
   const sourceSnapshot = capturePureIdleLightweightSnapshot(state, sharedPaths);
   const sourceResearch = captureResearchMacroCalibrationSnapshot(state);
   const calibrationPowerResources = [captureTimeWarpExhaustiblePowerResources(state)];
-  const combinedBefore = capturePureIdleCombinedConservationCheckpoint(state);
-  const calibrated = structuredClone(state);
-  const constructionEnabled = calibrated.constructionAutomation.enabled;
-  calibrated.constructionAutomation.enabled = false;
-  runExact(calibrated, calibrationSeconds, calibrationWallSeconds);
-  calibrated.constructionAutomation.enabled = constructionEnabled;
+  const combinedBefore = capturePureIdleCombinedConservationCheckpoint(state, { constructionReplaySeconds: simulationSeconds });
+  const constructionPowerAudit = createConstructionPowerAuditAccumulator();
+  const constructionSampleOptions = {
+    isolateConstructionAutomation: true,
+    onPowerPlan: constructionPowerAudit.onPowerPlan,
+  };
+  let calibrated = runExact(structuredClone(state), calibrationSeconds, calibrationWallSeconds, constructionSampleOptions);
   calibrationPowerResources.push(captureTimeWarpExhaustiblePowerResources(calibrated));
   const calibrationPowerTail = createPureIdlePowerTailCertificate(
     calibrated,
@@ -6189,7 +6210,7 @@ function runTimeWarpApproximateSettlementUnsafe(
     contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
   }
   if (!researchLedger || contract.maximumSimulationSeconds === 0 ||
-    contract.deltas.length === 0 && !isFastLightweightQuiescent(state)) {
+    contract.deltas.length === 0 && !isFastLightweightQuiescent(state) && !isFastLightweightConstructionOnly(state)) {
     return conservativeTimeWarpResult(
       state,
       calibrated,
@@ -6286,9 +6307,7 @@ function runTimeWarpApproximateSettlementUnsafe(
   const criticalBaseline = captureTimeWarpCriticalSnapshot(calibrated);
   const expectedCritical = criticalSnapshotWithPredictedWhiteMatrix(criticalBaseline, expectedValidation);
   const validationPowerResources = [captureTimeWarpExhaustiblePowerResources(calibrated)];
-  calibrated.constructionAutomation.enabled = false;
-  runExact(calibrated, validationSeconds, validationWallSeconds);
-  calibrated.constructionAutomation.enabled = constructionEnabled;
+  calibrated = runExact(calibrated, validationSeconds, validationWallSeconds, constructionSampleOptions);
   validationPowerResources.push(captureTimeWarpExhaustiblePowerResources(calibrated));
   const validationPowerTail = createPureIdlePowerTailCertificate(
     calibrated,
@@ -6345,6 +6364,13 @@ function runTimeWarpApproximateSettlementUnsafe(
       calibrated,
       productiveSimulationSeconds,
       combinedBefore,
+      {
+        contract,
+        powerCertificate: issuePureIdleConstructionPowerCertificate(
+          calibrated, contract, constructionPowerAudit, calibrationSeconds + validationSeconds,
+        ),
+        quantumTimelineStartSeconds: state.elapsedSeconds,
+      },
     );
   } catch (error) {
     return conservativeTimeWarpResult(
@@ -6378,6 +6404,8 @@ function runTimeWarpApproximateSettlementUnsafe(
     researchLedger,
     maxCriticalError,
     rollingPowerTail,
+    constructionPowerAudit,
+    calibrationSeconds + validationSeconds,
   );
   return {
     state: calibrated,
@@ -6631,6 +6659,22 @@ function isFastLightweightQuiescent(state: GameState): boolean {
     !state.endgame.constructionActivity.activityId;
 }
 
+/** An empty ordinary-production contract is sufficient only for this closed
+ * construction domain. It cannot certify a stalled ordinary factory. */
+function isFastLightweightConstructionOnly(state: GameState): boolean {
+  if (!state.constructionAutomation.enabled || state.belts.length > 0 || hasActiveResearch(state) ||
+    state.handcraftQueue.length > 0 || state.constructionQueue.length > 0 ||
+    Object.values(state.endgame.exportProjects).some((project) => project.enabled) ||
+    state.endgame.constructionActivity.activityId) return false;
+  return state.entities.every((entity) =>
+    entity.kind === "vein" && Number.isFinite(entity.minerCount) && entity.minerCount <= 0 ||
+    entity.buildingId === "construction_center" || entity.buildingId === "time_warp_device" ||
+    entity.kind === "power" && entity.buildingId === "wind_turbine" ||
+    entity.kind === "station" && entity.buildingId === "interstellar_logistics_station" &&
+      entity.quantumMode === "quantum" && (entity.stationRoutes?.length ?? 0) === 0 &&
+      getStationSlots(entity).every((slot) => !slot.itemId));
+}
+
 function pureIdleCreditedSecondsByItem(
   contract: PureIdleAffineContract,
   requestedSeconds: number,
@@ -6685,7 +6729,7 @@ function prepareFastLightweightSettlement(
   const macroSeconds = seconds - FAST_OFFLINE_CALIBRATION_SECONDS - FAST_OFFLINE_VALIDATION_SECONDS;
   if (macroSeconds < 1) return { failure: "校准后没有足够的批量外推时间" };
   const { contract, researchLedger } = calibrated;
-  if ((contract.deltas.length === 0 && !isFastLightweightQuiescent(source)) || contract.maximumSimulationSeconds === 0) {
+  if ((contract.deltas.length === 0 && !isFastLightweightQuiescent(source) && !isFastLightweightConstructionOnly(source)) || contract.maximumSimulationSeconds === 0) {
     return { failure: "30 秒轻量校准没有形成可持续普通生产合同" };
   }
   const availablePowerSeconds = availablePureIdlePowerTailSeconds(

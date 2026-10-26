@@ -2360,6 +2360,7 @@ fn build_resolved_construction_plan(
     automation: &Map<String, Value>,
     jobs: &Map<String, Value>,
     buffers: &Map<String, Value>,
+    warehouse: &Map<String, Value>,
     entity_id: &str,
     planet_id: &str,
     target: &crate::construction_planner::Target,
@@ -2376,7 +2377,9 @@ fn build_resolved_construction_plan(
         .get(entity_id)
         .and_then(Value::as_object)
         .unwrap_or(&empty);
-    let inventory = crate::construction_planner::inventory_from_sources(planet_tray, quantum);
+    let planning_quantum = combine_quantum_planning_inventory(&[quantum, warehouse])?;
+    let inventory =
+        crate::construction_planner::inventory_from_sources(planet_tray, &planning_quantum);
     let Some(plan) = crate::construction_planner::build_plan(state, base, target, inventory) else {
         return Ok(None);
     };
@@ -3522,6 +3525,7 @@ fn complete_step(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_centers(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -3530,6 +3534,7 @@ pub(crate) fn run_centers(
     power_factors: &HashMap<usize, f64>,
     center_indices: &[usize],
     runtime: &mut ConstructionRuntime,
+    allow_quantum_planning: bool,
 ) -> anyhow::Result<ConstructionRunOutcome> {
     let (selected_center_indices, scan) =
         runtime.selected_rows(state, base, entities, power_factors, center_indices);
@@ -3548,6 +3553,27 @@ pub(crate) fn run_centers(
         .and_then(|value| value.as_object().cloned())
         .ok_or_else(|| anyhow!("native construction automation state is missing"))?;
     let enabled = automation.get("enabled").and_then(Value::as_bool) == Some(true);
+    let warehouse_for_planning = if allow_quantum_planning
+        && automation
+            .get("quantumSourceEnabled")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && base
+            .get("quantumLogisticsNetwork")
+            .and_then(|network| network.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        && entities.iter().any(|entity| {
+            entity.get("kind").and_then(Value::as_str) == Some("station")
+                && entity.get("buildingId").and_then(Value::as_str)
+                    == Some("interstellar_logistics_station")
+                && entity.get("quantumMode").and_then(Value::as_str) == Some("quantum")
+                && finite_number(entity.get("machineCount")) > 0.0
+        }) {
+        quantum_warehouse_inventory(base)?
+    } else {
+        Map::new()
+    };
     let mut jobs = automation
         .remove("jobs")
         .and_then(|value| value.as_object().cloned())
@@ -3716,10 +3742,11 @@ pub(crate) fn run_centers(
                         }
                         break;
                     };
-                    let has_direct_buffer = buffers
-                        .get(&entity_id)
-                        .and_then(Value::as_object)
-                        .is_some_and(|buffer| !buffer.is_empty());
+                    let has_direct_buffer = !warehouse_for_planning.is_empty()
+                        || buffers
+                            .get(&entity_id)
+                            .and_then(Value::as_object)
+                            .is_some_and(|buffer| !buffer.is_empty());
                     let cached_direct = has_direct_buffer
                         .then(|| {
                             take_valid_direct_cached_plan(
@@ -3745,6 +3772,7 @@ pub(crate) fn run_centers(
                             &automation,
                             &jobs,
                             &buffers,
+                            &warehouse_for_planning,
                             &entity_id,
                             &planet_id,
                             &target,
@@ -3783,6 +3811,33 @@ pub(crate) fn run_centers(
                             ((target.index + 1) % count) as f64,
                         )?;
                         continue;
+                    }
+                    if !warehouse_for_planning.is_empty() {
+                        let first =
+                            parse_step(&planned_step_value(resolved.plan.steps[0].clone()))?;
+                        let empty = Map::new();
+                        let quantum = buffers
+                            .get(&entity_id)
+                            .and_then(Value::as_object)
+                            .unwrap_or(&empty);
+                        let planet_tray = tray(base, &planet_id).unwrap_or(&empty);
+                        if !requirements_available(
+                            &empty,
+                            planet_tray,
+                            quantum,
+                            &requirements(state, &first)?,
+                        ) {
+                            wait_for_planet_inventory = true;
+                            wait_for_planner_cursor = true;
+                            blocked_targets.insert(target.id.clone());
+                            let count = crate::construction_planner::targets(state).len().max(1);
+                            set_number(
+                                &mut automation,
+                                "cursor",
+                                ((target.index + 1) % count) as f64,
+                            )?;
+                            continue;
+                        }
                     }
                     let target_count = crate::construction_planner::targets(state).len().max(1);
                     set_number(
@@ -3839,7 +3894,7 @@ pub(crate) fn run_centers(
                 };
                 let step = parse_step(step_value)?;
                 let requirements = requirements(state, &step)?;
-                let inputs_available = {
+                let (inputs_available, waiting_for_quantum) = {
                     let job_inventory = current_job
                         .get("inventory")
                         .and_then(Value::as_object)
@@ -3851,7 +3906,20 @@ pub(crate) fn run_centers(
                         .unwrap_or(&empty_quantum);
                     let planet_tray = tray(base, &planet_id)
                         .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
-                    requirements_available(job_inventory, planet_tray, quantum, &requirements)
+                    let available =
+                        requirements_available(job_inventory, planet_tray, quantum, &requirements);
+                    let waiting = !available
+                        && !warehouse_for_planning.is_empty()
+                        && requirements_available(
+                            job_inventory,
+                            planet_tray,
+                            &combine_quantum_planning_inventory(&[
+                                quantum,
+                                &warehouse_for_planning,
+                            ])?,
+                            &requirements,
+                        );
+                    (available, waiting)
                 };
                 if !inputs_available {
                     // This is the exact transition that creates a direct quantum
@@ -3859,6 +3927,10 @@ pub(crate) fn run_centers(
                     // demands need no repeated global scan; the center remains in
                     // the active set until a later probe proves it quiescent.
                     wake_centers.insert(entity_index);
+                    if waiting_for_quantum {
+                        wait_for_planet_inventory = true;
+                        break;
+                    }
                     if repair_job(state, base, &buffers, &entity_id, &planet_id, current_job)? {
                         continue;
                     }
@@ -5151,6 +5223,7 @@ mod tests {
             power_factors,
             &state.factory_topology.construction_center_indices,
             runtime,
+            true,
         )
         .expect("run active construction fixture")
     }
@@ -5572,6 +5645,7 @@ mod tests {
             &power,
             &state.factory_topology.construction_center_indices,
             Arc::make_mut(&mut candidate_runtime),
+            true,
         )
         .expect_err("malformed candidate jobs must fail after selecting wake rows");
         assert_eq!(error.to_string(), "native construction jobs are missing");

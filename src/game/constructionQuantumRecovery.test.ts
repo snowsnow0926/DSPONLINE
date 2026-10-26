@@ -66,6 +66,46 @@ describe("construction quantum recovery in the persistent Web runtime", () => {
     expect(Object.values(end.constructionAutomation.quantumMaterialBuffer ?? {})).toEqual([]);
   });
 
+  it("prefers an advanced recipe supplied by quantum stock over a locally funded basic recipe", () => {
+    const s = factory({ optical_grating_crystal: "10" });
+    s.constructionAutomation.targetStock = { ray_receiver: 1 };
+    s.construction.ray_receiver = 0;
+    s.tray = { steel: 20, high_purity_silicon: 20, processor: 5, circuit_board: 10, prism: 20 };
+    s.planetTrays.home = s.tray;
+
+    const end = run(s, 30);
+
+    expect(end.construction.ray_receiver).toBe(1);
+    expect(end.quantumLogisticsNetwork.inventory.optical_grating_crystal).toBe("0");
+    expect(end.tray.prism).toBe(20);
+  });
+
+  it("uses the basic recipe when quantum stock cannot fund the advanced recipe", () => {
+    const s = factory({ optical_grating_crystal: "9" });
+    s.constructionAutomation.targetStock = { ray_receiver: 1 };
+    s.construction.ray_receiver = 0;
+    s.tray = { steel: 20, high_purity_silicon: 20, processor: 5, circuit_board: 10, prism: 20 };
+    s.planetTrays.home = s.tray;
+
+    const end = run(s, 30);
+
+    expect(end.construction.ray_receiver).toBe(1);
+    expect(end.quantumLogisticsNetwork.inventory.optical_grating_crystal).toBe("9");
+    expect(end.tray.prism).toBe(0);
+  });
+
+  it("does not wait for advanced warehouse material without a quantum tower", () => {
+    const s = factory({ optical_grating_crystal: "10" });
+    s.entities[1].quantumMode = "legacy";
+    s.constructionAutomation.targetStock = { ray_receiver: 1 };
+    s.construction.ray_receiver = 0;
+    s.tray = { steel: 20, high_purity_silicon: 20, processor: 5, circuit_board: 10, prism: 20 };
+    s.planetTrays.home = s.tray;
+    const end = run(s, 30);
+    expect(end.construction.ray_receiver).toBe(1);
+    expect(end.quantumLogisticsNetwork.inventory.optical_grating_crystal).toBe("10");
+  });
+
   it("combines partial finished stock with recursively manufacturable raw materials", () => {
     const s = factory({ iron_ingot: "4", iron_ore: "6", copper_ore: "3", stone: "2" });
     expect(run(s).construction.arc_smelter).toBe(1);

@@ -1002,7 +1002,7 @@ describe("offline macro contract experiment", () => {
     expect(hashGameState(source)).toBe(sourceHash);
   });
 
-  it("freezes an unmetered construction tail before it can break the final ledger", () => {
+  it("rejects a construction tail with unsafe counters before it can break the final ledger", () => {
     const source = stableEmptyState();
     source.entities.push({
       id: "construction-gate-time-warp", kind: "machine", planetId: "home", position: { x: -120, y: 0 },
@@ -1038,8 +1038,10 @@ describe("offline macro contract experiment", () => {
 
     expect(result.state.construction.arc_smelter ?? 0).toBe(0);
     expect(result.state.constructionAutomation.totalCrafted).toBe(Number.MAX_SAFE_INTEGER);
-    expect(result.state.entities.find((entity) => entity.id === "construction-gate-center"))
-      .toMatchObject({ powerInputKw: 0, powerFactor: 0, utilization: 0, productionRate: 0 });
+    const center = result.state.entities.find((entity) => entity.id === "construction-gate-center")!;
+    expect(center).toMatchObject({ utilization: 0, productionRate: 0 });
+    expect(center.powerInputKw ?? 0).toBe(0);
+    expect(center.powerFactor ?? 0).toBe(0);
     expect(hashGameState(source)).toBe(sourceHash);
   });
 

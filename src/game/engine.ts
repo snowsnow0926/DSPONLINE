@@ -6740,7 +6740,10 @@ function constructionQuantumTarget(state: GameState, center: FactoryEntity, inve
   return first;
 }
 
-function constructionQuantumCenters(state: GameState, lookup?: SimulationLookupContext): FactoryEntity[] {
+type ConstructionAutomationLookup = Pick<SimulationLookupContext,
+  "constructionCentersByPlanet" | "constructionAutomationPlanCache" | "quantumTowerStacks">;
+
+function constructionQuantumCenters(state: GameState, lookup?: Pick<ConstructionAutomationLookup, "constructionCentersByPlanet">): FactoryEntity[] {
   if (!state.constructionAutomation.quantumSourceEnabled) return [];
   const indexed = lookup?.constructionCentersByPlanet;
   if (indexed) {
@@ -6756,7 +6759,7 @@ function constructionQuantumCenters(state: GameState, lookup?: SimulationLookupC
 /** Build one direct endpoint per center/item so quantum material never passes through a planet tray. */
 function collectConstructionQuantumDemands(
   state: GameState,
-  lookup?: SimulationLookupContext,
+  lookup?: Pick<ConstructionAutomationLookup, "constructionCentersByPlanet">,
   prefetchSeconds = QUANTUM_SETTLEMENT_SECONDS,
   powerFactorByCenterId?: ReadonlyMap<string, number>,
   boundarySecond = state.elapsedSeconds,
@@ -6834,7 +6837,7 @@ function applyConstructionQuantumDelivery(
  * network's existing cursor rotation semantics. */
 function settleConstructionQuantumMacroBoundary(
   state: GameState,
-  lookup: SimulationLookupContext,
+  lookup: ConstructionAutomationLookup,
   globalDownloadCap: number,
   powerFactorByCenterId?: ReadonlyMap<string, number>,
   boundarySecond = state.elapsedSeconds,
@@ -12460,8 +12463,16 @@ interface ConstructionAutomationComputeBudget {
   remainingPlanBuilds: number;
 }
 
-function constructionAutomationInventorySnapshot(state: GameState, planetId: PlanetId): Partial<Record<ItemId, number>> {
-  return Object.fromEntries((Object.entries(trayForPlanet(state, planetId)) as Array<[ItemId, number]>)
+function constructionAutomationInventorySnapshot(
+  state: GameState,
+  planetId: PlanetId,
+  relevantItems?: readonly ItemId[],
+): Partial<Record<ItemId, number>> {
+  const tray = trayForPlanet(state, planetId);
+  const entries = relevantItems
+    ? relevantItems.map((itemId) => [itemId, tray[itemId] ?? 0] as [ItemId, number])
+    : Object.entries(tray) as Array<[ItemId, number]>;
+  return Object.fromEntries(entries
     .map(([itemId, amount]) => [itemId, Math.max(0, Math.floor(amount ?? 0))] as const)
     .filter(([, amount]) => amount > 0)
     .sort(([left], [right]) => left.localeCompare(right))) as Partial<Record<ItemId, number>>;
@@ -12549,7 +12560,7 @@ function constructionAutomationCachedPlanValid(
   planetId: PlanetId,
   cached: CachedConstructionAutomationPlan,
 ): boolean {
-  const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId);
+  const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId, cached.batch?.relevantItems);
   const materialInventoryVersion = constructionAutomationInventoryVersion(inventorySnapshot);
   if (cached.batch && cached.batch.jobsPerCycle > 1 &&
     !constructionAutomationCycleStateMatches(state, planetId, cached.batch)) return false;
@@ -12779,7 +12790,15 @@ function resolveConstructionAutomationPlan(
   budget.remainingPlanBuilds -= 1;
   const plan = buildConstructionAutomationPlan(state, definition, planetId);
   const batch = plan.blocker ? null : analyzeRepeatableConstructionAutomationPlan(state, definition, plan);
-  const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId);
+  const resolvedBatch = batch && !constructionAutomationBatchCanRepeat(state, planetId, batch)
+    ? (hasSingleConstructionAutomationTarget(state, definition.id)
+      ? (tryBuildStableConstructionAutomationCycle(state, definition, planetId, batch, budget, profiler) ?? batch)
+      : batch)
+    : batch;
+  // The dependency closure includes inputs to higher-priority fallback
+  // recipes. Unrelated output from another target cannot change this plan;
+  // newly available advanced ingredients still invalidate it.
+  const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId, resolvedBatch?.relevantItems);
   const resolved = {
     plan,
     // A finite by-product cycle is useful when one target can consume the
@@ -12788,11 +12807,7 @@ function resolveConstructionAutomationPlan(
     // there spends the same per-second plan-build budget that should be used
     // for those target plans, and can starve the rotation.  Keep the original
     // bounded batch fallback for the multi-target case.
-    batch: batch && !constructionAutomationBatchCanRepeat(state, planetId, batch)
-      ? (hasSingleConstructionAutomationTarget(state, definition.id)
-        ? (tryBuildStableConstructionAutomationCycle(state, definition, planetId, batch, budget, profiler) ?? batch)
-        : batch)
-      : batch,
+    batch: resolvedBatch,
     inventorySnapshot,
     materialInventoryVersion: constructionAutomationInventoryVersion(inventorySnapshot),
   };
@@ -12980,10 +12995,16 @@ function runConstructionCenters(
   entities = state.entities,
   batchConstructionAutomation = true,
   profiler?: SimulationProfiler,
-  lookup?: SimulationLookupContext,
+  lookup?: Pick<ConstructionAutomationLookup, "constructionAutomationPlanCache" | "quantumTowerStacks">,
 ): void {
   const centerEntities = entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center");
   if (centerEntities.length === 0) return;
+  // Warehouse stock may choose a recipe but is never spendable until the
+  // shared allocator delivers it. Without a working download endpoint keep
+  // using local recipes instead of waiting for an impossible delivery.
+  const towerStacks = lookup?.quantumTowerStacks ?? state.entities
+    .filter(isQuantumStation).reduce((sum, tower) => sum + Math.max(0, tower.machineCount), 0);
+  const warehouseForPlanning = towerStacks > 0 ? constructionQuantumWarehouseInventory(state) : {};
   const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
   const activeTargetCountForBudget = getActiveConstructionAutomationTargets(state).length;
   const extendedBudget = batchConstructionAutomation && activeTargetCountForBudget > 1 &&
@@ -13082,10 +13103,11 @@ function runConstructionCenters(
           // supposedly independent oracle to the optimization it checks.
           if (profiler) profiler.constructionPlanBuilds += 1;
           resolved = {
-            plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId, quantumBuffer),
+            plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId,
+              constructionQuantumPlanningInventory(quantumBuffer, warehouseForPlanning)),
             batch: null,
           };
-        } else if (Object.keys(quantumBuffer).length > 0) {
+        } else if (Object.keys(quantumBuffer).length > 0 || Object.keys(warehouseForPlanning).length > 0) {
           // A direct quantum delivery changes the planner's virtual input set;
           // bypass the tray-only cache and spend one bounded plan build. The
           // resulting repeatable batch consumes the center buffer directly,
@@ -13105,7 +13127,8 @@ function runConstructionCenters(
             }
             budget.remainingPlanBuilds -= 1;
             if (profiler) profiler.constructionPlanBuilds += 1;
-            const directPlan = buildConstructionAutomationPlan(state, target.definition, entity.planetId, quantumBuffer);
+            const directPlan = buildConstructionAutomationPlan(state, target.definition, entity.planetId,
+              constructionQuantumPlanningInventory(quantumBuffer, warehouseForPlanning));
             const directBaseBatch = directPlan.blocker
               ? null
               : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan);
@@ -13144,6 +13167,16 @@ function runConstructionCenters(
         }
         const plan = resolved.plan;
         if (plan.blocker) {
+          blockedTargets.add(target.definition.id);
+          state.constructionAutomation.cursor = (target.index + 1) % Math.max(1, getConstructionAutomationTargets().length);
+          continue;
+        }
+        // Leave a forecast as a demand, not a persisted job, until its first
+        // step has actually arrived. Other ready targets can use this slice.
+        const firstStep = plan.steps[0];
+        if (firstStep && Object.keys(warehouseForPlanning).length > 0 &&
+          !constructionMaterialsAvailable({}, trayForPlanet(state, entity.planetId), quantumBuffer,
+            constructionAutomationRequirements(firstStep))) {
           blockedTargets.add(target.definition.id);
           state.constructionAutomation.cursor = (target.index + 1) % Math.max(1, getConstructionAutomationTargets().length);
           continue;
@@ -13191,6 +13224,13 @@ function runConstructionCenters(
       }
       const duration = constructionAutomationStepDuration(state, step);
       if (!constructionAutomationInputsAvailable(state, entity.planetId, job, step, entity.id)) {
+        // Do not immediately replace a warehouse-backed advanced recipe with
+        // a local basic recipe while its real delivery is pending. No work or
+        // material is credited by this read-only availability check.
+        if (Object.keys(warehouseForPlanning).length > 0 &&
+          constructionMaterialsAvailable(job.inventory, trayForPlanet(state, entity.planetId),
+          constructionQuantumPlanningInventory(constructionAutomationQuantumBuffer(state, entity.id), warehouseForPlanning),
+          constructionAutomationRequirements(step))) break;
         if (repairConstructionAutomationJob(state, entity.planetId, job, step, entity.id)) continue;
         break;
       }
@@ -13293,8 +13333,22 @@ export function advanceConstructionAutomationMacroInPlace(
     return { completed: 0, centersVisited: centers.length };
   }
 
-  const lookup = createSimulationLookupContext(state);
-  const reception = options.powerFactorByCenterId ? undefined : calculateDysonReception(state, lookup);
+  // Certified macro work already owns a per-center power allocation. Building
+  // the full factory lookup here indexed every unrelated belt, machine and
+  // logistics route again on each offline/time-warp bucket.
+  const fullLookup = options.powerFactorByCenterId ? undefined : createSimulationLookupContext(state);
+  const centersByPlanet = new Map<PlanetId, FactoryEntity[]>();
+  for (const center of centers) {
+    const group = centersByPlanet.get(center.planetId);
+    if (group) group.push(center);
+    else centersByPlanet.set(center.planetId, [center]);
+  }
+  const lookup: ConstructionAutomationLookup = fullLookup ?? {
+    constructionCentersByPlanet: centersByPlanet,
+    constructionAutomationPlanCache: new Map(),
+    quantumTowerStacks: (options.quantumDownloadPerBoundary ?? 0) > 0 ? 1 : 0,
+  };
+  const reception = fullLookup ? calculateDysonReception(state, fullLookup) : undefined;
   const completedBefore = Math.max(0, Math.floor(state.constructionAutomation.totalCrafted));
   const planetIds = [...new Set(centers.map((entity) => entity.planetId))].sort();
   const advanceWork = (seconds: number): void => {
@@ -13332,13 +13386,13 @@ export function advanceConstructionAutomationMacroInPlace(
           generatorCount: 0,
         } satisfies PowerPlan
         : combinePowerPlans(POWER_GRID_IDS.map((gridId) =>
-          calculatePower(state, 1, planetId, gridId, reception!, lookup)));
+          calculatePower(state, 1, planetId, gridId, reception!, fullLookup)));
       runConstructionCenters(
         state,
         seconds,
         power,
         planetId,
-        lookup.entitiesByPlanet.get(planetId) ?? [],
+        centersByPlanet.get(planetId) ?? [],
         true,
         undefined,
         lookup,
@@ -13380,6 +13434,7 @@ export function advanceConstructionAutomationMacroInPlace(
     // already owned by a center (including the last boundary delivery) remain
     // safe to consume for the rest of the construction-only bucket; the
     // recursive planner stops naturally when those stores are exhausted.
+    if (!fullLookup) lookup.quantumTowerStacks = 0;
     advanceWork(Math.max(0, simulationSeconds - replaySeconds));
   } else {
     advanceWork(simulationSeconds);

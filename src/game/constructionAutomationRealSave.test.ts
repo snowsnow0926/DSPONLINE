@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { Session } from "node:inspector";
 import { describe, expect, it } from "vitest";
 import { advanceConstructionAutomationMacroInPlace, advanceSimulation, getConstructionAutomationStatus } from "./engine";
 import {
@@ -42,7 +43,7 @@ describe.skipIf(!fixturePath)("construction automation real-save recovery", () =
     expect(createHash("sha256").update(readFileSync(fixturePath!, "utf8")).digest("hex")).toBe(sourceSha256);
   });
 
-  it("profiles one endgame construction-only tail and one 8x time-warp slice", { timeout: 180_000 }, () => {
+  it("profiles one endgame construction-only tail and one 8x time-warp slice", { timeout: 180_000 }, async () => {
     const sourceRaw = readFileSync(fixturePath!, "utf8");
     const sourceSha256 = createHash("sha256").update(sourceRaw).digest("hex");
     const parsed = JSON.parse(sourceRaw) as { state?: unknown } & Record<string, unknown>;
@@ -56,12 +57,34 @@ describe.skipIf(!fixturePath)("construction automation real-save recovery", () =
     if (controller) source!.timeWarp.controllerEntityId = controller.id;
 
     const constructionCandidate = structuredClone(source!);
+    const cpu = process.env.DSP_CONSTRUCTION_CPU_PROFILE === "1" ? new Session() : undefined;
+    if (cpu) {
+      cpu.connect();
+      await new Promise<void>((resolve, reject) => cpu.post("Profiler.enable", (error) => error ? reject(error) : resolve()));
+    }
+    const startCpu = async () => {
+      if (cpu) await new Promise<void>((resolve, reject) => cpu.post("Profiler.start", (error) => error ? reject(error) : resolve()));
+    };
+    const stopCpu = async (name: string) => {
+      if (!cpu) return;
+      await new Promise<void>((resolve, reject) => cpu.post("Profiler.stop", (error, result) => {
+        if (error) return reject(error);
+        mkdirSync("artifacts/endgame-construction-20261026", { recursive: true });
+        writeFileSync(`artifacts/endgame-construction-20261026/${name}.cpuprofile`, JSON.stringify(result.profile));
+        resolve();
+      }));
+    };
+    await startCpu();
     const constructionStartedAt = performance.now();
     const construction = advanceConstructionAutomationMacroInPlace(constructionCandidate, 64);
     const constructionMs = performance.now() - constructionStartedAt;
+    await stopCpu("construction-only");
+    await startCpu();
     const timeWarpStartedAt = performance.now();
     const timeWarp = runTimeWarpApproximateSettlement(source!, 64, 8);
     const timeWarpMs = performance.now() - timeWarpStartedAt;
+    await stopCpu("time-warp");
+    cpu?.disconnect();
     console.log(`REAL_TIME_WARP_PROFILE ${JSON.stringify({ constructionMs, construction, timeWarpMs, report: timeWarp.report })}`);
 
     expect(timeWarp.state.elapsedSeconds - source!.elapsedSeconds).toBeCloseTo(64, 6);

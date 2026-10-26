@@ -884,6 +884,7 @@ import { beginRuntimeTransition, completeRuntimeTransition, installRuntimeLongTa
 import {
   createTimeWarpComputeGovernor,
   forceTimeWarpApproximation,
+  getTimeWarpWorkerHardTimeoutMs,
   markTimeWarpWorkerUnavailable,
   recordTimeWarpComputeSample,
   resolveTimeWarpComputeLimits,
@@ -12646,7 +12647,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         return;
       }
       const inFlight = simulationSubmissionRef.current;
-      if (currentState.timeWarp.enabled && inFlight && shouldAbortTimeWarpWorker(inFlight.submittedAt, now)) {
+      if (currentState.timeWarp.enabled && inFlight && shouldAbortTimeWarpWorker(
+        inFlight.submittedAt, now, getTimeWarpWorkerHardTimeoutMs(timeWarpComputeStateRef.current),
+      )) {
         previous = now;
         simulationPendingSecondsRef.current += inFlight.simulationSeconds;
         simulationPendingWallSecondsRef.current += inFlight.wallSeconds;

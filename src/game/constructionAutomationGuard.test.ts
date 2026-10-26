@@ -79,6 +79,36 @@ function expectSafeIntegerInventories(state: GameState): void {
 }
 
 describe("construction automation compute protection", () => {
+  it("keeps a valid plan when only an unrelated inventory item is added", () => {
+    const state = createProtectedConstructionState();
+    state.constructionAutomation.targetStock = { arc_smelter: 1_000_000 };
+    state.tray.coal = 1;
+    const runtime = createPersistentSimulationRuntime(state);
+    advancePersistentSimulationRuntime(runtime, 1, 1);
+    runtime.state.tray.coal = 2;
+    const profiler = createSimulationProfiler();
+    advancePersistentSimulationRuntime(runtime, 1, 1, profiler);
+    expect(profiler.constructionPlanCacheHits).toBeGreaterThan(0);
+    expect(profiler.constructionPlanBuilds).toBe(0);
+    expect(runtime.state.tray.coal).toBe(2);
+  });
+
+  it("replans a cached basic recipe when its higher-priority ingredient arrives", () => {
+    const state = createProtectedConstructionState();
+    state.entities.find((entity) => entity.buildingId === "construction_center")!.machineCount = 100;
+    state.constructionAutomation.targetStock = { ray_receiver: 1_000_000 };
+    state.construction.ray_receiver = 0;
+    state.tray = { steel: 100_000, high_purity_silicon: 100_000, processor: 100_000, circuit_board: 100_000, prism: 100_000 };
+    state.planetTrays.home = state.tray;
+    const runtime = createPersistentSimulationRuntime(state);
+    advancePersistentSimulationRuntime(runtime, 1, 1);
+    runtime.state.tray.optical_grating_crystal = 100;
+    const profiler = createSimulationProfiler();
+    advancePersistentSimulationRuntime(runtime, 1, 1, profiler);
+    expect(profiler.constructionPlanBuilds).toBeGreaterThan(0);
+    expect(runtime.state.tray.optical_grating_crystal).toBeLessThan(100);
+  });
+
   it("normalizes negative, wrapped and oversized scheduler cursors", () => {
     expect(normalizeConstructionAutomationCursor(-1)).toBeGreaterThanOrEqual(0);
     expect(normalizeConstructionAutomationCursor(Number.MAX_SAFE_INTEGER)).toBeGreaterThanOrEqual(0);

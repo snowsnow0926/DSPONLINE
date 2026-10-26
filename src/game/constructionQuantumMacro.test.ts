@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { hashGameState } from "./benchmark";
-import { createInitialState } from "./engine";
+import { advanceConstructionAutomationMacroInPlace, advanceSimulationBudget, createInitialState } from "./engine";
 import {
   advanceConstructionAutomationMacroWithReceiptInPlace,
   capturePureIdleCombinedConservationCheckpoint,
   createPureIdleLightweightCalibration,
+  runFastOfflineSettlement,
+  runTimeWarpApproximateSettlement,
+  runTimeWarpApproximateSettlementInPlace,
   validatePureIdleCombinedSettlementConservation,
   type PureIdleAffineContract,
   type PureIdleCombinedConservationCheckpoint,
@@ -189,6 +192,103 @@ function constructionQuantumSnapshot(state: GameState): unknown {
 }
 
 describe("bounded quantum construction replay", () => {
+  it.each(["offline", "time-warp"] as const)("keeps multi-target quantum construction active in %s settlement", (mode) => {
+    const source = quantumConstructionFixture(2, 10_000);
+    source.construction.assembling_machine_mk1 = 0;
+    source.constructionAutomation.targetStock.assembling_machine_mk1 = 10_000;
+    source.entities.find((entity) => entity.id === "macro-quantum-wind")!.machineCount = 1_000_000_000_000;
+    if (mode === "time-warp") enableQuantumConstructionTimeWarp(source, 8);
+    const sourceHash = hashGameState(source);
+    const result = mode === "offline"
+      ? runFastOfflineSettlement(source, 120)
+      : runTimeWarpApproximateSettlement(source, 64, 8);
+
+    if (!("state" in result)) throw new Error(JSON.stringify(result.report));
+    expect(result.state, JSON.stringify(result.report)).toBeDefined();
+    expect(result.state!.construction.arc_smelter, JSON.stringify(result.report)).toBeGreaterThan(0);
+    expect(result.state!.construction.assembling_machine_mk1).toBeGreaterThan(0);
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("feeds the whole accelerated bucket with the same material result as exact simulation", () => {
+    const source = quantumConstructionFixture(1, 10_000);
+    source.entities.find((entity) => entity.id === "macro-quantum-wind")!.machineCount = 1_000_000_000_000;
+    enableQuantumConstructionTimeWarp(source, 8);
+    const exact = advanceSimulationBudget(source, 64, 8);
+    const accelerated = runTimeWarpApproximateSettlement(source, 64, 8);
+    expect(accelerated.state.construction.arc_smelter).toEqual(exact.construction.arc_smelter);
+    expect(accelerated.state.constructionAutomation.totalCrafted).toEqual(exact.constructionAutomation.totalCrafted);
+    expect(accelerated.state.quantumLogisticsNetwork.inventory).toEqual(exact.quantumLogisticsNetwork.inventory);
+    expect(accelerated.state.constructionAutomation.quantumMaterialBuffer).toEqual(exact.constructionAutomation.quantumMaterialBuffer);
+  });
+
+  it("keeps the next rolling bucket on the same absolute quantum timeline", () => {
+    const source = quantumConstructionFixture(1, 10_000);
+    source.entities.find((entity) => entity.id === "macro-quantum-wind")!.machineCount = 1_000_000_000_000;
+    enableQuantumConstructionTimeWarp(source, 8);
+    const exact = advanceSimulationBudget(source, 64, 8);
+    const first = runTimeWarpApproximateSettlement(source, 32, 4);
+    const second = runTimeWarpApproximateSettlementInPlace(first.state, 32, 4);
+    expect(second.report.exactCalibrationSeconds).toBe(0);
+    expect(second.state.elapsedSeconds).toBeCloseTo(64, 6);
+    expect(second.state.constructionAutomation.totalCrafted).toBe(exact.constructionAutomation.totalCrafted);
+    expect(second.state.quantumLogisticsNetwork.inventory).toEqual(exact.quantumLogisticsNetwork.inventory);
+  });
+
+  it("replays shared quantum supply for multiple construction targets", () => {
+    const source = quantumConstructionFixture(2, 1_000);
+    source.construction.assembling_machine_mk1 = 0;
+    source.constructionAutomation.targetStock.assembling_machine_mk1 = 1_000;
+    const prepared = prepareQuantumConstruction(source);
+    const before = quantumInventoryTotal(prepared.state);
+
+    settlePrepared(prepared, [30]);
+
+    expect(prepared.state.construction.arc_smelter).toBeGreaterThan(0);
+    expect(prepared.state.construction.assembling_machine_mk1).toBeGreaterThan(0);
+    expect(quantumInventoryTotal(prepared.state)).toBeLessThan(before);
+  });
+
+  it("keeps multi-target replay identical across segmented settlement", () => {
+    const source = quantumConstructionFixture(2, 1_000);
+    source.construction.assembling_machine_mk1 = 0;
+    source.constructionAutomation.targetStock.assembling_machine_mk1 = 1_000;
+    const whole = settlePrepared(prepareQuantumConstruction(structuredClone(source)), [30]);
+    const split = settlePrepared(prepareQuantumConstruction(structuredClone(source)), [3, 7, 5, 15]);
+    expect(hashGameState(split)).toBe(hashGameState(whole));
+    expect(source.constructionAutomation.totalCrafted).toBe(0);
+  });
+
+  it("keeps feeding remaining targets after an earlier target completes", () => {
+    const source = quantumConstructionFixture(2, 1);
+    source.construction.assembling_machine_mk1 = 0;
+    source.constructionAutomation.targetStock.assembling_machine_mk1 = 10_000;
+    const whole = settlePrepared(prepareQuantumConstruction(structuredClone(source)), [30]);
+    const split = settlePrepared(prepareQuantumConstruction(structuredClone(source)), [15, 15]);
+    expect(whole.construction.arc_smelter).toBe(1);
+    expect(whole.construction.assembling_machine_mk1).toBeGreaterThan(0);
+    expect(hashGameState(split)).toBe(hashGameState(whole));
+  });
+
+  it("does not index unrelated belts for an already certified construction bucket", () => {
+    const source = quantumConstructionFixture();
+    source.belts = new Proxy(source.belts, {
+      get(target, key, receiver) {
+        if (key === Symbol.iterator || key === "map" || key === "filter") {
+          throw new Error("certified construction must not index the factory belt graph");
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const result = advanceConstructionAutomationMacroInPlace(source, 30, {
+      powerFactorByCenterId: new Map([["macro-quantum-center-0", 1]]),
+      quantumDownloadPerBoundary: 1_000,
+      quantumTimelineStartSeconds: 0,
+      quantumReplaySeconds: 30,
+    });
+    expect(result.completed).toBeGreaterThan(0);
+  });
+
   it("keeps 60 seconds equal to 17+43 and 20+20+20 without replaying the whole factory", () => {
     const source = quantumConstructionFixture(2, 1_000);
     const sourceHash = hashGameState(source);

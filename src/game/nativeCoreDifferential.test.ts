@@ -3496,7 +3496,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     await client.request({ operation: "coreClose", sessionId: segmentedOpened.sessionId });
   });
 
-  it.each(["water", "intermediates", "blocked-target"] as const)("matches recovered construction quantum flow: %s", async (scenario) => {
+  it.each(["water", "intermediates", "blocked-target", "advanced-quantum", "advanced-shortage"] as const)("matches recovered construction quantum flow: %s", async (scenario) => {
     let initial = noJobQuantumConstructionState();
     initial.elapsedSeconds = 0;
     initial.historyRecordedAt = 0;
@@ -3505,7 +3505,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     initial.belts = [];
     const tower = initial.entities.find(entity => entity.buildingId === "interstellar_logistics_station")!;
     tower.machineCount = 1;
-    let completedId: "arc_smelter" | "geothermal_power_station" | "plane_smelter" = "arc_smelter";
+    let completedId: "arc_smelter" | "geothermal_power_station" | "plane_smelter" | "ray_receiver" = "arc_smelter";
     if (scenario === "water") {
       completedId = "geothermal_power_station";
       initial.constructionAutomation.targetStock = { geothermal_power_station: 1 };
@@ -3515,6 +3515,13 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       initial = setStationSlotItem(initial, tower.id, 0, "hydrogen");
       initial = setStationSlotMode(initial, tower.id, 0, "remote", "demand");
       initial = setStationSlotPriority(initial, tower.id, 0, 2);
+    } else if (scenario === "advanced-quantum" || scenario === "advanced-shortage") {
+      completedId = "ray_receiver";
+      initial.construction.ray_receiver = 0;
+      initial.constructionAutomation.targetStock = { ray_receiver: 1 };
+      initial.tray = { steel: 20, high_purity_silicon: 20, processor: 5, circuit_board: 10, prism: 20 };
+      initial.planetTrays.home = initial.tray;
+      initial.quantumLogisticsNetwork.inventory = { optical_grating_crystal: scenario === "advanced-quantum" ? "10" : "9" };
     } else if (scenario === "intermediates") {
       initial.quantumLogisticsNetwork.inventory = { iron_ingot: "4", stone_brick: "2", circuit_board: "4", magnetic_coil: "2" };
       initial.constructionAutomation.targetStock = { arc_smelter: 1 };

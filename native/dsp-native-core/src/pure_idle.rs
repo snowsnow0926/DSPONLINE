@@ -3662,7 +3662,7 @@ fn construction_quantum_macro_fingerprint_from_entities(
             &format!("constructionAutomation.targetStock.{target_id}"),
         )
         .map_err(|error| error.to_string())?;
-        let current = if portable_fleet.contains_key(target_id) {
+        let _current = if portable_fleet.contains_key(target_id) {
             proof_counter(
                 portable_fleet.get(target_id),
                 &format!("portableFleet.{target_id}"),
@@ -3679,18 +3679,16 @@ fn construction_quantum_macro_fingerprint_from_entities(
             construction_quantum_fingerprint_integer(target),
         ]);
         normalized_targets.push(normalized.clone());
-        if target > current {
+        // Completion changes stock, not the configured shared-network grant.
+        if target > 0 {
             active_targets.push(normalized);
         }
     }
     normalized_targets.sort_by(|left, right| left[0].as_str().cmp(&right[0].as_str()));
     active_targets.sort_by(|left, right| left[0].as_str().cmp(&right[0].as_str()));
-    if active_targets.len() != 1 {
+    if active_targets.is_empty() {
         return Ok(None);
     }
-    let active_target_id = active_targets[0][0]
-        .as_str()
-        .expect("normalized construction target IDs are strings");
     if let Some(jobs) = automation.get("jobs") {
         let jobs = jobs
             .as_object()
@@ -3699,7 +3697,9 @@ fn construction_quantum_macro_fingerprint_from_entities(
             let job = job
                 .as_object()
                 .ok_or_else(|| format!("construction quantum job {job_id} is malformed"))?;
-            if job.get("constructionId").and_then(Value::as_str) != Some(active_target_id) {
+            if !active_targets.iter().any(|target| {
+                target[0].as_str() == job.get("constructionId").and_then(Value::as_str)
+            }) {
                 return Ok(None);
             }
         }
@@ -4004,6 +4004,7 @@ fn run_construction_tail_segment(
     seconds: u8,
     power_factors: &HashMap<usize, f64>,
     runtime: &mut crate::construction::ConstructionRuntime,
+    allow_quantum_planning: bool,
 ) -> Result<(i128, usize), String> {
     if seconds == 0 {
         return Ok((0, 0));
@@ -4016,6 +4017,7 @@ fn run_construction_tail_segment(
         power_factors,
         &state.factory_topology.construction_center_indices,
         runtime,
+        allow_quantum_planning,
     )
     .map_err(|error| format!("construction-tail settlement failed: {error:#}"))?;
     Ok((outcome.receipt.crafted, outcome.scan.selected_rows))
@@ -4223,6 +4225,7 @@ fn apply_construction_tail_certificate(
                     work_seconds,
                     &power_factors,
                     Arc::make_mut(&mut runtime),
+                    true,
                 )?;
                 crafted = crafted
                     .checked_add(segment_crafted)
@@ -4284,6 +4287,7 @@ fn apply_construction_tail_certificate(
             trailing_seconds,
             &power_factors,
             Arc::make_mut(&mut runtime),
+            false,
         )?;
         crafted = crafted
             .checked_add(segment_crafted)

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  getTimeWarpWorkerHardTimeoutMs,
   createTimeWarpComputeGovernor,
   forceTimeWarpApproximation,
   markTimeWarpWorkerUnavailable,
@@ -110,5 +111,14 @@ describe("time-warp compute governor", () => {
     expect(shouldAbortTimeWarpWorker(1_000, 6_000, 5_000)).toBe(true);
     expect(shouldAbortTimeWarpWorker(1_000, 1_000 + TIME_WARP_WORKER_HARD_TIMEOUT_MS - 1)).toBe(false);
     expect(shouldAbortTimeWarpWorker(1_000, 1_000 + TIME_WARP_WORKER_HARD_TIMEOUT_MS)).toBe(true);
+  });
+
+  it("allows bounded endgame calibration without weakening the exact worker watchdog", () => {
+    const exact = createTimeWarpComputeGovernor(1);
+    const approximate = forceTimeWarpApproximation(exact);
+    expect(getTimeWarpWorkerHardTimeoutMs(exact)).toBe(15_000);
+    expect(getTimeWarpWorkerHardTimeoutMs(approximate)).toBe(45_000);
+    expect(shouldAbortTimeWarpWorker(1_000, 31_000, getTimeWarpWorkerHardTimeoutMs(approximate))).toBe(false);
+    expect(shouldAbortTimeWarpWorker(1_000, 46_000, getTimeWarpWorkerHardTimeoutMs(approximate))).toBe(true);
   });
 });

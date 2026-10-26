@@ -43,7 +43,7 @@ import {
 import { isPureIdleReplicationUnlocked } from "./endgame";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v11-terminal-domain-boundaries";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v12-construction-timeline";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
@@ -1134,7 +1134,9 @@ function advanceReplicationSession(
     // terminal ledger cannot share a conservation baseline with construction.
     // Settle and validate the construction-only domain first; it still burns
     // real recursive inputs and uses only the power factor captured at start.
-    const constructionCheckpoint = capturePureIdleCombinedConservationCheckpoint(session.candidate);
+    const constructionCheckpoint = capturePureIdleCombinedConservationCheckpoint(session.candidate, {
+      constructionReplaySeconds: simulationSeconds,
+    });
     const construction = advanceConstructionAutomationMacroWithReceiptInPlace(
       session.candidate,
       simulationSeconds,
@@ -1142,6 +1144,7 @@ function advanceReplicationSession(
       {
         powerCertificate: session.constructionPowerCertificate,
         contract: session.contract,
+        quantumTimelineStartSeconds: session.candidate.elapsedSeconds,
       },
     );
     const constructionFailure = validatePureIdleCombinedSettlementConservation(

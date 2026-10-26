@@ -45,9 +45,8 @@ interface PlannerWork {
 }
 
 interface PlannerContext {
-  recipes: RecipeDefinition[];
+  recipesByOutput: ReadonlyMap<ItemId, readonly RecipeDefinition[]>;
   completedTechnologyIds: ReadonlySet<TechId>;
-  allowRecipe: (recipe: RecipeDefinition) => boolean;
   optionLimit: number;
 }
 
@@ -89,12 +88,8 @@ export function getRecipeNetOutput(recipe: RecipeDefinition, itemId: ItemId): nu
   return Number.isFinite(net) ? net : 0;
 }
 
-function producingRecipes(context: PlannerContext, itemId: ItemId): RecipeDefinition[] {
-  return context.recipes
-    .filter((recipe) => context.allowRecipe(recipe) && getRecipeNetOutput(recipe, itemId) > 0)
-    .sort((left, right) =>
-      (right.recursivePriority ?? 0) - (left.recursivePriority ?? 0) ||
-      left.id.localeCompare(right.id));
+function producingRecipes(context: PlannerContext, itemId: ItemId): readonly RecipeDefinition[] {
+  return context.recipesByOutput.get(itemId) ?? [];
 }
 
 function preferredBlocker(blockers: Array<RecursiveCraftBlocker & { depth: number }>): RecursiveCraftBlocker | undefined {
@@ -127,11 +122,9 @@ function ensureItemOptions(
 
   const recipes = producingRecipes(context, itemId);
   if (recipes.length === 0) {
-    const hasAnyRecipe = context.recipes.some((recipe) =>
-      context.allowRecipe(recipe) && getRecipeNetOutput(recipe, itemId) > 0);
     return {
       options: [],
-      blockers: [{ itemId, current, required, reason: hasAnyRecipe ? "no-recipe" : "raw-shortage", depth }],
+      blockers: [{ itemId, current, required, reason: "raw-shortage", depth }],
     };
   }
 
@@ -239,10 +232,26 @@ function plannerContext({ recipes, completedTechnologyIds, allowRecipe, optionLi
   allowRecipe?: (recipe: RecipeDefinition) => boolean;
   optionLimit?: number;
 }): PlannerContext {
+  // A planning invocation owns its index: content-pack and recipe changes on
+  // the next invocation are observed without retaining a global stale cache.
+  const recipesByOutput = new Map<ItemId, RecipeDefinition[]>();
+  for (const recipe of recipes) {
+    if (allowRecipe && !allowRecipe(recipe)) continue;
+    for (const itemId of new Set(recipe.outputs.map((output) => output.itemId))) {
+      if (getRecipeNetOutput(recipe, itemId) <= 0) continue;
+      const producing = recipesByOutput.get(itemId);
+      if (producing) producing.push(recipe);
+      else recipesByOutput.set(itemId, [recipe]);
+    }
+  }
+  for (const producing of recipesByOutput.values()) {
+    producing.sort((left, right) =>
+      (right.recursivePriority ?? 0) - (left.recursivePriority ?? 0) ||
+      left.id.localeCompare(right.id));
+  }
   return {
-    recipes,
+    recipesByOutput,
     completedTechnologyIds: new Set(completedTechnologyIds),
-    allowRecipe: allowRecipe ?? (() => true),
     optionLimit: Math.max(1, Math.min(64, Math.floor(optionLimit ?? 24))),
   };
 }

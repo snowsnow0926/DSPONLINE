@@ -6831,6 +6831,7 @@ fn simulate_step(
             &power_factors,
             &state.factory_topology.construction_center_indices,
             std::sync::Arc::make_mut(construction_runtime),
+            true,
         )?;
         execution_diagnostics.observe(
             FactoryScanStage::Construction,

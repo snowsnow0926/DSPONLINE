@@ -91,7 +91,8 @@ test("concurrent duplicate heartbeats, day rollover and restart preserve counts"
   try {
     const first = await Promise.all(Array.from({ length: 24 }, (_, i) => f.running.ping(i % 6)));
     assert.ok(first.every((r) => r.status === 202), JSON.stringify(first.filter((r) => r.status !== 202)));
-    assert.equal(first.at(-1).body.players.total, 6);
+    // Request-array order is not commit order under concurrent HTTP sockets.
+    assert.equal((await f.running.call("/api/public-status")).body.players.total, 6);
     assert.equal(f.running.server.store.data.dailyMetrics["2026-10-25"].requests, 24);
     assert.equal(f.running.server.store.data.dailyMetrics["2026-10-25"].players, 6);
     const earliest = f.running.server.store.data.players[hash(0)].firstSeenAt;

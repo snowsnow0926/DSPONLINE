@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "development-candidate-regressions-running",
+  "status": "verified-development-candidate-not-deployed",
   "runtimeFiles": [
     {
       "path": "src/game/storage.ts",
@@ -519,5 +519,41 @@
         }
       }
     ]
+  },
+  "runtimeCommit": "1f57492af8cbac3d3c5e18c9575ab5bda93c5571",
+  "artifact": {
+    "buildId": "1.3.1+1f57492af8cb",
+    "fileCount": 196,
+    "aggregateSha256": "3503dde6e54ea5de67f9953bb4b7ada9355da142422044bb63bd74d3bb20671b",
+    "archiveSha256": "72ac3aac8840cafa889ac1bf10610888bc2c518f29f53d448b18e9580b9f9011",
+    "copiedFilesVerified": 196
+  },
+  "tests": {
+    "focused": {
+      "passed": 30
+    },
+    "fullVitest": {
+      "passed": 3552,
+      "skipped": 38,
+      "failed": 0
+    },
+    "fullChromium": {
+      "passed": 477,
+      "skipped": 33,
+      "failed": 0
+    },
+    "server": {
+      "passed": 411,
+      "skipped": 2
+    },
+    "station": {
+      "passed": 4
+    },
+    "typescript": true,
+    "experimentalTypescript": true,
+    "webBuild": true,
+    "productionPwa": {
+      "passed": 1
+    }
   }
 }

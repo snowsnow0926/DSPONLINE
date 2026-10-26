@@ -1,10 +1,11 @@
 # 网页槽位与手动快照：复用权威检查点
 
-状态：开发实现、同档实测、全量单元与浏览器回归通过；最终构建验证待完成，未发布。
+状态：本轮开发验收完成，未发布。
 
 ## 范围与改动
 
-角色为 develop，承接“持续优化网页性能、保留存档和自动备份停用设置”的授权。
+角色为 develop，任务 `web-auxiliary-checkpoint-20261026`，优先级 P1（大档保存卡顿和内存峰值）。
+承接“持续优化网页性能、保留存档和自动备份停用设置”的授权，以香港网页版为目标。
 本轮没有 SSH、生产写入、下载发布或版本号变更。
 
 主存档已有后台校验写入通道，但槽位和手动快照仍把完整工厂从界面重新复制给保存 Worker，
@@ -67,14 +68,29 @@ v2 校验基于 JSON 字段顺序，两者各自有效，但不能据此宣称�
 
 本轮重新执行的全量单元：412 文件通过 / 16 条件跳过，3,552 用例通过 / 38 条件跳过。
 全量 Chromium：482 通过 / 33 条件跳过；包含新增五项回归。类型检查通过。
-最终源码提交、Web 冻结包和生产构建复验待完成。
+Web 构建、启动预算、原生界面边界和覆盖清单验证通过。生产 PWA 缓存升级及离线重开 1/1；
+最终冻结包的真实大档槽位、快照保存 2/2，完整 49 字段摘要均与基线一致。
 服务端本轮没有修改，未把上一轮服务端测试记作本轮重跑。
+
+运行源码提交：`23ae7dde4d8176b0c3828e66f8715f157f584e7d`。
+最终 Web buildId：`1.3.1+23ae7dde4d81`，在干净工作树构建。
+
+- 冻结目录：`D:/GameDev/DSPidle2/artifacts/web-performance-loop-20261026/web-auxiliary-checkpoint-dist`
+- 清单：同目录上级的 `web-auxiliary-checkpoint-manifest.json`；原构建与冻结副本 196 件文件逐一校验通过。
+- 清单聚合 SHA-256：`2882a4ee04b92c7bf060d4b65f984b8621dcb1ca6983bb2d2133f3be034278f2`
+- 归档：同目录上级的 `web-1.3.1-23ae7dde.tar.gz`
+- 归档 SHA-256：`359ff2195bd1ecc041e56fa44c90cef6de9d2cbc912a5d881c33cf7cc28d9a29`
+
+本轮未构建或发布 Android/Windows；没有把网页版实测外推为原生实机结果。
+线上 Web 仍为 `1.3.1-9af159f1b38e`，API 仍为 `api-1.3.0-4c8d0c13a714`；本轮没有线上切换，
+因此也没有执行线上回滚。本地仍保留上一轮 `1f57492af8cb` 的冻结包及本轮旧路径对照包。
 
 复现入口见 `experiments/web-save-checkpoints/README.md`；汇总工具为
 `experiments/web-save-checkpoints/summarize.mjs`。私有输入、逐次结果、Chrome 日志和诊断 profile
 均留在本机 `D:/GameDev/DSPidle2/artifacts/web-performance-loop-20261026/`，不提交真实存档。
 汇总结果为该目录的 `auxiliary-checkpoint-evidence.json`，公开摘要见
 [实测证据](./2026-10-26-web-auxiliary-checkpoint-evidence.json)。
+冻结包复验记录为 `app-slot-frozen.json`、`app-snapshot-frozen.json`，原始输入 SHA-256 复查未变。
 
 ## 后续
 

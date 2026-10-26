@@ -31,6 +31,7 @@ import { getInfiniteResearchCostBigInt, getInfiniteResearchMaximumLevel } from "
 import { normalizeDecimalIntegerString } from "./quantityFormat";
 import { ACTIVITY_MATERIAL_IDS } from "./activity";
 import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
+import { decodeVerifiedSaveTransferChunked } from "./saveTransferDecode";
 import {
   computeSavePayloadTextChecksum,
   decodeVerifiedSaveTransfer,
@@ -530,8 +531,9 @@ let backgroundSaveRequestId = 0;
 
 /**
  * Send one structured-cloned source snapshot to a short-lived Worker. Sparse
- * projection, checksum, serialization and byte verification all stay off the
- * UI thread; the synchronous serializer remains the compatibility fallback.
+ * projection, checksum and serialization stay off the UI thread. Large return
+ * payloads are verified in yielding chunks; the synchronous serializer remains
+ * the compatibility fallback.
  */
 export function serializeEnvelopeInWorker(
   state: GameState,
@@ -548,7 +550,7 @@ export function serializeEnvelopeInWorker(
   }
   const contentPackRegistry = loadContentPackRegistry();
   const id = ++backgroundSaveRequestId;
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let worker: Worker;
     try {
       worker = new Worker(new URL("./save.worker.ts", import.meta.url), { type: "module", name: "save-serialization" });
@@ -559,23 +561,48 @@ export function serializeEnvelopeInWorker(
       return;
     }
     let settled = false;
+    let receiving = false;
+    let fallingBack = false;
+    let decodeAbort: AbortController | undefined;
+    const dispose = () => {
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.onmessageerror = null;
+      worker.terminate();
+    };
     const finish = (result: BackgroundSaveResult) => {
       if (settled) return;
       settled = true;
-      worker.terminate();
+      dispose();
       resolve(result);
     };
     const fallback = () => {
+      if (settled || fallingBack) return;
+      fallingBack = true;
+      decodeAbort?.abort();
       const startedAt = monotonicNow();
-      const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, loadContentPackRegistry(), slot);
-      finish({ ...serialized, durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
+      try {
+        const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, loadContentPackRegistry(), slot);
+        finish({ ...serialized, durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
+      } catch (error) {
+        settled = true;
+        dispose();
+        reject(error);
+      }
     };
     worker.onerror = fallback;
-    worker.onmessage = (event: MessageEvent<{ id: number; bytes?: ArrayBuffer; payloadChecksum?: string; payloadSha256?: string; byteLength?: number; durationMs?: number; summary?: CloudSaveSummary; error?: string }>) => {
-      const { bytes, payloadChecksum, payloadSha256, byteLength, summary } = event.data;
-      if (event.data.id !== id || !(bytes instanceof ArrayBuffer) || !payloadChecksum ||
+    worker.onmessageerror = fallback;
+    worker.onmessage = async (event: MessageEvent<{ id: number; bytes?: ArrayBuffer; payloadChecksum?: string; payloadSha256?: string; byteLength?: number; durationMs?: number; summary?: CloudSaveSummary; error?: string }>) => {
+      if (settled || receiving || fallingBack) return;
+      const response = event.data;
+      if (!response || typeof response !== "object") {
+        fallback();
+        return;
+      }
+      const { bytes, payloadChecksum, payloadSha256, byteLength, summary } = response;
+      if (response.id !== id || !(bytes instanceof ArrayBuffer) || !payloadChecksum ||
         (includePayloadSha256 && !/^[a-f0-9]{64}$/.test(payloadSha256 ?? "")) || !summary?.stateChecksum ||
-        summary.integrity !== "valid" || byteLength !== bytes.byteLength || event.data.error) {
+        summary.integrity !== "valid" || byteLength !== bytes.byteLength || response.error) {
         fallback();
         return;
       }
@@ -586,13 +613,18 @@ export function serializeEnvelopeInWorker(
         byteLength,
       };
       let raw: string;
+      receiving = true;
       try {
-        raw = decodeVerifiedSaveTransfer(bytes, verification);
+        if (bytes.byteLength >= 1024 * 1024) {
+          decodeAbort = typeof AbortController === "undefined" ? undefined : new AbortController();
+          raw = await decodeVerifiedSaveTransferChunked(bytes, verification, { signal: decodeAbort?.signal, lowMemory: true });
+        } else raw = decodeVerifiedSaveTransfer(bytes, verification);
       } catch {
         fallback();
         return;
       }
-      finish({ raw, verification, ...(payloadSha256 ? { payloadSha256 } : {}), durationMs: Math.max(0, event.data.durationMs ?? 0), usedWorker: true, summary });
+      if (settled || fallingBack) return;
+      finish({ raw, verification, ...(payloadSha256 ? { payloadSha256 } : {}), durationMs: Math.max(0, response.durationMs ?? 0), usedWorker: true, summary });
     };
     try {
       worker.postMessage({

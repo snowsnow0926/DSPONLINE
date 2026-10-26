@@ -3,5 +3,5 @@
   "compilerOptions": {
     "tsBuildInfoFile": "../../node_modules/.tmp/web-construction-wasm.tsbuildinfo"
   },
-  "include": ["probe.ts", "large-save.ts", "save-profile.ts", "../../src/vite-env.d.ts"]
+  "include": ["probe.ts", "large-save.ts", "save-profile.ts", "save-responsiveness.ts", "../../src/vite-env.d.ts"]
 }

@@ -33,6 +33,10 @@ node experiments/web-construction-wasm/run.mjs --entry=large-save --prepared=D:/
 
 `--entry=save-profile` 使用同一只读样本测量持久投影、传输序列化、接收校验/解码和兼容字符串再编码，每进程三次。它不补充库存或推进生产，不含数据库 I/O；用同样的 `--source` 与旧/新/新/旧顺序比较。每次输出包含完整 payload 哈希，原文件在运行前后均校验。
 
+`--entry=save-responsiveness` 运行真实保存 Worker，并记录定时器、动画帧与回包时注入的测试点击。运行器按内存中的构建产物表提供 Worker 脚本，使用 ES 模块保持 URL 正确。`--decoder-ref=<commit>` 只从该 Git 提交替换 `storage.ts` 和 `saveTransferDecode.ts`，其余源码不变；比较前必须确认相关运行改动只在这两个文件中。
+
+响应测试加 `--memory=1` 时启用 Chrome 精确页面堆信息，并在 Windows 读取当前测试浏览器的 renderer 工作集。进程峰值包含整个测试生命周期，不是某个函数的净分配；`--collect-memory=1` 另在源状态和返回文本均存活时主动收集垃圾，比较保留堆。内存参数用于独立诊断，不能把测试点击或页面堆当作完整游戏 FPS/总内存。
+
 ## 当前结论
 
 现有 Rust 代码可在浏览器中运行，但这个 JSON 适配器尚无接入收益：简单计算的速度优势被传输和转换抵消；递归分支还会提前计算许多用不到的路线。继续前应验证按需规划、紧凑输入/输出及 JS 回退；不能仅因采用 Rust 就宣布更快。具体数值及候选身份见 [循环记录](../../docs/reviews/2026-10-26-web-performance-loop.md)。

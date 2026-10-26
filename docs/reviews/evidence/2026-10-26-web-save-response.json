@@ -1,0 +1,523 @@
+{
+  "schemaVersion": 1,
+  "status": "development-candidate-regressions-running",
+  "runtimeFiles": [
+    {
+      "path": "src/game/storage.ts",
+      "sha256": "52b621284d0e8656c2b719d0677aed0b0bd429e79dbf977d3049073be596ba5d"
+    },
+    {
+      "path": "src/game/saveTransferDecode.ts",
+      "sha256": "fc88e71417ef4f56b0649bf17477a7aedf14c0c2477dcd0c4df2ae977e40783d"
+    }
+  ],
+  "benchmark": {
+    "scope": "Actual save Worker response in isolated Chrome harness; not full game FPS",
+    "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "order": [
+      "a1",
+      "b1",
+      "b2",
+      "a2",
+      "a3",
+      "b3",
+      "b4",
+      "a4"
+    ],
+    "baseline": {
+      "samples": 4,
+      "postMessageMs": 339.6500000357628,
+      "returnDecodeMs": 252.75000005960464,
+      "inputResponseMs": 253.25000005960464,
+      "maxReturnFrameGapMs": 259.30000001192093,
+      "maxReturnTimerGapMs": 260,
+      "roundTripMs": 2392.650000035763,
+      "rendererLifetimePeakBytes": 1885243392
+    },
+    "candidate": {
+      "samples": 4,
+      "postMessageMs": 332.19999998807907,
+      "returnDecodeMs": 273.14999997615814,
+      "inputResponseMs": 3,
+      "maxReturnFrameGapMs": 158.0999999642372,
+      "maxReturnTimerGapMs": 154.19999998807907,
+      "roundTripMs": 2371.550000011921,
+      "rendererLifetimePeakBytes": 1887270912
+    },
+    "frameGapReductionPercent": 39.0281527354536,
+    "outputHashes": [
+      "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962"
+    ],
+    "serializedBytes": 110789823,
+    "heldPageHeapCheck": {
+      "baseline": {
+        "before": 356434049,
+        "afterReturn": 372265480,
+        "sampledMax": 372265480,
+        "afterGc": 261428101,
+        "scope": "sampled page JS heap only; source and raw kept live; excludes Worker and native allocations"
+      },
+      "candidate": {
+        "before": 356438617,
+        "afterReturn": 372639080,
+        "sampledMax": 476950623,
+        "afterGc": 261438533,
+        "scope": "sampled page JS heap only; source and raw kept live; excludes Worker and native allocations"
+      }
+    },
+    "rows": [
+      {
+        "run": "a1",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "d84392b5e516e387b0fcee31626bf01255164954",
+        "rendererMemory": [
+          {
+            "Id": 66796,
+            "WorkingSet64": 1042157568,
+            "PeakWorkingSet64": 1885343744,
+            "PrivateMemorySize64": 1002119168
+          },
+          {
+            "Id": 68160,
+            "WorkingSet64": 32247808,
+            "PeakWorkingSet64": 32251904,
+            "PrivateMemorySize64": 20918272
+          }
+        ],
+        "decoderReference": "d84392b5e516e387b0fcee31626bf01255164954",
+        "decoderFiles": [
+          "src/game/storage.ts",
+          "src/game/saveTransferDecode.ts"
+        ],
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "actual save Worker round trip; timer gap is a main-thread responsiveness proxy, not FPS",
+        "roundTripMs": 2394.4000000953674,
+        "postMessageMs": 348.7000000476837,
+        "workerReportedMs": 1785.8999999761581,
+        "messageDataAccessMs": 0.20000004768371582,
+        "returnDecodeMs": 253.30000007152557,
+        "maxTimerGapMs": 349.8000000715256,
+        "maxReturnTimerGapMs": 254.70000004768372,
+        "maxReturnFrameGapMs": 258.5,
+        "inputResponseMs": 253.80000007152557,
+        "returnLongTasks": [
+          {
+            "start": 3076.5,
+            "duration": 253
+          }
+        ],
+        "operationLongTasks": [
+          {
+            "start": 935.7999999523163,
+            "duration": 349
+          },
+          {
+            "start": 3076.5,
+            "duration": 253
+          }
+        ],
+        "serializedBytes": 110789823,
+        "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962",
+        "pageHeap": {
+          "before": 356431537,
+          "afterReturn": 372260564,
+          "sampledMax": 372289524,
+          "scope": "sampled page JS heap only; excludes Worker and native allocations"
+        }
+      },
+      {
+        "run": "b1",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "d84392b5e516e387b0fcee31626bf01255164954",
+        "rendererMemory": [
+          {
+            "Id": 744,
+            "WorkingSet64": 1059721216,
+            "PeakWorkingSet64": 1884348416,
+            "PrivateMemorySize64": 1017200640
+          },
+          {
+            "Id": 60872,
+            "WorkingSet64": 35004416,
+            "PeakWorkingSet64": 35008512,
+            "PrivateMemorySize64": 26292224
+          }
+        ],
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "actual save Worker round trip; timer gap is a main-thread responsiveness proxy, not FPS",
+        "roundTripMs": 2406.899999976158,
+        "postMessageMs": 334.60000002384186,
+        "workerReportedMs": 1797.6000000238419,
+        "messageDataAccessMs": 0,
+        "returnDecodeMs": 268.2000000476837,
+        "maxTimerGapMs": 335.6999999284744,
+        "maxReturnTimerGapMs": 151.39999997615814,
+        "maxReturnFrameGapMs": 153.29999995231628,
+        "inputResponseMs": 3,
+        "returnLongTasks": [
+          {
+            "start": 3210,
+            "duration": 148
+          }
+        ],
+        "operationLongTasks": [
+          {
+            "start": 951.9000000953674,
+            "duration": 335
+          },
+          {
+            "start": 3210,
+            "duration": 148
+          }
+        ],
+        "serializedBytes": 110789823,
+        "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962",
+        "pageHeap": {
+          "before": 356435649,
+          "afterReturn": 372408072,
+          "sampledMax": 484576423,
+          "scope": "sampled page JS heap only; excludes Worker and native allocations"
+        }
+      },
+      {
+        "run": "b2",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "d84392b5e516e387b0fcee31626bf01255164954",
+        "rendererMemory": [
+          {
+            "Id": 89864,
+            "WorkingSet64": 34811904,
+            "PeakWorkingSet64": 34816000,
+            "PrivateMemorySize64": 26300416
+          },
+          {
+            "Id": 100520,
+            "WorkingSet64": 1063895040,
+            "PeakWorkingSet64": 1889878016,
+            "PrivateMemorySize64": 1025990656
+          }
+        ],
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "actual save Worker round trip; timer gap is a main-thread responsiveness proxy, not FPS",
+        "roundTripMs": 2362.2999999523163,
+        "postMessageMs": 327.60000002384186,
+        "workerReportedMs": 1753.5,
+        "messageDataAccessMs": 0,
+        "returnDecodeMs": 274.2999999523163,
+        "maxTimerGapMs": 328.7999999523163,
+        "maxReturnTimerGapMs": 154.69999992847443,
+        "maxReturnFrameGapMs": 158.5,
+        "inputResponseMs": 3,
+        "returnLongTasks": [
+          {
+            "start": 3154.7999999523163,
+            "duration": 153
+          }
+        ],
+        "operationLongTasks": [
+          {
+            "start": 946,
+            "duration": 328
+          },
+          {
+            "start": 3154.7999999523163,
+            "duration": 153
+          }
+        ],
+        "serializedBytes": 110789823,
+        "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962",
+        "pageHeap": {
+          "before": 356435941,
+          "afterReturn": 374099104,
+          "sampledMax": 478166703,
+          "scope": "sampled page JS heap only; excludes Worker and native allocations"
+        }
+      },
+      {
+        "run": "a2",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "d84392b5e516e387b0fcee31626bf01255164954",
+        "rendererMemory": [
+          {
+            "Id": 87496,
+            "WorkingSet64": 34791424,
+            "PeakWorkingSet64": 34795520,
+            "PrivateMemorySize64": 26308608
+          },
+          {
+            "Id": 96264,
+            "WorkingSet64": 1041629184,
+            "PeakWorkingSet64": 1886220288,
+            "PrivateMemorySize64": 1000009728
+          }
+        ],
+        "decoderReference": "d84392b5e516e387b0fcee31626bf01255164954",
+        "decoderFiles": [
+          "src/game/storage.ts",
+          "src/game/saveTransferDecode.ts"
+        ],
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "actual save Worker round trip; timer gap is a main-thread responsiveness proxy, not FPS",
+        "roundTripMs": 2401.899999976158,
+        "postMessageMs": 337.10000002384186,
+        "workerReportedMs": 1807.1000000238419,
+        "messageDataAccessMs": 0.10000002384185791,
+        "returnDecodeMs": 251.10000002384186,
+        "maxTimerGapMs": 338,
+        "maxReturnTimerGapMs": 263.60000002384186,
+        "maxReturnFrameGapMs": 259.39999997615814,
+        "inputResponseMs": 251.70000004768372,
+        "returnLongTasks": [
+          {
+            "start": 3093.2999999523163,
+            "duration": 251
+          }
+        ],
+        "operationLongTasks": [
+          {
+            "start": 943,
+            "duration": 337
+          },
+          {
+            "start": 3093.2999999523163,
+            "duration": 251
+          }
+        ],
+        "serializedBytes": 110789823,
+        "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962",
+        "pageHeap": {
+          "before": 356431537,
+          "afterReturn": 372260992,
+          "sampledMax": 372290060,
+          "scope": "sampled page JS heap only; excludes Worker and native allocations"
+        }
+      },
+      {
+        "run": "a3",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "d84392b5e516e387b0fcee31626bf01255164954",
+        "rendererMemory": [
+          {
+            "Id": 92856,
+            "WorkingSet64": 1029570560,
+            "PeakWorkingSet64": 1852702720,
+            "PrivateMemorySize64": 990711808
+          },
+          {
+            "Id": 98468,
+            "WorkingSet64": 34856960,
+            "PeakWorkingSet64": 34861056,
+            "PrivateMemorySize64": 26284032
+          }
+        ],
+        "decoderReference": "d84392b5e516e387b0fcee31626bf01255164954",
+        "decoderFiles": [
+          "src/game/storage.ts",
+          "src/game/saveTransferDecode.ts"
+        ],
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "actual save Worker round trip; timer gap is a main-thread responsiveness proxy, not FPS",
+        "roundTripMs": 2251.399999976158,
+        "postMessageMs": 326.7999999523163,
+        "workerReportedMs": 1664.7999999523163,
+        "messageDataAccessMs": 0,
+        "returnDecodeMs": 252.20000004768372,
+        "maxTimerGapMs": 327.7999999523163,
+        "maxReturnTimerGapMs": 256.39999997615814,
+        "maxReturnFrameGapMs": 259.2000000476837,
+        "inputResponseMs": 252.70000004768372,
+        "returnLongTasks": [
+          {
+            "start": 2925.7000000476837,
+            "duration": 252
+          }
+        ],
+        "operationLongTasks": [
+          {
+            "start": 926.9000000953674,
+            "duration": 327
+          },
+          {
+            "start": 2925.7000000476837,
+            "duration": 252
+          }
+        ],
+        "serializedBytes": 110789823,
+        "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962",
+        "pageHeap": {
+          "before": 356431993,
+          "afterReturn": 372257568,
+          "sampledMax": 372286504,
+          "scope": "sampled page JS heap only; excludes Worker and native allocations"
+        }
+      },
+      {
+        "run": "b3",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "d84392b5e516e387b0fcee31626bf01255164954",
+        "rendererMemory": [
+          {
+            "Id": 82664,
+            "WorkingSet64": 34877440,
+            "PeakWorkingSet64": 34881536,
+            "PrivateMemorySize64": 26271744
+          },
+          {
+            "Id": 97976,
+            "WorkingSet64": 1055559680,
+            "PeakWorkingSet64": 1886961664,
+            "PrivateMemorySize64": 1016733696
+          }
+        ],
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "actual save Worker round trip; timer gap is a main-thread responsiveness proxy, not FPS",
+        "roundTripMs": 2380.8000000715256,
+        "postMessageMs": 336.10000002384186,
+        "workerReportedMs": 1761.2000000476837,
+        "messageDataAccessMs": 0,
+        "returnDecodeMs": 276.40000009536743,
+        "maxTimerGapMs": 337.10000002384186,
+        "maxReturnTimerGapMs": 157.60000002384186,
+        "maxReturnFrameGapMs": 158.5,
+        "inputResponseMs": 2.8000000715255737,
+        "returnLongTasks": [
+          {
+            "start": 3148.9000000953674,
+            "duration": 154
+          }
+        ],
+        "operationLongTasks": [
+          {
+            "start": 922.1000000238419,
+            "duration": 336
+          },
+          {
+            "start": 3148.9000000953674,
+            "duration": 154
+          }
+        ],
+        "serializedBytes": 110789823,
+        "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962",
+        "pageHeap": {
+          "before": 356435693,
+          "afterReturn": 372992588,
+          "sampledMax": 477468395,
+          "scope": "sampled page JS heap only; excludes Worker and native allocations"
+        }
+      },
+      {
+        "run": "b4",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "d84392b5e516e387b0fcee31626bf01255164954",
+        "rendererMemory": [
+          {
+            "Id": 98152,
+            "WorkingSet64": 34975744,
+            "PeakWorkingSet64": 34979840,
+            "PrivateMemorySize64": 26308608
+          },
+          {
+            "Id": 99740,
+            "WorkingSet64": 1171718144,
+            "PeakWorkingSet64": 1887580160,
+            "PrivateMemorySize64": 1133240320
+          }
+        ],
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "actual save Worker round trip; timer gap is a main-thread responsiveness proxy, not FPS",
+        "roundTripMs": 2352.3000000715256,
+        "postMessageMs": 329.7999999523163,
+        "workerReportedMs": 1743.8999999761581,
+        "messageDataAccessMs": 0.10000002384185791,
+        "returnDecodeMs": 272,
+        "maxTimerGapMs": 330.8000000715256,
+        "maxReturnTimerGapMs": 153.70000004768372,
+        "maxReturnFrameGapMs": 157.69999992847443,
+        "inputResponseMs": 7.199999928474426,
+        "returnLongTasks": [
+          {
+            "start": 3124.7000000476837,
+            "duration": 151
+          }
+        ],
+        "operationLongTasks": [
+          {
+            "start": 923.6000000238419,
+            "duration": 330
+          },
+          {
+            "start": 3124.7000000476837,
+            "duration": 151
+          }
+        ],
+        "serializedBytes": 110789823,
+        "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962",
+        "pageHeap": {
+          "before": 356436049,
+          "afterReturn": 373016696,
+          "sampledMax": 477609371,
+          "scope": "sampled page JS heap only; excludes Worker and native allocations"
+        }
+      },
+      {
+        "run": "a4",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "d84392b5e516e387b0fcee31626bf01255164954",
+        "rendererMemory": [
+          {
+            "Id": 73300,
+            "WorkingSet64": 1044602880,
+            "PeakWorkingSet64": 1885143040,
+            "PrivateMemorySize64": 1004113920
+          },
+          {
+            "Id": 98044,
+            "WorkingSet64": 34955264,
+            "PeakWorkingSet64": 34959360,
+            "PrivateMemorySize64": 26320896
+          }
+        ],
+        "decoderReference": "d84392b5e516e387b0fcee31626bf01255164954",
+        "decoderFiles": [
+          "src/game/storage.ts",
+          "src/game/saveTransferDecode.ts"
+        ],
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "scope": "actual save Worker round trip; timer gap is a main-thread responsiveness proxy, not FPS",
+        "roundTripMs": 2390.899999976158,
+        "postMessageMs": 342.2000000476837,
+        "workerReportedMs": 1782.6000000238419,
+        "messageDataAccessMs": 0.10000002384185791,
+        "returnDecodeMs": 259.39999997615814,
+        "maxTimerGapMs": 343.1999999284744,
+        "maxReturnTimerGapMs": 268.10000002384186,
+        "maxReturnFrameGapMs": 263.1999999284744,
+        "inputResponseMs": 260,
+        "returnLongTasks": [
+          {
+            "start": 3088.6999999284744,
+            "duration": 259
+          }
+        ],
+        "operationLongTasks": [
+          {
+            "start": 957.6000000238419,
+            "duration": 342
+          },
+          {
+            "start": 3088.6999999284744,
+            "duration": 259
+          }
+        ],
+        "serializedBytes": 110789823,
+        "finalHash": "22cbbcd7aae757d67b376028c15bf21f84596df4c418253cba9706c775589962",
+        "pageHeap": {
+          "before": 356431937,
+          "afterReturn": 372260400,
+          "sampledMax": 372289124,
+          "scope": "sampled page JS heap only; excludes Worker and native allocations"
+        }
+      }
+    ]
+  }
+}

@@ -11,19 +11,31 @@ export interface SaveTransferDecodeOptions {
   chunkBytes?: number;
   yieldControl?: () => Promise<void>;
   onProgress?: (progress: SaveTransferDecodeProgress) => void;
+  signal?: AbortSignal;
+  /** Keep only the source buffer; decode once after its full proof passes. */
+  lowMemory?: boolean;
 }
 
 function defaultYieldControl(): Promise<void> {
   const scheduler = (globalThis as typeof globalThis & { scheduler?: { yield?: () => Promise<void> } }).scheduler;
-  if (typeof scheduler?.yield === "function") return scheduler.yield();
+  if (typeof scheduler?.yield === "function") {
+    if (typeof document === "undefined" || document.visibilityState !== "visible") return scheduler.yield();
+    // A chain of boosted scheduler continuations can still starve ordinary
+    // timers and rendering. End each continuation with a timer task; the
+    // intervening scheduler task also resets nested-timer clamping.
+    return scheduler.yield().then(() => new Promise((resolve) => setTimeout(resolve, 0)));
+  }
+  // Hidden pages do not need UI fairness; timer throttling there can stretch
+  // a large save into minutes on browsers without the scheduler API.
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /**
- * Verify and decode a large Worker-produced save without one monolithic hash
- * loop or TextDecoder call on the UI thread. Streaming TextDecoder preserves
- * UTF-8 code points split across chunk boundaries; the completed string is not
- * returned until every byte has passed the original FNV-1a payload proof.
+ * Verify and decode a large Worker-produced save without one monolithic
+ * hash loop on the UI thread. Streaming mode also splits UTF-8 decoding;
+ * lowMemory mode retains only the source buffer and performs one native decode
+ * after validation. Both return only after the original complete payload proof.
  */
 export async function decodeVerifiedSaveTransferChunked(
   bytes: ArrayBuffer,
@@ -41,19 +53,21 @@ export async function decodeVerifiedSaveTransferChunked(
   const decoded: string[] = [];
   let hash = 0x811c9dc5;
   for (let offset = 0; offset < source.byteLength; offset += chunkBytes) {
+    if (options.signal?.aborted) throw options.signal.reason ?? new DOMException("Save decode aborted", "AbortError");
     const chunk = source.subarray(offset, Math.min(source.byteLength, offset + chunkBytes));
     for (let index = 0; index < chunk.byteLength; index += 1) {
       hash ^= chunk[index];
       hash = Math.imul(hash, 0x01000193);
     }
-    decoded.push(decoder.decode(chunk, { stream: offset + chunk.byteLength < source.byteLength }));
+    if (!options.lowMemory) decoded.push(decoder.decode(chunk, { stream: offset + chunk.byteLength < source.byteLength }));
     const processedBytes = offset + chunk.byteLength;
     options.onProgress?.({ processedBytes, totalBytes: source.byteLength });
     if (processedBytes < source.byteLength) await yieldControl();
   }
-  decoded.push(decoder.decode());
+  if (!options.lowMemory) decoded.push(decoder.decode());
+  if (options.signal?.aborted) throw options.signal.reason ?? new DOMException("Save decode aborted", "AbortError");
   if ((hash >>> 0).toString(16).padStart(8, "0") !== verification.payloadChecksum) {
     throw new Error("后台存档传输哈希校验失败");
   }
-  return decoded.join("");
+  return options.lowMemory ? decoder.decode(source) : decoded.join("");
 }

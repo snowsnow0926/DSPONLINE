@@ -3,6 +3,7 @@ import type { CanvasViewport, GameState, PlanetId, SaveMode } from "./types";
 import type { SimulationStateTransfer } from "./simulationRuntimeProtocol";
 import type { SaveTransferVerification } from "./saveTransfer";
 import type { WorkerBinaryPayload } from "./workerBinaryPayload";
+import type { SaveStateChunkAck } from "./saveStateChunkTransfer";
 import type {
   AuthoritativeSaveCatalogSeed,
   AuthoritativeSavePayloadProof,
@@ -95,6 +96,7 @@ export interface AuthoritativeSaveSerializationSummary {
 
 export interface AuthoritativeSaveSerializationResponse {
   id: number;
+  stateChunkAck?: SaveStateChunkAck;
   bytes?: WorkerBinaryPayload;
   sourceStateTransfer?: WorkerBinaryPayload;
   sourceEnvelopeTransfer?: WorkerBinaryPayload;

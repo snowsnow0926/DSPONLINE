@@ -95,6 +95,23 @@ node experiments/web-construction-wasm/run.mjs --entry=terminal-parity --termina
 node experiments/web-construction-wasm/run.mjs --entry=terminal-parity --terminal-path=terminal-safe --research-case=natural --prepared=D:/private/prepared.json --name=terminal-new
 ```
 
+## 冻结终态的分批保存传输
+
+`save-state-chunks` 先按当前迁移规则准备同一份只读运行态，然后调用真实主档保存
+客户端与保存 Worker。`clone` 使用原有整对象复制；`chunks` 使用生产客户端的
+`frozenStateIsCurrent` 选项，每批实体/运输线等待确认并让出浏览器，再提交完整状态。
+该选项只适用于独占且不可变的标准化快照，普通正在运行的状态不能这样分批读取。
+保存投影、完整正文校验和源状态前后 SHA-256 均保持；源数据、解压和最终哈希不计入
+保存往返计时。内存采样包含额外校验，不能据此声称游戏净内存降低。
+
+```powershell
+node experiments/web-construction-wasm/run.mjs --entry=save-state-chunks --transport-mode=clone --prepared=D:/private/prepared.json --name=state-clone
+node experiments/web-construction-wasm/run.mjs --entry=save-state-chunks --transport-mode=chunks --prepared=D:/private/prepared.json --name=state-chunks
+```
+
+这只是保存 Worker 往返，不包含 IndexedDB 或整页退出。整页资格应另用
+`experiments/web-live-runtime/run-pairs.ps1`，旧/新/新/旧顺序且与构建、测试串行。
+
 ## Rust/WASM 结论
 
 现有 Rust 代码可在浏览器中运行，但这个 JSON 适配器尚无接入收益：简单计算的速度优势被传输和转换抵消；递归分支还会提前计算许多用不到的路线。继续前应验证按需规划、紧凑输入/输出及 JS 回退；不能仅因采用 Rust 就宣布更快。具体数值及候选身份见 [循环记录](../../docs/reviews/2026-10-26-web-performance-loop.md)。

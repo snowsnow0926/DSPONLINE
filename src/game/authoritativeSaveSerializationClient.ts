@@ -1,4 +1,5 @@
 import { loadContentPackRegistry } from "./contentPacks";
+import { SaveStateChunkProtocolError, SaveStateChunkSender } from "./saveStateChunkTransfer";
 import type { GameState } from "./types";
 import type { SimulationStateTransfer } from "./simulationRuntimeProtocol";
 import type {
@@ -56,6 +57,9 @@ interface AuthoritativeSaveSerializationOptions {
   expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
   compressTransport?: boolean;
+  /** Exclusive JSON-derived canonical snapshot; caller keeps it immutable until
+   * completion. Recheck the owning timeline before every bounded clone. */
+  frozenStateIsCurrent?: () => boolean;
 }
 
 export type AuthoritativeSaveSerializationProgress =
@@ -86,6 +90,9 @@ function serializeAuthoritativeSaveSourceInWorker(
   if (options.signal?.aborted) {
     return Promise.reject(new AuthoritativeSaveSerializationClientError("aborted", "authoritative save serialization 已取消"));
   }
+  if (options.frozenStateIsCurrent && (source.kind !== "cloned-state" || includeSourceStateTransfer || kind !== "primary" || slot !== "main")) {
+    return Promise.reject(new AuthoritativeSaveSerializationClientError("unsupported", "分批存档只支持独占的标准化主档快照"));
+  }
   if (typeof Worker === "undefined") {
     return Promise.reject(new AuthoritativeSaveSerializationClientError(
       "unsupported",
@@ -105,6 +112,7 @@ function serializeAuthoritativeSaveSourceInWorker(
     }
     const id = 1;
     let settled = false;
+    let chunkSender: SaveStateChunkSender | null = null;
     const timeoutMs = options.timeoutMs ?? AUTHORITATIVE_SERIALIZATION_TIMEOUT_MS;
     const ownershipLost = () => source.kind === "snapshot"
       ? source.payload.bytes.byteLength === 0
@@ -117,6 +125,7 @@ function serializeAuthoritativeSaveSourceInWorker(
       worker.onmessage = null;
       worker.onerror = null;
       worker.onmessageerror = null;
+      chunkSender?.cancel();
       worker.terminate();
       operation();
     };
@@ -137,7 +146,21 @@ function serializeAuthoritativeSaveSourceInWorker(
       reject(new AuthoritativeSaveSerializationClientError("protocol", "save Worker 返回了无法反序列化的响应", ownershipLost()));
     });
     worker.onmessage = (event: MessageEvent<AuthoritativeSaveSerializationResponse>) => {
+      if (settled) return;
       if (event.data.id !== id) return;
+      if (event.data.stateChunkAck) {
+        try {
+          if (!chunkSender) throw new Error("非分批存档收到批次确认");
+          chunkSender.acknowledge(event.data.stateChunkAck);
+        } catch (error) {
+          finish(() => reject(new AuthoritativeSaveSerializationClientError("protocol", error instanceof Error ? error.message : "存档批次确认无效")));
+        }
+        return;
+      }
+      if (chunkSender && !chunkSender.readyForResult && !event.data.error) {
+        finish(() => reject(new AuthoritativeSaveSerializationClientError("protocol", "存档批次未完整发送即返回完成证明")));
+        return;
+      }
       const { bytes, proof, catalogSeed, summary, sourceStateTransfer, sourceEnvelopeTransfer } = event.data;
       if (source.kind === "state" && sourceStateTransfer instanceof ArrayBuffer) source.transfer.buffer = sourceStateTransfer;
       if (source.kind === "envelope" && sourceEnvelopeTransfer) source.transfer.buffer = sourceEnvelopeTransfer;
@@ -199,8 +222,18 @@ function serializeAuthoritativeSaveSourceInWorker(
       ...(options.compressTransport === false ? { compressTransport: false } : {}),
     };
     try {
-      worker.postMessage(request, source.kind === "cloned-state" ? [] : source.kind === "snapshot"
-        ? [source.payload.bytes] : workerBinaryPayloadTransferables(source.transfer.buffer));
+      if (options.frozenStateIsCurrent) {
+        chunkSender = new SaveStateChunkSender(worker);
+        void chunkSender.send(request as Extract<AuthoritativeSaveSerializationRequest, { state: GameState }>, options.frozenStateIsCurrent).catch((error) => {
+          if (!settled) finish(() => reject(new AuthoritativeSaveSerializationClientError(
+            error instanceof SaveStateChunkProtocolError ? "protocol" : "worker-operation",
+            error instanceof Error ? error.message : "无法发送存档批次", false,
+          )));
+        });
+      } else {
+        worker.postMessage(request, source.kind === "cloned-state" ? [] : source.kind === "snapshot"
+          ? [source.payload.bytes] : workerBinaryPayloadTransferables(source.transfer.buffer));
+      }
     } catch (error) {
       finish(() => reject(new AuthoritativeSaveSerializationClientError(
         "worker-operation", error instanceof Error ? error.message : "无法发送save Worker请求", ownershipLost(),

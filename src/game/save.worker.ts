@@ -23,6 +23,7 @@ import type {
 } from "./authoritativeSaveSerializationProtocol";
 import type { SaveWorkerRequest, SaveWorkerResponse } from "./saveWorkerProtocol";
 import type { GameState } from "./types";
+import { SaveStateChunkAssembler, type SaveStateChunkRequest } from "./saveStateChunkTransfer";
 import { applyAuthoritativeSaveCheckpointOverlay as applyCheckpointOverlay } from "./saveCheckpointOverlay";
 import {
   createImmutableWorkerBinaryPayload,
@@ -87,9 +88,24 @@ async function deserializeAuthoritativeEnvelopeTransfer(
   return state;
 }
 
-self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
+const chunkAssembler = new SaveStateChunkAssembler();
+self.onmessage = async (event: MessageEvent<SaveSerializationRequest | SaveStateChunkRequest>) => {
+  let collectedRequest: SaveSerializationRequest;
+  if ("type" in event.data) {
+    try {
+      const received = chunkAssembler.accept(event.data);
+      if ("ack" in received) {
+        self.postMessage({ id: event.data.id, stateChunkAck: received.ack } satisfies AuthoritativeSaveSerializationResponse);
+        return;
+      }
+      collectedRequest = received.request;
+    } catch (error) {
+      self.postMessage({ id: event.data.id, error: error instanceof Error ? error.message : "存档批次无效" } satisfies AuthoritativeSaveSerializationResponse);
+      return;
+    }
+  } else collectedRequest = event.data;
+  const request = collectedRequest;
   const startedAt = performance.now();
-  const request = event.data;
   const authoritativeProof = isAuthoritativeProofRequest(request);
   try {
     const snapshotSource = "snapshotSource" in request ? request.snapshotSource : undefined;

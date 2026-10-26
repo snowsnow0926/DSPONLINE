@@ -6803,7 +6803,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     };
   }, []);
 
-  const saveVerifiedPrimaryCheckpoint = useCallback(async (state: GameState, options: { deferBackup?: boolean; force?: boolean } = {}): Promise<SaveGameResult> => {
+  const saveVerifiedPrimaryCheckpoint = useCallback(async (state: GameState, options: { deferBackup?: boolean; force?: boolean; frozenStateIsCurrent?: () => boolean } = {}): Promise<SaveGameResult> => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
       return {
         success: false,
@@ -7841,7 +7841,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           }
         }
       } else {
-        result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+        result = await saveVerifiedPrimaryCheckpoint(saveState, {
+          deferBackup: kind === "autosave", force: kind !== "autosave",
+          ...(preparedTerminal && isLargeRuntimeState(saveState) ? { frozenStateIsCurrent: () =>
+            pureIdleStopCandidateRef.current === preparedTerminal && pureIdleMacroActiveRef.current &&
+            legacyJavaScriptAuthorityLeaseIsCurrent(preparedTerminal.authorityLease) &&
+            simulationCheckpointBarrierRef.current && simulationSaveBarrierDepthRef.current > 0 &&
+            !simulationSubmissionRef.current && !simulationRecoveryRef.current &&
+            !simulationCheckpointRequestRef.current && !deferredDurableUiSubmissionRef.current &&
+            !durableRecoveryStageInFlightRef.current && !lifecycleExitStartedRef.current,
+          } : {}),
+        });
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
           throw new Error("Windows 原生权威已在完整保存期间接管，旧保存结果已作废");
         }

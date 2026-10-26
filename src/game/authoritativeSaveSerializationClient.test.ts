@@ -11,6 +11,7 @@ import type {
   AuthoritativeSaveSerializationResponse,
 } from "./authoritativeSaveSerializationProtocol";
 import type { SimulationStateTransfer } from "./simulationRuntimeProtocol";
+import { SaveStateChunkAssembler, type SaveStateChunkRequest } from "./saveStateChunkTransfer";
 
 class FakeWorker {
   onmessage: ((event: MessageEvent<AuthoritativeSaveSerializationResponse>) => void) | null = null;
@@ -31,6 +32,21 @@ class FakeWorker {
   }
 }
 
+class FakeChunkWorker extends FakeWorker {
+  readonly parts: SaveStateChunkRequest[] = [];
+  readonly assembler = new SaveStateChunkAssembler();
+  hold = false;
+  override postMessage(message: AuthoritativeSaveSerializationRequest | SaveStateChunkRequest, transfer: Transferable[] = []): void {
+    if (!("type" in message)) return super.postMessage(message, transfer);
+    const copy = structuredClone(message);
+    this.parts.push(copy);
+    if (this.hold) return;
+    const received = this.assembler.accept(copy);
+    if ("ack" in received) queueMicrotask(() => this.onmessage?.({ data: { id: copy.id, stateChunkAck: received.ack } } as MessageEvent<AuthoritativeSaveSerializationResponse>));
+    else this.request = received.request;
+  }
+}
+
 function stateTransfer(): SimulationStateTransfer {
   const buffer = Uint8Array.from([1, 2, 3]).buffer;
   return { protocolVersion: 1, byteLength: buffer.byteLength, buffer };
@@ -48,6 +64,66 @@ afterEach(() => {
 });
 
 describe("authoritative save serialization transfer ownership", () => {
+  it("assembles the exact canonical snapshot on a fresh chunked retry after Worker failure", async () => {
+    const state = createInitialState(44_127);
+    state.entities = Array.from({ length: 601 }, (_, index) => ({ ...state.entities[0], id: `canonical-${index}` }));
+    const before = JSON.stringify(state);
+    for (let retry = 0; retry < 2; retry += 1) {
+      const worker = new FakeChunkWorker(); installWorker(worker);
+      const pending = serializeAuthoritativePrimarySaveInWorker(state, { frozenStateIsCurrent: () => true });
+      await vi.waitFor(() => expect(worker.request?.state).toBeDefined());
+      expect(JSON.stringify(worker.request!.state)).toBe(before);
+      expect(worker.parts.map((part) => part.type)).toEqual(["state-begin", "state-records", "state-records", "state-complete"]);
+      worker.onmessage?.({ data: { id: 1, error: "injected-after-assembly" } } as MessageEvent<AuthoritativeSaveSerializationResponse>);
+      await expect(pending).rejects.toMatchObject({ code: "worker-operation", ownershipLost: false });
+      expect(JSON.stringify(state)).toBe(before);
+      expect(worker.terminateCount).toBe(1);
+    }
+  });
+
+  it.each(["abort", "crash", "bad-ack", "early-result"] as const)("releases an outstanding chunk on %s", async (failure) => {
+    const worker = new FakeChunkWorker(); worker.hold = true; installWorker(worker);
+    const state = createInitialState(); const before = JSON.stringify(state);
+    const controller = new AbortController();
+    const pending = serializeAuthoritativePrimarySaveInWorker(state, { frozenStateIsCurrent: () => true, signal: controller.signal });
+    const rejected = expect(pending).rejects.toMatchObject({ ownershipLost: false,
+      code: failure === "abort" ? "aborted" : failure === "crash" ? "worker-crash" : "protocol" });
+    if (failure === "abort") controller.abort();
+    else if (failure === "crash") worker.onerror?.({ message: "chunk-crash" } as ErrorEvent);
+    else worker.onmessage?.({ data: failure === "early-result" ? { id: 1 } : {
+      id: 1, stateChunkAck: { type: "state-chunk-ack", id: 2, collection: "begin", nextOffset: 0 },
+    } } as MessageEvent<AuthoritativeSaveSerializationResponse>);
+    await rejected;
+    expect(worker.parts).toHaveLength(1);
+    expect(worker.terminateCount).toBe(1);
+    expect(JSON.stringify(state)).toBe(before);
+  });
+
+  it("times out a held chunk without losing the caller snapshot", async () => {
+    vi.useFakeTimers();
+    const worker = new FakeChunkWorker(); worker.hold = true; installWorker(worker);
+    const pending = serializeAuthoritativePrimarySaveInWorker(createInitialState(), { frozenStateIsCurrent: () => true, timeoutMs: 10 });
+    const rejected = expect(pending).rejects.toMatchObject({ code: "timeout", ownershipLost: false });
+    await vi.advanceTimersByTimeAsync(11); await rejected;
+    expect(worker.parts).toHaveLength(1);
+    expect(worker.terminateCount).toBe(1);
+  });
+
+  it("rejects an expired snapshot before sending any records", async () => {
+    const worker = new FakeChunkWorker(); installWorker(worker);
+    await expect(serializeAuthoritativePrimarySaveInWorker(createInitialState(), { frozenStateIsCurrent: () => false }))
+      .rejects.toMatchObject({ code: "protocol", ownershipLost: false });
+    expect(worker.parts).toHaveLength(0);
+    expect(worker.terminateCount).toBe(1);
+  });
+
+  it("refuses chunked transport for the state-returning API", async () => {
+    const worker = new FakeChunkWorker(); installWorker(worker);
+    await expect(serializeAuthoritativeSaveStateInWorker(createInitialState(), { frozenStateIsCurrent: () => true }))
+      .rejects.toMatchObject({ code: "unsupported", ownershipLost: false });
+    expect(worker.parts).toHaveLength(0);
+    expect(worker.request).toBeNull();
+  });
   for (const serialize of [serializeAuthoritativeSaveStateInWorker, serializeAuthoritativePrimarySaveInWorker]) {
   it(`retains the caller state on ${serialize.name} failure and permits a fresh retry`, async () => {
     const state = createInitialState(44_127);

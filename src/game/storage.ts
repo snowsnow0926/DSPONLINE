@@ -3403,6 +3403,7 @@ async function saveGameVerifiedWithWorkerProof(
     onProgress?: (progress: AuthoritativeSaveSerializationProgress | { stage: string; bytes?: number }) => void;
     checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
     expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
+    frozenStateIsCurrent?: () => boolean;
   } = {},
 ): Promise<SaveGameResult> {
   try {
@@ -3439,6 +3440,7 @@ async function saveGameVerifiedWithWorkerProof(
       savedAt,
       expectedStateIdentity,
       onProgress: options.onProgress,
+      ...(options.frozenStateIsCurrent ? { frozenStateIsCurrent: options.frozenStateIsCurrent } : {}),
       ...(options.checkpointOverlay ? { checkpointOverlay: options.checkpointOverlay } : {}),
     };
     const serialized = stateTransfer
@@ -3790,14 +3792,14 @@ async function recoverLocalSaveCache(): Promise<void> {
 async function saveGameVerifiedOnce(
   state: GameState,
   stateTransfer?: SimulationStateTransfer,
-  options: { deferBackup?: boolean; preferWorkerProof?: boolean } = {},
+  options: { deferBackup?: boolean; preferWorkerProof?: boolean; frozenStateIsCurrent?: () => boolean } = {},
 ): Promise<SaveGameResult> {
   if (stateTransfer) return saveGameVerifiedFromStateTransfer(state, stateTransfer);
   // Startup already owns a full state, but does not need a second UI-thread
   // envelope/catalog graph. Keep legacy/localStorage migration on its exact
   // compatibility path; Worker failures return a failed save for a safe retry.
   if (options.preferWorkerProof && typeof Worker !== "undefined" && getLocalSaveBackend() === "indexeddb") {
-    return saveGameVerifiedWithWorkerProof(state);
+    return saveGameVerifiedWithWorkerProof(state, undefined, { frozenStateIsCurrent: options.frozenStateIsCurrent });
   }
   const totalStartedAt = monotonicNow();
   const serializeStartedAt = totalStartedAt;
@@ -3955,6 +3957,7 @@ interface PendingPrimarySave {
   expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   deferBackup?: boolean;
   preferWorkerProof?: boolean;
+  frozenStateIsCurrent?: () => boolean;
   waiters: Array<(result: SaveGameResult) => void>;
 }
 
@@ -4086,6 +4089,7 @@ function ensurePrimarySaveProcessor(): void {
           : await saveGameVerifiedOnce(request.state, undefined, {
             deferBackup: request.deferBackup === true,
             preferWorkerProof: request.preferWorkerProof === true,
+            frozenStateIsCurrent: request.frozenStateIsCurrent,
           });
       } catch {
         result = failedSave("unavailable", "本地主存档写入失败，请立即导出当前进度");
@@ -4128,6 +4132,7 @@ export function saveGameVerified(
   options: {
     deferBackup?: boolean;
     preferWorkerProof?: boolean;
+    frozenStateIsCurrent?: () => boolean;
     force?: boolean;
     expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   } = {},
@@ -4169,6 +4174,7 @@ export function saveGameVerified(
         pending.state = state;
         pending.deferBackup = options.deferBackup === true;
         pending.preferWorkerProof = options.preferWorkerProof === true;
+        pending.frozenStateIsCurrent = options.frozenStateIsCurrent;
         if (ownedStateTransfer) {
           pending.stateTransfer = ownedStateTransfer;
           if (checkpointOverlay) pending.checkpointOverlay = checkpointOverlay;
@@ -4187,6 +4193,7 @@ export function saveGameVerified(
       }
       if (options.deferBackup !== true) pending.deferBackup = false;
       if (options.preferWorkerProof) pending.preferWorkerProof = true;
+      if (options.frozenStateIsCurrent) pending.frozenStateIsCurrent = options.frozenStateIsCurrent;
       pending.waiters.push(resolve);
     } else {
       const unchanged = options.force === true ? null : unchangedPrimarySaveResult(mode, state);
@@ -4202,6 +4209,7 @@ export function saveGameVerified(
         ...(options.expectedStateIdentity ? { expectedStateIdentity: options.expectedStateIdentity } : {}),
         ...(options.deferBackup === true ? { deferBackup: true } : {}),
         ...(options.preferWorkerProof === true ? { preferWorkerProof: true } : {}),
+        ...(options.frozenStateIsCurrent ? { frozenStateIsCurrent: options.frozenStateIsCurrent } : {}),
         waiters: [resolve],
       });
     }

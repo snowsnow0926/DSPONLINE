@@ -1,0 +1,221 @@
+{
+  "formatVersion": 1,
+  "status": "source_and_performance_verified_pending_freeze",
+  "baselineRuntimeCommit": "5624e22ca2670ca129d19b122bfd6fcbb86634af",
+  "runtimeCommit": null,
+  "runtimeSourceHashes": {
+    "src/App.tsx": "770fc7603dfc099d6a43addeccdbac63c9f98934f95bbc6031cd70973a62be6e",
+    "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+    "src/game/authoritativeSaveSerializationClient.ts": "1f71d92edbd7e0c45a2a425ab0dfbc9e3715f6689328227213ae0996bcd0098b",
+    "src/game/authoritativeSaveSerializationProtocol.ts": "158ab4af9fcd2816aafad2760c89257c6bc89a6faea7e905cd771102bf1f6ce8",
+    "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+    "src/game/saveStateChunkTransfer.ts": "c2c42c89d9871a587a6d45d105a7eb46d1a56438045f3761997d28d3eb4643bb",
+    "src/game/pureIdleMacroClient.ts": "7d25fbbe1106196a6012bc3b8fc4b35613c7879ea1b0f8a7751041e42ad3d2cc",
+    "src/game/saveTransferDecode.ts": "ba79bb4c94d33fd4ea7fa6a51497db2c4c44e296ce52b5e8a5beaa64d9badc09",
+    "src/game/saveProjection.ts": "7d62c35d7665960f04930dcf552ce432d07d3ca4beac7bb859b85b42af8e5077"
+  },
+  "sourceInput": {
+    "kind": "expanded_runtime_fixture",
+    "bytes": 205464026,
+    "sha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "originalSaveBytes": 107637967,
+    "entities": 110042,
+    "belts": 233300
+  },
+  "fixedInput": {
+    "order": [
+      "integrated-clone-1",
+      "integrated-chunks-1",
+      "integrated-chunks-2",
+      "integrated-clone-2",
+      "integrated-clone-3",
+      "integrated-chunks-3"
+    ],
+    "scope": "canonical frozen-state serialization Worker round-trip only; no IndexedDB, no page stop; preparation and full proof hashing excluded; process peak includes verification",
+    "metrics": {
+      "totalMs": {
+        "clone": 3075.300000190735,
+        "chunks": 2750.2000000476837,
+        "reductionPercent": 10.571326378658597
+      },
+      "maxFrameGapMs": {
+        "clone": 473.10000014305115,
+        "chunks": 8.899999856948853,
+        "reductionPercent": 98.11879098409263
+      },
+      "inputResponseMs": {
+        "clone": 473.10000014305115,
+        "chunks": 2.9000000953674316,
+        "reductionPercent": 99.38702175132306
+      },
+      "maxPostMs": {
+        "clone": 471.2000000476837,
+        "chunks": 3.0999999046325684,
+        "reductionPercent": 99.34210528346374
+      }
+    },
+    "fullStateSha256": "2c58b9b1c25abc9b0f5ffd86a781e53fcc9aac950749d94ec32aa2fb07045b99",
+    "actualBodySha256": "267aecfbe342ab14f7456b4894c25196fcfe64ac8920e35123aec0d2aac03f6d",
+    "actualBodyBytes": 110673715,
+    "inputSha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "bundleSha256": "6fffa87c3cb7cdaedbada598a6385572c45490111f2e52a93f10c4b29ea61cc4",
+    "runtimeSourceHashes": {
+      "src/App.tsx": "770fc7603dfc099d6a43addeccdbac63c9f98934f95bbc6031cd70973a62be6e",
+      "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+      "src/game/authoritativeSaveSerializationClient.ts": "1f71d92edbd7e0c45a2a425ab0dfbc9e3715f6689328227213ae0996bcd0098b",
+      "src/game/authoritativeSaveSerializationProtocol.ts": "158ab4af9fcd2816aafad2760c89257c6bc89a6faea7e905cd771102bf1f6ce8",
+      "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+      "src/game/saveStateChunkTransfer.ts": "c2c42c89d9871a587a6d45d105a7eb46d1a56438045f3761997d28d3eb4643bb",
+      "src/game/pureIdleMacroClient.ts": "7d25fbbe1106196a6012bc3b8fc4b35613c7879ea1b0f8a7751041e42ad3d2cc",
+      "src/game/saveTransferDecode.ts": "ba79bb4c94d33fd4ea7fa6a51497db2c4c44e296ce52b5e8a5beaa64d9badc09",
+      "src/game/saveProjection.ts": "7d62c35d7665960f04930dcf552ce432d07d3ca4beac7bb859b85b42af8e5077"
+    },
+    "chunkTransportSourceSha256": "c2c42c89d9871a587a6d45d105a7eb46d1a56438045f3761997d28d3eb4643bb",
+    "allSixEqual": true
+  },
+  "realPage": {
+    "scope": "4 independent real-page journeys; fixed stock; ~40.9 simulation seconds ordinary warmup, 8x replication, 5 second observation then stop; peak across renderer process samples",
+    "rows": [
+      {
+        "name": "frozen-stop-baseline-01",
+        "mode": "baseline",
+        "stopMs": 13405,
+        "maxFrameGapMs": 485.7999999523163,
+        "maxPostMs": 481.69999980926514,
+        "peakWorkingSetBytes": 5499297792,
+        "chunkBegins": 0,
+        "chunkCompletes": 0,
+        "chunkRecords": 0,
+        "primaryBytes": 110697917,
+        "seedChecksum": "d28d6a63",
+        "catalogIntegrity": "valid",
+        "pausedAttribute": "true"
+      },
+      {
+        "name": "frozen-stop-candidate-01",
+        "mode": "candidate",
+        "stopMs": 13210,
+        "maxFrameGapMs": 306.90000009536743,
+        "maxPostMs": 3.5,
+        "peakWorkingSetBytes": 5496569856,
+        "chunkBegins": 1,
+        "chunkCompletes": 1,
+        "chunkRecords": 329,
+        "primaryBytes": 110702022,
+        "seedChecksum": "d28d6a63",
+        "catalogIntegrity": "valid",
+        "pausedAttribute": "true"
+      },
+      {
+        "name": "frozen-stop-candidate-02",
+        "mode": "candidate",
+        "stopMs": 13314,
+        "maxFrameGapMs": 301.2999999523163,
+        "maxPostMs": 3.3999998569488525,
+        "peakWorkingSetBytes": 5446344704,
+        "chunkBegins": 1,
+        "chunkCompletes": 1,
+        "chunkRecords": 329,
+        "primaryBytes": 110665644,
+        "seedChecksum": "d28d6a63",
+        "catalogIntegrity": "valid",
+        "pausedAttribute": "true"
+      },
+      {
+        "name": "frozen-stop-baseline-02",
+        "mode": "baseline",
+        "stopMs": 13489,
+        "maxFrameGapMs": 497.2999999523163,
+        "maxPostMs": 487.89999985694885,
+        "peakWorkingSetBytes": 5301702656,
+        "chunkBegins": 0,
+        "chunkCompletes": 0,
+        "chunkRecords": 0,
+        "primaryBytes": 110717090,
+        "seedChecksum": "d28d6a63",
+        "catalogIntegrity": "valid",
+        "pausedAttribute": "true"
+      }
+    ],
+    "medians": {
+      "stopMs": {
+        "baseline": 13447.0,
+        "candidate": 13262.0,
+        "reductionPercent": 1.3757715475570809
+      },
+      "maxFrameGapMs": {
+        "baseline": 491.5499999523163,
+        "candidate": 304.10000002384186,
+        "reductionPercent": 38.13447257586377
+      },
+      "maxPostMs": {
+        "baseline": 484.799999833107,
+        "candidate": 3.4499999284744263,
+        "reductionPercent": 99.28836635114232
+      },
+      "peakWorkingSetBytes": {
+        "baseline": 5400500224.0,
+        "candidate": 5471457280.0,
+        "reductionPercent": -1.3138978438453686
+      }
+    },
+    "fullStateEqualityClaim": false
+  },
+  "validation": {
+    "unit": {
+      "passed": 3653,
+      "skipped": 38,
+      "failed": 0
+    },
+    "chromium": {
+      "startTime": "2026-10-26T22:12:53.411Z",
+      "duration": 439926.93399999995,
+      "expected": 490,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durableCombination": {
+      "startTime": "2026-10-26T22:21:21.901Z",
+      "duration": 46122.937,
+      "expected": 17,
+      "skipped": 5,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "focusedChromium": {
+      "passed": 14,
+      "skipped": 1,
+      "failed": 0
+    },
+    "nativeBoundary": {
+      "passed": 49,
+      "skipped": 0,
+      "failed": 0
+    },
+    "typecheck": true,
+    "experimentalTypecheck": true,
+    "build": true,
+    "startupBudget": true,
+    "nativeCoverage": true,
+    "licensesRuntimePackages": 127,
+    "pwa": null
+  },
+  "initialWrongInvocation": {
+    "command": "node Playwright CLI without npm version environment",
+    "passed": 487,
+    "failed": 2,
+    "conditionalSkipped": 34,
+    "notRun": 1,
+    "reason": "npm_package_version undefined; correct product UI 1.3.2; unchanged assertions passed in full npm rerun",
+    "diagnosticsPreserved": true
+  },
+  "frozenArtifact": null,
+  "notRun": [
+    "server",
+    "Rust core",
+    "native packages",
+    "physical devices"
+  ],
+  "published": false
+}

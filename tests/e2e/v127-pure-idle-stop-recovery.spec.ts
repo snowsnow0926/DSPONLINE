@@ -28,6 +28,11 @@ type StopProbe = {
   terminalChecksums: string[];
   postFinalizeCheckpoints: number;
   latestFactoryElapsed: number | null;
+  chunkBegins: number;
+  chunkRecords: number;
+  chunkCompletes: number;
+  crashChunkTransfer: boolean;
+  chunkCrashes: number;
 };
 
 async function installProbe(page: Page): Promise<void> {
@@ -45,6 +50,7 @@ async function installProbe(page: Page): Promise<void> {
       holdTerminalCommit: false, terminalCommitBlocked: false,
       holdTerminalDecode: false, terminalDecodeBlocked: false, terminalEnvelopeBytes: 0, terminalChecksums: [],
       postFinalizeCheckpoints: 0, latestFactoryElapsed: null,
+      chunkBegins: 0, chunkRecords: 0, chunkCompletes: 0, crashChunkTransfer: false, chunkCrashes: 0,
     };
     sessionStorage.removeItem("v127-stop-fail-next-boot");
     Object.assign(window, { __stopRecoveryProbe: probe });
@@ -100,6 +106,18 @@ async function installProbe(page: Page): Promise<void> {
       override postMessage(message: unknown, transfer?: Transferable[]): void {
         const request = message as { id?: number; type?: string; kind?: string;
           targetWallSeconds?: number; key?: string; payload?: ArrayBuffer; proof?: { stateChecksum: string } } | null;
+        if (this.workerName === "authoritative-save-serialization") {
+          if (request?.type === "state-begin") probe.chunkBegins += 1;
+          if (request?.type === "state-complete") probe.chunkCompletes += 1;
+          if (request?.type === "state-records") {
+            probe.chunkRecords += 1;
+            if (probe.crashChunkTransfer) {
+              probe.crashChunkTransfer = false; probe.chunkCrashes += 1;
+              queueMicrotask(() => this.dispatchEvent(new ErrorEvent("error", { message: "injected mid-chunk Worker crash" })));
+              return;
+            }
+          }
+        }
         if (this.workerName === "factory-simulation" && request?.kind === "checkpoint" && probe.finalizes > 0) {
           probe.postFinalizeCheckpoints += 1;
         }
@@ -204,7 +222,7 @@ async function seedRecoverableRun(page: Page, startedPaused: boolean, expiredBac
       buildingId: "time_warp_device", machineCount: 1, minerCount: 0, inputs: {}, outputs: {},
       progress: 0, routingCursor: 0, utilization: 0, productionRate: 0, interactionLocked: false,
     });
-    if (large) for (let index = 0; index < 7_000; index += 1) state.entities.push({
+    if (large) for (let index = 0; index < 12_000; index += 1) state.entities.push({
       id: `stop-decode-machine-${index}`, kind: "machine", planetId: "home", position: { x: 10_000 + index * 100, y: 10_000 },
       buildingId: "assembling_machine_mk1", machineCount: 1, minerCount: 0, inputs: {}, outputs: {},
       progress: 0, routingCursor: 0, utilization: 0, productionRate: 0, interactionLocked: false,
@@ -700,6 +718,64 @@ test("cancelling a cooperative terminal decode cannot later write its completed 
   expect((await readPrimary(page)).raw).toBe(seeded.primary);
   expect((await readProbe(page)).primaryWrites).toBe(primaryWrites);
   expect((await readRecovery(page))?.committed).toBe(false);
+});
+
+test("large frozen terminal chunks retry the same settlement after a failed primary write", async ({ page }) => {
+  test.skip(durableMode, "Chunked canonical-state delivery belongs to the default coordinator.");
+  test.setTimeout(90_000);
+  await installProbe(page);
+  const seeded = await seedRecoverableRun(page, true, false, false, true);
+  await openRecovery(page, seeded);
+  await stopWithFailure(page);
+  const frozen = await readRecovery(page);
+  const failed = await readProbe(page);
+  expect(failed.chunkBegins).toBe(1);
+  expect(failed.chunkCompletes).toBe(1);
+  expect(failed.chunkRecords).toBeGreaterThan(1);
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  await armWriteFailure(page, false);
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true }).click();
+  await expect(overlay).toBeHidden();
+  const after = await readProbe(page);
+  expect(after.chunkBegins).toBe(2);
+  expect(after.chunkCompletes).toBe(2);
+  expect(after.finalizes).toBe(1);
+  expect(new Set(after.terminalChecksums).size).toBe(1);
+  expect(after.terminalChecksums).toHaveLength(2);
+  const persisted = await readPrimary(page);
+  expect(persisted).toMatchObject({ enabled: false, paused: true, currentRunStartedAt: null });
+  expect(persisted.inventory).toEqual(seeded.inventory);
+  expect(persisted.totalIdleTime).toBeCloseTo(frozen!.targetWallSeconds!, 6);
+  expect(await readRecovery(page)).toBeNull();
+});
+
+test("a mid-chunk save Worker crash keeps the frozen candidate for one safe retry", async ({ page }) => {
+  test.skip(durableMode, "Chunked canonical-state delivery belongs to the default coordinator.");
+  test.setTimeout(90_000);
+  await installProbe(page);
+  const seeded = await seedRecoverableRun(page, true, false, false, true);
+  await openRecovery(page, seeded);
+  const writes = (await readProbe(page)).primaryWrites;
+  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.crashChunkTransfer = true; });
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect(overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true })).toBeVisible();
+  const frozen = await readRecovery(page);
+  const failed = await readProbe(page);
+  expect(failed.chunkCrashes).toBe(1);
+  expect(failed.chunkCompletes).toBe(0);
+  expect(failed.primaryWrites).toBe(writes);
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  await overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true }).click();
+  await expect(overlay).toBeHidden();
+  const persisted = await readPrimary(page);
+  expect(persisted.inventory).toEqual(seeded.inventory);
+  expect(persisted.totalIdleTime).toBeCloseTo(frozen!.targetWallSeconds!, 6);
+  expect(persisted).toMatchObject({ enabled: false, paused: true });
+  expect((await readProbe(page)).finalizes).toBe(1);
+  expect((await readProbe(page)).chunkCompletes).toBe(1);
+  expect(await readRecovery(page)).toBeNull();
 });
 
 test("failed-stop recovery export downloads a diagnostic without mutating storage and fits both mobile orientations", async ({ page }, testInfo) => {

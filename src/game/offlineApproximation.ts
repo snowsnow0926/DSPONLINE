@@ -702,6 +702,11 @@ interface ExactWindowLookup {
   configuration?: string;
 }
 
+// Retaining a whole endgame graph across the macro tail increases peak memory
+// while the source, snapshots and candidate are all live. Rebuild large indexes
+// on demand; keep reuse for smaller factories where its residency is bounded.
+const MAX_RETAINED_EXACT_LOOKUP_RECORDS = 50_000;
+
 function exactWindowConfiguration(state: GameState): string {
   return JSON.stringify([
     state.settings,
@@ -6220,7 +6225,9 @@ function runTimeWarpApproximateSettlementUnsafe(
   const constructionSampleOptions = {
     isolateConstructionAutomation: true,
     onPowerPlan: constructionPowerAudit.onPowerPlan,
-    reusableLookup: {} as ExactWindowLookup,
+    reusableLookup: state.entities.length + state.belts.length <= MAX_RETAINED_EXACT_LOOKUP_RECORDS
+      ? {} as ExactWindowLookup
+      : undefined,
   };
   let calibrated = runExact(structuredClone(state), calibrationSeconds, calibrationWallSeconds, constructionSampleOptions);
   calibrationPowerResources.push(captureTimeWarpExhaustiblePowerResources(calibrated));

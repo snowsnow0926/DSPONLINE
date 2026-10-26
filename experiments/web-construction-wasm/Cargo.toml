@@ -1,0 +1,21 @@
+[package]
+name = "dsp-web-construction-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Independent measurement harness. It is not part of the shipped native host.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dsp-native-core = { path = "../../native/dsp-native-core" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[profile.release]
+lto = "thin"
+panic = "abort"
+

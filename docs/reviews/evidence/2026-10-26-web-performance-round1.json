@@ -77,5 +77,153 @@
     "files": 196,
     "aggregateSha256": "9e4c85efe987548572abf34a866e672b9c63da8c9e0beeb1c4198181d457217f",
     "archiveSha256": "4277995b993f8d81c1c2f2bf624004861cbe4fee37f99db246988232360e24b2"
+  },
+  "browser": {
+    "scope": "Chrome JS core computation; supplied-material variant; setup and whole-save serialization timed separately",
+    "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "browser": "147.0.7727.138",
+    "order": [
+      "a1",
+      "b1",
+      "b2",
+      "a2"
+    ],
+    "baseline": {
+      "samples": 2,
+      "medianBuckets": [
+        14.350000023841858,
+        856.8999999761581,
+        1807.050000011921
+      ],
+      "medianSetupMs": 5060.850000023842,
+      "medianSerializationMs": 2730.550000011921
+    },
+    "candidate": {
+      "samples": 2,
+      "medianBuckets": [
+        12.75,
+        552.75,
+        1167
+      ],
+      "medianSetupMs": 5074.100000023842,
+      "medianSerializationMs": 2691.300000011921
+    },
+    "thirdBucketReductionPercent": 35.41960654147359,
+    "finalHashes": [
+      "2b56509b5cd28c50e187f1a4c9030bb3fd2b459a9740e57a870c3e51c1613acd"
+    ],
+    "crafted": [
+      371304708097
+    ],
+    "rows": [
+      {
+        "run": "a1",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "9af159f1b38e16019a95685ef61f1aa236664932",
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "setupMs": 5097.600000023842,
+        "startupMs": 5.799999952316284,
+        "buckets": [
+          {
+            "targetWallSeconds": 1,
+            "milliseconds": 14.700000047683716
+          },
+          {
+            "targetWallSeconds": 10,
+            "milliseconds": 853
+          },
+          {
+            "targetWallSeconds": 30,
+            "milliseconds": 1815.2000000476837
+          }
+        ],
+        "serializationMs": 2729.2000000476837,
+        "serializedBytes": 110869315,
+        "finalHash": "2b56509b5cd28c50e187f1a4c9030bb3fd2b459a9740e57a870c3e51c1613acd",
+        "crafted": 371304708097,
+        "simulatedSeconds": 240
+      },
+      {
+        "run": "b1",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "c9b127d908ef1f59e9ea7c67396a3443ae219b39",
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "setupMs": 4991.800000071526,
+        "startupMs": 5.899999976158142,
+        "buckets": [
+          {
+            "targetWallSeconds": 1,
+            "milliseconds": 13
+          },
+          {
+            "targetWallSeconds": 10,
+            "milliseconds": 559
+          },
+          {
+            "targetWallSeconds": 30,
+            "milliseconds": 1160.5
+          }
+        ],
+        "serializationMs": 2683.600000023842,
+        "serializedBytes": 110869315,
+        "finalHash": "2b56509b5cd28c50e187f1a4c9030bb3fd2b459a9740e57a870c3e51c1613acd",
+        "crafted": 371304708097,
+        "simulatedSeconds": 240
+      },
+      {
+        "run": "b2",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "c9b127d908ef1f59e9ea7c67396a3443ae219b39",
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "setupMs": 5156.399999976158,
+        "startupMs": 4.700000047683716,
+        "buckets": [
+          {
+            "targetWallSeconds": 1,
+            "milliseconds": 12.5
+          },
+          {
+            "targetWallSeconds": 10,
+            "milliseconds": 546.5
+          },
+          {
+            "targetWallSeconds": 30,
+            "milliseconds": 1173.5
+          }
+        ],
+        "serializationMs": 2699,
+        "serializedBytes": 110869315,
+        "finalHash": "2b56509b5cd28c50e187f1a4c9030bb3fd2b459a9740e57a870c3e51c1613acd",
+        "crafted": 371304708097,
+        "simulatedSeconds": 240
+      },
+      {
+        "run": "a2",
+        "browser": "147.0.7727.138",
+        "sourceCommit": "9af159f1b38e16019a95685ef61f1aa236664932",
+        "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+        "setupMs": 5024.100000023842,
+        "startupMs": 4.899999976158142,
+        "buckets": [
+          {
+            "targetWallSeconds": 1,
+            "milliseconds": 14
+          },
+          {
+            "targetWallSeconds": 10,
+            "milliseconds": 860.7999999523163
+          },
+          {
+            "targetWallSeconds": 30,
+            "milliseconds": 1798.8999999761581
+          }
+        ],
+        "serializationMs": 2731.899999976158,
+        "serializedBytes": 110869315,
+        "finalHash": "2b56509b5cd28c50e187f1a4c9030bb3fd2b459a9740e57a870c3e51c1613acd",
+        "crafted": 371304708097,
+        "simulatedSeconds": 240
+      }
+    ]
   }
 }

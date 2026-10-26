@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "../../node_modules/.tmp/web-construction-wasm.tsbuildinfo"
+  },
+  "include": ["probe.ts", "large-save.ts", "../../src/vite-env.d.ts"]
+}

@@ -423,7 +423,7 @@ test.describe("1.2.3 pure-idle macro recovery", () => {
     });
 
     expect(result.oldAlgorithm).toBe("pure-idle-macro-v2");
-    expect(result.newAlgorithm).toBe("pure-idle-macro-v11-terminal-domain-boundaries");
+    expect(result.newAlgorithm).toBe("pure-idle-macro-v12-construction-timeline");
     expect(result).toMatchObject({ researchKind: "finite", researchId: "electromagnetic_matrix" });
   });
 

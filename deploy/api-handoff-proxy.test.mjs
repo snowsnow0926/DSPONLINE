@@ -87,6 +87,74 @@ async function consumeRequest(request) {
   await once(request, "end");
 }
 
+for (const scenario of [
+  { name: "GET before response headers", method: "GET", stream: false },
+  { name: "completed POST before response headers", method: "POST", stream: false },
+  { name: "partial response stream", method: "GET", stream: true },
+]) {
+  test(`disconnected downstream releases upstream: ${scenario.name}`, { timeout: 10_000 }, async () => {
+    const sockets = new Set();
+    let received;
+    const upstreamReceived = new Promise((resolve) => { received = resolve; });
+    const upstream = http.createServer(async (request, response) => {
+      await consumeRequest(request);
+      if (scenario.stream) {
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.write("partial");
+      }
+      received();
+    });
+    upstream.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+    });
+    const upstreamPort = await listen(upstream);
+    const proxyPort = await reservePort();
+    const stateFile = path.join(directory, `disconnect-${scenario.method}-${scenario.stream}.json`);
+    await writeApiProxyState(stateFile, {
+      version: 1, generation: 1, mode: "forward", changedAt: Date.now(),
+      upstream: { host: "127.0.0.1", port: upstreamPort, slot: "blue", releaseId: "disconnect-test" },
+    });
+    const proxy = createApiHandoffProxy({
+      stateFile, statusFile: `${stateFile}.status`, port: proxyPort,
+      logger: { error() {}, warn() {} },
+    });
+    await proxy.start();
+    let request;
+    try {
+      request = http.request({
+        host: "127.0.0.1", port: proxyPort, method: scenario.method,
+        path: scenario.method === "POST" ? "/api/presence" : "/api/health", agent: false,
+        ...(scenario.method === "POST" ? { headers: { "content-length": "2" } } : {}),
+      });
+      request.on("error", () => {});
+      const streamClosed = scenario.stream ? new Promise((resolve) => {
+        request.once("response", (response) => response.once("data", () => {
+          response.destroy();
+          resolve();
+        }));
+      }) : null;
+      request.end(scenario.method === "POST" ? "{}" : undefined);
+      await upstreamReceived;
+      if (streamClosed) await streamClosed;
+      else request.destroy();
+      await waitUntil(() => proxy.status().activeRequests === 0 && sockets.size === 0, 1_000);
+      assert.equal(proxy.status().activeWriterRequests, 0);
+      assert.equal(proxy.status().failedRequests, 1);
+      assert.equal(proxy.status().retriedRequests, 0);
+      assert.equal((await Promise.race([
+        proxy.close().then(() => "closed"),
+        new Promise((resolve) => setTimeout(() => resolve("timeout"), 1_000)),
+      ])), "closed");
+    } finally {
+      request?.destroy();
+      for (const socket of sockets) socket.destroy();
+      await proxy.close();
+      await close(upstream);
+    }
+  });
+}
+
 async function waitForRequestBody(request) {
   const chunks = [];
   request.on("data", (chunk) => chunks.push(chunk));

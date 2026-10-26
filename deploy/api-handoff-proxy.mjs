@@ -274,17 +274,34 @@ export function createApiHandoffProxy({
     persistStatus();
     let settled = false;
     let activeUpstreamRequest = null;
+    let activeUpstreamResponse = null;
     let retryCount = 0;
-    const destroyActiveUpstream = () => activeUpstreamRequest?.destroy();
+    const destroyActiveUpstream = () => {
+      if (settled) return;
+      settle(true);
+      if (activeUpstreamRequest) entry.request.unpipe(activeUpstreamRequest);
+      activeUpstreamResponse?.destroy();
+      activeUpstreamRequest?.destroy();
+    };
+    const onResponseFinish = () => settle(false);
+    const onResponseClose = () => {
+      if (!entry.response.writableFinished) destroyActiveUpstream();
+    };
     const settle = (failed = false) => {
       if (settled) return;
       settled = true;
       entry.request.removeListener("aborted", destroyActiveUpstream);
       entry.request.removeListener("error", destroyActiveUpstream);
+      entry.response.removeListener("finish", onResponseFinish);
+      entry.response.removeListener("close", onResponseClose);
       finishActive(entry.requiresWriter, failed);
     };
     const attempt = (retry = false) => {
-      if (settled || closing || entry.response.writableEnded || entry.response.destroyed) return;
+      if (settled) return;
+      if (closing || entry.response.writableEnded || entry.response.destroyed) {
+        destroyActiveUpstream();
+        return;
+      }
       let upstreamResponded = false;
       const upstreamRequest = http.request({
         host: selectedState.upstream.host,
@@ -294,6 +311,12 @@ export function createApiHandoffProxy({
         headers: sanitizedRequestHeaders(entry.request.headers),
         agent,
       }, (upstreamResponse) => {
+        activeUpstreamResponse = upstreamResponse;
+        if (settled || entry.response.destroyed) {
+          upstreamResponse.destroy();
+          destroyActiveUpstream();
+          return;
+        }
         upstreamResponded = true;
         const responseHeaders = sanitizedResponseHeaders(upstreamResponse.headers);
         if (typeof upstreamResponse.statusMessage === "string" && upstreamResponse.statusMessage) {
@@ -307,10 +330,6 @@ export function createApiHandoffProxy({
           if (!entry.response.destroyed) entry.response.destroy(error);
         });
         upstreamResponse.pipe(entry.response);
-        entry.response.once("finish", () => settle(false));
-        entry.response.once("close", () => {
-          if (!entry.response.writableEnded) settle(true);
-        });
       });
       activeUpstreamRequest = upstreamRequest;
       let connectionTimer = null;
@@ -328,6 +347,7 @@ export function createApiHandoffProxy({
       upstreamRequest.once("close", clearConnectionTimer);
       upstreamRequest.once("error", (error) => {
         clearConnectionTimer();
+        if (settled) return;
         const staleKeepAliveRace = upstreamRequest.reusedSocket === true && error?.code === "ECONNRESET";
         if (!upstreamResponded && staleKeepAliveRace && mayRetryStaleSocket && retryCount === 0
           && !settled && !closing && !entry.response.writableEnded && !entry.response.destroyed) {
@@ -352,6 +372,11 @@ export function createApiHandoffProxy({
     };
     entry.request.once("aborted", destroyActiveUpstream);
     entry.request.once("error", destroyActiveUpstream);
+    // A complete GET or POST body no longer emits request.aborted when the
+    // downstream disconnects while waiting for headers. Observe the response
+    // from the beginning so its upstream socket/agent queue entry is released.
+    entry.response.once("finish", onResponseFinish);
+    entry.response.once("close", onResponseClose);
     attempt(false);
   };
 

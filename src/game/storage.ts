@@ -4205,6 +4205,10 @@ async function saveAuxiliaryCheckpointWithProof(
       reason: target.reason,
       expectedStateIdentity,
       ...(checkpoint.checkpointOverlay ? { checkpointOverlay: checkpoint.checkpointOverlay } : {}),
+      // The Web checkpoint path forwards ArrayBuffers without cloning. Keep
+      // the existing compressed transport on native/Blob-backed paths.
+      ...(__APP_PLATFORM__ === "web" && checkpoint.stateTransfer.buffer instanceof ArrayBuffer
+        ? { compressTransport: false } : {}),
     });
     const capacity = await hasLocalSaveCapacityForBytes(target.key, serialized.proof.byteLength);
     if (!capacity.ok) return failedSave("quota", "本地存储空间不足，存档尚未保存。", serialized.proof.byteLength);

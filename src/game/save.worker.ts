@@ -207,7 +207,8 @@ self.onmessage = async (event: MessageEvent<SaveSerializationRequest>) => {
       reason: summary.reason,
       settings: catalogSettings(persistent.settings),
     };
-    const transport = await prepareSavePayloadTransport(serialized.bytes, payloadSha256!);
+    const transport = await prepareSavePayloadTransport(serialized.bytes, payloadSha256!,
+      request.compressTransport !== false || binaryTransport === "blob");
     const proofWithoutBinding: Omit<AuthoritativeSavePayloadProof, "bindingSha256"> = {
       integrity: "valid",
       payloadChecksum: serialized.payloadChecksum,

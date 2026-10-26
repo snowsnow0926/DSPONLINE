@@ -55,6 +55,7 @@ interface AuthoritativeSaveSerializationOptions {
   timeoutMs?: number;
   expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
+  compressTransport?: boolean;
 }
 
 export type AuthoritativeSaveSerializationProgress =
@@ -195,6 +196,7 @@ function serializeAuthoritativeSaveSourceInWorker(
       ...(!includeSourceStateTransfer ? { includeSourceStateTransfer: false as const } : {}),
       ...(options.expectedStateIdentity ? { expectedStateIdentity: options.expectedStateIdentity } : {}),
       ...(options.checkpointOverlay ? { checkpointOverlay: options.checkpointOverlay } : {}),
+      ...(options.compressTransport === false ? { compressTransport: false } : {}),
     };
     try {
       worker.postMessage(request, source.kind === "cloned-state" ? [] : source.kind === "snapshot"

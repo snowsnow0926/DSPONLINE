@@ -54,3 +54,19 @@ control. Use at least three completed runs per action and compare the same input
 browser and build mode; do not count failed preparation or read-only-page runs.
 `summarize.mjs <evidence-directory>` validates and summarizes the specifically
 named 110,042-entity / 233,300-belt runs recorded for this optimization.
+
+The follow-up verification experiment uses `run-series.ps1` with `-BaseUrl`,
+`-OutputDirectory` and `-Variant baseline` or `candidate`. It records Worker
+phase timings as well as the full-page measurements; summarize it with
+`save-verification-summary.mjs <evidence-directory>`. `--worker-timings=1` can
+also be passed directly to the JavaScript runner.
+
+`--transport=raw` and `--transport=gzip` are diagnostic-only wrapper Workers
+used to isolate compression cost while loading the same production modules.
+They must not be mistaken for the final application implementation, which uses
+a typed transfer preference and keeps Blob/native paths compressed. Omit the
+transport override when measuring the actual candidate.
+
+The separate `web-construction-wasm/run.mjs --entry=save-inspection` harness
+compares the frozen original scanner, the measured substring variant, and the
+production scanner on the same serialized payload. It performs no save writes.

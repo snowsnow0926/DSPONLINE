@@ -5,6 +5,19 @@ import { decodeSavePayloadTransport, prepareSavePayloadTransport } from "./saveP
 afterEach(() => vi.unstubAllGlobals());
 
 describe("save payload compression", () => {
+  it("keeps explicitly uncompressed transfers byte-identical without starting a compressor", async () => {
+    const compressor = vi.fn(() => { throw new Error("compressor must not run"); });
+    vi.stubGlobal("CompressionStream", compressor);
+    const source = new TextEncoder().encode("材料🧪".repeat(1024)).buffer;
+    const sourceSha = await sha256Bytes(source);
+    const prepared = await prepareSavePayloadTransport(source, sourceSha, false);
+    expect(prepared.buffer).toBe(source);
+    expect(prepared).toMatchObject({ encoding: "raw", originalByteLength: source.byteLength,
+      storedByteLength: source.byteLength, storedSha256: sourceSha });
+    expect(compressor).not.toHaveBeenCalled();
+    expect(await sha256Bytes(await decodeSavePayloadTransport(prepared.buffer, prepared.encoding))).toBe(sourceSha);
+  });
+
   it("gzip-compresses a repetitive large payload and restores the exact bytes", async () => {
     const source = new TextEncoder().encode(`{"state":"${"factory-belt-".repeat(32_768)}"}`).buffer;
     const sourceSha = await sha256Bytes(source);

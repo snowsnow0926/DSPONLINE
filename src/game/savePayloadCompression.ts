@@ -18,14 +18,16 @@ function elapsedSince(startedAt: number): number {
 /**
  * Compress a save before it crosses the UI/persistence Worker boundary. The
  * raw buffer stays owned by the serializer Worker and is never cloned through
- * the renderer. A raw fallback is retained for older embedded browsers.
+ * the renderer. Callers with an ownership-only ArrayBuffer relay may skip
+ * compression; older embedded browsers also retain the exact raw fallback.
  */
 export async function prepareSavePayloadTransport(
   raw: ArrayBuffer,
   rawSha256: string,
+  compress = true,
 ): Promise<PreparedSavePayloadTransport> {
   const startedAt = globalThis.performance?.now?.() ?? Date.now();
-  if (typeof CompressionStream === "undefined" || typeof Blob === "undefined" || typeof Response === "undefined") {
+  if (!compress || typeof CompressionStream === "undefined" || typeof Blob === "undefined" || typeof Response === "undefined") {
     return {
       buffer: raw,
       encoding: "raw",

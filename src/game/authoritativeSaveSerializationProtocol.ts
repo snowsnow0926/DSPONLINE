@@ -63,6 +63,8 @@ interface AuthoritativeSaveSerializationRequestCommon {
   expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
   includeSourceStateTransfer?: false;
+  /** False is safe only when the caller can forward the payload by ownership. */
+  compressTransport?: boolean;
 }
 
 export type AuthoritativeSaveSerializationRequest = AuthoritativeSaveSerializationRequestCommon & (

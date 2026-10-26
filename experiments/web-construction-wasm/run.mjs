@@ -12,10 +12,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-responsiveness"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
 const callable = entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
-  : entry === "save-responsiveness" ? "runSaveResponsiveness" : "runConstructionWasmProbe";
+  : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
 const decoderFiles = ["src/game/storage.ts", "src/game/saveTransferDecode.ts"];
 const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["decoder-ref"]}^{commit}`],

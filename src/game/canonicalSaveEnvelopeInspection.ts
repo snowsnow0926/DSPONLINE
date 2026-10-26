@@ -28,12 +28,22 @@ interface JsonRange {
 const MAX_SCALAR_CHARS = 4_096;
 
 function skipWhitespace(raw: string, index: number, end: number): number {
-  while (index < end && /[\t\n\r ]/.test(raw[index])) index += 1;
+  while (index < end) {
+    const code = raw.charCodeAt(index);
+    if (code !== 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) break;
+    index += 1;
+  }
   return index;
 }
 
+const simpleJsonString = /[^"\\\x00-\x1f]*"/y;
+
 function skipJsonString(raw: string, start: number, end: number): number {
   if (raw[start] !== '"') throw new Error("expected JSON string");
+  // Scan ordinary keys and IDs without allocating substrings or match arrays.
+  // Escapes and control characters still use the complete validator below.
+  simpleJsonString.lastIndex = start + 1;
+  if (simpleJsonString.test(raw) && simpleJsonString.lastIndex <= end) return simpleJsonString.lastIndex;
   for (let index = start + 1; index < end; index += 1) {
     const code = raw.charCodeAt(index);
     if (code === 0x22) return index + 1;
@@ -52,17 +62,17 @@ function skipJsonString(raw: string, start: number, end: number): number {
 }
 
 function skipCompositeJsonValue(raw: string, start: number, end: number): number {
-  const stack: string[] = [raw[start]];
+  const stack: number[] = [raw.charCodeAt(start)];
   for (let index = start + 1; index < end; index += 1) {
-    const char = raw[index];
-    if (char === '"') {
+    const code = raw.charCodeAt(index);
+    if (code === 0x22) {
       index = skipJsonString(raw, index, end) - 1;
       continue;
     }
-    if (char === "{" || char === "[") stack.push(char);
-    else if (char === "}" || char === "]") {
+    if (code === 0x7b || code === 0x5b) stack.push(code);
+    else if (code === 0x7d || code === 0x5d) {
       const open = stack.pop();
-      if (open !== (char === "}" ? "{" : "[")) throw new Error("mismatched JSON container");
+      if (open !== (code === 0x7d ? 0x7b : 0x5b)) throw new Error("mismatched JSON container");
       if (stack.length === 0) return index + 1;
     }
   }
@@ -75,7 +85,11 @@ function skipJsonValue(raw: string, start: number, end: number): number {
   if (first === '"') return skipJsonString(raw, index, end);
   if (first === "{" || first === "[") return skipCompositeJsonValue(raw, index, end);
   let cursor = index;
-  while (cursor < end && !/[,}\]\t\n\r ]/.test(raw[cursor])) cursor += 1;
+  while (cursor < end) {
+    const code = raw.charCodeAt(cursor);
+    if (code === 0x2c || code === 0x7d || code === 0x5d || code === 0x09 || code === 0x0a || code === 0x0d || code === 0x20) break;
+    cursor += 1;
+  }
   if (cursor === index) throw new Error("missing JSON value");
   return cursor;
 }
@@ -181,10 +195,14 @@ function countArrayElements(raw: string, range: JsonRange): number {
 function checksumRange(formatVersion: number, raw: string, state: JsonRange): string {
   let hash = 0x811c9dc5;
   const mix = (value: string, start = 0, end = value.length) => {
-    for (let index = start; index < end; index += 1) {
-      hash ^= value.charCodeAt(index);
-      hash = Math.imul(hash, 0x01000193);
+    let index = start;
+    for (; index + 3 < end; index += 4) {
+      hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+      hash = Math.imul(hash ^ value.charCodeAt(index + 1), 0x01000193);
+      hash = Math.imul(hash ^ value.charCodeAt(index + 2), 0x01000193);
+      hash = Math.imul(hash ^ value.charCodeAt(index + 3), 0x01000193);
     }
+    for (; index < end; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
   };
   mix(`{"formatVersion":${JSON.stringify(formatVersion)},"state":`);
   mix(raw, state.start, state.end);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { inspectCanonicalSaveEnvelope } from "./canonicalSaveEnvelopeInspection";
+import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
 import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
 
 function fixtureRaw(): string {
@@ -27,6 +28,37 @@ function fixtureRaw(): string {
 }
 
 describe("canonical save envelope inspection", () => {
+  it("keeps exact checksums across string escapes, Unicode and checksum loop tails", () => {
+    const texts = ["", "abc", "quote\"slash\\", "\u0000\n\t", "\\u1234", "物料🧪", "\ud800", "\udc00", "},]\\\""];
+    for (let index = 0; index < 256; index++) {
+      const text = texts[index % texts.length] + "x".repeat(index % 37);
+      const mode = index % 2 ? "normal" : "speedrun";
+      const state = {
+        version: 47, mode, activePlanetId: `home-${text}`,
+        entities: Array.from({ length: index % 7 }, (_, id) => ({ id, text, nested: [{ value: text }, null] })),
+        belts: Array.from({ length: index % 5 }, (_, id) => ({ id, text })),
+        elapsedSeconds: index + 0.5, research: { completedTechIds: texts.slice(0, index % 5) },
+        dysonSphere: { structurePoints: index * 10 }, extra: { text, flags: [true, false, null, -1.5e-8] },
+      };
+      const checksum = computeSaveStateChecksum(2, state);
+      const raw = JSON.stringify({ formatVersion: 2, kind: "primary", savedAt: 1234, mode, slot: "main", state, checksum });
+      expect(inspectCanonicalSaveEnvelope(raw), `sample ${index}`).toEqual({
+        formatVersion: 2, kind: "primary", savedAt: 1234, mode, slot: "main",
+        recordedChecksum: checksum, computedChecksum: checksum,
+        state: { version: 47, mode, activePlanetId: state.activePlanetId, entityCount: state.entities.length,
+          beltCount: state.belts.length, elapsedSeconds: index, completedTechCount: state.research.completedTechIds.length,
+          structurePoints: index * 10 },
+      });
+    }
+  });
+
+  it("does not let fast string scans skip invalid controls or escapes", () => {
+    const raw = fixtureRaw();
+    for (const invalid of ["bad\u0000value", "bad\nvalue", "bad\\qvalue", "bad\\u12xzvalue", "bad\\"]) {
+      expect(inspectCanonicalSaveEnvelope(raw.replace('"id":"a"', `"id":"${invalid}"`))).toBeNull();
+    }
+  });
+
   it("validates header/checksum and counts large collections without parsing the state object", () => {
     expect(inspectCanonicalSaveEnvelope(fixtureRaw())).toEqual({
       formatVersion: 2,

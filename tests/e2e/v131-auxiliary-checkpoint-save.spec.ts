@@ -154,3 +154,72 @@ test("compatibility fallback keeps the caller's checkpoint intact when Workers a
   });
   expect(result).toEqual({ success: true, sameBufferLength: true, valid: true });
 });
+
+test("raw transport preserves envelope validation and Blob transport keeps compression", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    await import(/* @vite-ignore */ "/@vite/env");
+    const engine: any = await import(/* @vite-ignore */ "/src/game/engine.ts");
+    const storage: any = await import(/* @vite-ignore */ "/src/game/storage.ts");
+    const protocol: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeProtocol.ts");
+    const serializer: any = await import(/* @vite-ignore */ "/src/game/authoritativeSaveSerializationClient.ts");
+    const transfers: any = await import(/* @vite-ignore */ "/src/game/saveTransfer.ts");
+    const compression: any = await import(/* @vite-ignore */ "/src/game/savePayloadCompression.ts");
+    const state = engine.createInitialState();
+    const options = { savedAt: 123456, compressTransport: false };
+    const raw = await serializer.serializeAuthoritativeSaveStateTransferInWorker(
+      protocol.serializeSimulationStateForTransfer(state), options);
+    const source = transfers.serializeSaveEnvelopeToTransfer(state,
+      { formatVersion: 2, savedAt: 123456, kind: "primary", slot: "main", mode: state.mode });
+    const blob = await serializer.serializeAuthoritativeSaveEnvelopeTransferInWorker({
+      buffer: new Blob([source.bytes]), byteLength: source.byteLength, stateChecksum: source.stateChecksum,
+      payloadChecksum: source.payloadChecksum, integrity: "valid",
+    }, options);
+    const decodedBlob = await compression.decodeSavePayloadTransport(await blob.bytes.arrayBuffer(), blob.proof.transportEncoding);
+    return { rawEncoding: raw.proof.transportEncoding, rawLengthMatches: raw.bytes.byteLength === raw.proof.byteLength,
+      rawValid: storage.inspectSave(new TextDecoder().decode(raw.bytes)).valid,
+      blobEncoding: blob.proof.transportEncoding, isBlob: blob.bytes instanceof Blob,
+      blobValid: storage.inspectSave(new TextDecoder().decode(decodedBlob)).valid };
+  });
+  expect(result).toEqual({ rawEncoding: "raw", rawLengthMatches: true, rawValid: true,
+    blobEncoding: "gzip", isBlob: true, blobValid: true });
+});
+
+test("raw persistence checks actual bytes and rejects forged SHA proofs before replacing a slot", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    await import(/* @vite-ignore */ "/@vite/env");
+    const engine: any = await import(/* @vite-ignore */ "/src/game/engine.ts");
+    const storage: any = await import(/* @vite-ignore */ "/src/game/storage.ts");
+    const store: any = await import(/* @vite-ignore */ "/src/game/localSaveStore.ts");
+    const protocol: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeProtocol.ts");
+    const serializer: any = await import(/* @vite-ignore */ "/src/game/authoritativeSaveSerializationClient.ts");
+    const proofApi: any = await import(/* @vite-ignore */ "/src/game/authoritativeSaveProof.ts");
+    await store.initializeLocalSaveStore();
+    const state = engine.createInitialState();
+    if (!(await storage.saveGameSlotVerified(1, state)).success) throw new Error("Cannot seed slot");
+    const key = "dsp-idle-network.slot.1";
+    const original = await store.readPersistedLocalSaveValue(key);
+    state.entities[0].inputs.iron_ore = 123;
+    const serialized = await serializer.serializeAuthoritativeSaveStateTransferInWorker(
+      protocol.serializeSimulationStateForTransfer(state), { kind: "slot", slot: 1, compressTransport: false });
+    const sourceBytes = serialized.bytes.slice(0);
+    const writer = store.getLocalSaveWriterStatus();
+    const request = { key, seed: serialized.catalogSeed, expectedRevision: store.getLocalSaveRevision(key),
+      fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken } };
+    const { bindingSha256: _binding, ...baseProof } = serialized.proof;
+    const forgedPartial = { ...baseProof, storedSha256: "0".repeat(64), payloadSha256: "0".repeat(64) };
+    const forged = { ...forgedPartial,
+      bindingSha256: await proofApi.computeAuthoritativeSaveProofBindingSha256(forgedPartial, serialized.catalogSeed) };
+    const forgedResult = await store.setLocalSavePayloadWithProof({ ...request, bytes: sourceBytes.slice(0), proof: forged });
+    const corruptedBytes = sourceBytes.slice(0);
+    new Uint8Array(corruptedBytes)[0] ^= 1;
+    const corruptResult = await store.setLocalSavePayloadWithProof({ ...request, bytes: corruptedBytes, proof: serialized.proof });
+    const unchanged = original === await store.readPersistedLocalSaveValue(key);
+    const committed = await store.setLocalSavePayloadWithProof({ ...request, bytes: sourceBytes, proof: serialized.proof });
+    const loaded = storage.importGame(await store.readPersistedLocalSaveValue(key));
+    return { forged: forgedResult.result, corrupt: corruptResult.result, unchanged,
+      committed: committed.result.ok, iron: loaded?.entities[0].inputs.iron_ore };
+  });
+  expect(result.forged).toMatchObject({ ok: false, reason: "invalid" });
+  expect(result.corrupt).toMatchObject({ ok: false, reason: "invalid" });
+  expect(result).toMatchObject({ unchanged: true, committed: true, iron: 123 });
+});

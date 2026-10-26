@@ -1,0 +1,354 @@
+{
+  "schemaVersion": 1,
+  "sampleCountPerVariantAndAction": 3,
+  "scope": "paused normal-mode factory; production Chrome UI; isolated IndexedDB; no API writes",
+  "input": {
+    "sha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "preparedBytes": 205464026,
+    "entities": 110042,
+    "belts": 233300
+  },
+  "verification": {
+    "stateBytes": 110673590,
+    "sha256": "2d3a398c359336100136bf30a59ae476b8709bd9166e24eccfa79f7aa9b3317e",
+    "canonicalFieldsSha256": "372522226c1f1b0a7033122bc2ab121bd2d170f6dd750d368f132d26be165cff",
+    "verifiedRuns": [
+      "save-verify-slot-baseline-1",
+      "save-verify-slot-candidate-1",
+      "save-verify-snapshot-baseline-1",
+      "save-verify-snapshot-candidate-1"
+    ]
+  },
+  "actions": {
+    "slot": {
+      "baseline": {
+        "samples": [
+          {
+            "name": "save-verify-slot-baseline-1",
+            "durationMs": 6446.399999976158,
+            "maxFrameGapMs": 100.89999997615814,
+            "serializationMs": 2339,
+            "compressionMs": 470.7999999523163,
+            "persistenceValidationMs": 2011.8999999761581,
+            "idbAndReadbackMs": 402.7000000476837,
+            "transferredBytes": 5373213,
+            "payloadBytes": 110673703,
+            "rendererLifetimePeakWorkingSetBytes": 2704728064,
+            "rendererFinalPrivateBytes": 2077700096,
+            "appAssets": [
+              "/assets/index-C-KwqDFT.js"
+            ]
+          },
+          {
+            "name": "save-verify-slot-baseline-2",
+            "durationMs": 6468.800000071526,
+            "maxFrameGapMs": 101.19999992847443,
+            "serializationMs": 2470.899999976158,
+            "compressionMs": 465.60000002384186,
+            "persistenceValidationMs": 1997,
+            "idbAndReadbackMs": 419,
+            "transferredBytes": 5373210,
+            "payloadBytes": 110673703,
+            "rendererLifetimePeakWorkingSetBytes": 2589335552,
+            "rendererFinalPrivateBytes": 2087866368,
+            "appAssets": [
+              "/assets/index-C-KwqDFT.js"
+            ]
+          },
+          {
+            "name": "save-verify-slot-baseline-3",
+            "durationMs": 6479.299999952316,
+            "maxFrameGapMs": 100.89999997615814,
+            "serializationMs": 2369.100000023842,
+            "compressionMs": 479.7999999523163,
+            "persistenceValidationMs": 1998.2999999523163,
+            "idbAndReadbackMs": 408.6999999284744,
+            "transferredBytes": 5373212,
+            "payloadBytes": 110673703,
+            "rendererLifetimePeakWorkingSetBytes": 2599141376,
+            "rendererFinalPrivateBytes": 2086985728,
+            "appAssets": [
+              "/assets/index-C-KwqDFT.js"
+            ]
+          }
+        ],
+        "medians": {
+          "durationMs": 6468.800000071526,
+          "maxFrameGapMs": 100.89999997615814,
+          "serializationMs": 2369.100000023842,
+          "compressionMs": 470.7999999523163,
+          "persistenceValidationMs": 1998.2999999523163,
+          "idbAndReadbackMs": 408.6999999284744,
+          "transferredBytes": 5373212,
+          "payloadBytes": 110673703,
+          "rendererLifetimePeakWorkingSetBytes": 2599141376,
+          "rendererFinalPrivateBytes": 2086985728
+        }
+      },
+      "candidate": {
+        "samples": [
+          {
+            "name": "save-verify-slot-candidate-1",
+            "durationMs": 5424.299999952316,
+            "maxFrameGapMs": 100.60000002384186,
+            "serializationMs": 1871.7999999523163,
+            "compressionMs": 0,
+            "persistenceValidationMs": 1475.3000000715256,
+            "idbAndReadbackMs": 410.39999997615814,
+            "transferredBytes": 110673703,
+            "payloadBytes": 110673703,
+            "rendererLifetimePeakWorkingSetBytes": 2653343744,
+            "rendererFinalPrivateBytes": 2092015616,
+            "appAssets": [
+              "/assets/index-UbWgtsqz.js"
+            ]
+          },
+          {
+            "name": "save-verify-slot-candidate-2",
+            "durationMs": 5427.899999976158,
+            "maxFrameGapMs": 100.80000007152557,
+            "serializationMs": 1907.6000000238419,
+            "compressionMs": 0,
+            "persistenceValidationMs": 1462.8999999761581,
+            "idbAndReadbackMs": 400.60000002384186,
+            "transferredBytes": 110673703,
+            "payloadBytes": 110673703,
+            "rendererLifetimePeakWorkingSetBytes": 2641051648,
+            "rendererFinalPrivateBytes": 2074914816,
+            "appAssets": [
+              "/assets/index-UbWgtsqz.js"
+            ]
+          },
+          {
+            "name": "save-verify-slot-candidate-3",
+            "durationMs": 5458.899999976158,
+            "maxFrameGapMs": 101.29999995231628,
+            "serializationMs": 1978.5999999046326,
+            "compressionMs": 0,
+            "persistenceValidationMs": 1463.7000000476837,
+            "idbAndReadbackMs": 409.39999997615814,
+            "transferredBytes": 110673703,
+            "payloadBytes": 110673703,
+            "rendererLifetimePeakWorkingSetBytes": 2642190336,
+            "rendererFinalPrivateBytes": 2090938368,
+            "appAssets": [
+              "/assets/index-UbWgtsqz.js"
+            ]
+          }
+        ],
+        "medians": {
+          "durationMs": 5427.899999976158,
+          "maxFrameGapMs": 100.80000007152557,
+          "serializationMs": 1907.6000000238419,
+          "compressionMs": 0,
+          "persistenceValidationMs": 1463.7000000476837,
+          "idbAndReadbackMs": 409.39999997615814,
+          "transferredBytes": 110673703,
+          "payloadBytes": 110673703,
+          "rendererLifetimePeakWorkingSetBytes": 2642190336,
+          "rendererFinalPrivateBytes": 2090938368
+        }
+      },
+      "percentChange": {
+        "durationMs": -16.091083355241437,
+        "maxFrameGapMs": -0.09910793325688556,
+        "serializationMs": -19.479971296921008,
+        "compressionMs": -100,
+        "persistenceValidationMs": -26.752739824720475,
+        "idbAndReadbackMs": 0.17127478536976293,
+        "transferredBytes": 1959.7308090579713,
+        "payloadBytes": 0,
+        "rendererLifetimePeakWorkingSetBytes": 1.6562761994213278,
+        "rendererFinalPrivateBytes": 0.18939468281787886
+      }
+    },
+    "snapshot": {
+      "baseline": {
+        "samples": [
+          {
+            "name": "save-verify-snapshot-baseline-1",
+            "durationMs": 6431.700000047684,
+            "maxFrameGapMs": 100.89999997615814,
+            "serializationMs": 2467.5,
+            "compressionMs": 479.7000000476837,
+            "persistenceValidationMs": 1970.6000000238419,
+            "idbAndReadbackMs": 420.6999999284744,
+            "transferredBytes": 5373258,
+            "payloadBytes": 110673736,
+            "rendererLifetimePeakWorkingSetBytes": 2583277568,
+            "rendererFinalPrivateBytes": 2080907264,
+            "appAssets": [
+              "/assets/index-C-KwqDFT.js"
+            ]
+          },
+          {
+            "name": "save-verify-snapshot-baseline-2",
+            "durationMs": 6444.100000023842,
+            "maxFrameGapMs": 100.60000002384186,
+            "serializationMs": 2451.899999976158,
+            "compressionMs": 472.10000002384186,
+            "persistenceValidationMs": 1979.4000000953674,
+            "idbAndReadbackMs": 413.2000000476837,
+            "transferredBytes": 5373254,
+            "payloadBytes": 110673736,
+            "rendererLifetimePeakWorkingSetBytes": 2596716544,
+            "rendererFinalPrivateBytes": 2080821248,
+            "appAssets": [
+              "/assets/index-C-KwqDFT.js"
+            ]
+          },
+          {
+            "name": "save-verify-snapshot-baseline-3",
+            "durationMs": 6432.199999928474,
+            "maxFrameGapMs": 101.30000007152557,
+            "serializationMs": 2468.100000023842,
+            "compressionMs": 471.39999997615814,
+            "persistenceValidationMs": 1973.1999999284744,
+            "idbAndReadbackMs": 428.89999997615814,
+            "transferredBytes": 5373254,
+            "payloadBytes": 110673736,
+            "rendererLifetimePeakWorkingSetBytes": 2581336064,
+            "rendererFinalPrivateBytes": 2078937088,
+            "appAssets": [
+              "/assets/index-C-KwqDFT.js"
+            ]
+          }
+        ],
+        "medians": {
+          "durationMs": 6432.199999928474,
+          "maxFrameGapMs": 100.89999997615814,
+          "serializationMs": 2467.5,
+          "compressionMs": 472.10000002384186,
+          "persistenceValidationMs": 1973.1999999284744,
+          "idbAndReadbackMs": 420.6999999284744,
+          "transferredBytes": 5373254,
+          "payloadBytes": 110673736,
+          "rendererLifetimePeakWorkingSetBytes": 2583277568,
+          "rendererFinalPrivateBytes": 2080821248
+        }
+      },
+      "candidate": {
+        "samples": [
+          {
+            "name": "save-verify-snapshot-candidate-1",
+            "durationMs": 5419.899999976158,
+            "maxFrameGapMs": 100.29999995231628,
+            "serializationMs": 1937.6000000238419,
+            "compressionMs": 0,
+            "persistenceValidationMs": 1441.3000000715256,
+            "idbAndReadbackMs": 415,
+            "transferredBytes": 110673736,
+            "payloadBytes": 110673736,
+            "rendererLifetimePeakWorkingSetBytes": 2584465408,
+            "rendererFinalPrivateBytes": 1861111808,
+            "appAssets": [
+              "/assets/index-UbWgtsqz.js"
+            ]
+          },
+          {
+            "name": "save-verify-snapshot-candidate-2",
+            "durationMs": 5398.399999976158,
+            "maxFrameGapMs": 100.70000004768372,
+            "serializationMs": 1910.1000000238419,
+            "compressionMs": 0,
+            "persistenceValidationMs": 1444,
+            "idbAndReadbackMs": 421.3000000715256,
+            "transferredBytes": 110673736,
+            "payloadBytes": 110673736,
+            "rendererLifetimePeakWorkingSetBytes": 2585030656,
+            "rendererFinalPrivateBytes": 1873641472,
+            "appAssets": [
+              "/assets/index-UbWgtsqz.js"
+            ]
+          },
+          {
+            "name": "save-verify-snapshot-candidate-3",
+            "durationMs": 5425.899999976158,
+            "maxFrameGapMs": 105.10000002384186,
+            "serializationMs": 1989.3999999761581,
+            "compressionMs": 0,
+            "persistenceValidationMs": 1426.2000000476837,
+            "idbAndReadbackMs": 429.6999999284744,
+            "transferredBytes": 110673736,
+            "payloadBytes": 110673736,
+            "rendererLifetimePeakWorkingSetBytes": 2566242304,
+            "rendererFinalPrivateBytes": 2055462912,
+            "appAssets": [
+              "/assets/index-UbWgtsqz.js"
+            ]
+          }
+        ],
+        "medians": {
+          "durationMs": 5419.899999976158,
+          "maxFrameGapMs": 100.70000004768372,
+          "serializationMs": 1937.6000000238419,
+          "compressionMs": 0,
+          "persistenceValidationMs": 1441.3000000715256,
+          "idbAndReadbackMs": 421.3000000715256,
+          "transferredBytes": 110673736,
+          "payloadBytes": 110673736,
+          "rendererLifetimePeakWorkingSetBytes": 2584465408,
+          "rendererFinalPrivateBytes": 1873641472
+        }
+      },
+      "percentChange": {
+        "durationMs": -15.738005658461692,
+        "maxFrameGapMs": -0.1982159846597469,
+        "serializationMs": -21.475177303998304,
+        "compressionMs": -100,
+        "persistenceValidationMs": -26.956213251379964,
+        "idbAndReadbackMs": 0.1426194778115419,
+        "transferredBytes": 1959.715323340382,
+        "payloadBytes": 0,
+        "rendererLifetimePeakWorkingSetBytes": 0.045981895817708736,
+        "rendererFinalPrivateBytes": -9.956634968002787
+      }
+    }
+  },
+  "scanner": {
+    "bytes": 110789823,
+    "samples": [
+      {
+        "name": "baseline",
+        "durationMs": 1540.0999999046326
+      },
+      {
+        "name": "candidate",
+        "durationMs": 1244.6999999284744
+      },
+      {
+        "name": "regexp",
+        "durationMs": 1147.5
+      },
+      {
+        "name": "regexp",
+        "durationMs": 1153.6000000238419
+      },
+      {
+        "name": "candidate",
+        "durationMs": 1279.2000000476837
+      },
+      {
+        "name": "baseline",
+        "durationMs": 1534
+      },
+      {
+        "name": "candidate",
+        "durationMs": 1282.5
+      },
+      {
+        "name": "baseline",
+        "durationMs": 1536.6999999284744
+      },
+      {
+        "name": "regexp",
+        "durationMs": 1171.3999999761581
+      }
+    ],
+    "medians": {
+      "baseline": 1536.6999999284744,
+      "candidate": 1279.2000000476837,
+      "regexp": 1153.6000000238419
+    }
+  }
+}

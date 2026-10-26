@@ -476,13 +476,14 @@ async function commitPayload(
     return failure("invalid", "authoritative payload proof 与 catalog seed binding 不匹配");
   }
   report({ stage: "decoding-payload", key: request.key, bytes: request.proof.byteLength });
-  if (await sha256Bytes(storedPayload) !== request.proof.storedSha256) {
+  const storedSha256 = await sha256Bytes(storedPayload);
+  if (storedSha256 !== request.proof.storedSha256) {
     return failure("invalid", "authoritative 存档传输 SHA-256 与 Worker proof 不匹配");
   }
   const payload = await decodeSavePayloadTransport(storedPayload, request.proof.transportEncoding);
   if (payload.byteLength !== request.proof.byteLength ||
     computeSavePayloadChecksum(payload) !== request.proof.payloadChecksum ||
-    await sha256Bytes(payload) !== request.proof.payloadSha256) {
+    (payload === storedPayload ? storedSha256 : await sha256Bytes(payload)) !== request.proof.payloadSha256) {
     return failure("invalid", "authoritative 原始存档 checksum 与 Worker proof 不匹配");
   }
   let raw: string;

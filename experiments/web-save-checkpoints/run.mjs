@@ -8,6 +8,7 @@ const base = new URL(options.url ?? "http://127.0.0.1:4375");
 if (base.protocol !== "http:" || base.hostname !== "127.0.0.1") throw new Error("This fixture writer only runs on localhost");
 const action = options.action ?? "slot";
 if (!["slot", "snapshot"].includes(action)) throw new Error("Unknown save action");
+if (options.transport && !["raw", "gzip"].includes(options.transport)) throw new Error("Unknown transport experiment");
 if (options.hash && options.profile) throw new Error("Hash verification closes the profiled page; run it separately");
 const output = resolve(options.output ?? "artifacts/web-save-checkpoints");
 await mkdir(output, { recursive: true });
@@ -42,18 +43,38 @@ context.on("page", (created) => {
 });
 try {
   await context.route("**/api/**", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"isolated performance run"}' }));
-  await context.addInitScript(() => {
+  await context.addInitScript(({ captureWorkerTimings, transportExperiment }) => {
     if (location.hostname !== "127.0.0.1") return;
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-26-v1.3.1");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
-    const trace = { active: false, startedAt: 0, calls: [], frames: [], tasks: [] };
+    const trace = { active: false, startedAt: 0, calls: [], frames: [], tasks: [], phases: [] };
     globalThis.__SAVE_CHECKPOINT_TRACE__ = trace;
     const NativeWorker = Worker;
     globalThis.Worker = class extends NativeWorker {
       constructor(url, options) {
-        super(url, options);
         const name = options?.name ?? String(url).split("/").at(-1);
+        const experimentUrl = transportExperiment && name === "authoritative-save-serialization"
+          ? URL.createObjectURL(new Blob([
+              `import ${JSON.stringify(new URL(url, location.href).href)};\n`,
+              transportExperiment === "raw" ? "globalThis.CompressionStream = undefined;" : "",
+            ], { type: "text/javascript" })) : null;
+        super(experimentUrl ?? url, options);
+        if (experimentUrl) this.addEventListener("message", () => URL.revokeObjectURL(experimentUrl), { once: true });
+        if (captureWorkerTimings && (name === "authoritative-save-serialization" || name === "authoritative-save-persistence")) {
+          this.addEventListener("message", (event) => {
+            if (!trace.active) return;
+            const data = event.data;
+            const proof = data?.result?.proof;
+            // Retain only scalar diagnostics, never returned payload buffers.
+            trace.phases.push({ name, atMs: performance.now() - trace.startedAt, type: data?.type,
+              stage: data?.progress?.stage, durationMs: data?.durationMs,
+              compressionDurationMs: data?.compressionDurationMs,
+              rawBytes: data?.proof?.byteLength, transferredBytes: data?.proof?.storedByteLength,
+              workerDecodeMs: proof?.workerDecodeMs, idbWriteMs: proof?.idbWriteMs,
+              backupVerifyMs: proof?.backupVerifyMs });
+          });
+        }
         const original = this.postMessage.bind(this);
         this.postMessage = (message, transfers = []) => {
           const started = performance.now();
@@ -61,7 +82,8 @@ try {
           finally {
             if (trace.active) trace.calls.push({ name, type: message?.type ?? "serialize",
               duration: performance.now() - started, entities: message?.state?.entities?.length ?? null,
-              transferred: Array.isArray(transfers) ? transfers.length : null });
+              transferred: Array.isArray(transfers) ? transfers.length : null,
+              ...(captureWorkerTimings ? { atMs: started - trace.startedAt } : {}) });
           }
         };
       }
@@ -77,7 +99,7 @@ try {
     new PerformanceObserver((list) => {
       if (trace.active) for (const entry of list.getEntries()) trace.tasks.push(entry.duration);
     }).observe({ type: "longtask" });
-  });
+  }, { captureWorkerTimings: Boolean(options["worker-timings"]), transportExperiment: options.transport ?? null });
   page = await context.newPage();
   console.log("Preparing isolated IndexedDB save");
   await page.goto(new URL("/icon.svg", base).href);
@@ -129,7 +151,7 @@ try {
   await page.waitForTimeout(500);
   await page.evaluate(() => {
     const trace = globalThis.__SAVE_CHECKPOINT_TRACE__;
-    trace.calls = []; trace.frames = []; trace.tasks = [];
+    trace.calls = []; trace.frames = []; trace.tasks = []; trace.phases = [];
     trace.startedAt = performance.now(); trace.active = true;
   });
   console.log(`Measuring ${action} action`);
@@ -160,7 +182,7 @@ try {
     const primary = await readCatalog("dsp-idle-network.save.v1");
     db.close();
     return { durationMs, maxFrameGapMs: Math.max(0, ...trace.frames),
-      longTasks: trace.tasks, workerCalls: trace.calls, catalog,
+      longTasks: trace.tasks, workerCalls: trace.calls, phaseTimings: trace.phases, catalog,
       primary, shell: {
         worker: document.querySelector(".game-shell")?.getAttribute("data-simulation-worker"),
       }, appAssets: [...document.querySelectorAll('script[type="module"][src]')].map((script) => script.getAttribute("src")) };
@@ -198,7 +220,7 @@ try {
         canonicalFieldsSha256: await sha256(encoder.encode(JSON.stringify(fields))), fields };
     }, result.catalog.key);
   }
-  await writeFile(resolve(output, `${options.name ?? action}.json`), JSON.stringify({ action, browser: await browser.version(), seeded, ...result }, null, 2) + "\n");
+  await writeFile(resolve(output, `${options.name ?? action}.json`), JSON.stringify({ action, transportExperiment: options.transport ?? null, browser: await browser.version(), seeded, ...result }, null, 2) + "\n");
   console.log(JSON.stringify({ action, durationMs: result.durationMs, maxFrameGapMs: result.maxFrameGapMs,
     workerCalls: result.workerCalls, checksum: result.catalog?.stateChecksum }, null, 2));
 } catch (error) {

@@ -5119,9 +5119,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     normalOfflineSeconds: number;
     background: boolean;
     primaryCommitted: boolean;
+    persistenceStarted?: boolean;
   } & (
     | { kind: "state"; state: GameState; summary: PureIdleMacroSummary; saved?: SaveGameResult; terminalState?: true }
-    | { kind: "envelope"; finalized: PureIdleMacroFinalEnvelopeResult }
+    | { kind: "envelope"; finalized: PureIdleMacroFinalEnvelopeResult; saved?: SaveGameResult;
+        recoveryHead?: SimulationRuntimeDurableAppHead; journalCommitted?: true; simulationRebased?: true }
   )) | null>(null);
   useEffect(() => {
     if (!pureIdleActive || nativePlayerAuthorityOwnsRuntime) pureIdleStopCandidateRef.current = null;
@@ -7348,6 +7350,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (durablePrimarySaveInFlightRef.current) {
       return { success: false, message: "已有 durable 主存档检查点正在进行，请稍候", code: "conflict" };
     }
+    const retained = pureIdleStopCandidateRef.current;
+    const candidate = retained?.kind === "envelope" && retained.sessionId === record.sessionId &&
+      retained.finalized.finalEnvelope === finalized.finalEnvelope &&
+      legacyJavaScriptAuthorityLeaseIsCurrent(retained.authorityLease) ? retained : null;
+    if (!candidate) return { success: false, message: "纯挂机候选已失效，未写入主存档", code: "conflict" };
     durablePrimarySaveInFlightRef.current = true;
     const startedAt = performance.now();
     const progressId = runtimePersistenceProgressIdRef.current + 1;
@@ -7376,7 +7383,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         buffer: finalized.finalEnvelope.payloadBytes,
         ...finalized.finalEnvelope.verification,
       };
-      const saved = await saveGameVerifiedFromEnvelopeTransfer(sourceEnvelope, {
+      const saved = candidate.saved ?? await saveGameVerifiedFromEnvelopeTransfer(sourceEnvelope, {
         mode: identity.mode,
         version: identity.stateVersion,
         activePlanetId: identity.activePlanetId,
@@ -7399,8 +7406,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "failed", startedAt, message: saved.message });
         return saved;
       }
-      const candidate = pureIdleStopCandidateRef.current;
-      if (candidate?.sessionId === record.sessionId) candidate.primaryCommitted = true;
+      candidate.primaryCommitted = true;
+      // A verified primary is final even if a later journal/rebase step fails.
+      // Keep its transfer and receipt so retries finish that same commit.
+      candidate.saved = saved;
       const mode = identity.mode;
       const primaryIdentity = getPrimaryLocalSaveRecoveryIdentity(mode);
       const writer = getLocalSaveWriterStatus();
@@ -7408,29 +7417,36 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       if (!primaryIdentity || writer.role !== "primary" || writer.fencingToken < 1 || !oldHead) {
         throw new Error("纯挂机 T1 写入后未取得 durable identity/fence");
       }
-      const nextRevision = oldHead.stateRevision + 1;
-      const nextCheckpoint = createSimulationRuntimeDurablePrimaryCheckpoint({
-        baseIdentity: primaryIdentity,
-        sessionId: `idle_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`,
-        stateRevision: nextRevision,
-        registry: contentPackRuntimeSnapshotRef.current,
-        committedAtMs: primaryIdentity.savedAt,
-      });
-      const fence = { ownerId: writer.writerId, fencingToken: writer.fencingToken };
-      const initialized = await initializeSimulationRuntimeRecoveryInPersistenceWorker(nextCheckpoint, fence);
-      if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
-      if (!initialized.result.ok) throw new Error(initialized.result.message);
-      durableRecoveryHeadRef.current = {
-        baseIdentity: nextCheckpoint.baseIdentity,
-        sessionId: nextCheckpoint.sessionId,
-        generation: nextCheckpoint.generation,
-        sequence: nextCheckpoint.lastSequence,
-        stateRevision: nextCheckpoint.stateRevision,
-        registryFingerprint: nextCheckpoint.registryFingerprint,
-      };
-      simulationStateRevisionRef.current = nextRevision;
+      if (primaryIdentity.savedAt !== saved.savedAt) throw new Error("纯挂机已提交主存档身份发生变化，请刷新以验证恢复");
+      if (!candidate.recoveryHead) {
+        const nextRevision = oldHead.stateRevision + 1;
+        const nextCheckpoint = createSimulationRuntimeDurablePrimaryCheckpoint({
+          baseIdentity: primaryIdentity,
+          sessionId: `idle_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`,
+          stateRevision: nextRevision,
+          registry: contentPackRuntimeSnapshotRef.current,
+          committedAtMs: primaryIdentity.savedAt,
+        });
+        const fence = { ownerId: writer.writerId, fencingToken: writer.fencingToken };
+        const initialized = await initializeSimulationRuntimeRecoveryInPersistenceWorker(nextCheckpoint, fence);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
+        if (!initialized.result.ok) throw new Error(initialized.result.message);
+        candidate.recoveryHead = {
+          baseIdentity: nextCheckpoint.baseIdentity,
+          sessionId: nextCheckpoint.sessionId,
+          generation: nextCheckpoint.generation,
+          sequence: nextCheckpoint.lastSequence,
+          stateRevision: nextCheckpoint.stateRevision,
+          registryFingerprint: nextCheckpoint.registryFingerprint,
+        };
+        durableRecoveryHeadRef.current = candidate.recoveryHead;
+        simulationStateRevisionRef.current = nextRevision;
+      } else if (durableRecoveryHeadRef.current !== candidate.recoveryHead ||
+        !sameDurableRecoveryBaseIdentity(candidate.recoveryHead.baseIdentity, primaryIdentity)) {
+        throw new Error("纯挂机恢复边界发生变化，请刷新以验证已提交主存档");
+      }
       const committedAtMs = Date.now();
-      const marked = await recordPureIdleRecoveryTransition(record.sessionId, pureIdleOwnerTokenRef.current, {
+      const marked = candidate.journalCommitted || await recordPureIdleRecoveryTransition(record.sessionId, pureIdleOwnerTokenRef.current, {
         stopReason: "save-finalized",
         phase: "finalizing",
         committed: true,
@@ -7448,10 +7464,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         };
       }
       if (!marked) throw new Error("纯挂机恢复日志提交标记未获得 durable readback");
+      candidate.journalCommitted = true;
       const sourceStateTransfer = saved.sourceStateTransfer;
       if (!sourceStateTransfer) throw new Error("纯挂机保存未返还模拟 Worker state transfer");
       setRuntimePersistenceProgress({ id: progressId, kind: "pure-idle-stop", phase: "serialize-write-readback", startedAt, message: "主存档已验证，正在等待模拟 Worker 接管…" });
-      await replaceSimulationAuthorityFromStateTransfer(sourceStateTransfer, durableRecoveryHeadRef.current);
+      if (!candidate.simulationRebased) {
+        await replaceSimulationAuthorityFromStateTransfer(sourceStateTransfer, candidate.recoveryHead);
+        candidate.simulationRebased = true;
+      }
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
       const cleared = await clearPureIdleRecovery(record.sessionId, pureIdleOwnerTokenRef.current);
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return staleAuthorityResult();
@@ -8002,6 +8022,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nowMs = Date.now(),
   ): Promise<boolean> => {
     if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
+    const stopTarget = update.stopReason === "user-stop-requested" ? pureIdleStopTargetRef.current : null;
     let persisted = false;
     try {
       persisted = await recordPureIdleRecoveryTransition(
@@ -8014,6 +8035,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       // The checkpoint remains authoritative if diagnostic metadata cannot be written.
     }
     if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return false;
+    // A cancellation can complete while an earlier journal acknowledgement
+    // is delayed. Do not let that acknowledgement restore stale UI metadata.
+    if (stopTarget && pureIdleStopTargetRef.current !== stopTarget) return persisted;
     const current = pureIdleRecoveryRef.current;
     if (current?.sessionId !== record.sessionId) return persisted;
     pureIdleRecoveryRef.current = {
@@ -8929,7 +8953,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       const frozenTarget = candidate?.targetWallSeconds ?? (pureIdleStopTargetRef.current?.sessionId === record.sessionId
         ? pureIdleStopTargetRef.current.targetWallSeconds
         : targetWallSeconds);
-      pureIdleStopTargetRef.current = { sessionId: record.sessionId, targetWallSeconds: frozenTarget };
+      const stopTarget = { sessionId: record.sessionId, targetWallSeconds: frozenTarget };
+      pureIdleStopTargetRef.current = stopTarget;
       await persistPureIdleTransition(record, {
         stopReason: "user-stop-requested",
         phase: "finalizing",
@@ -8937,6 +8962,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         targetWallSeconds: frozenTarget,
       }, authorityLease, stoppedAtMs);
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+      if (pureIdleStopTargetRef.current !== stopTarget) {
+        pureIdleStoppingRef.current = false;
+        return;
+      }
       recordRuntimeTransitionPhase("pure-idle-terminal-journal-staged", performance.now(), 0);
       startTransition(() => {
         setPureIdleRecoveryStatus("正在复用已校准会话推进最后结算边界");
@@ -8962,7 +8991,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
                 if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
               });
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
-          if (pureIdleStopTargetRef.current?.sessionId !== record.sessionId) return;
+          if (pureIdleStopTargetRef.current !== stopTarget) return;
           macroFinalized = true;
           await persistPureIdleTransition(record, {
             stopReason: "user-stop-requested",
@@ -8970,7 +8999,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             finalizedAtMs: Date.now(),
           }, authorityLease);
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
-          if (pureIdleStopTargetRef.current?.sessionId !== record.sessionId) return;
+          if (pureIdleStopTargetRef.current !== stopTarget) return;
           const restored = legacyFinalized.state;
           const pending = candidate?.kind === "state" ? candidate : {
             kind: "state" as const, state: restored, summary: legacyFinalized.summary,
@@ -9034,7 +9063,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           binaryTransport: "blob",
         });
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
-        if (pureIdleStopTargetRef.current?.sessionId !== record.sessionId) return;
+        if (pureIdleStopTargetRef.current !== stopTarget) return;
         recordRuntimeTransitionPhase(
           "pure-idle-terminal-finalize-received",
           terminalFinalizeStartedAt,
@@ -9042,10 +9071,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           { bytes: finalized.rawBytes },
         );
         macroFinalized = true;
-        pureIdleStopCandidateRef.current = candidate ?? {
-          kind: "envelope", finalized, sessionId: record.sessionId, authorityLease,
-          targetWallSeconds: frozenTarget, normalOfflineSeconds: 0, background: false, primaryCommitted: false,
+        const pending = candidate?.kind === "envelope" ? candidate : {
+          kind: "envelope" as const, finalized, sessionId: record.sessionId, authorityLease,
+          targetWallSeconds: frozenTarget, normalOfflineSeconds: 0, background: false, primaryCommitted: false, persistenceStarted: false,
         };
+        pureIdleStopCandidateRef.current = pending;
         finalizer?.close();
         if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
         await persistPureIdleTransition(record, {
@@ -9054,6 +9084,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           finalizedAtMs: Date.now(),
         }, authorityLease);
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+        if (pureIdleStopTargetRef.current !== stopTarget || pureIdleStopCandidateRef.current !== pending) return;
+        // No user event can run between this flag and dispatch. Once storage
+        // begins, cancellation must not race a possibly committed primary.
+        pending.persistenceStarted = true;
         startTransition(() => {
           setPureIdleRecoveryStatus("候选已序列化验证，正在由保存 Worker 写入并重新读取主存档");
         });
@@ -9806,12 +9840,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const authorityLease = issueLegacyJavaScriptAuthorityLease();
     if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
     if (!pureIdleStoppingRef.current) return;
-    if (pureIdleStopCandidateRef.current) {
-      setNotice("结算计算已完成，正在确认保存边界；结果和恢复日志会保留，请等待保存完成或重试");
+    const candidate = pureIdleStopCandidateRef.current;
+    const canCancelCandidate = candidate?.kind === "envelope" && !candidate.background &&
+      !candidate.persistenceStarted && !candidate.primaryCommitted &&
+      pureIdleStopTargetRef.current?.sessionId === candidate.sessionId;
+    if (candidate && !canCancelCandidate) {
+      setPureIdleRecoveryStatus("主存档写入已开始，无法取消；请等待验证或重试保存");
+      setNotice("主存档写入已开始，无法取消；请等待验证或重试保存");
       return;
     }
     const record = pureIdleRecoveryRef.current;
     pureIdleStopTargetRef.current = null;
+    if (canCancelCandidate) pureIdleStopCandidateRef.current = null;
     pureIdleBackgroundOfflineAbortRef.current?.abort();
     const client = pureIdleMacroClientRef.current;
     if (client) {
@@ -9819,15 +9859,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       if (pureIdleMacroClientRef.current === client) pureIdleMacroClientRef.current = null;
     }
     if (record) {
-      await persistPureIdleTransition(record, {
+      const recorded = await persistPureIdleTransition(record, {
         stopReason: "user-cancelled",
         lastError: "玩家取消了本次停止结算；候选未提交",
       }, authorityLease);
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+      if (!recorded) {
+        setPureIdleRecoveryContinueState(true);
+        setPureIdleRecoveryStatus("停止结算已阻止，但取消记录写入失败；请先处理恢复日志");
+        setNotice("停止结算已阻止，但取消记录写入失败；请先处理恢复日志，避免刷新后恢复旧结算");
+        return;
+      }
     }
     setPureIdleRecoveryStatus("停止结算已取消；恢复日志和原主存档保持不变");
     setNotice("停止结算已取消；纯挂机会话将从权威检查点安全恢复");
-  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTransition]);
+  }, [issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTransition, setPureIdleRecoveryContinueState]);
 
   const retryPureIdleRecovery = useCallback(async () => {
     const authorityLease = issueLegacyJavaScriptAuthorityLease();
@@ -9868,7 +9914,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     if (pureIdleStopCandidateRef.current?.primaryCommitted || record.committed) {
-      setNotice("本次结算主存档已经写入，尚需确认恢复收口；请重试保存，不能回退到旧检查点");
+      const message = "本次结算主存档已经写入，尚需确认恢复收口；请重试保存，不能回退到旧检查点";
+      setRuntimePersistenceProgress((current) => current?.kind === "pure-idle-stop" && current.phase === "failed" ? null : current);
+      setPureIdleRecoveryStatus(message);
+      setNotice(message);
       return;
     }
     pureIdleStoppingRef.current = true;
@@ -9918,6 +9967,29 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setPureIdleRecoveryContinueState(false);
       setPureIdleRecoveryStatus(cleared ? "已恢复检查点并清理恢复日志" : "已恢复检查点；旧恢复日志将在下次启动时覆盖");
       invalidateFactoryAlertProjection();
+      if (durableSimulationRuntimeEnabled) {
+        // The explicit checkpoint replaced the primary and recovery head, but
+        // the old Worker still owns its pre-abandon state and deferred history.
+        // Install the same verified checkpoint before accepting another run.
+        simulationWorkerRef.current?.terminate();
+        simulationWorkerRef.current = null;
+        simulationWorkerDisabledRef.current = false;
+        simulationSubmissionRef.current = null;
+        simulationRecoveryRef.current = null;
+        simulationReplayJournalRef.current = [];
+        latestAuthoritativeCheckpointTransferRef.current = null;
+        latestAuthoritativeCheckpointRef.current = restored;
+        lastSimulationResultRef.current = null;
+        simulationStateRevisionRef.current = durableRecoveryHeadRef.current?.stateRevision ?? 0;
+        simulationProjectionIndexRef.current = createSimulationProjectionStateIndex(restored);
+        simulationPendingSecondsRef.current = restored.timeWarp.pendingSimulationSeconds;
+        simulationPendingWallSecondsRef.current = restored.timeWarp.pendingWallSeconds;
+        simulationRetrySecondsRef.current = 0;
+        simulationRetryWallSecondsRef.current = 0;
+        durableRecoveryBaseStateRef.current = restored;
+        setSimulationWorkerActive(false);
+        setSimulationWorkerGeneration((generation) => generation + 1);
+      }
       gameRef.current = restored;
       setGame(restored);
       setNotice(record.startedPaused
@@ -9931,7 +10003,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     } finally {
       if (legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) pureIdleStoppingRef.current = false;
     }
-  }, [invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPrimarySave, persistPureIdleTransition, setPureIdleRecoveryContinueState]);
+  }, [durableSimulationRuntimeEnabled, invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPrimarySave, persistPureIdleTransition, setPureIdleRecoveryContinueState]);
 
   const openCommandPalette = useCallback(() => {
     if (nextMobileShell) mobileNavigation.openModal("command");
@@ -24618,6 +24690,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         recoveryStatus={pureIdleRecoveryStatus}
         onStop={stopPureIdle}
         onCancelSettlement={cancelPureIdleSettlement}
+        canCancelSettlement={!pureIdleStopCandidateRef.current || (pureIdleStopCandidateRef.current.kind === "envelope" &&
+          !pureIdleStopCandidateRef.current.background && !pureIdleStopCandidateRef.current.persistenceStarted &&
+          !pureIdleStopCandidateRef.current.primaryCommitted)}
         continueAvailable={pureIdleContinueAvailable}
         onRetryRecovery={retryPureIdleRecovery}
         onContinueNormally={continueFromPureIdleCheckpoint}

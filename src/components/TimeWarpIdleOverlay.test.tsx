@@ -91,4 +91,27 @@ describe("TimeWarpIdleOverlay", () => {
     expect(cancel).not.toHaveBeenCalled();
     await act(async () => finishStop());
   });
+
+  it("does not offer cancellation once the primary commit has started", async () => {
+    const game = createInitialState();
+    const governor = createTimeWarpComputeGovernor(game.settings.simulationSpeed);
+    const limits = resolveTimeWarpComputeLimits(governor, 15, 15, 1);
+    let finishStop!: () => void;
+    const stop = vi.fn(() => new Promise<void>((resolve) => { finishStop = resolve; }));
+    const cancel = vi.fn(async () => undefined);
+    act(() => root.render(<TimeWarpIdleOverlay
+      game={game} baselineGame={game} startedAt={Date.now()} saveFailure={null} workerActive
+      computeLimits={limits} computeState={governor} pendingSimulationSeconds={0}
+      macroSummary={null} recovery={null} recoveryStatus="正在写入主存档"
+      onStop={stop} onCancelSettlement={cancel} canCancelSettlement={false}
+      continueAvailable={false} onRetryRecovery={async () => undefined} onContinueNormally={async () => undefined}
+    />));
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="停止并结算纯挂机"]')!.click());
+    const committing = host.querySelector<HTMLButtonElement>('[aria-label="正在保存，无法取消"]')!;
+    expect(committing.disabled).toBe(true);
+    act(() => committing.click());
+    expect(stop).toHaveBeenCalledOnce();
+    expect(cancel).not.toHaveBeenCalled();
+    await act(async () => finishStop());
+  });
 });

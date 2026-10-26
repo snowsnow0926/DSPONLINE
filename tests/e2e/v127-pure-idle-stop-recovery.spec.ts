@@ -15,9 +15,13 @@ type StopProbe = {
   primaryWrites: number;
   failJournalCommit: boolean;
   failedJournalCommits: number;
+  failCancelJournal: boolean;
+  failedCancelJournals: number;
   backgroundRuns: number;
   holdValidatingJournal: boolean;
   validatingJournalBlocked: boolean;
+  holdTerminalCommit: boolean;
+  terminalCommitBlocked: boolean;
   terminalChecksums: string[];
   postFinalizeCheckpoints: number;
   latestFactoryElapsed: number | null;
@@ -33,18 +37,25 @@ async function installProbe(page: Page): Promise<void> {
       claims: 0, initializes: 0, finalizes: 0, targets: [],
       failPrimaryWrites: sessionStorage.getItem("v127-stop-fail-next-boot") === "1",
       failedWrites: 0, primaryWrites: 0, failJournalCommit: false, failedJournalCommits: 0,
-      backgroundRuns: 0, holdValidatingJournal: false, validatingJournalBlocked: false, terminalChecksums: [],
+      failCancelJournal: false, failedCancelJournals: 0,
+      backgroundRuns: 0, holdValidatingJournal: false, validatingJournalBlocked: false,
+      holdTerminalCommit: false, terminalCommitBlocked: false, terminalChecksums: [],
       postFinalizeCheckpoints: 0, latestFactoryElapsed: null,
     };
     sessionStorage.removeItem("v127-stop-fail-next-boot");
     Object.assign(window, { __stopRecoveryProbe: probe });
     const nativePut = IDBObjectStore.prototype.put;
     IDBObjectStore.prototype.put = function (value: unknown, key?: IDBValidKey) {
-      const record = value as { key?: string; value?: unknown; committed?: boolean } | null;
+      const record = value as { key?: string; value?: unknown; committed?: boolean; stopReason?: string } | null;
       if (this.transaction.db.name === "dsp-idle-network.pure-idle-recovery" &&
           record?.key === "heartbeat" && record.committed === true && probe.failJournalCommit) {
         probe.failedJournalCommits += 1;
         throw new DOMException("injected pure-idle committed-marker failure", "QuotaExceededError");
+      }
+      if (this.transaction.db.name === "dsp-idle-network.pure-idle-recovery" &&
+          record?.key === "heartbeat" && record.stopReason === "user-cancelled" && probe.failCancelJournal) {
+        probe.failedCancelJournals += 1;
+        throw new DOMException("injected pure-idle cancellation-marker failure", "QuotaExceededError");
       }
       if (this.transaction.db.name === "dsp-idle-network.local-saves" &&
           record?.key === "dsp-idle-network.save.v1") {
@@ -109,6 +120,13 @@ async function installProbe(page: Page): Promise<void> {
             id: request.id, type: "error", message: "injected pure-idle primary write failure",
             ...(request.payload instanceof ArrayBuffer ? { sourcePayloadTransfer: request.payload } : {}),
           } })));
+          return;
+        }
+        if (this.workerName === "authoritative-save-persistence" &&
+            request?.type === "commit" && request.key === "dsp-idle-network.save.v1" &&
+            probe.holdTerminalCommit && probe.finalizes > 0) {
+          probe.terminalCommitBlocked = true;
+          Object.assign(window, { __releaseStopCommit: () => super.postMessage(message, transfer ?? []) });
           return;
         }
         super.postMessage(message, transfer ?? []);
@@ -419,6 +437,16 @@ test("a failed journal marker after primary commit only retries recovery closeou
   await overlay.getByRole("button", { name: /放弃约 .* 未结算时间并继续普通模拟/ }).click();
   await expect(page.locator(".game-notice")).toContainText("不能回退到旧检查点");
   expect((await readPrimary(page)).raw).toBe(committed.raw);
+  const committedRevision = await page.locator(".game-shell").getAttribute("data-runtime-recovery-revision");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const failures = (await readProbe(page)).failedJournalCommits;
+    await retry.click();
+    await expect.poll(async () => (await readProbe(page)).failedJournalCommits).toBeGreaterThan(failures);
+    await expect(retry).toBeEnabled();
+    expect((await readProbe(page)).primaryWrites).toBe(beforeRetry.primaryWrites);
+    expect((await readPrimary(page)).raw).toBe(committed.raw);
+    if (durableMode) await expect(page.locator(".game-shell")).toHaveAttribute("data-runtime-recovery-revision", committedRevision!);
+  }
   await page.evaluate(() => {
     (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.failJournalCommit = false;
   });
@@ -483,6 +511,7 @@ test("explicitly abandoning a failed terminal candidate starts a new run with a 
   const checkpoint = await readPrimary(page);
   expect(checkpoint.totalIdleTime).toBe(0);
   expect(checkpoint.inventory).toEqual(seeded.inventory);
+  expect(JSON.parse(checkpoint.raw).state.productionHistory).toEqual(JSON.parse(seeded.primary).state.productionHistory);
   const oldProbe = await readProbe(page);
   // Ordinary startup progress may finish loading behind the idle overlay.
   // Its preserved report becomes actionable after abandon, before factory input.
@@ -532,7 +561,89 @@ test("cancel while the finalized journal acknowledgement is pending never saves 
   await expect(overlay.getByRole("button", { name: "取消结算并保留原存档", exact: true })).toHaveCount(0);
   expect((await readPrimary(page)).raw).toBe(seeded.primary);
   expect((await readRecovery(page))?.committed).toBe(false);
+  expect((await readRecovery(page))?.stopReason).toBe("user-cancelled");
   expect((await readProbe(page)).primaryWrites).toBe(primaryWritesBeforeStop);
+  const retained = await readPrimary(page);
+  await page.reload();
+  await continueDurableMenu(page);
+  await expect(overlay).toBeVisible();
+  const reopened = await readPrimary(page);
+  expect(reopened).toMatchObject({ enabled: retained.enabled, totalIdleTime: retained.totalIdleTime, inventory: retained.inventory });
+  expect((await readRecovery(page))?.stopReason).toBe("user-cancelled");
+});
+
+test("an in-flight durable primary commit cannot be cancelled or rolled back", async ({ page }, testInfo) => {
+  test.skip(!durableMode, "The explicit durable mode owns this persistence Worker.");
+  test.setTimeout(90_000);
+  await installProbe(page);
+  const seeded = await seedRecoverableRun(page, true);
+  await openRecovery(page, seeded);
+  await page.evaluate(() => {
+    (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.holdTerminalCommit = true;
+  });
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect.poll(async () => (await readProbe(page)).terminalCommitBlocked).toBe(true);
+  await expect(overlay.getByRole("button", { name: "正在保存，无法取消", exact: true })).toBeDisabled();
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+    await page.setViewportSize(viewport);
+    for (const scale of [80, 100, 125, 150]) {
+      await page.evaluate((value) => document.documentElement.style.setProperty("--ui-font-scale", String(value / 100)), scale);
+      const committing = overlay.getByRole("button", { name: "正在保存，无法取消", exact: true });
+      await committing.scrollIntoViewIfNeeded();
+      await expect(committing).toBeDisabled();
+      expect(await committing.evaluate((button) => {
+        const panel = button.closest(".time-warp-idle-overlay")!;
+        const outer = panel.getBoundingClientRect();
+        const rect = button.getBoundingClientRect();
+        return panel.scrollWidth <= panel.clientWidth + 1 && rect.left >= outer.left && rect.right <= outer.right;
+      })).toBe(true);
+      if (scale === 150) await page.screenshot({ path: testInfo.outputPath(`saving-${viewport.width}-font-${scale}.png`) });
+    }
+  }
+  await page.evaluate(() => {
+    const runtime = window as typeof window & { __stopRecoveryProbe: StopProbe; __releaseStopCommit: () => void };
+    runtime.__stopRecoveryProbe.holdTerminalCommit = false;
+    runtime.__releaseStopCommit();
+  });
+  await expect(overlay).toBeHidden({ timeout: 30_000 });
+  expect((await readPrimary(page)).enabled).toBe(false);
+  expect(await readRecovery(page)).toBeNull();
+});
+
+test("a failed cancellation marker blocks the pending save and visibly requires recovery", async ({ page }) => {
+  test.setTimeout(90_000);
+  await installProbe(page);
+  const seeded = await seedRecoverableRun(page, true);
+  await openRecovery(page, seeded);
+  const primaryWrites = (await readProbe(page)).primaryWrites;
+  await page.evaluate(() => {
+    const probe = (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe;
+    probe.holdValidatingJournal = true;
+    probe.failCancelJournal = true;
+  });
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect.poll(async () => (await readProbe(page)).validatingJournalBlocked).toBe(true);
+  await overlay.getByRole("button", { name: "取消结算并保留原存档", exact: true }).click();
+  await expect.poll(async () => (await readProbe(page)).failedCancelJournals).toBeGreaterThan(0);
+  await expect(overlay).toContainText("取消记录写入失败");
+  await page.evaluate(() => {
+    const runtime = window as typeof window & { __stopRecoveryProbe: StopProbe; __releaseStopJournal: () => void };
+    runtime.__stopRecoveryProbe.holdValidatingJournal = false;
+    runtime.__stopRecoveryProbe.failCancelJournal = false;
+    runtime.__releaseStopJournal();
+  });
+  const abandon = overlay.getByRole("button", { name: /放弃约 .* 未结算时间并继续普通模拟/ });
+  await expect(abandon).toBeEnabled();
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  expect((await readProbe(page)).primaryWrites).toBe(primaryWrites);
+  await abandon.click();
+  await expect(overlay).toBeHidden();
+  expect(await readRecovery(page)).toBeNull();
+  expect((await readPrimary(page)).totalIdleTime).toBe(0);
+  expect((await readPrimary(page)).inventory).toEqual(seeded.inventory);
 });
 
 test("failed-stop recovery export downloads a diagnostic without mutating storage and fits both mobile orientations", async ({ page }, testInfo) => {

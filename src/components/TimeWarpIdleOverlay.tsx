@@ -102,6 +102,7 @@ export function TimeWarpIdleOverlay({
   recoveryStatus,
   onStop,
   onCancelSettlement,
+  canCancelSettlement = true,
   continueAvailable,
   onRetryRecovery,
   onContinueNormally,
@@ -119,6 +120,7 @@ export function TimeWarpIdleOverlay({
   recoveryStatus: string;
   onStop: () => Promise<void>;
   onCancelSettlement: () => Promise<void>;
+  canCancelSettlement?: boolean;
   continueAvailable: boolean;
   onRetryRecovery: () => Promise<void>;
   onContinueNormally: () => Promise<void>;
@@ -280,7 +282,7 @@ export function TimeWarpIdleOverlay({
             {continueAvailable ? <>
               <button className="time-warp-idle-stop" type="button" aria-label="重试恢复纯挂机" disabled={stopping} onClick={() => void retryRecovery()}><ShieldCheck size={16} />{stopping ? "正在重试" : "重试恢复"}</button>
               <button className="time-warp-idle-continue" type="button" aria-label={`放弃约 ${formatDuration(uncommittedWallSeconds)} 未结算时间并继续普通模拟`} disabled={stopping} onClick={() => void continueNormally()}><Play size={16} />放弃未结算并继续</button>
-            </> : <button className="time-warp-idle-stop" type="button" aria-label={stopping ? "取消结算并保留原存档" : "停止并结算纯挂机"} onClick={() => void stop()}>{stopping ? <X size={16} /> : <Square size={16} />}{stopping ? "取消并保留原档" : "停止并结算"}</button>}
+            </> : <button className="time-warp-idle-stop" type="button" disabled={stopping && !canCancelSettlement} aria-label={stopping ? canCancelSettlement ? "取消结算并保留原存档" : "正在保存，无法取消" : "停止并结算纯挂机"} onClick={() => void stop()}>{stopping ? <X size={16} /> : <Square size={16} />}{stopping ? canCancelSettlement ? "取消并保留原档" : "正在保存，不可取消" : "停止并结算"}</button>}
           </div>
         </footer>
         <RecoveryDataExportButton

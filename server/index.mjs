@@ -105,7 +105,6 @@ import {
 } from "./account-archive-import.mjs";
 import {
   auditCloudPayloadAliasReferences,
-  auditCurrentMainCloudPayloadResolution,
   deleteCloudPayload,
   deleteCloudPayloadsForUser,
   garbageCollectCloudPayloadBlobCandidates,
@@ -114,6 +113,7 @@ import {
   readCloudPayload,
   writeInspectedCloudPayload,
 } from "./cloud-payload-store.mjs";
+import { CurrentMainPayloadAuditIndex } from "./current-main-payload-audit.mjs";
 import {
   applyRuntimeRetentionPolicy,
   LeaderboardSnapshotIndex,
@@ -1614,6 +1614,7 @@ class SqliteStore extends AtomicStoreBase {
       maximumProjectedCharacters: 161,
     };
     this.currentMainPayloadAudit = unavailableCurrentMainPayloadAudit();
+    this.currentMainPayloadAuditIndex = null;
     this.runtimeStatePersistence = null;
   }
 
@@ -1625,17 +1626,29 @@ class SqliteStore extends AtomicStoreBase {
     this.refreshCurrentMainPayloadAudit();
   }
 
-  refreshCurrentMainPayloadAudit() {
+  refreshCurrentMainPayloadAudit(mutation = null) {
     try {
+      this.currentMainPayloadAuditIndex ??= new CurrentMainPayloadAuditIndex(this.database);
+      const payloadChanges = [
+        ...(mutation?.writes?.values() ?? []),
+        ...(mutation?.fileWrites?.values() ?? []),
+        ...(mutation?.deletes?.values() ?? []),
+      ];
+      const forceUserIds = new Set([
+        ...payloadChanges.map((entry) => entry.userId),
+        ...(mutation?.userDeletes ?? []),
+        ...(mutation?.replaceUserPayloads ?? []),
+      ]);
       this.currentMainPayloadAudit = {
         available: true,
         checkedAt: Date.now(),
-        ...auditCurrentMainCloudPayloadResolution(this.database, this._data),
+        ...this.currentMainPayloadAuditIndex.refresh(this._data, { forceUserIds, full: mutation === null }),
       };
     } catch {
       // Readiness must surface an unavailable audit without leaking database
       // details or blocking the remainder of the service's status response.
       this.currentMainPayloadAudit = unavailableCurrentMainPayloadAudit(Date.now());
+      this.currentMainPayloadAuditIndex = null;
     }
   }
 
@@ -1780,7 +1793,7 @@ class SqliteStore extends AtomicStoreBase {
     super.afterMutationCommitted(mutation);
     if (mutation.writes.size > 0 || mutation.fileWrites?.size > 0 || mutation.deletes.size > 0 ||
       mutation.userDeletes.size > 0 || mutation.replaceUserPayloads?.size > 0) {
-      this.refreshCurrentMainPayloadAudit();
+      this.refreshCurrentMainPayloadAudit(mutation);
     }
     if (!mutation.legacyPending) return;
     for (const [key, write] of mutation.writes) {

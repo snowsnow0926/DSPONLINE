@@ -387,8 +387,10 @@ function validCurrentMainMetadata(value) {
  * Alias rows are checked without materializing blob bodies so server startup
  * remains bounded for large saves. The offline recovery and maintenance tools
  * perform the full size/SHA-256/body validation before making any mutation.
+ * The internal userIds/onRecord hooks let the runtime index revalidate affected
+ * accounts after a committed write; the returned value stays aggregate-only.
  */
-export function auditCurrentMainCloudPayloadResolution(database, data) {
+export function auditCurrentMainCloudPayloadResolution(database, data, { userIds = null, onRecord = null } = {}) {
   assertDatabase(database);
   const result = {
     checked: 0,
@@ -427,52 +429,62 @@ export function auditCurrentMainCloudPayloadResolution(database, data) {
   `);
 
   for (const [userId, metadata] of Object.entries(current)) {
-    result.checked += 1;
-    if (!users[userId]) {
-      result.orphanedMetadata += 1;
-      continue;
-    }
-    if (!validCurrentMainMetadata(metadata)) {
-      result.invalidMetadata += 1;
-      continue;
-    }
-    const row = readPayload.get(CLOUD_PAYLOAD_ALIAS_PREFIX[0], CLOUD_PAYLOAD_ALIAS_PROJECTION_CHARACTERS, userId, metadata.revision);
-    if (!row) {
-      result.missingPayloadRows += 1;
-      continue;
-    }
-    if (row.storageType !== "text") {
-      result.invalidPayloadRows += 1;
-      continue;
-    }
+    if (userIds instanceof Set && !userIds.has(userId)) continue;
+    const before = typeof onRecord === "function" ? { ...result } : null;
     try {
-      const alias = projectedAlias(row);
-      if (!alias) {
-        if (sqliteSafeNumber(row.storedBytes) !== metadata.size) {
+      result.checked += 1;
+      if (!users[userId]) {
+        result.orphanedMetadata += 1;
+        continue;
+      }
+      if (!validCurrentMainMetadata(metadata)) {
+        result.invalidMetadata += 1;
+        continue;
+      }
+      const row = readPayload.get(CLOUD_PAYLOAD_ALIAS_PREFIX[0], CLOUD_PAYLOAD_ALIAS_PROJECTION_CHARACTERS, userId, metadata.revision);
+      if (!row) {
+        result.missingPayloadRows += 1;
+        continue;
+      }
+      if (row.storageType !== "text") {
+        result.invalidPayloadRows += 1;
+        continue;
+      }
+      try {
+        const alias = projectedAlias(row);
+        if (!alias) {
+          if (sqliteSafeNumber(row.storedBytes) !== metadata.size) {
+            result.metadataMismatches += 1;
+            continue;
+          }
+          result.legacyDirectRows += 1;
+          result.resolvable += 1;
+          continue;
+        }
+        if (alias.checksum !== metadata.checksum || alias.sizeBytes !== metadata.size) {
           result.metadataMismatches += 1;
           continue;
         }
-        result.legacyDirectRows += 1;
+        const blob = readBlob.get(alias.checksum);
+        if (!blob) {
+          result.missingBlobs += 1;
+          continue;
+        }
+        if (blob.checksum !== alias.checksum || sqliteSafeNumber(blob.sizeBytes) !== alias.sizeBytes) {
+          result.blobMetadataMismatches += 1;
+          continue;
+        }
         result.resolvable += 1;
-        continue;
+      } catch (error) {
+        if (!(error instanceof CloudPayloadStoreError)) throw error;
+        result.invalidPayloadRows += 1;
       }
-      if (alias.checksum !== metadata.checksum || alias.sizeBytes !== metadata.size) {
-        result.metadataMismatches += 1;
-        continue;
+    } finally {
+      if (before) {
+        const record = Object.fromEntries(Object.keys(result).map((key) => [key, result[key] - before[key]]));
+        record.unresolvable = record.checked - record.resolvable;
+        onRecord(userId, record);
       }
-      const blob = readBlob.get(alias.checksum);
-      if (!blob) {
-        result.missingBlobs += 1;
-        continue;
-      }
-      if (blob.checksum !== alias.checksum || sqliteSafeNumber(blob.sizeBytes) !== alias.sizeBytes) {
-        result.blobMetadataMismatches += 1;
-        continue;
-      }
-      result.resolvable += 1;
-    } catch (error) {
-      if (!(error instanceof CloudPayloadStoreError)) throw error;
-      result.invalidPayloadRows += 1;
     }
   }
   result.unresolvable = result.checked - result.resolvable;

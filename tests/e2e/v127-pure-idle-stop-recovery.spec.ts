@@ -19,6 +19,8 @@ type StopProbe = {
   holdValidatingJournal: boolean;
   validatingJournalBlocked: boolean;
   terminalChecksums: string[];
+  postFinalizeCheckpoints: number;
+  latestFactoryElapsed: number | null;
 };
 
 async function installProbe(page: Page): Promise<void> {
@@ -32,6 +34,7 @@ async function installProbe(page: Page): Promise<void> {
       failPrimaryWrites: sessionStorage.getItem("v127-stop-fail-next-boot") === "1",
       failedWrites: 0, primaryWrites: 0, failJournalCommit: false, failedJournalCommits: 0,
       backgroundRuns: 0, holdValidatingJournal: false, validatingJournalBlocked: false, terminalChecksums: [],
+      postFinalizeCheckpoints: 0, latestFactoryElapsed: null,
     };
     sessionStorage.removeItem("v127-stop-fail-next-boot");
     Object.assign(window, { __stopRecoveryProbe: probe });
@@ -70,10 +73,18 @@ async function installProbe(page: Page): Promise<void> {
         super(scriptURL, options);
         this.workerName = options?.name ?? "";
         if (this.workerName === "offline-simulation" || this.workerName === "background-offline-finalize") probe.backgroundRuns += 1;
+        if (this.workerName === "factory-simulation") this.addEventListener("message", ({ data }) => {
+          const elapsed = data.projection?.elapsedSeconds ?? data.deferredElapsedSeconds ?? data.state?.elapsedSeconds;
+          if (Number.isFinite(elapsed)) probe.latestFactoryElapsed = elapsed;
+        });
       }
 
       override postMessage(message: unknown, transfer?: Transferable[]): void {
-        const request = message as { id?: number; type?: string; targetWallSeconds?: number; key?: string; payload?: ArrayBuffer; proof?: { stateChecksum: string } } | null;
+        const request = message as { id?: number; type?: string; kind?: string;
+          targetWallSeconds?: number; key?: string; payload?: ArrayBuffer; proof?: { stateChecksum: string } } | null;
+        if (this.workerName === "factory-simulation" && request?.kind === "checkpoint" && probe.finalizes > 0) {
+          probe.postFinalizeCheckpoints += 1;
+        }
         if (this.workerName === "pure-idle-macro") {
           if (request?.type === "initialize") probe.initializes += 1;
           if (request?.type === "finalize") {
@@ -311,6 +322,47 @@ for (const failures of [1, 2]) {
     await expect(page.getByText("上次停止结算未提交；原主存档保持不变，等待安全恢复", { exact: true })).toHaveCount(0);
   });
 }
+
+test("terminal save retry skips the obsolete checkpoint and ordinary simulation resumes from the settled state", async ({ page }) => {
+  test.setTimeout(90_000);
+  test.skip(durableMode, "The decoded-state retry belongs to the default runtime");
+  await installProbe(page);
+  const seeded = await seedRecoverableRun(page, true);
+  await openRecovery(page, seeded);
+  const before = await readProbe(page);
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await stopWithFailure(page);
+  const retry = overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true });
+  const frozen = await readRecovery(page);
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  expect((await readProbe(page)).failedWrites).toBeGreaterThan(0);
+  await armWriteFailure(page, false);
+  await retry.click();
+  await expect(overlay).toBeHidden();
+  const persisted = await readPrimary(page);
+  expect(persisted).toMatchObject({ enabled: false, paused: true, currentRunStartedAt: null });
+  expect(persisted.inventory).toEqual(seeded.inventory);
+  expect(persisted.totalIdleTime).toBeCloseTo(frozen!.targetWallSeconds!, 6);
+  const after = await readProbe(page);
+  expect(after.finalizes).toBe(1);
+  expect(after.initializes).toBe(before.initializes);
+  expect(after.postFinalizeCheckpoints).toBe(0);
+  expect(await readRecovery(page)).toBeNull();
+
+  const terminalElapsed = JSON.parse(persisted.raw).state.elapsedSeconds;
+  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.latestFactoryElapsed = null; });
+  await page.getByRole("button", { name: "继续模拟", exact: true }).click();
+  await expect.poll(async () => (await readProbe(page)).latestFactoryElapsed ?? 0, { timeout: 20_000 })
+    .toBeGreaterThan(terminalElapsed + 0.5);
+  await page.getByRole("button", { name: "暂停模拟", exact: true }).click();
+  await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-paused", "true");
+  await page.getByRole("button", { name: "保存并返回主菜单", exact: true }).click();
+  await expect(page.locator(".start-menu")).toBeVisible();
+  const continued = await readPrimary(page);
+  expect(JSON.parse(continued.raw).state.elapsedSeconds).toBeGreaterThan(terminalElapsed);
+  expect(continued.totalIdleTime).toBeCloseTo(frozen!.targetWallSeconds!, 6);
+  expect(continued.inventory).toEqual(seeded.inventory);
+});
 
 test("reload after a failed stop keeps the frozen journal recoverable and commits its time once", async ({ page }) => {
   test.setTimeout(90_000);

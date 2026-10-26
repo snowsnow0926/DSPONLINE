@@ -5120,7 +5120,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     background: boolean;
     primaryCommitted: boolean;
   } & (
-    | { kind: "state"; state: GameState; summary: PureIdleMacroSummary; saved?: SaveGameResult }
+    | { kind: "state"; state: GameState; summary: PureIdleMacroSummary; saved?: SaveGameResult; terminalState?: true }
     | { kind: "envelope"; finalized: PureIdleMacroFinalEnvelopeResult }
   )) | null>(null);
   useEffect(() => {
@@ -7604,7 +7604,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     else if (kind === "pure-idle-stop") beginRuntimeTransition("pure-idle-stop");
     setRuntimePersistenceProgress({ id: progressId, kind, phase: "checkpoint", startedAt, message: "正在取得模拟检查点…" });
     recordRuntimeTransitionPhase("persistence-phase", startedAt, 0, { kind, phase: "checkpoint" });
-    const ownsBarrier = state === undefined;
+    const stopCandidate = pureIdleStopCandidateRef.current;
+    const preparedTerminal = kind === "pure-idle-stop" && stopCandidate?.kind === "state" &&
+      stopCandidate.state === state && stopCandidate.terminalState === true &&
+      legacyJavaScriptAuthorityLeaseIsCurrent(stopCandidate.authorityLease)
+      ? stopCandidate : null;
+    const ownsBarrier = state === undefined || preparedTerminal !== null;
     if (ownsBarrier) {
       simulationSaveBarrierDepthRef.current += 1;
       simulationCheckpointBarrierRef.current = true;
@@ -7668,11 +7673,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       let barrierState: GameState;
       const useConfirmedAutosaveBoundary = canUseConfirmedAutosaveBoundary && !nativeSaveTransaction;
       try {
-        barrierState = useConfirmedAutosaveBoundary
-          ? stateWithSimulationDebt(confirmedState)
-          : state === undefined && checkpointCandidateIsLarge
-            ? await requestAuthoritativePersistenceCheckpoint(directChunkedSave, nativeSaveTransaction)
-            : await requestAuthoritativeSimulationCheckpoint();
+        if (preparedTerminal) {
+          // The modal owns the frozen timeline and its exact terminal state.
+          // A new ordinary checkpoint would only copy the superseded T0 graph.
+          if (!pureIdleMacroActiveRef.current || simulationSubmissionRef.current || simulationRecoveryRef.current ||
+            simulationCheckpointRequestRef.current || deferredDurableUiSubmissionRef.current || durableRecoveryStageInFlightRef.current) {
+            throw new Error("纯挂机终态保存前仍有普通模拟操作未完成");
+          }
+          barrierState = preparedTerminal.state;
+        } else {
+          barrierState = useConfirmedAutosaveBoundary
+            ? stateWithSimulationDebt(confirmedState)
+            : state === undefined && checkpointCandidateIsLarge
+              ? await requestAuthoritativePersistenceCheckpoint(directChunkedSave, nativeSaveTransaction)
+              : await requestAuthoritativeSimulationCheckpoint();
+        }
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) {
           await nativeSaveTransaction?.abort();
           throw new Error("Windows 原生权威已在检查点期间接管，旧保存已取消");
@@ -8940,7 +8955,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           // 1.0.43-compatible pure-idle handoff: the macro Worker returns a
           // validated state, the ordinary primary save verifies it, and only
           // then is the independent recovery log marked committed/cleared.
-          const legacyFinalized = candidate?.kind === "state" ? candidate : await finalizer!.finalize(frozenTarget);
+          const legacyFinalized = candidate?.kind === "state" ? candidate
+            : await finalizer!.finalize(frozenTarget, { terminal: true, closeBeforeDecode: true })
+              .then(({ state, summary }) => ({ state, summary })).finally(() => {
+                finalizer?.close();
+                if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
+              });
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (pureIdleStopTargetRef.current?.sessionId !== record.sessionId) return;
           macroFinalized = true;
@@ -8951,20 +8971,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           }, authorityLease);
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
           if (pureIdleStopTargetRef.current?.sessionId !== record.sessionId) return;
-          const restored = candidate?.kind === "state" ? candidate.state : setPaused(
-            {
-              ...settleCompletedResearchBoundaries(legacyFinalized.state),
-              idleSettlement: finishIdleRun(settleIdleRun(
-                record.state.idleSettlement,
-                frozenTarget,
-                record.state.totalProduced,
-                legacyFinalized.state.totalProduced,
-              )),
-            },
-            record.startedPaused,
-          );
+          const restored = legacyFinalized.state;
           const pending = candidate?.kind === "state" ? candidate : {
             kind: "state" as const, state: restored, summary: legacyFinalized.summary,
+            terminalState: true as const,
             sessionId: record.sessionId, authorityLease, targetWallSeconds: frozenTarget,
             normalOfflineSeconds: 0, background: false, primaryCommitted: false,
             saved: undefined as SaveGameResult | undefined,

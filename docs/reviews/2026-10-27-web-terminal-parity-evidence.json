@@ -1,0 +1,175 @@
+{
+  "formatVersion": 1,
+  "task": "web-stop-terminal-parity-20261027",
+  "input": {
+    "bytes": 205464026,
+    "sha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "entities": 110042,
+    "belts": 233300
+  },
+  "retainedPathCases": [
+    {
+      "path": "legacy",
+      "scenario": "natural",
+      "uiStateSha256": "2a2aa5a0b59a01eded544c79af1f4b87af4f458995452322aff8c406aa5aefd9",
+      "persistedStateSha256": "2a2aa5a0b59a01eded544c79af1f4b87af4f458995452322aff8c406aa5aefd9",
+      "payloadSha256": "bcae8b800fa11c2c911f1d4e3c63b6d92585446a38263bfb973fcbbdbe9f0002",
+      "workerPayloadSha256": "bcae8b800fa11c2c911f1d4e3c63b6d92585446a38263bfb973fcbbdbe9f0002",
+      "payloadBytes": 110673707,
+      "entities": 110042,
+      "belts": 233300,
+      "paused": true,
+      "idleSeconds": 200207.77539990234,
+      "bundleSha256": "5e3c7752f37b7ab246b897b9ac6cb502d74cda1fa2d76417b7a961a5efd548fc",
+      "saveSourceFiles": {
+        "src/game/authoritativeSaveSerializationClient.ts": "b3e76f4c8d47306e6aeb917e2ba758e396d020237ddf630a01ae83ca52c1f300",
+        "src/game/save.worker.ts": "ca3974f40f6f05fe53140324c191b7fa35c2675fd39a5c8ea6db12f4ece20069",
+        "src/game/storage.ts": "61f9bb44e22d638bcde31ab30867be36e76df8648c52df6776913ded3be6d557",
+        "src/game/pureIdleMacroClient.ts": "1629245ccd579d9c1c181d1d7e5b4df85fc5c56847877f1f517f95d993e43dfa",
+        "src/App.tsx": "71cfe287ddc5f2b7a5051a616e2ddb19e3c3adc59257d82c9d4575e02d18eba3"
+      }
+    },
+    {
+      "path": "terminal-safe",
+      "scenario": "natural",
+      "uiStateSha256": "2a2aa5a0b59a01eded544c79af1f4b87af4f458995452322aff8c406aa5aefd9",
+      "persistedStateSha256": "2a2aa5a0b59a01eded544c79af1f4b87af4f458995452322aff8c406aa5aefd9",
+      "payloadSha256": "bcae8b800fa11c2c911f1d4e3c63b6d92585446a38263bfb973fcbbdbe9f0002",
+      "workerPayloadSha256": "bcae8b800fa11c2c911f1d4e3c63b6d92585446a38263bfb973fcbbdbe9f0002",
+      "payloadBytes": 110673707,
+      "entities": 110042,
+      "belts": 233300,
+      "paused": true,
+      "idleSeconds": 200207.77539990234,
+      "bundleSha256": "5e3c7752f37b7ab246b897b9ac6cb502d74cda1fa2d76417b7a961a5efd548fc",
+      "saveSourceFiles": {
+        "src/game/authoritativeSaveSerializationClient.ts": "b3e76f4c8d47306e6aeb917e2ba758e396d020237ddf630a01ae83ca52c1f300",
+        "src/game/save.worker.ts": "ca3974f40f6f05fe53140324c191b7fa35c2675fd39a5c8ea6db12f4ece20069",
+        "src/game/storage.ts": "61f9bb44e22d638bcde31ab30867be36e76df8648c52df6776913ded3be6d557",
+        "src/game/pureIdleMacroClient.ts": "1629245ccd579d9c1c181d1d7e5b4df85fc5c56847877f1f517f95d993e43dfa",
+        "src/App.tsx": "71cfe287ddc5f2b7a5051a616e2ddb19e3c3adc59257d82c9d4575e02d18eba3"
+      }
+    },
+    {
+      "path": "legacy",
+      "scenario": "completed-research",
+      "uiStateSha256": "42f3a9d942acccd9c13a8a2a23ccc23abfb52856c79eb8a16f230a75a0c714eb",
+      "persistedStateSha256": "42f3a9d942acccd9c13a8a2a23ccc23abfb52856c79eb8a16f230a75a0c714eb",
+      "payloadSha256": "15ac6c38ddb7d21ada8885212ae2dd5bc3b8c1f896dba971e3ddb9ff26c5e24d",
+      "workerPayloadSha256": "15ac6c38ddb7d21ada8885212ae2dd5bc3b8c1f896dba971e3ddb9ff26c5e24d",
+      "payloadBytes": 110673707,
+      "entities": 110042,
+      "belts": 233300,
+      "paused": true,
+      "idleSeconds": 200207.77539990234,
+      "bundleSha256": "5e3c7752f37b7ab246b897b9ac6cb502d74cda1fa2d76417b7a961a5efd548fc",
+      "saveSourceFiles": {
+        "src/game/authoritativeSaveSerializationClient.ts": "b3e76f4c8d47306e6aeb917e2ba758e396d020237ddf630a01ae83ca52c1f300",
+        "src/game/save.worker.ts": "ca3974f40f6f05fe53140324c191b7fa35c2675fd39a5c8ea6db12f4ece20069",
+        "src/game/storage.ts": "61f9bb44e22d638bcde31ab30867be36e76df8648c52df6776913ded3be6d557",
+        "src/game/pureIdleMacroClient.ts": "1629245ccd579d9c1c181d1d7e5b4df85fc5c56847877f1f517f95d993e43dfa",
+        "src/App.tsx": "71cfe287ddc5f2b7a5051a616e2ddb19e3c3adc59257d82c9d4575e02d18eba3"
+      }
+    },
+    {
+      "path": "terminal-safe",
+      "scenario": "completed-research",
+      "uiStateSha256": "42f3a9d942acccd9c13a8a2a23ccc23abfb52856c79eb8a16f230a75a0c714eb",
+      "persistedStateSha256": "42f3a9d942acccd9c13a8a2a23ccc23abfb52856c79eb8a16f230a75a0c714eb",
+      "payloadSha256": "15ac6c38ddb7d21ada8885212ae2dd5bc3b8c1f896dba971e3ddb9ff26c5e24d",
+      "workerPayloadSha256": "15ac6c38ddb7d21ada8885212ae2dd5bc3b8c1f896dba971e3ddb9ff26c5e24d",
+      "payloadBytes": 110673707,
+      "entities": 110042,
+      "belts": 233300,
+      "paused": true,
+      "idleSeconds": 200207.77539990234,
+      "bundleSha256": "5e3c7752f37b7ab246b897b9ac6cb502d74cda1fa2d76417b7a961a5efd548fc",
+      "saveSourceFiles": {
+        "src/game/authoritativeSaveSerializationClient.ts": "b3e76f4c8d47306e6aeb917e2ba758e396d020237ddf630a01ae83ca52c1f300",
+        "src/game/save.worker.ts": "ca3974f40f6f05fe53140324c191b7fa35c2675fd39a5c8ea6db12f4ece20069",
+        "src/game/storage.ts": "61f9bb44e22d638bcde31ab30867be36e76df8648c52df6776913ded3be6d557",
+        "src/game/pureIdleMacroClient.ts": "1629245ccd579d9c1c181d1d7e5b4df85fc5c56847877f1f517f95d993e43dfa",
+        "src/App.tsx": "71cfe287ddc5f2b7a5051a616e2ddb19e3c3adc59257d82c9d4575e02d18eba3"
+      }
+    }
+  ],
+  "rejectedRelay": {
+    "uiStateSha256": "2a2aa5a0b59a01eded544c79af1f4b87af4f458995452322aff8c406aa5aefd9",
+    "persistedStateSha256": "76e63d808812bf4d8c2c6de627660493df3a868e4e274a2a0fb5dc2f41967633",
+    "payloadBytes": 110789815,
+    "differences": {
+      "entities": {
+        "proliferatorBonusProgress": 2171
+      },
+      "belts": {},
+      "topLevel": {
+        "powerGridMetrics": 1
+      }
+    }
+  },
+  "replicationCases": [
+    {
+      "path": "legacy",
+      "scenario": "replication",
+      "uiStateSha256": "e7f493e56b308e9d107bef8975bedd64377bf7fe17dccdd7640d2ecf4d85fe36",
+      "persistedStateSha256": "e7f493e56b308e9d107bef8975bedd64377bf7fe17dccdd7640d2ecf4d85fe36",
+      "payloadSha256": "c118f6b3c79f38869164c90bf212437b6d5c641e90f676e8af706f7eef16d047",
+      "workerPayloadSha256": "c118f6b3c79f38869164c90bf212437b6d5c641e90f676e8af706f7eef16d047",
+      "payloadBytes": 110735835,
+      "entities": 110042,
+      "belts": 233300,
+      "paused": true,
+      "idleSeconds": 200207.77539990234,
+      "bundleSha256": "c89977a486e51829d5e7f51991b0a409c0ebebddff3f550ac6608016ed7142f0",
+      "saveSourceFiles": {
+        "src/game/authoritativeSaveSerializationClient.ts": "b3e76f4c8d47306e6aeb917e2ba758e396d020237ddf630a01ae83ca52c1f300",
+        "src/game/save.worker.ts": "ca3974f40f6f05fe53140324c191b7fa35c2675fd39a5c8ea6db12f4ece20069",
+        "src/game/storage.ts": "61f9bb44e22d638bcde31ab30867be36e76df8648c52df6776913ded3be6d557",
+        "src/game/pureIdleMacroClient.ts": "90b0b0075cb1b08effa961f45af46fa53853f53064e54ba774da8c9644ae7e9b",
+        "src/App.tsx": "71cfe287ddc5f2b7a5051a616e2ddb19e3c3adc59257d82c9d4575e02d18eba3"
+      },
+      "replicationSummary": {
+        "simulatedSeconds": 240,
+        "crafted": 371145985343
+      }
+    },
+    {
+      "path": "terminal-safe",
+      "scenario": "replication",
+      "uiStateSha256": "e7f493e56b308e9d107bef8975bedd64377bf7fe17dccdd7640d2ecf4d85fe36",
+      "persistedStateSha256": "e7f493e56b308e9d107bef8975bedd64377bf7fe17dccdd7640d2ecf4d85fe36",
+      "payloadSha256": "c118f6b3c79f38869164c90bf212437b6d5c641e90f676e8af706f7eef16d047",
+      "workerPayloadSha256": "c118f6b3c79f38869164c90bf212437b6d5c641e90f676e8af706f7eef16d047",
+      "payloadBytes": 110735835,
+      "entities": 110042,
+      "belts": 233300,
+      "paused": true,
+      "idleSeconds": 200207.77539990234,
+      "bundleSha256": "c89977a486e51829d5e7f51991b0a409c0ebebddff3f550ac6608016ed7142f0",
+      "saveSourceFiles": {
+        "src/game/authoritativeSaveSerializationClient.ts": "b3e76f4c8d47306e6aeb917e2ba758e396d020237ddf630a01ae83ca52c1f300",
+        "src/game/save.worker.ts": "ca3974f40f6f05fe53140324c191b7fa35c2675fd39a5c8ea6db12f4ece20069",
+        "src/game/storage.ts": "61f9bb44e22d638bcde31ab30867be36e76df8648c52df6776913ded3be6d557",
+        "src/game/pureIdleMacroClient.ts": "90b0b0075cb1b08effa961f45af46fa53853f53064e54ba774da8c9644ae7e9b",
+        "src/App.tsx": "71cfe287ddc5f2b7a5051a616e2ddb19e3c3adc59257d82c9d4575e02d18eba3"
+      },
+      "replicationSummary": {
+        "simulatedSeconds": 240,
+        "crafted": 371145985343
+      }
+    }
+  ],
+  "replicationConstructionCheck": {
+    "pathsCompared": 2,
+    "simulatedSeconds": 240,
+    "craftedDelta": 122880,
+    "completeWorkerPayloadSha256": "c118f6b3c79f38869164c90bf212437b6d5c641e90f676e8af706f7eef16d047",
+    "outputEqual": true
+  },
+  "limits": [
+    "One read-only real large-save fixture on one browser/machine.",
+    "The completed-research scenario deliberately changes a browser-only copy; it is not the original save condition.",
+    "Both retained cases compare complete projected state and independently decompressed bytes from the real authoritative save Worker.",
+    "The rejected relay used lightweight hydration instead of full migration and was removed from production code."
+  ]
+}

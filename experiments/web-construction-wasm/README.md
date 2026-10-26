@@ -67,4 +67,16 @@ node experiments/web-construction-wasm/run.mjs --entry=power-snapshot --prepared
 
 ## 当前结论
 
+`--entry=terminal-parity` 使用同一只读大档对照旧结算顺序和保留的 Worker 终态结算顺序，
+分别计算界面状态和最终持久状态的完整 SHA-256。`natural` 保留原科研条件，
+`completed-research` 在浏览器副本中人为制造科研完成边界；后者不是原存档的自然状态。
+`replication` 使用原库存，在浏览器副本中启用建筑制造和 8 倍产率复制，推进固定 30 秒墙钟，
+然后比较完整状态与实际保存 Worker 的输出；只测这份大档，不代表所有存档条件。
+`--terminal-path=terminal` 复现已弃用的直接转交路径，不用于实际保存。
+
+```powershell
+node experiments/web-construction-wasm/run.mjs --entry=terminal-parity --terminal-path=legacy --research-case=natural --prepared=D:/private/prepared.json --name=terminal-old
+node experiments/web-construction-wasm/run.mjs --entry=terminal-parity --terminal-path=terminal-safe --research-case=natural --prepared=D:/private/prepared.json --name=terminal-new
+```
+
 现有 Rust 代码可在浏览器中运行，但这个 JSON 适配器尚无接入收益：简单计算的速度优势被传输和转换抵消；递归分支还会提前计算许多用不到的路线。继续前应验证按需规划、紧凑输入/输出及 JS 回退；不能仅因采用 Rust 就宣布更快。具体数值及候选身份见 [循环记录](../../docs/reviews/2026-10-26-web-performance-loop.md)。

@@ -12,11 +12,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "terminal-parity"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
 const callable = entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
-    : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe" : "runConstructionWasmProbe";
+    : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
+      : entry === "terminal-parity" ? "runTerminalParityProbe" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
 const decoderFiles = ["src/game/storage.ts", "src/game/saveTransferDecode.ts"];
 const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["decoder-ref"]}^{commit}`],
@@ -80,7 +81,10 @@ try {
   if (entry === "save-responsiveness") await page.exposeFunction("requestSaveInputProbe", () => page.mouse.click(20, 20));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction((name) => typeof globalThis[name] === "function", callable);
-  const result = await page.evaluate((name) => globalThis[name](), callable);
+  const result = entry === "terminal-parity"
+    ? await page.evaluate(({ name, path, scenario }) => globalThis[name](path, scenario),
+      { name: callable, path: options["terminal-path"] ?? "legacy", scenario: options["research-case"] ?? "natural" })
+    : await page.evaluate((name) => globalThis[name](), callable);
   let rendererMemory;
   if (options.memory && process.platform === "win32") {
     const cdp = await browser.newBrowserCDPSession();
@@ -97,6 +101,10 @@ try {
     bundleSha256: createHash("sha256").update(code).digest("hex"),
     ...(rendererMemory ? { rendererMemory } : {}),
     ...(decoderReference ? { decoderReference, decoderFiles } : {}),
+    ...(entry === "terminal-parity" ? { saveSourceFiles: Object.fromEntries(await Promise.all([
+      "src/game/authoritativeSaveSerializationClient.ts", "src/game/save.worker.ts", "src/game/storage.ts",
+      "src/game/pureIdleMacroClient.ts", "src/App.tsx",
+    ].map(async (file) => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(runtimeReference || ["quantum-runtime", "power-snapshot"].includes(entry) ? { runtimeReference, runtimeFiles,
       runtimeSourceHashes: Object.fromEntries(await Promise.all(runtimeFiles.map(async (file) => [file,
         runtimeReference

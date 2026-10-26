@@ -81,6 +81,8 @@ export interface PureIdleMacroFinalizeOptions {
   deadlineMs?: number;
   terminal?: boolean;
   binaryTransport?: "array-buffer" | "blob";
+  /** The transferred envelope remains available while the session graph is released. */
+  closeBeforeDecode?: boolean;
 }
 
 export interface PureIdleMacroInitializeOptions {
@@ -280,6 +282,7 @@ export class PureIdleMacroClient {
     options: PureIdleMacroFinalizeOptions = {},
   ): Promise<PureIdleMacroFinalResult> {
     const result = await this.finalizeEnvelope(targetWallSeconds, options);
+    if (options.closeBeforeDecode) this.close();
     const { finalEnvelope } = result;
     let raw: string;
     try {

@@ -224,6 +224,48 @@ describe("pure idle final envelope ownership", () => {
     client.close();
   });
 
+  it("releases the macro session before decoding its final state when requested", async () => {
+    const worker = new FakeWorker();
+    installWorker(worker);
+    const state = createInitialState(44, false);
+    const client = new PureIdleMacroClient();
+    await initializeClient(client, worker, state);
+    const response = finalizedResponse(state);
+    class ObservedBlob extends Blob {
+      override arrayBuffer(): Promise<ArrayBuffer> {
+        expect(worker.terminateCount).toBe(1);
+        return super.arrayBuffer();
+      }
+    }
+    response.finalEnvelope.payloadBytes = new ObservedBlob([arrayBufferPayload(response.finalEnvelope.payloadBytes)]);
+    const pending = client.finalize(60, { closeBeforeDecode: true });
+    expect(worker.request).not.toHaveProperty("closeBeforeDecode");
+    worker.respond(response);
+    const result = await pending;
+    expect(result.state.tray).toEqual(state.tray);
+    expect(result.state.totalProduced).toEqual(state.totalProduced);
+    expect(result.state.entities.map((entity) => entity.id)).toEqual(state.entities.map((entity) => entity.id));
+    expect(worker.terminateCount).toBe(1);
+    await expect(client.advance(61)).rejects.toMatchObject({ code: "closed" });
+    client.close();
+    expect(worker.terminateCount).toBe(1);
+  });
+
+  it("retains a failed decode envelope after releasing the macro session", async () => {
+    const worker = new FakeWorker();
+    installWorker(worker);
+    const state = createInitialState(145, false);
+    const client = new PureIdleMacroClient();
+    await initializeClient(client, worker, state);
+    const response = finalizedResponse({ ...state, version: 999 } as unknown as GameState);
+    const pending = client.finalize(60, { closeBeforeDecode: true });
+    worker.respond(response);
+    const error = await pending.catch((value: unknown) => value as PureIdleMacroClientError);
+    expect(error).toMatchObject({ code: "operation", recoverable: true });
+    expect(error.finalEnvelope?.payloadBytes).toBe(response.finalEnvelope.payloadBytes);
+    expect(worker.terminateCount).toBe(1);
+  });
+
   it("returns a terminal envelope without decoding or parsing it on the UI", async () => {
     const worker = new FakeWorker();
     installWorker(worker);

@@ -25,7 +25,9 @@ node experiments/web-live-runtime/summarize.mjs D:/private/results/baseline.json
 powershell -File experiments/web-live-runtime/run-pairs.ps1 -OutputDirectory D:/private/results
 ```
 
-The paired runner stops at the first failure and preserves its log. An
+The paired runner alternates pair order (old/new, then new/old). Set
+`-ObservationSeconds 5` for a shorter transition smoke comparison; it defaults
+to 30 seconds. The paired runner stops at the first failure and preserves its log. An
 interrupted pair is a failure reproduction, not a completed timing comparison.
 
 `stock` retains the copied inventory. `tray` and `quantum` are explicit supplied

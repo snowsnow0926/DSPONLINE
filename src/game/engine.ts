@@ -2136,7 +2136,17 @@ export function createSimulationLookupContext(
   profiler?: SimulationProfiler,
   constructionAutomationPlanCache = new Map<string, CachedConstructionAutomationPlan>(),
 ): SimulationLookupContext {
+  return buildSimulationLookupContext(state, profiler, constructionAutomationPlanCache, true);
+}
+
+function buildSimulationLookupContext(
+  state: GameState,
+  profiler: SimulationProfiler | undefined,
+  constructionAutomationPlanCache: Map<string, CachedConstructionAutomationPlan>,
+  includeBeltRuntime: boolean,
+): SimulationLookupContext {
   const startedAt = profileNow();
+  const belts = includeBeltRuntime ? state.belts : [];
   const context: SimulationLookupContext = {
     entityById: new Map(state.entities.map((entity) => [entity.id, entity])),
     entitiesByPlanet: new Map(),
@@ -2163,10 +2173,10 @@ export function createSimulationLookupContext(
     galacticExporters: [],
     timeWarpDevices: [],
     beltsByPlanet: new Map(),
-    beltById: new Map(state.belts.map((belt) => [belt.id, belt])),
+    beltById: new Map(belts.map((belt) => [belt.id, belt])),
     // Preserve persisted belt order. It is part of the legacy deterministic
     // tie-breaking for equal-priority sources; caching must not reorder it.
-    sortedBelts: [...state.belts],
+    sortedBelts: [...belts],
     beltRoutes: [],
     outgoingBeltsBySource: new Map(),
     incomingBeltsByTarget: new Map(),
@@ -8484,7 +8494,10 @@ export function refreshTimeWarpPowerSnapshotInPlace(state: GameState): void {
     state.timeWarp.allocatedPowerKw = 0;
     return;
   }
-  const lookup = createSimulationLookupContext(state);
+  // Electrical allocation needs the machine and station indexes, including
+  // their in-flight cargo, but never settles production belts. Building the
+  // full belt graph here retained a second large route index during startup.
+  const lookup = buildSimulationLookupContext(state, undefined, new Map(), false);
   const reception = calculateDysonReception(state);
   calculatePower(state, 1, controller.planetId, getEntityPowerGridId(controller), reception, lookup);
 }

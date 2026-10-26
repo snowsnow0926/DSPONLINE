@@ -53,6 +53,18 @@ node experiments/web-construction-wasm/run.mjs --entry=quantum-runtime --prepare
 摘要。此参数也可用于 `large-save` 的产率复制对照。只在一个测量结束后再开始下一个，
 不要并行构建或跑测试；普通引擎耗时不等同于实际网页帧率。
 
+## 时间扭曲供电快照对照
+
+`--entry=power-snapshot` 只对同一份准备态启用控制器并刷新供电快照，不推进生产或
+提供新材料。单独记录刷新耗时，完成后再计算完整状态 JSON 的 SHA-256；哈希计算
+不计入刷新耗时。使用 `--runtime-ref` 冻结旧引擎，按旧/新/新/旧/旧/新运行。
+这只衡量供电准备步骤，不能替代真实页面的启动、退出、帧间隔及内存测试。
+
+```powershell
+node experiments/web-construction-wasm/run.mjs --entry=power-snapshot --prepared=D:/private/prepared.json --runtime-ref=bee28f77 --name=power-old
+node experiments/web-construction-wasm/run.mjs --entry=power-snapshot --prepared=D:/private/prepared.json --name=power-new
+```
+
 ## 当前结论
 
 现有 Rust 代码可在浏览器中运行，但这个 JSON 适配器尚无接入收益：简单计算的速度优势被传输和转换抵消；递归分支还会提前计算许多用不到的路线。继续前应验证按需规划、紧凑输入/输出及 JS 回退；不能仅因采用 Rust 就宣布更快。具体数值及候选身份见 [循环记录](../../docs/reviews/2026-10-26-web-performance-loop.md)。

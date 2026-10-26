@@ -520,14 +520,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "量子取料与建筑自动制造修复");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.0");
+  await expect(dialog).toHaveAttribute("aria-label", "时间扭曲与终局建筑制造优化");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.1");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("缺货请求不再占住下载额度");
-  await expect(dialog).toContainText("共享下载保留优先级并轮转");
-  await expect(dialog).toContainText("现成中间件可直接取料");
-  await expect(dialog).toContainText("缺料目标不再堵住后续制造");
-  await expect(dialog).toContainText("配送原因与实收数量更清楚");
+  await expect(dialog).toContainText("两种时间扭曲均可推进建筑制造");
+  await expect(dialog).toContainText("校准进度可见，取消后可恢复");
+  await expect(dialog).toContainText("减少递归制造的重复规划");
+  await expect(dialog).toContainText("减少离线与加速结算的重复工作");
+  await expect(dialog).toContainText("启动恢复与制造等待状态更清楚");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

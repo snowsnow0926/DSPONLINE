@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **匿名心跳 API 开发候选（2026-10-26，未发布）**：`d39420f96259` 的完整 server 398 通过/2 条件跳过、station 4/4、Ops 60 通过/6 平台跳过。新增 13 项心跳失败隔离与并发回归；修正慢请求持有写队列和完整元数据复制。90 秒、20,906,013 B 合成元数据 HTTP 对照中，修复后心跳 P95 33.2 ms、健康/就绪 180/180 为 200，40,000 条模拟存档修订与摘要保留。已独立安装/启动并复核 API 压缩包 186 个文件；未执行生产验收或浏览器全量 E2E。初轮探针限流和并发断言失败未算通过，精确制品、最终验证与限制见 [开发记录](./reviews/2026-10-26-presence-incremental-fix.md)。
+
 > **普通 CI 改为手动（2026-09-27，用户授权取消自动检查）**：截图对应 [CI / e5e33cb4](https://github.com/snowsnow0926/DSPONLINE/actions/runs/36261823713)，由上一次提交触发；Ops 与 E2E 分片 1 失败，单元、构建及 E2E 分片 2 通过。现将 `.github/workflows/ci.yml` 的 `push` / `pull_request` 改为仅 `workflow_dispatch`；它和浏览器兼容性检查均由 Actions 页面手动运行，不再因普通提交、PR 或每日计划自动发送失败结果。保留原有全部 job、断言和本地测试命令，不把历史失败标记成通过；手动运行仍会执行完整检查并报告真实失败。显式版本标签触发的发布流程保留，GitHub 账号通知偏好及分支保护未修改。配置校验确认仅触发方式改变，没有运行不相关的全量游戏测试。
 
 > **浏览器兼容性 CI 维护（2026-09-27）**：`Nightly Browser Compatibility` 改为仅手动 `workflow_dispatch`，取消每日计划，避免重复失败通知；普通提交/PR 的 CI 触发规则保留。[Linux 失败日志](https://github.com/snowsnow0926/DSPONLINE/actions/runs/36192772241) 确认 WebKit 在启动时拒绝共享的 `--mute-audio` 参数，Firefox 通过；该参数已移至 Chromium 项目专用配置，仍保留可选 renderer heap 参数。本机 Windows 上 Firefox/WebKit 2/2、Chromium 同一交互旅程 1/1 通过，并检查实际启动日志中 Firefox/WebKit 不再携带 Chromium 参数。Windows 修复前也能通过，不将其声称为 Linux 失败复现；本次未宣称 Linux 重新运行成功，也未把其他既有 CI 失败标记为已修复。

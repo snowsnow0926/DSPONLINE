@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import { readPureIdleRecoveryForMacro } from "./pureIdleRecovery";
 
 import {
   applyContentPackRuntimeSnapshot,
@@ -7,7 +8,7 @@ import {
 import {
   applyPureIdleMacroFinalState,
   advancePureIdleMacroSession,
-  createPureIdleMacroSession,
+  createPureIdleMacroSessionAsync,
   finalizePureIdleMacroCandidate,
   PURE_IDLE_MACRO_ALGORITHM_VERSION,
   PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD,
@@ -102,7 +103,7 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
   const deadlineAtMs = startedAt + Math.max(1_000, request.deadlineMs ?? PURE_IDLE_MACRO_OPERATION_DEADLINE_MS);
   const operation = request.type;
   const interrupted = () => cancelledRequestIds.has(request.id);
-  const postProgress = (phase: PureIdleMacroPhase) => {
+  const postProgress = (phase: PureIdleMacroPhase, completedSimulationSeconds?: number, totalSimulationSeconds?: number) => {
     self.postMessage({
       id: request.id,
       type: "progress",
@@ -110,18 +111,25 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
       phase,
       wallClockMs: Math.max(0, performance.now() - startedAt),
       algorithmVersion: PURE_IDLE_MACRO_ALGORITHM_VERSION,
+      ...(completedSimulationSeconds !== undefined ? { completedSimulationSeconds, totalSimulationSeconds } : {}),
     } satisfies PureIdleMacroWorkerResponse);
   };
   try {
     if (request.type === "initialize") {
+      if (Boolean(request.state) === Boolean(request.recovery)) throw new Error("纯挂机初始化必须指定唯一检查点来源");
+      const recovery = request.recovery ? await readPureIdleRecoveryForMacro(request.recovery) : null;
+      if (recovery && recovery.mode !== request.mode) throw new Error("纯挂机模式与检查点不符");
+      const state = recovery?.state ?? request.state!;
+      const terminalState = readTerminalState(recovery ? { ...request, startedPaused: recovery.startedPaused,
+        baselineIdleSettlement: structuredClone(state.idleSettlement), baselineTotalProduced: { ...state.totalProduced } } : request);
       const replication = request.mode === "replication";
       postProgress(replication ? "running" : request.forceConservativeReason ? "conservative" : "preparing-power");
       sessionContext = null;
       applyContentPackRuntimeSnapshot(request.registry);
       postProgress(replication ? "running" : request.forceConservativeReason ? "conservative" : "calibrating");
-      const consumeCalibrationState = request.state.entities.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD ||
-        request.state.belts.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD;
-      const initializedSession = createPureIdleMacroSession(request.state, request.mode, {
+      const consumeCalibrationState = state.entities.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD ||
+        state.belts.length >= PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD;
+      const initializedSession = await createPureIdleMacroSessionAsync(state, request.mode, {
         deadlineAtMs,
         shouldCancel: interrupted,
         forceConservativeReason: request.forceConservativeReason,
@@ -130,6 +138,7 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
         // peak memory and GC cost. The durable main-thread checkpoint remains
         // the rollback authority if this operation fails.
         consumeCalibrationState,
+        onCalibrationProgress: (completed, total) => postProgress("calibrating", completed, total),
       });
       // A consumed calibration candidate is exactly 30 simulated seconds in
       // the future. Never publish it before the corresponding real wall time
@@ -143,7 +152,6 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
         );
       }
       const summary = summarizePureIdleMacroSession(initializedSession);
-      const terminalState = readTerminalState(request);
       sessionContext = {
         session: initializedSession,
         registryFingerprint: request.registry.fingerprint,

@@ -1,4 +1,5 @@
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
+import type { PureIdleRecoveryReference } from "./pureIdleRecovery";
 import {
   PURE_IDLE_MACRO_OPERATION_DEADLINE_MS,
   type PureIdleMacroFinalStateOptions,
@@ -232,6 +233,21 @@ export class PureIdleMacroClient {
   ): Promise<PureIdleMacroSummary> {
     const response = await this.request({ type: "advance", targetWallSeconds }, options);
     if (response.type !== "advanced") throw new PureIdleMacroClientError("operation", "纯挂机 Worker 没有返回宏观结算摘要");
+    return response.summary;
+  }
+
+  async initializeFromRecovery(
+    recovery: PureIdleRecoveryReference,
+    registry: ContentPackRuntimeSnapshot,
+    options: Pick<PureIdleMacroInitializeOptions, "signal" | "deadlineMs" | "forceConservativeReason"> = {},
+  ): Promise<PureIdleMacroSummary> {
+    this.initializedRegistryFingerprint = null;
+    const reference = { sessionId: recovery.sessionId, ownerToken: recovery.ownerToken,
+      checkpointHash: recovery.checkpointHash, mode: recovery.mode };
+    const response = await this.request({ type: "initialize", recovery: reference, mode: reference.mode, registry,
+      forceConservativeReason: options.forceConservativeReason }, options);
+    if (response.type !== "ready") throw new PureIdleMacroClientError("operation", "纯挂机 Worker 没有返回校准结果");
+    this.initializedRegistryFingerprint = registry.fingerprint;
     return response.summary;
   }
 

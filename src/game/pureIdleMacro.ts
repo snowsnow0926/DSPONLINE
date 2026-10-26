@@ -1,14 +1,19 @@
 import {
   getEffectiveSimulationMultiplier,
+  createConstructionAutomationMacroRuntime,
+  getConstructionAutomationMacroStatuses,
+  getConstructionAutomationMacroGuardHits,
   refreshDysonGenerationSnapshot,
   refreshTimeWarpPowerSnapshotInPlace,
   setPaused,
   settleCompletedResearchBoundaries,
+  type ConstructionAutomationMacroRuntime,
 } from "./engine";
 import { MATRIX_ITEM_IDS } from "./content";
 import { finishIdleRun, settleIdleRun } from "./idleSettlement";
 import {
   advanceConstructionAutomationMacroWithReceiptInPlace,
+  advancePureIdleConstructionDomainInPlace,
   advanceExactSimulationWindow,
   advanceExactSimulationWindowWithConstructionReceipt,
   advancePureIdleRocketMacroLedgerInPlace,
@@ -19,9 +24,11 @@ import {
   creditPureIdleConstructionQuantumReplay,
   createPureIdleAffineCalibration,
   createPureIdleLightweightCalibration,
+  createPureIdleLightweightCalibrationAsync,
   issuePureIdleConstructionRuntimePowerCertificate,
   validatePureIdleCombinedSettlementConservation,
   type PureIdleAffineContract,
+  type PureIdleAffineCalibration,
   type PureIdleCombinedConservationCheckpoint,
   type PureIdleConstructionPowerCertificate,
   type PureIdlePowerTailCertificate,
@@ -105,6 +112,7 @@ export interface PureIdleLineStatus {
 }
 
 export interface PureIdleMacroSummary {
+  construction?: PureIdleConstructionSummary;
   phase: PureIdleMacroPhase;
   mode: PureIdleMacroMode;
   algorithmVersion: string;
@@ -135,7 +143,20 @@ export interface PureIdleMacroSummary {
   conservativeOnly: boolean;
 }
 
+export interface PureIdleConstructionSummary {
+  state: "disabled" | "missing-center" | "complete" | "working" | "materials" | "power" | "quantum" | "compute";
+  centerCount: number;
+  completedLastBucket: number;
+  totalCrafted: number;
+  waitingMaterials: number;
+  waitingPower: number;
+  waitingQuantum: number;
+  computeLimited: boolean;
+}
+
 export interface PureIdleMacroSession {
+  constructionSummary?: PureIdleConstructionSummary;
+  constructionRuntime?: ConstructionAutomationMacroRuntime;
   mode: PureIdleMacroMode;
   phase: PureIdleMacroPhase;
   candidate: GameState;
@@ -211,6 +232,7 @@ export interface PureIdleMacroSession {
 }
 
 export interface PureIdleMacroOperationOptions {
+  onCalibrationProgress?: (completedSeconds: number, totalSeconds: number) => void;
   deadlineAtMs?: number;
   shouldCancel?: () => boolean;
   forceConservativeReason?: string;
@@ -505,6 +527,7 @@ function hasFullConservativeItemCredit(
 }
 
 export function summarizePureIdleMacroSession(session: PureIdleMacroSession): PureIdleMacroSummary {
+  if (!session.constructionSummary) updateConstructionSummary(session, 0);
   const lines = terminalLines(session);
   const running = lines.filter((entry): entry is PureIdleLineStatus & { efficiency: number } => entry.efficiency !== null);
   const minimum = running.length > 0 ? Math.min(...running.map((entry) => entry.efficiency)) : null;
@@ -516,6 +539,7 @@ export function summarizePureIdleMacroSession(session: PureIdleMacroSession): Pu
     ? "终局产线尚未在校准窗口运行"
     : lines.find((entry) => entry.efficiency === minimum)?.reason ?? "供给稳定";
   return {
+    ...(session.constructionSummary ? { construction: session.constructionSummary } : {}),
     phase: session.phase,
     mode: session.mode,
     algorithmVersion: session.mode === "replication"
@@ -547,6 +571,38 @@ export function summarizePureIdleMacroSession(session: PureIdleMacroSession): Pu
     computationDurationMs: session.computationDurationMs,
     conservativeOnly: session.conservativeOnly,
   };
+}
+
+function updateConstructionSummary(session: PureIdleMacroSession, completedLastBucket: number): void {
+  const state = session.candidate;
+  const runtime = session.constructionRuntime ??= createConstructionAutomationMacroRuntime();
+  const hasWork = Object.keys(state.constructionAutomation.jobs).length > 0 ||
+    Object.entries(state.constructionAutomation.targetStock).some(([id, target]) =>
+      (target ?? 0) > ((state.construction as Record<string, number>)[id] ??
+        (state.portableFleet as Record<string, number>)[id] ?? 0));
+  const statuses = state.constructionAutomation.enabled && hasWork ? getConstructionAutomationMacroStatuses(state, runtime) : [];
+  let waitingMaterials = 0;
+  let waitingPower = 0;
+  let waitingQuantum = 0;
+  let complete = 0;
+  for (const { status } of statuses) {
+    if (status.blockerReason === "raw-shortage") {
+      if (state.constructionAutomation.quantumSourceEnabled && status.missingItemId &&
+        Number(state.quantumLogisticsNetwork.inventory[status.missingItemId] ?? 0) > 0) waitingQuantum += 1;
+      else waitingMaterials += 1;
+    } else if (!session.constructionPowerCertificate || status.blockerReason === "no-power") waitingPower += 1;
+    else if (status.stage === "目标库存已满足") complete += 1;
+  }
+  const computeLimited = statuses.length > 0 && getConstructionAutomationMacroGuardHits(state, runtime) > 0;
+  const phase: PureIdleConstructionSummary["state"] = !state.constructionAutomation.enabled ? "disabled"
+    : hasWork && statuses.length === 0 ? "missing-center"
+    : statuses.length === 0 || complete === statuses.length ? "complete"
+    : computeLimited ? "compute"
+    : waitingPower === statuses.length ? "power"
+    : waitingQuantum > 0 && waitingPower + waitingMaterials + waitingQuantum === statuses.length ? "quantum"
+    : waitingMaterials > 0 && waitingPower + waitingMaterials + waitingQuantum === statuses.length ? "materials" : "working";
+  session.constructionSummary = { state: phase, centerCount: statuses.length, completedLastBucket,
+    totalCrafted: state.constructionAutomation.totalCrafted, waitingMaterials, waitingPower, waitingQuantum, computeLimited };
 }
 
 function calibrate(state: GameState): {
@@ -687,6 +743,25 @@ export function createConservativePureIdleMacroSession(
   reason: string,
   options: Pick<PureIdleMacroOperationOptions, "consumeCalibrationState"> = {},
 ): PureIdleMacroSession {
+  const initialization = conservativeSessionInitialization(state, mode, reason, options);
+  initialization.next();
+  let calibrated: PureIdleAffineCalibration | null;
+  try {
+    calibrated = createPureIdleLightweightCalibration(state,
+      PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS / Math.max(1, getEffectiveSimulationMultiplier(state)),
+      { isolateConstructionAutomation: true, consumeState: options.consumeCalibrationState === true });
+  } catch (error) {
+    return initialization.throw(error).value as PureIdleMacroSession;
+  }
+  return initialization.next(calibrated).value as PureIdleMacroSession;
+}
+
+function* conservativeSessionInitialization(
+  state: GameState,
+  mode: PureIdleMacroMode,
+  reason: string,
+  options: Pick<PureIdleMacroOperationOptions, "consumeCalibrationState">,
+): Generator<void, PureIdleMacroSession, PureIdleAffineCalibration | null> {
   if (!state.timeWarp.enabled || state.paused) throw new Error("纯挂机保守会话要求已启用且未暂停的时间扭曲状态");
   if (state.speedrun?.enabled) throw new Error("速通工厂必须继续使用独立的精确时间规则");
   refreshTimeWarpPowerSnapshotInPlace(state);
@@ -734,14 +809,7 @@ export function createConservativePureIdleMacroSession(
   let calibrationCheckpoint: PureIdleMacroSession["calibrationCheckpoint"];
   let prefixFailure: string | undefined;
   try {
-    const calibrated = createPureIdleLightweightCalibration(
-      state,
-      prefixSeconds / actualMultiplier,
-      {
-        isolateConstructionAutomation: true,
-        consumeState: options.consumeCalibrationState === true,
-      },
-    );
+    const calibrated = yield;
     if (!calibrated) throw new Error("30 秒轻量校准没有形成可用样本");
     contract = calibrated.contract;
     researchLedger = calibrated.researchLedger;
@@ -1031,6 +1099,39 @@ export function createPureIdleMacroSession(
   };
 }
 
+/** Same physical calibration as the synchronous path, with cancellation and
+ * progress between authoritative steps instead of a long blocked Worker. */
+export async function createPureIdleMacroSessionAsync(
+  state: GameState,
+  mode: PureIdleMacroMode,
+  options: PureIdleMacroOperationOptions = {},
+): Promise<PureIdleMacroSession> {
+  throwIfMacroInterrupted(options);
+  if (state.timeWarp.pendingSimulationSeconds > 1e-6 || state.timeWarp.pendingWallSeconds > 1e-6) {
+    throw new Error("纯挂机检查点仍包含未提交模拟预算");
+  }
+  if (mode === "replication" || (!options.forceConservativeReason &&
+    state.entities.length < PURE_IDLE_MACRO_LIGHTWEIGHT_ENTITY_THRESHOLD &&
+    state.belts.length < PURE_IDLE_MACRO_LIGHTWEIGHT_BELT_THRESHOLD)) return createPureIdleMacroSession(state, mode, options);
+  const reason = options.forceConservativeReason ??
+    `终局规模 ${state.entities.length.toLocaleString("zh-CN")} 实体 / ${state.belts.length.toLocaleString("zh-CN")} 线路，自动使用单影子轻量校准`;
+  const initialization = conservativeSessionInitialization(state, mode, reason, options);
+  initialization.next();
+  let calibrated: PureIdleAffineCalibration | null;
+  try {
+    calibrated = await createPureIdleLightweightCalibrationAsync(state,
+      PURE_IDLE_MACRO_CONSERVATIVE_PREFIX_SECONDS / Math.max(1, getEffectiveSimulationMultiplier(state)),
+      { shouldCancel: options.shouldCancel, deadlineAtMs: options.deadlineAtMs, yieldAfterMs: 8,
+        onProgress: options.onCalibrationProgress },
+      { isolateConstructionAutomation: true, consumeState: options.consumeCalibrationState === true });
+  } catch (error) {
+    throwIfMacroInterrupted(options);
+    return initialization.throw(error).value as PureIdleMacroSession;
+  }
+  throwIfMacroInterrupted(options);
+  return initialization.next(calibrated).value as PureIdleMacroSession;
+}
+
 function runShadowValidation(session: PureIdleMacroSession, options: PureIdleMacroOperationOptions): void {
   const startedAt = performance.now();
   session.phase = "validating";
@@ -1134,24 +1235,16 @@ function advanceReplicationSession(
     // terminal ledger cannot share a conservation baseline with construction.
     // Settle and validate the construction-only domain first; it still burns
     // real recursive inputs and uses only the power factor captured at start.
-    const constructionCheckpoint = capturePureIdleCombinedConservationCheckpoint(session.candidate, {
-      constructionReplaySeconds: simulationSeconds,
-    });
-    const construction = advanceConstructionAutomationMacroWithReceiptInPlace(
+    const construction = advancePureIdleConstructionDomainInPlace(
       session.candidate,
       simulationSeconds,
-      constructionCheckpoint,
       {
+        runtime: session.constructionRuntime ??= createConstructionAutomationMacroRuntime(),
         powerCertificate: session.constructionPowerCertificate,
         contract: session.contract,
         quantumTimelineStartSeconds: session.candidate.elapsedSeconds,
       },
     );
-    const constructionFailure = validatePureIdleCombinedSettlementConservation(
-      constructionCheckpoint,
-      session.candidate,
-    );
-    if (constructionFailure) throw new Error(`产率复制建筑制造结算失败：${constructionFailure}`);
     constructionCompleted = construction.completed;
   }
   const application = advancePureIdleReplicationInPlace(
@@ -1180,6 +1273,7 @@ function advanceReplicationSession(
   session.settledSimulationSeconds += simulationSeconds;
   session.actualMultiplier = multiplier;
   session.phase = "running";
+  updateConstructionSummary(session, constructionCompleted);
   session.lastValidationReason = `统计产率终端直结：白矩阵科研 ${application.settledWhiteMatrixResearch.toString()}，火箭 ${application.launchedRockets.toLocaleString("zh-CN")}，壳面帆 ${application.absorbedSails.toLocaleString("zh-CN")}；虚空物品零写入${constructionCompleted > 0 ? `；建筑制造递归完成 ${constructionCompleted.toLocaleString("zh-CN")} 件（消耗真实物资）` : ""}`;
   session.computationDurationMs = Math.max(0, macroNow() - startedAt);
   return summarizePureIdleMacroSession(session);
@@ -1524,6 +1618,7 @@ export function advancePureIdleMacroSession(
       constructionSeconds,
       session.conservationCheckpoint!,
       {
+        runtime: session.constructionRuntime ??= createConstructionAutomationMacroRuntime(),
         powerCertificate: session.constructionPowerCertificate,
         contract: session.contract,
       },
@@ -1537,6 +1632,7 @@ export function advancePureIdleMacroSession(
         : "普通产线继续按已验证宏观合同结算";
       session.lastValidationReason = `建筑制造巨构按真实库存递归完成 ${construction.completed.toLocaleString("zh-CN")} 件；${productionGuard}`;
     }
+    updateConstructionSummary(session, construction.completed);
     throwIfMacroInterrupted(options);
     if (research.completedFiniteTechIds.length > 0 || research.completedInfiniteLevels.length > 0) {
       session.lastValidationReason = `科研边界完成：有限科技 ${research.completedFiniteTechIds.length} 项，无限科技 ${research.completedInfiniteLevels.length} 级`;

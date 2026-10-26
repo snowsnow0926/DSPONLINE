@@ -487,3 +487,24 @@ html[data-theme="light"] .time-warp-idle-continue {
     margin: 10px 0;
   }
 }
+.time-warp-construction {
+  margin-block: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-color, #31534a);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+
+.time-warp-construction header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.time-warp-construction p {
+  margin: 8px 0 0;
+  font-size: 0.85em;
+  line-height: 1.5;
+}

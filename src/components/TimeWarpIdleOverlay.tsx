@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { RecoveryDataExportButton } from "./RecoveryDataExportButton";
+import { PureIdleConstructionStatus } from "./PureIdleConstructionStatus";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { PureIdleMacroSummary, PureIdleTerminalSnapshot } from "../game/pureIdleMacro";
 import { projectPureIdleTerminalSnapshot } from "../game/pureIdlePresentation";
@@ -218,6 +219,8 @@ export function TimeWarpIdleOverlay({
           <div><HardDrive size={17} /><span>保存与恢复</span><strong className={saveFailure ? "warning" : "ready"}>{saveFailure ? "需要处理" : "检查点正常"}</strong><small>{recoveryStatus}</small></div>
           <div><ShieldCheck size={17} /><span>{replication ? "统计快照" : "下次真实校验"}</span><strong>{replication ? "启动时锁定" : macroSummary?.mode === "extreme" ? "仅宏观结算" : nextValidationSeconds === null ? "校准后开始" : formatDuration(nextValidationSeconds)}</strong></div>
         </section>
+
+        <PureIdleConstructionStatus summary={macroSummary?.construction} />
 
         <section className="time-warp-idle-output" aria-label="终局产出">
           <header><span>终局产出</span><small>累计值与本次挂机增量</small></header>

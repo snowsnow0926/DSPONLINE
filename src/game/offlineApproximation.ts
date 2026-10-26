@@ -18,6 +18,8 @@ import {
   advanceSimulationSession,
   completeSimulationAdvanceSession,
   createSimulationAdvanceSession,
+  getConstructionAutomationMacroCenters,
+  resetConstructionAutomationMacroGuard,
   getEntityInputCapacity,
   getEntityOutputCapacity,
   getEntityProliferatorItemId,
@@ -35,6 +37,7 @@ import {
   type SimulationAdvanceSession,
   type SimulationProfiler,
   type SimulationLookupContext,
+  type ConstructionAutomationMacroRuntime,
 } from "./engine";
 import { getDifficultyDefinition } from "./difficulty";
 import type { FactoryEntity, GameState, ItemId, PlanetId, PowerGridId } from "./types";
@@ -4143,8 +4146,9 @@ function createConstructionPowerAllocation(
   simulationSeconds: number,
   certificate: PureIdleConstructionPowerCertificate | undefined,
   contract: PureIdleAffineContract | undefined,
+  runtime?: ConstructionAutomationMacroRuntime,
 ): ConstructionPowerAllocation {
-  const centers = state.entities.filter((entity) => entity.buildingId === "construction_center");
+  const centers = getConstructionAutomationMacroCenters(state, runtime);
   const powerFactorByCenterId = new Map(centers.map((center) => [center.id, 0]));
   const allocatedEnergyKwsByGrid = new Map<string, number>();
   const authorizedEnergyKwsByGrid = new Map<string, number>();
@@ -4238,6 +4242,7 @@ function mergeConstructionPowerReceipt(
 }
 
 export interface ConstructionAutomationMacroReceiptOptions {
+  runtime?: ConstructionAutomationMacroRuntime;
   allowUnmeteredPowerForTest?: boolean;
   powerCertificate?: PureIdleConstructionPowerCertificate;
   contract?: PureIdleAffineContract;
@@ -4252,7 +4257,20 @@ export function advanceConstructionAutomationMacroWithReceiptInPlace(
   options: ConstructionAutomationMacroReceiptOptions = {},
 ): ReturnType<typeof advanceConstructionAutomationMacroInPlace> {
   const authority = requirePureIdleCombinedCheckpoint(checkpoint);
-  const centers = state.entities.filter((entity) => entity.buildingId === "construction_center");
+  return advanceConstructionWithAuthority(state, simulationSeconds, authority, options);
+}
+
+type ConstructionDomainAuthority = Pick<PureIdleCombinedConservationCheckpointAuthority,
+  "constructionRecipeReceipt" | "constructionPowerReceipt" | "constructionQuantumReplayRemainingSeconds">;
+
+function advanceConstructionWithAuthority(
+  state: GameState,
+  simulationSeconds: number,
+  authority: ConstructionDomainAuthority,
+  options: ConstructionAutomationMacroReceiptOptions,
+): ReturnType<typeof advanceConstructionAutomationMacroInPlace> {
+  if (options.runtime) resetConstructionAutomationMacroGuard(state, options.runtime);
+  const centers = getConstructionAutomationMacroCenters(state, options.runtime);
   const allocation = options.allowUnmeteredPowerForTest
     ? undefined
     : createConstructionPowerAllocation(
@@ -4260,6 +4278,7 @@ export function advanceConstructionAutomationMacroWithReceiptInPlace(
       simulationSeconds,
       options.powerCertificate,
       options.contract,
+      options.runtime,
     );
   if (allocation && ![...allocation.powerFactorByCenterId.values()].some((factor) => factor > EPSILON)) {
     // Missing, stale or non-positive grants freeze only construction. Exact
@@ -4285,13 +4304,14 @@ export function advanceConstructionAutomationMacroWithReceiptInPlace(
     state,
     simulationSeconds,
     allocation ? {
+      runtime: options.runtime,
       powerFactorByCenterId: allocation.powerFactorByCenterId,
       ...(allocation.quantumDownloadPerBoundary !== undefined ? {
         quantumDownloadPerBoundary: allocation.quantumDownloadPerBoundary,
         quantumTimelineStartSeconds: options.quantumTimelineStartSeconds ?? allocation.quantumTimelineStartSeconds ?? state.elapsedSeconds - simulationSeconds,
         quantumReplaySeconds: quantumReplaySeconds ?? 0,
       } : {}),
-    } : {},
+    } : { runtime: options.runtime },
   );
   const receipt = createConstructionRecipeReceipt(stageBefore, state);
   if (typeof receipt === "string") throw new Error(`建筑制造隔离阶段最终物资守恒失败：${receipt}`);
@@ -4306,6 +4326,39 @@ export function advanceConstructionAutomationMacroWithReceiptInPlace(
     mergeConstructionPowerReceipt(authority.constructionPowerReceipt, allocation);
     authority.constructionPowerReceipt.meteredCrafted += receipt.crafted;
   }
+  return result;
+}
+
+/** Atomic construction-only transaction. Ordinary machines, veins and terminal
+ * systems are not advanced here, so their inventories need not be rescanned.
+ * The caller cannot supply a candidate, receipt, callback, or skip validation. */
+export function advancePureIdleConstructionDomainInPlace(
+  state: GameState,
+  simulationSeconds: number,
+  options: Omit<ConstructionAutomationMacroReceiptOptions, "allowUnmeteredPowerForTest">,
+): ReturnType<typeof advanceConstructionAutomationMacroInPlace> {
+  const before = captureConstructionRecipeStageSnapshot(state);
+  if (before.failure) throw new Error(`施工阶段基线无效：${before.failure}`);
+  const authority: ConstructionDomainAuthority = {
+    constructionRecipeReceipt: { [CONSTRUCTION_RECIPE_RECEIPT_BRAND]: true, outputs: new Map(), crafted: 0n },
+    constructionPowerReceipt: { allocatedEnergyKwsByGrid: new Map(), authorizedEnergyKwsByGrid: new Map(), meteredCrafted: 0n, exactAuthorizedCrafted: 0n },
+    constructionQuantumReplayRemainingSeconds: Math.min(128, Math.max(0, simulationSeconds)),
+  };
+  const result = advanceConstructionWithAuthority(state, simulationSeconds, authority, options);
+  const after = captureConstructionRecipeStageSnapshot(state);
+  let failure = after.failure ?? validateConstructionPowerReceipt(authority.constructionPowerReceipt, authority.constructionRecipeReceipt);
+  for (const itemId of new Set([...before.owned.keys(), ...after.owned.keys(), ...before.produced.keys(), ...after.produced.keys(), ...before.destroyed.keys(), ...after.destroyed.keys(), ...before.granted.keys(), ...after.granted.keys()])) {
+    if (failure) break;
+    const produced = (after.produced.get(itemId) ?? 0n) - (before.produced.get(itemId) ?? 0n);
+    const granted = (after.granted.get(itemId) ?? 0n) - (before.granted.get(itemId) ?? 0n);
+    const destroyed = (after.destroyed.get(itemId) ?? 0n) - (before.destroyed.get(itemId) ?? 0n);
+    const stock = (after.owned.get(itemId) ?? 0n) - (before.owned.get(itemId) ?? 0n);
+    const built = authority.constructionRecipeReceipt.outputs.get(itemId) ?? 0n;
+    if (produced < 0n || granted < 0n || destroyed < 0n || stock + destroyed > produced + granted + built) {
+      failure = `施工阶段 ${itemId} 物资来源与结余不符`;
+    }
+  }
+  if (failure) throw new Error(`建筑制造独立结算失败：${failure}`);
   return result;
 }
 
@@ -4582,7 +4635,7 @@ export function createPureIdleLightweightCalibration(
   };
 }
 
-async function createPureIdleLightweightCalibrationAsync(
+export async function createPureIdleLightweightCalibrationAsync(
   state: GameState,
   calibrationWallSeconds: number,
   asyncOptions: OfflineApproximationAsyncOptions,
@@ -4596,7 +4649,11 @@ async function createPureIdleLightweightCalibrationAsync(
   const rocketSnapshots = [capturePureIdleRocketCalibrationSnapshot(state)];
   const powerResourceSnapshots = [captureTimeWarpExhaustiblePowerResources(state)];
   const constructionPowerAudit = createConstructionPowerAuditAccumulator();
-  let shadow = structuredClone(state);
+  const entityIds = state.entities.map((entity) => entity.id);
+  const beltIds = state.belts.map((belt) => belt.id);
+  const researchIndexes = new Set(state.entities.map((entity, index) => entity.recipeId === "matrix_research" ? index : -1).filter((index) => index >= 0));
+  const activeFiniteResource = hasActiveFinitePureIdleResource(state);
+  let shadow = options.consumeState ? state : structuredClone(state);
   let topologyStable = true;
   const windowCount = FAST_OFFLINE_CALIBRATION_SECONDS / FAST_OFFLINE_CALIBRATION_SLICE_SECONDS;
   shadow = await runExactCalibrationWindowsAsync(
@@ -4607,7 +4664,7 @@ async function createPureIdleLightweightCalibrationAsync(
     asyncOptions,
     (candidate, index) => {
       powerResourceSnapshots.push(captureTimeWarpExhaustiblePowerResources(candidate));
-      topologyStable &&= sameStableIds(state.entities, candidate.entities) && sameStableIds(state.belts, candidate.belts);
+      topologyStable &&= sameStableIdValues(entityIds, candidate.entities) && sameStableIdValues(beltIds, candidate.belts);
       snapshots.push(capturePureIdleLightweightSnapshot(candidate, sharedPaths));
       flowSnapshots.push(capturePureIdleFlowSnapshot(candidate));
       researchSnapshots.push(captureResearchMacroCalibrationSnapshot(candidate));
@@ -4632,10 +4689,10 @@ async function createPureIdleLightweightCalibrationAsync(
   );
   if (!researchLedger) return null;
   const unboundSampledContract: PureIdleAffineContract = sampled
-    ? reconcilePureIdleLightweightMaterialDeltas(removeResearchInputDeltas({
+    ? reconcilePureIdleLightweightMaterialDeltas(removeResearchInputDeltasAtIndexes({
       ...sampled,
       deltas: sampled.deltas.filter((delta) => delta.kind === "number" ? Math.abs(Number(delta.delta)) > EPSILON : delta.delta !== 0n),
-    }, state))
+    }, researchIndexes))
     : {
       deltas: [],
       calibrationSeconds: FAST_OFFLINE_CALIBRATION_SECONDS,
@@ -4650,7 +4707,6 @@ async function createPureIdleLightweightCalibrationAsync(
   let powerTailCertified = powerTail.maximumSimulationSeconds === null || powerTail.maximumSimulationSeconds > EPSILON;
   const sampledContract = stripPowerFuelInputDeltas(shadow, unboundSampledContract, powerTail);
   let contract = freezePureIdleLightweightStoreReplenishment(sampledContract);
-  const activeFiniteResource = hasActiveFinitePureIdleResource(state);
   if (activeFiniteResource || !topologyStable || !powerTailCertified) {
     contract = { ...contract, deltas: [], maximumSimulationSeconds: 0 };
     researchLedger = scalePureIdleResearchLedger(researchLedger, {}, [state, shadow]);

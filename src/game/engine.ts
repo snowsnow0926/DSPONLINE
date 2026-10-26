@@ -1836,6 +1836,8 @@ export interface SimulationProfiler {
  * GameState and save data.
  */
 export interface SimulationContractExperiment {
+  /** Test oracle: preserve the former per-lab full-factory progress reset. */
+  eagerResearchProgressResetForTest?: boolean;
   skippedBeltIds?: ReadonlySet<string>;
   skippedProductionEntityIds?: ReadonlySet<string>;
   beforeInputBelts?: (state: GameState) => void;
@@ -2000,6 +2002,7 @@ export interface SimulationLookupContext {
   constructionCentersByPlanet: Map<PlanetId, FactoryEntity[]>;
   rayReceivers: FactoryEntity[];
   machineRuntimesByPlanet: Map<PlanetId, IndexedMachineRuntime[]>;
+  researchProgressEntities: FactoryEntity[];
   machineRuntimeById: Map<string, IndexedMachineRuntime>;
   veinsByPlanet: Map<PlanetId, FactoryEntity[]>;
   stations: FactoryEntity[];
@@ -2136,6 +2139,7 @@ export function createSimulationLookupContext(
     constructionCentersByPlanet: new Map(),
     rayReceivers: [],
     machineRuntimesByPlanet: new Map(),
+    researchProgressEntities: [],
     machineRuntimeById: new Map(),
     veinsByPlanet: new Map(),
     stations: [],
@@ -2205,6 +2209,7 @@ export function createSimulationLookupContext(
     const gridEntities = context.entitiesByPlanetGrid.get(gridKey);
     if (gridEntities) gridEntities.push(entity);
     else context.entitiesByPlanetGrid.set(gridKey, [entity]);
+    if (entity.recipeId === "matrix_research") context.researchProgressEntities.push(entity);
     if (entity.kind === "machine") {
       const machines = context.machinesByPlanet.get(entity.planetId);
       if (machines) machines.push(entity);
@@ -4249,8 +4254,12 @@ function isolateConstructionPowerDispatch(
   let constructionAllocatedKw = 0;
   if (constructionAutomationHasDeficit(state)) {
     const difficultyPowerMultiplier = getDifficultyDefinition(state.settings.difficulty).powerDemandMultiplier;
-    for (const center of lookup?.constructionCentersByPlanet.get(planetId) ??
-      state.entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center")) {
+    // A complete index also proves that a planet has no centers. Falling back
+    // on a missing entry rescanned the entire endgame factory for every empty
+    // planet/grid on every exact calibration step.
+    const centers = lookup ? (lookup.constructionCentersByPlanet.get(planetId) ?? []) :
+      state.entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center");
+    for (const center of centers) {
       if (getEntityPowerGridId(center) !== gridId) continue;
       const demandKw = Math.max(0, getBuilding("construction_center").powerDemandKw ?? 0) *
         Math.max(0, center.machineCount) * difficultyPowerMultiplier;
@@ -5452,6 +5461,7 @@ function runMachines(
   credits?: OutputCapacityCredits,
   lookup?: SimulationLookupContext,
   skippedEntityIds?: ReadonlySet<string>,
+  batchResearchProgressResets = true,
 ): void {
   const profile = getPlanetIndustrialProfile(state, planetId);
   // An absent planet entry in a complete lookup means there are no machines;
@@ -5490,9 +5500,26 @@ function runMachines(
     industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
     matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
   };
+  // Research used to visit every factory entity after each matrix deposit,
+  // even when no level completed. Preserve the same logical resets, but
+  // materialize them once before this planet's observable production boundary.
+  let researchResetPending = false;
+  const researchProgressAfterReset = new Set<FactoryEntity>();
+  const resetResearchProgress = (current: FactoryEntity): void => {
+    if (!batchResearchProgressResets) {
+      for (const researchEntity of state.entities) {
+        if (researchEntity.recipeId === "matrix_research") researchEntity.progress = 0;
+      }
+      return;
+    }
+    researchResetPending = true;
+    researchProgressAfterReset.clear();
+    current.progress = 0;
+  };
   for (const runtime of runtimes) {
     const { entity, recipe, baseSpeedProduct, planetSpeed, recipeDuration } = runtime;
     if (skippedEntityIds?.has(entity.id)) continue;
+    if (researchResetPending && runtime.matrixResearch) entity.progress = 0;
     const allocatedPowerFactor = power.factorByEntity.get(entity.id);
     entity.powerFactor = allocatedPowerFactor === undefined
       ? undefined
@@ -5582,9 +5609,7 @@ function runMachines(
           completeTechnology(state, techId);
           completedTechIds.add(techId);
           activateNextQueuedTechnology(state);
-          for (const researchEntity of state.entities) {
-            if (researchEntity.recipeId === "matrix_research") researchEntity.progress = 0;
-          }
+          resetResearchProgress(entity);
         }
       } else if (infiniteId && isEndgameUnlocked(state) && cycles > 0) {
         const available = Math.floor((entity.inputs.universe_matrix ?? 0) + EPSILON);
@@ -5592,9 +5617,7 @@ function runMachines(
         if (consumed > 0) {
           entity.inputs.universe_matrix = Math.floor((entity.inputs.universe_matrix ?? 0) - consumed);
           consumedResearchMatrices = consumed;
-          for (const researchEntity of state.entities) {
-            if (researchEntity.recipeId === "matrix_research") researchEntity.progress = 0;
-          }
+          resetResearchProgress(entity);
         }
       }
       consumeProliferatorPoints(entity, recipe, Math.min(sprayedCycles, consumedResearchMatrices), runtime.sprayCost);
@@ -5632,6 +5655,13 @@ function runMachines(
     entity.utilization = round(powerFactor * launchFactor * activityFactor, 4);
     const bonusUnitsPerCycle = work > EPSILON ? runtime.baseUnitsPerCycle * extraProductBonus * sprayedWork / work : 0;
     entity.productionRate = round((seconds > EPSILON ? work / seconds : 0) * (runtime.baseUnitsPerCycle + bonusUnitsPerCycle) * 60, 2);
+    if (researchResetPending && runtime.matrixResearch && entity.progress !== 0) researchProgressAfterReset.add(entity);
+  }
+  if (researchResetPending) {
+    const researchEntities = lookup?.researchProgressEntities ?? state.entities.filter((entity) => entity.recipeId === "matrix_research");
+    for (const entity of researchEntities) {
+      if (!researchProgressAfterReset.has(entity)) entity.progress = 0;
+    }
   }
 }
 
@@ -7243,7 +7273,8 @@ export function runPlanetSimulationPhase(
   subsystemStartedAt = profiler ? profileNow() : 0;
   contractExperiment?.beforePlanetProduction?.(state, planetId);
   runMiners(state, seconds, power, planetId, beltStepReservation.outputCredits, phaseLookup, contractExperiment?.skippedProductionEntityIds);
-  runMachines(state, seconds, power, planetId, beltStepReservation.outputCredits, phaseLookup, contractExperiment?.skippedProductionEntityIds);
+  runMachines(state, seconds, power, planetId, beltStepReservation.outputCredits, phaseLookup,
+    contractExperiment?.skippedProductionEntityIds, contractExperiment?.eagerResearchProgressResetForTest !== true);
   contractExperiment?.afterPlanetProduction?.(state, planetId);
   if (profiler) profiler.productionMs += profileNow() - subsystemStartedAt;
   subsystemStartedAt = profiler ? profileNow() : 0;
@@ -11928,7 +11959,10 @@ export function getEntityCycleRatePerSimulationSecond(
 }
 
 export function getConstructionAutomationStatus(state: GameState, entityId: string): ConstructionAutomationStatus {
-  const entity = state.entities.find((candidate) => candidate.id === entityId);
+  return constructionAutomationStatusForEntity(state, entityId, state.entities.find((candidate) => candidate.id === entityId));
+}
+
+function constructionAutomationStatusForEntity(state: GameState, entityId: string, entity: FactoryEntity | undefined): ConstructionAutomationStatus {
   if (!entity || entity.buildingId !== "construction_center") return { stage: "无制造任务", progress: 0, etaSeconds: 0 };
   const inventoryItems = (inventory: Partial<Record<ItemId, number>>) =>
     (Object.entries(inventory) as Array<[ItemId, number]>).flatMap(([itemId, rawAmount]) => {
@@ -13332,6 +13366,8 @@ export interface ConstructionAutomationMacroResult {
 }
 
 export interface ConstructionAutomationMacroOptions {
+  /** Owned by one isolated macro session with no intervening player commands. */
+  runtime?: ConstructionAutomationMacroRuntime;
   /**
    * Optional power authority supplied by the offline joint-energy ledger.
    * Every construction center must be present; a missing entry is zero power.
@@ -13358,6 +13394,72 @@ export interface ConstructionAutomationMacroOptions {
   quantumReplaySeconds?: number;
 }
 
+const CONSTRUCTION_MACRO_RUNTIME = Symbol("construction-macro-runtime");
+export interface ConstructionAutomationMacroRuntime {
+  readonly [CONSTRUCTION_MACRO_RUNTIME]: true;
+}
+interface ConstructionMacroIndex {
+  entities: GameState["entities"];
+  belts: GameState["belts"];
+  entityCount: number;
+  beltCount: number;
+  catalog: string;
+  centers: FactoryEntity[];
+  lookup: ConstructionAutomationLookup;
+  guardHits: number;
+}
+const constructionMacroIndexes = new WeakMap<ConstructionAutomationMacroRuntime, ConstructionMacroIndex>();
+
+/** The token retains only the session's centers and bounded plan cache. */
+export function createConstructionAutomationMacroRuntime(): ConstructionAutomationMacroRuntime {
+  return Object.freeze({ [CONSTRUCTION_MACRO_RUNTIME]: true as const });
+}
+
+function constructionMacroIndex(state: GameState, runtime: ConstructionAutomationMacroRuntime): ConstructionMacroIndex {
+  const catalog = `${state.research.completedTechIds.join(",")}|${state.contentPacks.map((pack) => `${pack.id}@${pack.version}`).join(",")}`;
+  const previous = constructionMacroIndexes.get(runtime);
+  if (previous && previous.entities === state.entities && previous.belts === state.belts &&
+    previous.entityCount === state.entities.length && previous.beltCount === state.belts.length) {
+    if (previous.catalog !== catalog) {
+      previous.lookup.constructionAutomationPlanCache.clear();
+      previous.catalog = catalog;
+    }
+    return previous;
+  }
+  const centers = state.entities.filter((entity) => entity.buildingId === "construction_center");
+  const byPlanet = new Map<PlanetId, FactoryEntity[]>();
+  for (const center of centers) {
+    const group = byPlanet.get(center.planetId);
+    if (group) group.push(center);
+    else byPlanet.set(center.planetId, [center]);
+  }
+  const index: ConstructionMacroIndex = {
+    entities: state.entities, belts: state.belts, entityCount: state.entities.length, beltCount: state.belts.length,
+    catalog, centers, guardHits: 0, lookup: { constructionCentersByPlanet: byPlanet, constructionAutomationPlanCache: new Map(), quantumTowerStacks: 0 },
+  };
+  constructionMacroIndexes.set(runtime, index);
+  return index;
+}
+
+export function getConstructionAutomationMacroCenters(state: GameState, runtime?: ConstructionAutomationMacroRuntime): FactoryEntity[] {
+  return runtime ? constructionMacroIndex(state, runtime).centers
+    : state.entities.filter((entity) => entity.buildingId === "construction_center");
+}
+
+export function getConstructionAutomationMacroStatuses(state: GameState, runtime: ConstructionAutomationMacroRuntime) {
+  return getConstructionAutomationMacroCenters(state, runtime).map((entity) => ({
+    entityId: entity.id, status: constructionAutomationStatusForEntity(state, entity.id, entity),
+  }));
+}
+
+export function getConstructionAutomationMacroGuardHits(state: GameState, runtime: ConstructionAutomationMacroRuntime): number {
+  return constructionMacroIndex(state, runtime).guardHits;
+}
+
+export function resetConstructionAutomationMacroGuard(state: GameState, runtime: ConstructionAutomationMacroRuntime): void {
+  constructionMacroIndex(state, runtime).guardHits = 0;
+}
+
 /**
  * Advances only the construction-center domain on an already isolated state.
  *
@@ -13376,7 +13478,9 @@ export function advanceConstructionAutomationMacroInPlace(
     !state.constructionAutomation.enabled) {
     return { completed: 0, centersVisited: 0 };
   }
-  const centers = state.entities.filter((entity) => entity.buildingId === "construction_center");
+  const centers = getConstructionAutomationMacroCenters(state, options.runtime);
+  const runtimeIndex = options.runtime ? constructionMacroIndex(state, options.runtime) : undefined;
+  if (runtimeIndex) runtimeIndex.guardHits = 0;
   if (centers.length === 0) return { completed: 0, centersVisited: 0 };
   const hasWork = () => Object.keys(state.constructionAutomation.jobs).length > 0 ||
     getActiveConstructionAutomationTargets(state).some((target) => {
@@ -13400,19 +13504,22 @@ export function advanceConstructionAutomationMacroInPlace(
   // the full factory lookup here indexed every unrelated belt, machine and
   // logistics route again on each offline/time-warp bucket.
   const fullLookup = options.powerFactorByCenterId ? undefined : createSimulationLookupContext(state);
-  const centersByPlanet = new Map<PlanetId, FactoryEntity[]>();
-  for (const center of centers) {
+  const indexed = options.runtime ? constructionMacroIndex(state, options.runtime) : undefined;
+  const centersByPlanet = indexed?.lookup.constructionCentersByPlanet ?? new Map<PlanetId, FactoryEntity[]>();
+  if (!indexed) for (const center of centers) {
     const group = centersByPlanet.get(center.planetId);
     if (group) group.push(center);
     else centersByPlanet.set(center.planetId, [center]);
   }
-  const lookup: ConstructionAutomationLookup = fullLookup ?? {
+  const lookup: ConstructionAutomationLookup = fullLookup ?? indexed?.lookup ?? {
     constructionCentersByPlanet: centersByPlanet,
     constructionAutomationPlanCache: new Map(),
     quantumTowerStacks: (options.quantumDownloadPerBoundary ?? 0) > 0 ? 1 : 0,
   };
+  if (!fullLookup) lookup.quantumTowerStacks = (options.quantumDownloadPerBoundary ?? 0) > 0 ? 1 : 0;
   const reception = fullLookup ? calculateDysonReception(state, fullLookup) : undefined;
   const completedBefore = Math.max(0, Math.floor(state.constructionAutomation.totalCrafted));
+  const computeProfiler = runtimeIndex ? createSimulationProfiler() : undefined;
   const planetIds = [...new Set(centers.map((entity) => entity.planetId))].sort();
   const advanceWork = (seconds: number): void => {
     if (seconds <= EPSILON) return;
@@ -13457,7 +13564,7 @@ export function advanceConstructionAutomationMacroInPlace(
         planetId,
         centersByPlanet.get(planetId) ?? [],
         true,
-        undefined,
+        computeProfiler,
         lookup,
       );
     }
@@ -13515,6 +13622,7 @@ export function advanceConstructionAutomationMacroInPlace(
     center.utilization = 0;
     center.productionRate = 0;
   }
+  if (runtimeIndex) runtimeIndex.guardHits = computeProfiler?.constructionGuardHits ?? 0;
   return {
     completed: Math.max(0, Math.floor(state.constructionAutomation.totalCrafted) - completedBefore),
     centersVisited: centers.length,

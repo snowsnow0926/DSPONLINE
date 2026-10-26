@@ -11,6 +11,19 @@ function emptyMachinePlanet() {
 }
 
 describe("planet simulation with no machines or construction centers", () => {
+  it("treats an absent construction entry as empty during conservative calibration", () => {
+    const { state, lookup, prepared } = emptyMachinePlanet();
+    state.constructionAutomation.enabled = true;
+    state.constructionAutomation.targetStock = { arc_smelter: 100 };
+    const scan = vi.spyOn(state.entities, "filter");
+    try {
+      const result = runPlanetSimulationPhase(state, 1, "home", prepared.reception,
+        prepared.beltStepReservation, lookup, undefined, true, true,
+        { isolateConstructionAutomation: true });
+      expect(result.planetMetrics.demandKw).toBe(0);
+      expect(scan).not.toHaveBeenCalled();
+    } finally { scan.mockRestore(); }
+  });
   it("uses the complete power-source index for a disconnected grid", () => {
     const { state, lookup } = emptyMachinePlanet();
     const vein = state.entities.find((entity) => entity.id === "vein_iron")!;

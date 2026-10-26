@@ -1527,7 +1527,9 @@ function nativeStackBlockedMessage(reason: NativeConstructionStackSupportReason)
 
 function pureIdleProgressLabel(progress: PureIdleMacroProgress): string {
   if (progress.phase === "preparing-power") return "正在准备权威供电快照";
-  if (progress.phase === "calibrating") return "正在执行有界精确校准";
+  if (progress.phase === "calibrating") return progress.completedSimulationSeconds === undefined
+    ? "正在执行有界精确校准"
+    : `正在执行有界精确校准 ${Math.floor(progress.completedSimulationSeconds)}/${Math.floor(progress.totalSimulationSeconds ?? 30)} 模拟秒`;
   if (progress.phase === "conservative") return "正在执行保守宏观结算";
   if (progress.phase === "validating") return "正在验证宏观候选";
   if (progress.phase === "finalizing") return "正在序列化、重载并验证存档";
@@ -8127,13 +8129,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       ? `正在从权威检查点建立保守宏观会话 · ${offlineProfileLabel(complexity!.profile)}`
       : record.summary ? `正在从检查点重建宏观状态 · ${offlineProfileLabel(complexity!.profile)}` : `正在执行 3 × 10 秒产线校准 · ${offlineProfileLabel(complexity!.profile)}`);
     try {
-      const summary = await client.initialize(record.state, record.mode, contentPackRuntimeSnapshotRef.current, {
+      const summary = await client.initializeFromRecovery({
+        sessionId: record.sessionId, ownerToken: record.ownerToken, checkpointHash: record.checkpointHash, mode: record.mode,
+      }, contentPackRuntimeSnapshotRef.current, {
         forceConservativeReason,
-        terminalState: {
-          startedPaused: record.startedPaused,
-          baselineIdleSettlement: record.state.idleSettlement,
-          baselineTotalProduced: record.state.totalProduced,
-        },
       });
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease) ||
         !pureIdleMacroActiveRef.current || pureIdleRecoveryRef.current?.sessionId !== record.sessionId) {

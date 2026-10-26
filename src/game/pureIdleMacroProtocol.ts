@@ -7,12 +7,14 @@ import type {
 import type { SaveTransferVerification } from "./saveTransfer";
 import type { GameState, IdleSettlementState, ItemId, SaveMode } from "./types";
 import type { WorkerBinaryPayload } from "./workerBinaryPayload";
+import type { PureIdleRecoveryReference } from "./pureIdleRecovery";
 
 export type PureIdleMacroWorkerRequest =
   | {
     id: number;
     type: "initialize";
-    state: GameState;
+    state?: GameState;
+    recovery?: PureIdleRecoveryReference;
     mode: PureIdleMacroMode;
     registry: ContentPackRuntimeSnapshot;
     deadlineMs?: number;
@@ -78,6 +80,8 @@ export type PureIdleMacroWorkerResponse =
     phase: PureIdleMacroPhase;
     wallClockMs: number;
     algorithmVersion: string;
+    completedSimulationSeconds?: number;
+    totalSimulationSeconds?: number;
   }
   | {
     id: number;

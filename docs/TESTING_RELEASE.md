@@ -1,5 +1,11 @@
 # 测试与发布基线
 
+## 2026-10-26 双模式纯挂机开发验证
+
+新增 `researchProgressReset.test.ts`，以保留的逐次科研清零路径对照默认合并路径，比较每个星球的可观察边界及完整状态。`pureIdleConstructionDomain.test.ts` 对比制造子域与完整物资账，覆盖实际量子配送、普通需求竞争、缺少供电证明、同步/异步校准一致性和取消。`pure-idle-checkpoint-start.spec.ts` 使用真实浏览器 Worker 与 IndexedDB，验证检查点所有权、身份拒绝和校准取消后的原档保留。
+
+可选私有大档测试 `pureIdleModesBenchmark.test.ts` 通过 `DSP_PURE_IDLE_MODES_FIXTURE` 启用；`DSP_PURE_IDLE_MODES_PREPARED` 保存本机预热副本，`DSP_PURE_IDLE_MODES` 选择 `replication,stable`。它分别记录启动、重复结算和停止耗时，并校验原文件 SHA-256。`DSP_PURE_IDLE_MODES_MATERIAL_STRESS=1` 明确启用本地供料压力副本，必须与原档条件分开报告；该副本不改变玩家原文件或其量子取料偏好。基准和恢复日志、CPU 样本、存档及含存档副本的文件均留在忽略目录，不进入 Web 制品。最终结果见 [交接记录](./reviews/2026-10-26-time-warp-modes-optimization.md)。
+
 > **终局深度优化开发候选（2026-10-26，未发布）**：最终运行源码 `307bacf18452` 的完整单元 3,441 通过 / 36 条件跳过，完整 Chromium 474 通过 / 33 条件跳过 / 0 失败。干净 D 盘检出的 Web 安装、类型、构建、启动预算、原生 UI 边界和覆盖清单校验通过；196 个制品文件与归档逐项哈希一致。约 108 MB 历史存档的 64 秒建造诊断从 8.2 秒降至 3.5 秒，完整时间扭曲片段从 18.8 秒降至 12.7 秒，完整持久化输出哈希一致。连续 192 模拟秒的计算从 44.6 秒降至 29.7 秒；为约束内存，最终没有采用大档跨校准索引驻留。不等同于浏览器已全程流畅。大档测量、不可变清单和剩余限制见 [开发验证记录](./reviews/2026-10-26-endgame-deep-optimization.md)。
 
 最终生产预览额外 3/3 通过，覆盖真实大档的默认/极限模式暂停与运行四种采样条件、PWA 更新与离线重开、主菜单启动预算。默认运行画布 6 秒采样的帧时间 P95 为 7.1 ms，仍有 139 ms 的长帧，不能据此宣称所有设备或长期运行完全流畅。

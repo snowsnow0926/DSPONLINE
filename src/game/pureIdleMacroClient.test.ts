@@ -148,6 +148,20 @@ afterEach(() => {
 });
 
 describe("pure idle final envelope ownership", () => {
+  it("initializes from a bounded recovery reference without cloning the factory through the UI", async () => {
+    const worker = new FakeWorker();
+    installWorker(worker);
+    const client = new PureIdleMacroClient();
+    const reference = { sessionId: "session", ownerToken: "owner", checkpointHash: "checkpoint-12345678", mode: "stable" as const };
+    const pending = client.initializeFromRecovery({ ...reference, state: createInitialState() } as typeof reference, testRegistry);
+    expect(worker.request).toMatchObject({ type: "initialize", mode: "stable", recovery: reference });
+    expect(worker.request).not.toHaveProperty("state");
+    expect(worker.request).not.toHaveProperty("recovery.state");
+    worker.respond({ id: 1, type: "ready", summary: summary(0), durationMs: 1 });
+    await expect(pending).resolves.toMatchObject({ settledWallSeconds: 0 });
+    client.close();
+  });
+
   it("keeps the source checkpoint hash unchanged across a Worker crash and clean restart", async () => {
     const source = createInitialState(43, false);
     const sourceHash = hashGameState(source);

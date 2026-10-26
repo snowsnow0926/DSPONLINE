@@ -100,6 +100,20 @@ export interface PureIdleRecoveryTransition {
   lastError?: string;
 }
 
+export type PureIdleRecoveryReference = Pick<PureIdleRecoveryRecord, "sessionId" | "ownerToken" | "checkpointHash" | "mode">;
+
+/** Read an already committed checkpoint directly inside the macro Worker.
+ * This never claims ownership or writes a heartbeat. */
+export async function readPureIdleRecoveryForMacro(reference: PureIdleRecoveryReference): Promise<PureIdleRecoveryRecord> {
+  const record = await readPureIdleRecovery();
+  if (!record || record.committed || record.sessionId !== reference.sessionId ||
+    record.ownerToken !== reference.ownerToken || record.checkpointHash !== reference.checkpointHash ||
+    record.mode !== reference.mode || !matchesPureIdleRecoveryCheckpoint(record, record.state)) {
+    throw new Error("纯挂机检查点已变化或所有权不符，未启动结算");
+  }
+  return record;
+}
+
 export interface PureIdleBackgroundPlan {
   backgrounded: boolean;
   totalWallSeconds: number;
@@ -291,7 +305,7 @@ export function getPureIdleOwnerToken(): string {
 }
 
 export function canUsePureIdleRecovery(): boolean {
-  return typeof window !== "undefined" && Boolean(window.indexedDB);
+  return Boolean(typeof window !== "undefined" ? window.indexedDB : globalThis.indexedDB);
 }
 
 function openDatabase(): Promise<IDBDatabase> {
@@ -301,7 +315,7 @@ function openDatabase(): Promise<IDBDatabase> {
       reject(new Error("当前环境不支持 IndexedDB 恢复日志"));
       return;
     }
-    const request = window.indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+    const request = (typeof window !== "undefined" ? window.indexedDB : globalThis.indexedDB).open(DATABASE_NAME, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME, { keyPath: "key" });

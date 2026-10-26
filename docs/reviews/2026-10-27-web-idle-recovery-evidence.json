@@ -1,0 +1,138 @@
+{
+  "formatVersion": 1,
+  "task": "web-idle-recovery-20261027",
+  "status": "locally_verified_not_published",
+  "runtimeCommit": "856973a0bfc8052a648c979826c665381d4189e8",
+  "baselineReproductionCommit": "c01ad5dcc2fb59b7fe7f6bf9ecaf424079e6d3c9",
+  "resolvedHistoricalFailures": 3,
+  "sourceHashes": {
+    "src/App.tsx": "8165c9b5ddb1145df3bbbb932fc148967055a9b7403afafe3d3e951fbe40d764",
+    "src/components/TimeWarpIdleOverlay.tsx": "9b3d1791314004d0cc0067e2ddd3deb809a1360064ba11214ca24d1d85222044",
+    "src/game/pureIdleMacroClient.ts": "90b0b0075cb1b08effa961f45af46fa53853f53064e54ba774da8c9644ae7e9b",
+    "src/game/storage.ts": "61f9bb44e22d638bcde31ab30867be36e76df8648c52df6776913ded3be6d557",
+    "src/game/save.worker.ts": "ca3974f40f6f05fe53140324c191b7fa35c2675fd39a5c8ea6db12f4ece20069"
+  },
+  "tests": {
+    "unit": {
+      "passed": 3569,
+      "skipped": 38,
+      "failed": 0,
+      "durationSeconds": 335.059
+    },
+    "defaultChromium": {
+      "startTime": "2026-10-26T20:08:47.717Z",
+      "duration": 460023.598,
+      "expected": 487,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durableOfficialAndExtended": {
+      "startTime": "2026-10-26T20:16:44.193Z",
+      "duration": 47423.909,
+      "expected": 17,
+      "skipped": 2,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "productionPwa": {
+      "startTime": "2026-10-26T20:19:47.516Z",
+      "duration": 7845.272,
+      "expected": 1,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "nativeBoundaryPassed": 49,
+    "mobileSavingButton": {
+      "orientations": [
+        "portrait",
+        "landscape"
+      ],
+      "fontPercentages": [
+        80,
+        100,
+        125,
+        150
+      ],
+      "overflowChecksPassed": true,
+      "reviewedScreenshots": 2
+    }
+  },
+  "defaultProductionLargeSaveSmoke": {
+    "stopMs": 13408,
+    "warmup": {
+      "wallMs": 46998,
+      "simulationSeconds": 40.88260000012815
+    },
+    "longestStopFrameMs": 1119,
+    "rendererPeakWorkingSetBytes": 5499875328,
+    "catalogIntegrity": "valid",
+    "entities": 110042,
+    "belts": 233300,
+    "paused": "true",
+    "autosaveIntervalSeconds": 0,
+    "finalMode": "replication",
+    "actualMultiplier": 8,
+    "validationFailures": 0,
+    "persistedPrimaryByteLength": 110695218,
+    "copiedBackupSettingsPreserved": true
+  },
+  "frozenArtifact": {
+    "releaseId": "1.3.2-856973a0bfc8",
+    "git": {
+      "sha": "856973a0bfc8052a648c979826c665381d4189e8",
+      "clean": true
+    },
+    "files": 196,
+    "aggregateSha256": "4e5abb5b529fe63816bd60ecf044c3d7c19380d90832a4750021ec7289cd47f3",
+    "manifestSha256": "43c4daf037a1b826bb9d4d2f1a36fecfb26f73cfb599d69da7e517a850484537",
+    "archiveSha256": "ba564ff7a5fc836089dc6bd8ff439f6ae005c1268f1e631cd7d356a37db45ada",
+    "identicalPreviousMeasuredWorkers": 14
+  },
+  "scope": [
+    "The large-save smoke uses the default coordinator; it is one local run, not a new percentage comparison.",
+    "Optional durable recovery remains disabled by default; full large-save parity and performance for that mode are not certified here.",
+    "The previous 21.9 percent median improvement belongs to the a8c200bedd69 development candidate.",
+    "No production service, player browser profile, save format or backup preference was changed.",
+    "Skipped cases remain skipped; a passing focused recovery suite does not certify every device or storage failure.",
+    "The expanded 205464026-byte runtime fixture is not the original 107637967-byte save; the final primary is 110695218 bytes (105.567 MiB)."
+  ],
+  "originalSave": {
+    "bytes": 107637967,
+    "sha256": "d64b5646f6117f3c089fba4dc95a95e84bedd9375f75b3c8c917b2e7cf473bc1",
+    "matchesPreparedSourceProvenance": true,
+    "entityCount": 110042,
+    "beltCount": 233300
+  },
+  "preparedRuntimeInput": {
+    "bytes": 205464026,
+    "sha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "unchangedAfterTesting": true,
+    "kind": "expanded_runtime_test_fixture"
+  },
+  "fixtureSizeProvenance": {
+    "originalBytes": 107637967,
+    "preparedBytes": 205464026,
+    "sourceSha256Matched": true,
+    "originalEntityCount": 110042,
+    "preparedEntityCount": 110042,
+    "originalBeltCount": 233300,
+    "preparedBeltCount": 233300,
+    "preparedAdvanceSeconds": 30.0,
+    "largestExpandedFields": [
+      {
+        "field": "entities",
+        "originalJsonBytesApprox": 50093085,
+        "preparedJsonBytesApprox": 132777852,
+        "addedJsonBytesApprox": 82684767
+      },
+      {
+        "field": "belts",
+        "originalJsonBytesApprox": 57135111,
+        "preparedJsonBytesApprox": 72274510,
+        "addedJsonBytesApprox": 15139399
+      }
+    ]
+  }
+}

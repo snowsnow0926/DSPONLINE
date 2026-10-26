@@ -1,6 +1,7 @@
 import {
   getEffectiveSimulationMultiplier,
   createConstructionAutomationMacroRuntime,
+  getConstructionAutomationMacroCenters,
   getConstructionAutomationMacroStatuses,
   getConstructionAutomationMacroGuardHits,
   refreshDysonGenerationSnapshot,
@@ -144,7 +145,7 @@ export interface PureIdleMacroSummary {
 }
 
 export interface PureIdleConstructionSummary {
-  state: "disabled" | "missing-center" | "complete" | "working" | "materials" | "power" | "quantum" | "compute";
+  state: "disabled" | "missing-center" | "complete" | "working" | "progress" | "materials" | "power" | "quantum" | "compute";
   centerCount: number;
   completedLastBucket: number;
   totalCrafted: number;
@@ -580,6 +581,17 @@ function updateConstructionSummary(session: PureIdleMacroSession, completedLastB
     Object.entries(state.constructionAutomation.targetStock).some(([id, target]) =>
       (target ?? 0) > ((state.construction as Record<string, number>)[id] ??
         (state.portableFleet as Record<string, number>)[id] ?? 0));
+  const computeLimited = state.constructionAutomation.enabled && hasWork &&
+    getConstructionAutomationMacroGuardHits(state, runtime) > 0;
+  if (state.constructionAutomation.enabled && hasWork && (computeLimited || completedLastBucket > 0)) {
+    // The scheduler has already established this result. A status refresh
+    // must not rebuild a recursive plan just to describe the completed bucket.
+    session.constructionSummary = { state: computeLimited ? "compute" : "progress",
+      centerCount: getConstructionAutomationMacroCenters(state, runtime).length,
+      completedLastBucket, totalCrafted: state.constructionAutomation.totalCrafted,
+      waitingMaterials: 0, waitingPower: 0, waitingQuantum: 0, computeLimited };
+    return;
+  }
   const statuses = state.constructionAutomation.enabled && hasWork ? getConstructionAutomationMacroStatuses(state, runtime) : [];
   let waitingMaterials = 0;
   let waitingPower = 0;
@@ -593,7 +605,6 @@ function updateConstructionSummary(session: PureIdleMacroSession, completedLastB
     } else if (!session.constructionPowerCertificate || status.blockerReason === "no-power") waitingPower += 1;
     else if (status.stage === "目标库存已满足") complete += 1;
   }
-  const computeLimited = statuses.length > 0 && getConstructionAutomationMacroGuardHits(state, runtime) > 0;
   const phase: PureIdleConstructionSummary["state"] = !state.constructionAutomation.enabled ? "disabled"
     : hasWork && statuses.length === 0 ? "missing-center"
     : statuses.length === 0 || complete === statuses.length ? "complete"

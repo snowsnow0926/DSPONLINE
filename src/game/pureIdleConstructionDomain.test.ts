@@ -29,6 +29,15 @@ function fixture() {
 const contract = (): PureIdleAffineContract => ({ deltas: [], calibrationSeconds: 30, calibrationWallSeconds: 30 });
 
 describe("isolated construction ledger", () => {
+  it("reports completed construction without promising the next bucket's supply", () => {
+    const state = fixture();
+    state.paused = false; state.timeWarp.enabled = true;
+    const session = createPureIdleMacroSession(state, "extreme", { forceConservativeReason: "progress status test" });
+    advancePureIdleMacroSession(session, session.settledWallSeconds + 1);
+    const summary = summarizePureIdleMacroSession(session).construction!;
+    expect(summary.completedLastBucket).toBeGreaterThan(0);
+    expect(["progress", "compute"]).toContain(summary.state);
+  });
   it.each([false, true])("preserves the real quantum delivery boundary with competing demand=%s", (competing) => {
     const narrow = fixture();
     narrow.construction.arc_smelter = 0;

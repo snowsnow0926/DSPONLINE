@@ -194,7 +194,10 @@ export function createApiHandoffProxy({
   const maximumQueue = finiteInteger(queueLimit, 1, 10_000, "proxy queue limit");
   const holdLimitMs = finiteInteger(maximumHoldMs, 1_000, 10 * 60_000, "proxy maximum hold time");
   const connectTimeoutMs = finiteInteger(upstreamConnectTimeoutMs, 100, 60_000, "upstream connect timeout");
-  const agent = new http.Agent({ keepAlive: true, maxSockets: 512, maxFreeSockets: 32 });
+  // Idle server sockets can retain the async context of a completed mutation,
+  // including a large metadata snapshot. Reuse a small idle pool and release
+  // surplus connections promptly after bursts instead of retaining 32 copies.
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 512, maxFreeSockets: 2 });
   const queued = [];
   const counters = {
     acceptedRequests: 0,

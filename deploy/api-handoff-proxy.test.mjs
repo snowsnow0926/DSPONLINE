@@ -155,6 +155,43 @@ for (const scenario of [
   });
 }
 
+test("releases surplus idle upstream connections after a request burst", { timeout: 10_000 }, async () => {
+  const sockets = new Set();
+  let arrived = 0;
+  let release;
+  const barrier = new Promise((resolve) => { release = resolve; });
+  const upstream = http.createServer(async (_request, response) => {
+    arrived += 1;
+    if (arrived === 8) release();
+    await barrier;
+    response.end("ok");
+  });
+  upstream.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  const upstreamPort = await listen(upstream);
+  const proxyPort = await reservePort();
+  const stateFile = path.join(directory, "idle-upstream-pool.json");
+  await writeApiProxyState(stateFile, {
+    version: 1, generation: 1, mode: "forward", changedAt: Date.now(),
+    upstream: { host: "127.0.0.1", port: upstreamPort, slot: "blue", releaseId: "idle-pool-test" },
+  });
+  const proxy = createApiHandoffProxy({ stateFile, statusFile: `${stateFile}.status`, port: proxyPort, logger: { error() {} } });
+  await proxy.start();
+  try {
+    const results = await Promise.all(Array.from({ length: 8 }, () => getText(`http://127.0.0.1:${proxyPort}/api/health`)));
+    assert.ok(results.every((result) => result.status === 200 && result.body === "ok"));
+    await waitUntil(() => proxy.status().activeRequests === 0 && sockets.size <= 2, 1_000);
+    assert.equal(proxy.status().completedRequests, 8);
+  } finally {
+    release();
+    for (const socket of sockets) socket.destroy();
+    await proxy.close();
+    await close(upstream);
+  }
+});
+
 async function waitForRequestBody(request) {
   const chunks = [];
   request.on("data", (chunk) => chunks.push(chunk));

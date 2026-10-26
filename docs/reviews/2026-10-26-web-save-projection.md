@@ -28,8 +28,12 @@ Role: develop。承接 [上一轮](./2026-10-26-web-performance-loop.md)，继�
 
 ## 验证与交接
 
-新增独立旧行为参考，完成 2,016 组 scope/version/字段组合的结果与顺序对照，另测兄弟字段、跨记录交替、访问器与继承属性。专项目前 **50 通过 / 1 条件跳过**，类型检查通过；完整单元、服务端与 Chromium 回归正在运行。待这些门禁完成后冻结 Web 制品，再补充精确结果。
+新增独立旧行为参考，完成 2,016 组 scope/version/字段组合的结果与顺序对照，另测兄弟字段、跨记录交替、访问器与继承属性。专项 **50 通过 / 1 条件跳过**，完整 Vitest **3,533 通过 / 38 条件跳过**，类型检查通过；服务端 **411 通过 / 2 条件跳过**，空间站专项 **4/4**；完整 Chromium **477 通过 / 33 条件跳过 / 0 失败**。存档导入、冲突保护、多个标签页、离线结算和普通制造回归通过。
+
+运行源码为 `2cbd95a0396234e271fce1564cdfd291dfbaa016`。冻结 Web build ID 为 `1.3.1+2cbd95a03962`，196 个文件已复验，聚合 SHA-256 为 `5f2c73cdd894b9e43beb2fce8f451fdc5f903d4e0092c0c5a834900deaf7143e`。压缩包 `artifacts/web-performance-loop-20261026/web-1.3.1-2cbd95a0.tar.gz` 的 SHA-256 为 `3365e7bb1857bdd45f868ca048aab62570b444f222fe126e322d58483b3fcf4f`。该生产包的 PWA 缓存升级/离线重开 **1/1**，没有上线。
+
+精简对照和最终验证信息保存在 [本轮证据](./evidence/2026-10-26-web-save-projection.json)。后续文档提交不改变上述运行源码和制品身份。
 
 复现入口为 [保存分段探针](../../experiments/web-construction-wasm/save-profile.ts)，使用现有运行器的 `--entry=save-profile` 和显式 `--prepared` 路径。原始对照位于本机忽略目录 `artifacts/web-performance-loop-20261026/save-pair-*.json/log`；不提交玩家状态。
 
-下一轮继续检查真实 Worker 往返、保存交接和页面响应，尤其是完整状态在主线程中的复制；保留本轮的字节一致性验证与失败回退。
+下一轮继续检查真实 Worker 往返、保存交接和页面响应，尤其是完整状态在主线程中的复制。`storage.ts` 的普通 `serializeEnvelopeInWorker` 回包仍同步调用 `decodeVerifiedSaveTransfer`；本轮该步骤约 240 ms，需在实际回包路径测量界面响应，并评估复用现有 `saveTransferDecode.ts` 分块解码，保留完整校验和失败回退。这里是后续验证目标，尚未修改该路径。

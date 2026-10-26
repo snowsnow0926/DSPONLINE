@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "status": "verified-development-candidate-not-deployed",
+  "runtimeCommit": "8fab8c100dc9076edbf367682f06df0dae7db67d",
+  "paired": {
+    "samples": 4,
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "baseline": {
+      "medianBuckets": [
+        11.1208000000006,
+        1035.2433500000002,
+        2317.2633999999994
+      ],
+      "resultHashes": [
+        "2b56509b5cd28c50e187f1a4c9030bb3fd2b459a9740e57a870c3e51c1613acd"
+      ],
+      "rssAtSampleEnd": [
+        2695340032,
+        3477307392,
+        2692399104,
+        3479638016
+      ]
+    },
+    "candidate": {
+      "medianBuckets": [
+        9.72019999999975,
+        713.9539499999996,
+        1588.8826000000008
+      ],
+      "resultHashes": [
+        "2b56509b5cd28c50e187f1a4c9030bb3fd2b459a9740e57a870c3e51c1613acd"
+      ],
+      "rssAtSampleEnd": [
+        2639818752,
+        3421007872,
+        2640449536,
+        3420307456
+      ]
+    },
+    "lastBucketReductionPercent": 31.432801294837642,
+    "identicalFinalState": true,
+    "preparedInputUntouched": true,
+    "preparedInputSha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "preparedInputBytes": 205464026,
+    "baselineRuntimeSha": "9af159f1b38e16019a95685ef61f1aa236664932",
+    "candidateParentSha": "daf8f408c2ebfce66977c1b61f7e3325fe145c9f"
+  },
+  "originalStock": {
+    "modified": false,
+    "finalHash": "a16df7ded5fd29f2018e042c77692f2aed191c4e10faa757cccb3cb48a6c0b35",
+    "crafted": 371145862411
+  },
+  "tests": {
+    "vitest": {
+      "passed": 3528,
+      "skipped": 38
+    },
+    "chromium": {
+      "passed": 477,
+      "skipped": 33
+    },
+    "productionPwa": {
+      "passed": 1
+    },
+    "typecheck": true,
+    "webBuild": true,
+    "wasm32CoreCheck": true,
+    "wasmIntegrated": false
+  },
+  "artifact": {
+    "buildId": "1.3.1+8fab8c100dc9",
+    "files": 196,
+    "aggregateSha256": "9e4c85efe987548572abf34a866e672b9c63da8c9e0beeb1c4198181d457217f",
+    "archiveSha256": "4277995b993f8d81c1c2f2bf624004861cbe4fee37f99db246988232360e24b2"
+  }
+}

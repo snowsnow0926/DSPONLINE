@@ -40,7 +40,7 @@ try {
   await context.addInitScript(({ profileSteps }) => {
     if (location.hostname !== "127.0.0.1") return;
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-26-v1.3.1");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.2");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     const trace = { active: false, phase: "idle", startedAt: 0, lastElapsed: 0, frames: [], tasks: [], sends: [], events: [] };
     globalThis.__LIVE_RUNTIME_TRACE__ = trace;

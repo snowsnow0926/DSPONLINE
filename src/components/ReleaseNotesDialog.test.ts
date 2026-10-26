@@ -4,6 +4,7 @@ import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getRe
 import { getCurrentReleaseNotes as getEagerCurrentReleaseNotes } from "../i18n/currentReleaseNotes";
 import { getReleaseNotes129 } from "../i18n/releaseNotes129";
 import { getReleaseNotes130 } from "../i18n/releaseNotes130";
+import { getReleaseNotes131 } from "../i18n/releaseNotes131";
 
 describe("release notes history", () => {
   it("keeps the newest release first and exposes bounded pages", () => {
@@ -16,28 +17,28 @@ describe("release notes history", () => {
   });
 
   it("supports a small fixed page size without rendering the complete history", () => {
-    expect(getReleaseNotesPage(0, 3).map((entry) => entry.version)).toEqual(["1.3.1", "1.3.0", "1.2.9"]);
-    expect(getReleaseNotesPage(19, 2).map((entry) => entry.version)).toEqual(["1.0.25", "1.0.24"]);
-    expect(getReleaseNotesPage(20, 2).map((entry) => entry.version)).toEqual(["1.0.23", "1.0.22"]);
-    expect(getReleaseNotesPage(21, 2).map((entry) => entry.version)).toEqual(["1.0.21", "1.0.20"]);
-    expect(getReleaseNotesPage(22, 2).map((entry) => entry.version)).toEqual(["1.0.19", "1.0.18"]);
-    expect(getReleaseNotesPage(23, 2).map((entry) => entry.version)).toEqual(["1.0.17", "1.0.16"]);
+    expect(getReleaseNotesPage(0, 3).map((entry) => entry.version)).toEqual(["1.3.2", "1.3.1", "1.3.0"]);
+    expect(getReleaseNotesPage(19, 2).map((entry) => entry.version)).toEqual(["1.0.26", "1.0.25"]);
+    expect(getReleaseNotesPage(20, 2).map((entry) => entry.version)).toEqual(["1.0.24", "1.0.23"]);
+    expect(getReleaseNotesPage(21, 2).map((entry) => entry.version)).toEqual(["1.0.22", "1.0.21"]);
+    expect(getReleaseNotesPage(22, 2).map((entry) => entry.version)).toEqual(["1.0.20", "1.0.19"]);
+    expect(getReleaseNotesPage(23, 2).map((entry) => entry.version)).toEqual(["1.0.18", "1.0.17"]);
   });
 
   it("maps direct page jumps and historical details to the same page", () => {
     expect(getReleaseNotesPageCount()).toBe(22);
-    expect(getReleaseNotesPageForRelease("2026-08-14-v1.0.43")).toBe(6);
+    expect(getReleaseNotesPageForRelease("2026-08-14-v1.0.43")).toBe(7);
     expect(getReleaseNotesPageForRelease("2026-08-14-v1.0.42")).toBe(7);
     expect(getReleaseNotesPageForRelease("2026-08-13-v1.0.41")).toBe(7);
-    expect(getReleaseNotesPageForRelease("2026-08-13-v1.0.40")).toBe(7);
+    expect(getReleaseNotesPageForRelease("2026-08-13-v1.0.40")).toBe(8);
     expect(getReleaseNotesPageForRelease("2026-08-11-v1.0.39")).toBe(8);
     expect(getReleaseNotesPageForRelease("2026-08-11-v1.0.38")).toBe(8);
-    expect(getReleaseNotesPageForRelease("2026-08-10-v1.0.37")).toBe(8);
+    expect(getReleaseNotesPageForRelease("2026-08-10-v1.0.37")).toBe(9);
     expect(getReleaseNotesPageForRelease("2026-08-10-v1.0.36")).toBe(9);
     expect(getReleaseNotesPageForRelease("2026-08-09-v1.0.35")).toBe(9);
     expect(getReleaseNotesPageForRelease("2026-08-07-v1.0.33")).toBe(10);
     expect(getReleaseNotesPageForRelease("2026-08-07-v1.0.32")).toBe(10);
-    expect(getReleaseNotesPageForRelease("2026-08-06-v1.0.31")).toBe(10);
+    expect(getReleaseNotesPageForRelease("2026-08-06-v1.0.31")).toBe(11);
     expect(getReleaseNotesPageForRelease("2026-08-03-v1.0.24")).toBe(13);
     expect(getReleaseNotesPageForRelease("missing-release")).toBeNull();
   });
@@ -45,19 +46,21 @@ describe("release notes history", () => {
   it("serves the current release from stable locale keys", () => {
     const chinese = getCurrentReleaseNotes("zh-CN");
     const english = getCurrentReleaseNotes("en");
-    expect(chinese).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.3.1" });
-    expect(english).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.3.1" });
+    expect(chinese).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.3.2" });
+    expect(english).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.3.2" });
     expect(chinese.items).toHaveLength(5);
     expect(chinese.items.map((item) => item.id)).toEqual(expect.arrayContaining([
-      "v131-dual-mode-construction",
-      "v131-calibration",
-      "v131-recursive-planning",
-      "v131-endgame-settlement",
-      "v131-recovery-status",
+      "v132-quantum-deposits",
+      "v132-construction-planning",
+      "v132-save-response",
+      "v132-checkpoint-reuse",
+      "v132-compatibility",
     ]));
     expect(english.items.map((item) => item.id)).toEqual(chinese.items.map((item) => item.id));
     expect(getEagerCurrentReleaseNotes("zh-CN").items.map((item) => item.id)).toEqual(chinese.items.map((item) => item.id));
-    expect(english.summary).toContain("GameState v47");
+    expect(english.items.at(-1)?.description).toContain("GameState v47");
+    expect(getReleaseNotes131("en")).toMatchObject({ id: "2026-10-26-v1.3.1", version: "1.3.1" });
+    expect(getReleaseNotes131("zh-CN").items).toHaveLength(5);
     expect(getReleaseNotes130("en")).toMatchObject({ id: "2026-09-22-v1.3.0", version: "1.3.0" });
     expect(getReleaseNotes130("zh-CN").items).toHaveLength(5);
     expect(getReleaseNotes129("en")).toMatchObject({ id: "2026-09-10-v1.2.9", version: "1.2.9" });

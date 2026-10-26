@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-10-26-v1.3.1";
+const RELEASE_NOTE_ID = "2026-10-27-v1.3.2";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,14 +520,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "时间扭曲与终局建筑制造优化");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.1");
+  await expect(dialog).toHaveAttribute("aria-label", "终局大档性能与保存体验优化");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.2");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("两种时间扭曲均可推进建筑制造");
-  await expect(dialog).toContainText("校准进度可见，取消后可恢复");
-  await expect(dialog).toContainText("减少递归制造的重复规划");
-  await expect(dialog).toContainText("减少离线与加速结算的重复工作");
-  await expect(dialog).toContainText("启动恢复与制造等待状态更清楚");
+  await expect(dialog).toContainText("量子入库计算更轻");
+  await expect(dialog).toContainText("建筑制造减少重复规划");
+  await expect(dialog).toContainText("大档保存更少阻塞操作");
+  await expect(dialog).toContainText("快照与挂机切换减少大档复制");
+  await expect(dialog).toContainText("原有存档与材料规则保留");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

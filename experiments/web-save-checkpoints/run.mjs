@@ -46,7 +46,7 @@ try {
   await context.addInitScript(({ captureWorkerTimings, transportExperiment }) => {
     if (location.hostname !== "127.0.0.1") return;
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-26-v1.3.1");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.2");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     const trace = { active: false, startedAt: 0, calls: [], frames: [], tasks: [], phases: [] };
     globalThis.__SAVE_CHECKPOINT_TRACE__ = trace;

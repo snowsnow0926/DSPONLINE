@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-26-v1.3.1");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.2");
     }
   });
 }
@@ -1602,14 +1602,14 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "时间扭曲与终局建筑制造优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.1");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "终局大档性能与保存体验优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.2");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(releaseNotes).toContainText("两种时间扭曲均可推进建筑制造");
-  await expect(releaseNotes).toContainText("校准进度可见，取消后可恢复");
-  await expect(releaseNotes).toContainText("减少递归制造的重复规划");
-  await expect(releaseNotes).toContainText("减少离线与加速结算的重复工作");
-  await expect(releaseNotes).toContainText("启动恢复与制造等待状态更清楚");
+  await expect(releaseNotes).toContainText("量子入库计算更轻");
+  await expect(releaseNotes).toContainText("建筑制造减少重复规划");
+  await expect(releaseNotes).toContainText("大档保存更少阻塞操作");
+  await expect(releaseNotes).toContainText("快照与挂机切换减少大档复制");
+  await expect(releaseNotes).toContainText("原有存档与材料规则保留");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1635,15 +1635,15 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "时间扭曲与终局建筑制造优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.1");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "终局大档性能与保存体验优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.2");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-26-v131-1440.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await releaseNotes.locator(".release-notes-scroll li").last().scrollIntoViewIfNeeded();
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-26-v131-390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-390.png", fullPage: true });
 
   await page.setViewportSize({ width: 360, height: 480 });
   await page.evaluate(() => {
@@ -1666,7 +1666,7 @@ test("dated release notes appear once and remain available from both settings sc
     return Boolean(scroll && summary && firstItem && footer && summary.bottom <= firstItem.top + 1 && scroll.bottom <= footer.top + 1);
   })).toBe(true);
   await expect.poll(() => releaseNotes.locator(".release-notes-scroll").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-26-v131-360x480-font200.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-360x480-font200.png", fullPage: true });
   await page.evaluate(() => {
     document.documentElement.dataset.uiFontScale = "100";
     document.documentElement.style.setProperty("--ui-font-scale", "1");
@@ -1675,15 +1675,15 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-10-26-v1.3.1");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-10-27-v1.3.2");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
-  await page.getByRole("button", { name: "查看2026年10月26日版本更新记录" }).click();
+  await page.getByRole("button", { name: "查看2026年10月27日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "时间扭曲与终局建筑制造优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.1");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "终局大档性能与保存体验优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.2");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
@@ -1694,12 +1694,12 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "时间扭曲与终局建筑制造优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.1");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "终局大档性能与保存体验优化");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.2");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-26-v131-844x390.png", fullPage: true });
+  await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-844x390.png", fullPage: true });
   await releaseNotes.getByLabel("关闭版本更新记录").click();
   await expect(operations).toBeVisible();
 });

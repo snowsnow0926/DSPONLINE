@@ -1,11 +1,13 @@
 import { readFileSync, statSync } from "node:fs";
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { DEFAULT_CANVAS_PERFORMANCE_FEATURES } from "../../src/game/endgamePerformance";
+import { selectSettingsCategory } from "./settings-helpers";
 
 const FIXTURE = process.env.DSP_CANVAS_FIXTURE;
 const RUN_BENCHMARK = process.env.DSP_RUN_CANVAS_BENCHMARK === "1";
 const SAMPLE_MS = Math.max(2_000, Math.min(30_000, Number.parseInt(process.env.DSP_CANVAS_SAMPLE_MS ?? "6000", 10) || 6_000));
 const REQUESTED_STAGES = new Set((process.env.DSP_CANVAS_STAGES ?? "baseline,p1,p2,p3,p4,p5,p6").split(",").map((value) => value.trim()).filter(Boolean));
-const REUSE_PAGE = process.env.DSP_CANVAS_REUSE_PAGE !== "0";
+const REUSE_PAGE = process.env.DSP_CANVAS_REUSE_PAGE === "1";
 const CAPTURE_CPU_PROFILE = process.env.DSP_CANVAS_CPU_PROFILE === "1";
 const REQUESTED_SCENARIOS = new Set((process.env.DSP_CANVAS_SCENARIOS ?? "paused-pan,running-pan").split(",").map((value) => value.trim()).filter(Boolean));
 const TEST_TIMEOUT_MS = Math.max(30_000, Math.min(1_200_000, Number.parseInt(process.env.DSP_CANVAS_TEST_TIMEOUT_MS ?? "1200000", 10) || 1_200_000));
@@ -22,6 +24,9 @@ const ALL_FEATURES = {
 };
 
 const STAGES = [
+  // Opt in explicitly to measure the shipped defaults without forcing the
+  // device's extreme-mode preference; historical stage comparisons stay fixed.
+  { id: "current", extreme: false, features: { ...DEFAULT_CANVAS_PERFORMANCE_FEATURES } },
   { id: "baseline", extreme: false, features: { ...ALL_FEATURES } },
   { id: "p1", extreme: false, features: { ...ALL_FEATURES, renderProjection: true } },
   { id: "p2", extreme: false, features: { ...ALL_FEATURES, renderProjection: true, topologyCache: true } },
@@ -183,12 +188,54 @@ async function sampleCanvas(page: Page, durationMs: number) {
   };
 }
 
+async function seedBenchmarkSave(page: Page, raw: string): Promise<void> {
+  await page.goto("/version.json");
+  // A hundred-MiB fixture must not become one oversized DevTools message.
+  // This transport happens before sampling and never touches the source file.
+  await page.evaluate(() => {
+    (window as typeof window & { __dspCanvasFixtureChunks?: string[] }).__dspCanvasFixtureChunks = [];
+  });
+  for (let offset = 0; offset < raw.length; offset += 1024 * 1024) {
+    await page.evaluate((chunk) => {
+      (window as typeof window & { __dspCanvasFixtureChunks: string[] }).__dspCanvasFixtureChunks.push(chunk);
+    }, raw.slice(offset, offset + 1024 * 1024));
+  }
+  await page.evaluate(async () => {
+    const holder = window as typeof window & { __dspCanvasFixtureChunks?: string[] };
+    const saveRaw = holder.__dspCanvasFixtureChunks!.join("");
+    delete holder.__dspCanvasFixtureChunks;
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dsp-idle-network.local-saves");
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("records")) request.result.createObjectStore("records", { keyPath: "key" });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction("records", "readwrite");
+        transaction.objectStore("records").put({ key: "dsp-idle-network.save.v1", value: saveRaw,
+          updatedAt: Date.now(), bytes: new TextEncoder().encode(saveRaw).byteLength });
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+    } finally { database.close(); }
+  });
+}
+
 async function runStage(browser: Browser, source: SourceState, planetId: string, stage: typeof STAGES[number], paused: boolean) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   const state = structuredClone(source);
   state.activePlanetId = planetId;
-  state.paused = paused;
+  // Bootstrap paused so file transport and first-paint time cannot be
+  // interpreted as offline gameplay. Resume explicitly for the running sample.
+  state.paused = true;
+  if (state.timeWarp && typeof state.timeWarp === "object") {
+    state.timeWarp = { ...state.timeWarp, enabled: false, pendingSimulationSeconds: 0, pendingWallSeconds: 0 };
+  }
   state.settings = { ...state.settings, autosaveIntervalSeconds: 120 };
   state.planetViewports = { ...state.planetViewports, [planetId]: { x: 510, y: 250, zoom: 0.84 } };
   const raw = JSON.stringify({ savedAt: Date.now(), state });
@@ -207,36 +254,17 @@ async function runStage(browser: Browser, source: SourceState, planetId: string,
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   try {
-    await page.goto("/version.json");
-    await page.evaluate(async ({ saveRaw }) => {
-      const database = await new Promise<IDBDatabase>((resolve, reject) => {
-        const request = indexedDB.open("dsp-idle-network.local-saves");
-        request.onupgradeneeded = () => {
-          if (!request.result.objectStoreNames.contains("records")) request.result.createObjectStore("records", { keyPath: "key" });
-        };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      await new Promise<void>((resolve, reject) => {
-        const transaction = database.transaction("records", "readwrite");
-        transaction.objectStore("records").put({
-          key: "dsp-idle-network.save.v1",
-          value: saveRaw,
-          updatedAt: Date.now(),
-          bytes: new TextEncoder().encode(saveRaw).byteLength,
-        });
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(transaction.error);
-      });
-      database.close();
-    }, { saveRaw: raw });
+    await seedBenchmarkSave(page, raw);
     await page.goto("/");
     await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 90_000 });
+    await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-paused", "true");
     await page.locator(".react-flow__controls-fitview").click();
     await expect(page.locator(".react-flow__node").first()).toBeVisible({ timeout: 90_000 });
+    if (!paused) await page.getByLabel("继续模拟").click();
+    await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-paused", String(paused));
     await page.waitForTimeout(paused ? 1_500 : 3_000);
     const metrics = await sampleCanvas(page, SAMPLE_MS);
+    await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-paused", String(paused));
     const flags = await page.locator(".factory-canvas").evaluate((element) => ({
       batch: element.getAttribute("data-batch-renderer") === "true",
       minimap: element.getAttribute("data-minimap-throttled") === "true",
@@ -244,7 +272,7 @@ async function runStage(browser: Browser, source: SourceState, planetId: string,
     }));
     return { ...metrics, flags, errors };
   } finally {
-    await context.close();
+    await context.close().catch(() => {});
   }
 }
 
@@ -252,6 +280,7 @@ async function applyStage(page: Page, stage: typeof STAGES[number]) {
   await page.getByLabel("打开设置").click();
   const operations = page.locator(".operations-workspace");
   await expect(operations).toBeVisible();
+  await selectSettingsCategory(operations, "性能", "performance");
   for (const [id, label] of Object.entries(FEATURE_LABELS) as Array<[keyof typeof ALL_FEATURES, string]>) {
     const checkbox = operations.locator("label.setting-row").filter({ hasText: label }).getByRole("checkbox");
     if (await checkbox.isChecked() !== stage.features[id]) await checkbox.evaluate((input: HTMLInputElement) => input.click());
@@ -272,6 +301,11 @@ async function runStagesOnOnePage(browser: Browser, source: SourceState, planetI
   const state = structuredClone(source);
   state.activePlanetId = planetId;
   state.paused = true;
+  // Canvas runs measure ordinary paused/running interaction. An inherited
+  // pure-idle session would intentionally replace this canvas with its guard.
+  if (state.timeWarp && typeof state.timeWarp === "object") {
+    state.timeWarp = { ...state.timeWarp, enabled: false, pendingSimulationSeconds: 0, pendingWallSeconds: 0 };
+  }
   state.settings = { ...state.settings, autosaveIntervalSeconds: 120 };
   state.planetViewports = { ...state.planetViewports, [planetId]: { x: 510, y: 250, zoom: 0.84 } };
   const raw = JSON.stringify({ savedAt: Date.now(), state });
@@ -288,25 +322,7 @@ async function runStagesOnOnePage(browser: Browser, source: SourceState, planetI
   page.on("pageerror", (error) => errors.push(error.message));
   try {
     console.log("CANVAS_STEP", "seed-indexeddb");
-    await page.goto("/version.json");
-    await page.evaluate(async ({ saveRaw }) => {
-      const database = await new Promise<IDBDatabase>((resolve, reject) => {
-        const request = indexedDB.open("dsp-idle-network.local-saves");
-        request.onupgradeneeded = () => {
-          if (!request.result.objectStoreNames.contains("records")) request.result.createObjectStore("records", { keyPath: "key" });
-        };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      await new Promise<void>((resolve, reject) => {
-        const transaction = database.transaction("records", "readwrite");
-        transaction.objectStore("records").put({ key: "dsp-idle-network.save.v1", value: saveRaw, updatedAt: Date.now(), bytes: new TextEncoder().encode(saveRaw).byteLength });
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(transaction.error);
-      });
-      database.close();
-    }, { saveRaw: raw });
+    await seedBenchmarkSave(page, raw);
     console.log("CANVAS_STEP", "open-game");
     await page.goto("/");
     await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 120_000 });
@@ -338,13 +354,15 @@ async function runStagesOnOnePage(browser: Browser, source: SourceState, planetI
           minimap: element.getAttribute("data-minimap-throttled") === "true",
           culling: element.closest(".game-shell")?.getAttribute("data-canvas-viewport-culling") === "true",
         }));
-        results.push({ stage: stage.id, scenario, ...metrics, flags });
+        const sample = { stage: stage.id, scenario, ...metrics, flags };
+        results.push(sample);
+        console.log("CANVAS_SAMPLE", JSON.stringify(sample));
         console.log("CANVAS_STEP", `${scenario}:${stage.id}:done`);
       }
     }
     return { results, errors };
   } finally {
-    await context.close();
+    await context.close().catch(() => {});
   }
 }
 
@@ -360,11 +378,13 @@ test("profiles staged canvas optimizations on an explicitly supplied local real 
     expect(shared.errors).toEqual([]);
     results.push(...shared.results);
   } else {
-    for (const paused of [true, false]) {
+    for (const paused of [true, false].filter((paused) => REQUESTED_SCENARIOS.has(paused ? "paused-pan" : "running-pan"))) {
       for (const stage of STAGES) {
         const metrics = await runStage(browser, source, planet.id, stage, paused);
         expect(metrics.errors).toEqual([]);
-        results.push({ stage: stage.id, scenario: paused ? "paused-pan" : "running-pan", ...metrics });
+        const sample = { stage: stage.id, scenario: paused ? "paused-pan" : "running-pan", ...metrics };
+        results.push(sample);
+        console.log("CANVAS_SAMPLE", JSON.stringify(sample));
       }
     }
   }

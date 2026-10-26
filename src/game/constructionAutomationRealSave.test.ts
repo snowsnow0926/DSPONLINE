@@ -10,10 +10,13 @@ import {
 import { inspectSave, migrateGame, serializeEnvelope } from "./storage";
 
 const fixturePath = process.env.DSP_CONSTRUCTION_AUTOMATION_FIXTURE;
+const recoveryFixturePath = process.env.DSP_CONSTRUCTION_RECOVERY_FIXTURE;
 
-describe.skipIf(!fixturePath)("construction automation real-save recovery", () => {
-  it("repairs a depleted persisted intermediate without modifying the fixture", { timeout: 120_000 }, () => {
-    const sourceRaw = readFileSync(fixturePath!, "utf8");
+describe("construction automation real-save recovery", () => {
+  // Stress saves need not contain a blocked persisted job; recovery needs
+  // its own explicitly supplied fixture with that precondition.
+  it.skipIf(!recoveryFixturePath)("repairs a depleted persisted intermediate without modifying the fixture", { timeout: 120_000 }, () => {
+    const sourceRaw = readFileSync(recoveryFixturePath!, "utf8");
     const sourceSha256 = createHash("sha256").update(sourceRaw).digest("hex");
     const parsed = JSON.parse(sourceRaw) as { state?: unknown } & Record<string, unknown>;
     const state = migrateGame(parsed.state ?? parsed);
@@ -40,10 +43,10 @@ describe.skipIf(!fixturePath)("construction automation real-save recovery", () =
 
     const serialized = serializeEnvelope(advanced);
     expect(inspectSave(serialized).valid).toBe(true);
-    expect(createHash("sha256").update(readFileSync(fixturePath!, "utf8")).digest("hex")).toBe(sourceSha256);
+    expect(createHash("sha256").update(readFileSync(recoveryFixturePath!, "utf8")).digest("hex")).toBe(sourceSha256);
   });
 
-  it("profiles one endgame construction-only tail and one 8x time-warp slice", { timeout: 180_000 }, async () => {
+  it.skipIf(!fixturePath)("profiles one endgame construction-only tail and one 8x time-warp slice", { timeout: 180_000 }, async () => {
     const sourceRaw = readFileSync(fixturePath!, "utf8");
     const sourceSha256 = createHash("sha256").update(sourceRaw).digest("hex");
     const parsed = JSON.parse(sourceRaw) as { state?: unknown } & Record<string, unknown>;

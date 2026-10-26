@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 1,
+  "scope": "Hong Kong Web only; native downloads deferred by user",
+  "releaseId": "1.3.1-9af159f1b38e",
+  "runtimeSha": "9af159f1b38e16019a95685ef61f1aa236664932",
+  "testCorrectionCommit": "d9aec940",
+  "webSwitch": {
+    "published": true,
+    "web": "1.3.1-9af159f1b38e",
+    "rollback": "1.3.0-e8c44f8d7160",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "apiProcessUnchanged": true,
+    "backupState": "disabled",
+    "filesVerified": 196,
+    "buildId": "1.3.1+9af159f1b38e",
+    "ready": true
+  },
+  "fallback": {
+    "published": true,
+    "previousWeb": "1.3.0-e8c44f8d7160",
+    "rootWeb": "1.3.1-9af159f1b38e",
+    "nginxSha256": "fed38344d5362f15451c88fbc4818f505355b7b3efbbd9d4deb5ec79d4388e16",
+    "previousHtmlByteExact": true,
+    "oldWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "backup": "/var/backups/dsp-idle/1.3.1-9af159f1b38e/fallback/original-app.conf"
+  },
+  "observation": {
+    "samples": 12,
+    "windowSeconds": 55,
+    "allHealthy": true,
+    "backupDisabled": true,
+    "sameApiProcess": true,
+    "web": "1.3.1-9af159f1b38e"
+  },
+  "finalServer": {
+    "web": "1.3.1-9af159f1b38e",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "nginxSha256": "fed38344d5362f15451c88fbc4818f505355b7b3efbbd9d4deb5ec79d4388e16",
+    "nginxValid": true,
+    "health": {
+      "http": 200,
+      "ok": true,
+      "writable": null,
+      "backupState": "disabled"
+    },
+    "ready": {
+      "http": 200,
+      "ok": null,
+      "writable": true,
+      "backupState": null
+    },
+    "offsiteBackupTimer": "inactive",
+    "rootDiskUsedPercent": 78.3
+  },
+  "publicArtifacts": {
+    "publicFiles": [
+      {
+        "path": "index.html",
+        "sha256": "bd38658d075cde0e0e1395018bd01d57da7accdfc52afbe8a324f0ea55fbc990",
+        "bytes": 983
+      },
+      {
+        "path": "version.json",
+        "sha256": "46a29371105746813d43087cc6000dcba1822a383b14fa0523dfe4370ea7a973",
+        "bytes": 109
+      },
+      {
+        "path": "sw.js",
+        "sha256": "ff0ec9d4458b10e0dad17ff453a46dfba72fd7cdb9c9b990c05d308d0faa5060",
+        "bytes": 17803
+      },
+      {
+        "path": "icon.svg",
+        "sha256": "88e9b11cfebf7e5815bb6d635522c6c8df3ee1b649361997a4ef34318d53f3c3",
+        "bytes": 349
+      },
+      {
+        "path": "manifest.webmanifest",
+        "sha256": "fc70a386379d0a32eb71fc17a0694d40ad3b1a5ac9b0b61e81a4aa16da0536bf",
+        "bytes": 413
+      },
+      {
+        "path": "assets/index-mu2L0-NU.js",
+        "bytes": 82093,
+        "sha256": "03cdc748bf93f49b8b11608ca492e4a2ffcc54ead4c24c62635978d21c84ec97"
+      },
+      {
+        "path": "assets/rolldown-runtime-QTnfLwEv.js",
+        "bytes": 694,
+        "sha256": "5db5ba82eef00d1dee7e86e663098c9427d01183a88d357437daff295aec3e75"
+      },
+      {
+        "path": "assets/react-vendor-CCIEwYL0.js",
+        "bytes": 189644,
+        "sha256": "71388ee1f865f80e2970481ecb3bd9e014991c0d1c445635245afa182efdbbb5"
+      },
+      {
+        "path": "assets/desktop-7uRuU7Do.js",
+        "bytes": 82,
+        "sha256": "6888fcb03bdd180db12f86f5b0e5b99f995ec052d1d34c9876db19b23fc5e82e"
+      },
+      {
+        "path": "assets/preload-helper-Czpn1I53.js",
+        "bytes": 1196,
+        "sha256": "aba87f2a53e45ecdc9113fc30387d16e449d1676428cf5f82dd624c1df97d152"
+      },
+      {
+        "path": "assets/index-D2FiaD24.css",
+        "bytes": 621718,
+        "sha256": "0317857be4ff6cf07ddff399b4aee27544f49973c0c5fe28806ff31cae69d4f7"
+      }
+    ],
+    "previousRedirect": 302,
+    "previousLocation": "https://dsponline.cn/canary/1.3.0-e8c44f8d7160/",
+    "oldWorkerStatus": 404,
+    "fallbackNoStore": true,
+    "fallbackVary": "*"
+  },
+  "publicBrowser": {
+    "currentVersion": "1.3.1",
+    "previousVersion": "1.3.0",
+    "currentWorkerPreserved": true,
+    "currentCacheUnchanged": true,
+    "offlineCurrentRootPassed": true,
+    "visitedStableAndImmutableFallback": true
+  },
+  "actualBundleUpgrade": {
+    "from": "1.3.0+e8c44f8d7160",
+    "to": "1.3.1+9af159f1b38e",
+    "saveBytes": 90420,
+    "saveSha256": "25fcf40d321f91a62f23f842fd161d07aeafaf928989256e4e2ba9d1b7b1a0d6",
+    "saveBytesUnchanged": true,
+    "offlineReloadPassed": true,
+    "explicitUpdateActivation": true
+  },
+  "nativeDownloadsPublished": false,
+  "windowsPrepared": {
+    "version": "1.3.1",
+    "sourceSha": "9af159f1b38e16019a95685ef61f1aa236664932",
+    "size": 108065307,
+    "sha256": "a684c7efccb25557298f94cf9ebde1189bdabbb49e8ddef6a681fbb33cabc5a0",
+    "signature": "NotSigned",
+    "published": false,
+    "packagedRuntimeSaveReopenPassed": true
+  },
+  "unit": {
+    "passed": 3461,
+    "skipped": 37
+  },
+  "browser": {
+    "initialPassed": 474,
+    "initialFailed": 3,
+    "initialSkipped": 33,
+    "correctedRetestPassed": 3,
+    "distinctCovered": 477,
+    "additionalProductionPwaPassed": 1
+  },
+  "rustCore": {
+    "serialPassed": 1099,
+    "ignored": 3,
+    "initialParallelProcessCrash": true,
+    "fullWorkspaceNotCertified": true
+  },
+  "previousPublicAssets": {
+    "files": [
+      {
+        "path": "assets/index-CiqM0weB.js",
+        "sha256": "221ba84d43b76bd8faf6aacda7d098c098a403fa97fbb77bb3d2a19da676d0c3"
+      },
+      {
+        "path": "assets/rolldown-runtime-QTnfLwEv.js",
+        "sha256": "5db5ba82eef00d1dee7e86e663098c9427d01183a88d357437daff295aec3e75"
+      },
+      {
+        "path": "assets/react-vendor-CCIEwYL0.js",
+        "sha256": "71388ee1f865f80e2970481ecb3bd9e014991c0d1c445635245afa182efdbbb5"
+      },
+      {
+        "path": "assets/desktop-7uRuU7Do.js",
+        "sha256": "6888fcb03bdd180db12f86f5b0e5b99f995ec052d1d34c9876db19b23fc5e82e"
+      },
+      {
+        "path": "assets/preload-helper-Czpn1I53.js",
+        "sha256": "aba87f2a53e45ecdc9113fc30387d16e449d1676428cf5f82dd624c1df97d152"
+      },
+      {
+        "path": "assets/index-D2FiaD24.css",
+        "sha256": "0317857be4ff6cf07ddff399b4aee27544f49973c0c5fe28806ff31cae69d4f7"
+      }
+    ]
+  }
+}

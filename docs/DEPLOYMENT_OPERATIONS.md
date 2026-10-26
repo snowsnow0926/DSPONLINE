@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **香港 Web 当前基线（2026-10-26 22:03）**：`current` 为 `1.3.1-9af159f1b38e`，直接回退和 `/canary/previous/` 均为 `1.3.0-e8c44f8d7160`；API 保持 `api-1.3.0-4c8d0c13a714`，未重启。Nginx snippet SHA-256 为 `fed38344d5362f15451c88fbc4818f505355b7b3efbbd9d4deb5ec79d4388e16`；health/ready 正常，自动备份仍 disabled。下载站证书过期与客户端发布按用户要求延后，公共 feed 未变。回退快照和独立 Nginx 回退边界见 [1.3.1](./releases/1.3.1.md)。
+
 > **香港最新稳定观测基线（2026-10-26 18:31）**：API `api-1.3.0-4c8d0c13a714`，green/4322，state generation 54、proxy 202/forward；Web `1.3.0-e8c44f8d7160`，API 回退点 `api-1.3.0-d39420f96259`。匿名统计已恢复，5 分钟真实流量验收通过，Nginx 正常配置 SHA-256 为 `283c4de3b076b03cba3077928f20e2941b42d7e733cace17e2ee29c404e8aceb`。原数据库 inode 663062、存档与保护数据保留；自动备份 disabled、COS 未挂载，临时资源设置及维护 timer 已撤销。备份使用固定只读事务的 SQLite Backup API，避免活跃定时写入反复重启大库复制。见 [最新发布记录](./releases/ops-hk-current-main-audit-release-2026-10-26.md)。
 
 > **香港 Web 当前基线（2026-09-22，1.3.0）**：current/previous 为 `1.3.0-e8c44f8d7160` / `1.2.9-0521eb63f179`，generation/proxy 52/192；API 仍为 `api-1.2.6-df828869e276`、green/4322。health/ready 200，可写、无 pending，API/代理 PID 不变且零重启，约 25.3% 磁盘可用。`/canary/previous/` 已指向不可变 1.2.9，根 worker 拒绝与缓存隔离通过。Web 配置备份、独立 Nginx 回滚点和恢复顺序见 [1.3.0 发布记录](./releases/1.3.0.md)。本次无 API/数据库切换、无新增数据库快照；上海与下载/原生版本未操作，以下 1.2.9 状态是对应历史记录。

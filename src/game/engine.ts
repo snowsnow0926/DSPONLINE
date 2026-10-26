@@ -11277,14 +11277,30 @@ const recursiveManufacturingRecipes = (): RecipeDefinition[] =>
 interface ConstructionPlanningContext {
   planner: RecursiveCraftPlanner;
   version: string;
+  projectInventory: boolean;
+  inventoryDependencies: Map<ConstructionAutomationTargetId, ReadonlySet<ItemId>>;
+  targets: readonly ConstructionAutomationTargetDefinition[];
+  targetById: ReadonlyMap<ConstructionAutomationTargetId, ConstructionAutomationTargetDefinition>;
+  eligibleTargets: readonly ConstructionAutomationTargetDefinition[];
+  eligibleTargetIds: ReadonlySet<ConstructionAutomationTargetId>;
 }
 
-function createConstructionPlanningContext(state: GameState): ConstructionPlanningContext {
+function createConstructionPlanningContext(state: GameState, projectInventory = true): ConstructionPlanningContext {
+  const targets = getConstructionAutomationTargets();
+  const completed = new Set(state.research.completedTechIds);
+  const eligibleTargets = targets.filter((target) => constructionDomainUnlocked(state, target.id) &&
+    (!target.requiredTechId || completed.has(target.requiredTechId)));
   return {
     planner: createRecursiveCraftPlanner({
       recipes: recursiveManufacturingRecipes(), completedTechnologyIds: state.research.completedTechIds,
     }),
     version: `${[...state.research.completedTechIds].sort().join(",")}|${state.contentPacks.map((pack) => `${pack.id}@${pack.version}`).sort().join(",")}`,
+    projectInventory,
+    inventoryDependencies: new Map(),
+    targets,
+    targetById: new Map(targets.map((target) => [target.id, target])),
+    eligibleTargets,
+    eligibleTargetIds: new Set(eligibleTargets.map((target) => target.id)),
   };
 }
 
@@ -11733,16 +11749,19 @@ interface ConstructionAutomationPlan {
   recursiveDecisions?: RecursiveCraftDecision[];
 }
 
-function constructionAutomationPending(state: GameState, constructionId: ConstructionAutomationTargetId): number {
+function constructionAutomationPending(state: GameState, constructionId: ConstructionAutomationTargetId, context?: ConstructionPlanningContext): number {
   return Object.values(state.constructionAutomation.jobs).reduce((sum, job) => {
     if (job.constructionId !== constructionId) return sum;
-    const definition = getConstructionAutomationTargetDefinition(constructionId);
+    const definition = context?.targetById.get(constructionId) ?? getConstructionAutomationTargetDefinition(constructionId);
     return sum + (definition?.outputAmount ?? 0);
   }, 0);
 }
 
 export function normalizeConstructionAutomationCursor(cursor: number): number {
-  const length = getConstructionAutomationTargets().length;
+  return normalizeConstructionAutomationCursorForLength(cursor, getConstructionAutomationTargets().length);
+}
+
+function normalizeConstructionAutomationCursorForLength(cursor: number, length: number): number {
   if (length < 1) return 0;
   const integerCursor = Number.isFinite(cursor) && Number.isSafeInteger(Math.trunc(cursor))
     ? Math.trunc(cursor)
@@ -11750,10 +11769,10 @@ export function normalizeConstructionAutomationCursor(cursor: number): number {
   return ((integerCursor % length) + length) % length;
 }
 
-function constructionAutomationTarget(state: GameState, cursor = state.constructionAutomation.cursor, skipped?: ReadonlySet<ConstructionAutomationTargetId>): { index: number; definition: ConstructionAutomationTargetDefinition } | null {
-  const definitions = getConstructionAutomationTargets();
+function constructionAutomationTarget(state: GameState, cursor = state.constructionAutomation.cursor, skipped?: ReadonlySet<ConstructionAutomationTargetId>, context?: ConstructionPlanningContext): { index: number; definition: ConstructionAutomationTargetDefinition } | null {
+  const definitions = context?.targets ?? getConstructionAutomationTargets();
   if (definitions.length === 0) return null;
-  const normalizedCursor = normalizeConstructionAutomationCursor(cursor);
+  const normalizedCursor = normalizeConstructionAutomationCursorForLength(cursor, definitions.length);
   for (let offset = 0; offset < definitions.length; offset += 1) {
     const index = (normalizedCursor + offset) % definitions.length;
     const definition = definitions[index];
@@ -11761,8 +11780,10 @@ function constructionAutomationTarget(state: GameState, cursor = state.construct
     // cursor must never turn into a missing catalog definition.
     if (!definition || skipped?.has(definition.id)) continue;
     const target = state.constructionAutomation.targetStock[definition.id] ?? 0;
-    const current = constructionAutomationCurrentStock(state, definition.id) + constructionAutomationPending(state, definition.id);
-    if (target <= current || !constructionDomainUnlocked(state, definition.id) || definition.requiredTechId && !isTechnologyCompleted(state, definition.requiredTechId)) continue;
+    const current = constructionAutomationCurrentStock(state, definition.id) + constructionAutomationPending(state, definition.id, context);
+    const eligible = context ? context.eligibleTargetIds.has(definition.id)
+      : constructionDomainUnlocked(state, definition.id) && (!definition.requiredTechId || isTechnologyCompleted(state, definition.requiredTechId));
+    if (target <= current || !eligible) continue;
     return { index, definition };
   }
   return null;
@@ -11805,15 +11826,29 @@ function buildConstructionAutomationPlan(
   context?: ConstructionPlanningContext,
 ): ConstructionAutomationPlan {
   const tray = trayForPlanet(state, planetId);
-  const inventory = Object.fromEntries((Object.entries(tray) as Array<[ItemId, number]>).map(([itemId, amount]) => [
-    itemId,
-    Math.max(0, Math.floor(amount ?? 0)),
-  ])) as Partial<Record<ItemId, number>>;
+  const planning = context ?? createConstructionPlanningContext(state);
+  let dependencies = planning.inventoryDependencies.get(definition.id);
+  if (planning.projectInventory && !dependencies) {
+    const requirements = definition.kind === "fleet" && definition.recipeId
+      ? RECIPES[definition.recipeId].inputs
+      : definition.costs;
+    dependencies = planning.planner.inventoryDependencies(requirements);
+    planning.inventoryDependencies.set(definition.id, dependencies);
+  }
+  // Only input dependencies can affect route selection. Carrying every other
+  // stocked item through each recursive branch multiplies allocation cost.
+  // The complete tray remains authoritative and is changed only by execution.
+  const inventory: Partial<Record<ItemId, number>> = {};
+  const itemIds = planning.projectInventory ? dependencies! : Object.keys(tray) as ItemId[];
+  for (const itemId of itemIds) {
+    if (Object.hasOwn(tray, itemId)) inventory[itemId] = Math.max(0, Math.floor(tray[itemId] ?? 0));
+  }
   for (const [itemId, amount] of Object.entries(extraInventory) as Array<[ItemId, number]>) {
+    if (planning.projectInventory && !dependencies!.has(itemId)) continue;
     const normalized = Math.max(0, Math.floor(amount ?? 0));
     if (normalized > 0) inventory[itemId] = Math.min(Number.MAX_SAFE_INTEGER, (inventory[itemId] ?? 0) + normalized);
   }
-  const planner = (context ?? createConstructionPlanningContext(state)).planner;
+  const planner = planning.planner;
   const plan = definition.kind === "fleet" && definition.recipeId
     ? planner.recipe(inventory, RECIPES[definition.recipeId], 1)
     : planner.requirements(inventory, definition.costs);
@@ -12509,17 +12544,17 @@ function analyzeRepeatableConstructionAutomationPlan(
   };
 }
 
-function getActiveConstructionAutomationTargets(state: GameState): ConstructionAutomationTargetDefinition[] {
-  return getConstructionAutomationTargets().filter((definition) => {
-    if (!constructionDomainUnlocked(state, definition.id)) return false;
-    if (definition.requiredTechId && !isTechnologyCompleted(state, definition.requiredTechId)) return false;
+function getActiveConstructionAutomationTargets(state: GameState, context?: ConstructionPlanningContext): ConstructionAutomationTargetDefinition[] {
+  return (context?.eligibleTargets ?? getConstructionAutomationTargets()).filter((definition) => {
+    if (!context && !constructionDomainUnlocked(state, definition.id)) return false;
+    if (!context && definition.requiredTechId && !isTechnologyCompleted(state, definition.requiredTechId)) return false;
     const target = state.constructionAutomation.targetStock[definition.id] ?? 0;
-    return target > constructionAutomationCurrentStock(state, definition.id) + constructionAutomationPending(state, definition.id);
+    return target > constructionAutomationCurrentStock(state, definition.id) + constructionAutomationPending(state, definition.id, context);
   });
 }
 
-function hasSingleConstructionAutomationTarget(state: GameState, targetId: ConstructionAutomationTargetId): boolean {
-  const activeTargets = getActiveConstructionAutomationTargets(state);
+function hasSingleConstructionAutomationTarget(state: GameState, targetId: ConstructionAutomationTargetId, context?: ConstructionPlanningContext): boolean {
+  const activeTargets = getActiveConstructionAutomationTargets(state, context);
   return activeTargets.length === 1 && activeTargets[0].id === targetId;
 }
 
@@ -12823,7 +12858,7 @@ function tryBuildStableConstructionAutomationCycle(
   const cycleStateItems = new Set<ItemId>();
   for (let probe = 1; probe <= maxProbeJobs; probe += 1) {
     for (const itemId of Object.keys(current.trayReturns) as ItemId[]) cycleStateItems.add(itemId);
-    applyConstructionAutomationBatch(planning, planetId, 0, definition, current, 1, entityId);
+    applyConstructionAutomationBatch(planning, planetId, 0, definition, current, 1, entityId, context);
     if (JSON.stringify(planning.constructionAutomation.destroyedByproducts) !== destroyedBefore) return null;
     if (budget.remainingPlanBuilds < 1) return null;
     const nextPlan = buildConstructionAutomationPlan(
@@ -12885,7 +12920,7 @@ function resolveConstructionAutomationPlan(
   const plan = buildConstructionAutomationPlan(state, definition, planetId, undefined, context);
   const batch = plan.blocker ? null : analyzeRepeatableConstructionAutomationPlan(state, definition, plan, context);
   const resolvedBatch = batch && !constructionAutomationBatchCanRepeat(state, planetId, batch)
-    ? (hasSingleConstructionAutomationTarget(state, definition.id)
+    ? (hasSingleConstructionAutomationTarget(state, definition.id, context)
       ? (tryBuildStableConstructionAutomationCycle(state, definition, planetId, batch, budget, profiler, undefined, context) ?? batch)
       : batch)
     : batch;
@@ -12935,6 +12970,7 @@ function applyConstructionAutomationBatch(
   batch: RepeatableConstructionAutomationBatch,
   cycles: number,
   entityId?: string,
+  context?: ConstructionPlanningContext,
 ): number {
   const cycleCount = Math.max(1, Math.floor(cycles));
   const count = cycleCount * Math.max(1, Math.floor(batch.jobsPerCycle));
@@ -13029,7 +13065,7 @@ function applyConstructionAutomationBatch(
   }
   state.constructionAutomation.totalCrafted += completed;
   state.constructionAutomation.lastCraftedId = definition.id;
-  state.constructionAutomation.cursor = (targetIndex + 1) % Math.max(1, getConstructionAutomationTargets().length);
+  state.constructionAutomation.cursor = (targetIndex + 1) % Math.max(1, context?.targets.length ?? getConstructionAutomationTargets().length);
   return completed;
 }
 
@@ -13043,13 +13079,14 @@ function tryRunConstructionAutomationBatch(
   activeTargetCount: number,
   highLoadProtection: boolean,
   maxFairBatchJobs: number,
+  context?: ConstructionPlanningContext,
 ): { usedWork: number; completed: number; jobs: number } | null {
   if (repeatable.workSeconds <= EPSILON || definition.outputAmount < 1) return null;
   const hasDirectSource = state.constructionAutomation.quantumSourceEnabled === true ||
     Object.keys(constructionAutomationQuantumBuffer(state, entity.id)).length > 0;
   const directEntityId = hasDirectSource ? entity.id : undefined;
   const target = Math.max(0, Math.floor(state.constructionAutomation.targetStock[definition.id] ?? 0));
-  const current = constructionAutomationCurrentStock(state, definition.id) + constructionAutomationPending(state, definition.id);
+  const current = constructionAutomationCurrentStock(state, definition.id) + constructionAutomationPending(state, definition.id, context);
   const jobsForTarget = Math.ceil(Math.max(0, target - current) / definition.outputAmount);
   const jobsForWork = Math.floor((Math.max(0, remainingWork) + EPSILON) / repeatable.workSeconds);
   if (jobsForTarget < 1 || jobsForWork < 1 || !constructionAutomationBatchInputsAvailable(state, entity.planetId, repeatable, 1, directEntityId)) return null;
@@ -13059,7 +13096,7 @@ function tryRunConstructionAutomationBatch(
     repeatable,
     directEntityId,
   );
-  const canRepeat = hasSingleConstructionAutomationTarget(state, definition.id) &&
+  const canRepeat = hasSingleConstructionAutomationTarget(state, definition.id, context) &&
     Object.keys(state.constructionAutomation.jobs).length === 0 &&
     constructionAutomationBatchCanRepeat(state, entity.planetId, repeatable);
   const canFairBatch = highLoadProtection && constructionAutomationBatchCanRepeat(state, entity.planetId, repeatable);
@@ -13076,7 +13113,7 @@ function tryRunConstructionAutomationBatch(
     ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock)
     : canFairBatch ? Math.min(cyclesForTarget, cyclesForWork, cyclesForStock, Math.floor(fairShare / jobsPerCycle)) : 1;
   if (cycles < 1) return null;
-  const completed = applyConstructionAutomationBatch(state, entity.planetId, targetIndex, definition, repeatable, cycles, directEntityId);
+  const completed = applyConstructionAutomationBatch(state, entity.planetId, targetIndex, definition, repeatable, cycles, directEntityId, context);
   return { usedWork: repeatable.workSeconds * cycles, completed, jobs: cycles * jobsPerCycle };
 }
 
@@ -13099,8 +13136,14 @@ function runConstructionCenters(
     .filter(isQuantumStation).reduce((sum, tower) => sum + Math.max(0, tower.machineCount), 0);
   const warehouseForPlanning = towerStacks > 0 ? constructionQuantumWarehouseInventory(state) : {};
   const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
-  const planningContext = state.constructionAutomation.enabled ? createConstructionPlanningContext(state) : undefined;
-  const activeTargetCountForBudget = getActiveConstructionAutomationTargets(state).length;
+  const planningContext = state.constructionAutomation.enabled
+    ? createConstructionPlanningContext(state, batchConstructionAutomation)
+    : undefined;
+  // Eligibility cannot change inside this synchronous construction phase.
+  // Stock and outstanding jobs still remain live reads on every fair turn.
+  const schedulingContext = batchConstructionAutomation ? planningContext : undefined;
+  const targetCount = Math.max(1, schedulingContext?.targets.length ?? getConstructionAutomationTargets().length);
+  const activeTargetCountForBudget = getActiveConstructionAutomationTargets(state, schedulingContext).length;
   const extendedBudget = batchConstructionAutomation && activeTargetCountForBudget > 1 &&
     centerEntities.some((entity) => entity.machineCount >= CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD);
   const maxIterationsPerSecond = extendedBudget
@@ -13182,12 +13225,12 @@ function runConstructionCenters(
       const stepBeforeIteration = job?.stepIndex;
       if (!job) {
         const quantumBuffer = constructionAutomationQuantumBuffer(state, entity.id);
-        const target = constructionAutomationTarget(state, state.constructionAutomation.cursor, blockedTargets);
+        const target = constructionAutomationTarget(state, state.constructionAutomation.cursor, blockedTargets, schedulingContext);
         if (!target) {
           // A direct request can outlive the final completion by one boundary
           // if a recipe produced a smaller net amount than its raw probe. Do
           // not strand that reservation in a center that no longer has a goal.
-          if (!constructionAutomationTarget(state) && Object.keys(quantumBuffer).length > 0) refundConstructionAutomationQuantumBuffer(state, entity.id);
+          if (!constructionAutomationTarget(state, undefined, undefined, schedulingContext) && Object.keys(quantumBuffer).length > 0) refundConstructionAutomationQuantumBuffer(state, entity.id);
           break;
         }
         let resolved: CachedConstructionAutomationPlan | { plan: ConstructionAutomationPlan; batch: RepeatableConstructionAutomationBatch | null } | null;
@@ -13228,7 +13271,7 @@ function runConstructionCenters(
               : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan, planningContext);
             const directBatch = directBaseBatch &&
               !constructionAutomationBatchCanRepeat(state, entity.planetId, directBaseBatch) &&
-              hasSingleConstructionAutomationTarget(state, target.definition.id)
+              hasSingleConstructionAutomationTarget(state, target.definition.id, schedulingContext)
               ? (tryBuildStableConstructionAutomationCycle(
                 state,
                 target.definition,
@@ -13263,7 +13306,7 @@ function runConstructionCenters(
         const plan = resolved.plan;
         if (plan.blocker) {
           blockedTargets.add(target.definition.id);
-          state.constructionAutomation.cursor = (target.index + 1) % Math.max(1, getConstructionAutomationTargets().length);
+          state.constructionAutomation.cursor = (target.index + 1) % targetCount;
           continue;
         }
         // Leave a forecast as a demand, not a persisted job, until its first
@@ -13273,10 +13316,10 @@ function runConstructionCenters(
           !constructionMaterialsAvailable({}, trayForPlanet(state, entity.planetId), quantumBuffer,
             constructionAutomationRequirements(firstStep))) {
           blockedTargets.add(target.definition.id);
-          state.constructionAutomation.cursor = (target.index + 1) % Math.max(1, getConstructionAutomationTargets().length);
+          state.constructionAutomation.cursor = (target.index + 1) % targetCount;
           continue;
         }
-        const activeTargetCount = Math.max(1, getActiveConstructionAutomationTargets(state).length);
+        const activeTargetCount = Math.max(1, getActiveConstructionAutomationTargets(state, schedulingContext).length);
         const highLoadProtection = entity.machineCount >= CONSTRUCTION_AUTOMATION_PROTECTION_STACK_THRESHOLD ||
           remainingWork > CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND;
         const batched = batchConstructionAutomation && resolved.batch
@@ -13290,6 +13333,7 @@ function runConstructionCenters(
             activeTargetCount,
             highLoadProtection,
             maxFairBatchJobs,
+            schedulingContext,
           )
           : null;
         if (batched) {
@@ -13311,7 +13355,7 @@ function runConstructionCenters(
           recipeDecisions: plan.recipeDecisions,
         };
         state.constructionAutomation.jobs[entity.id] = job;
-        state.constructionAutomation.cursor = (target.index + 1) % Math.max(1, getConstructionAutomationTargets().length);
+        state.constructionAutomation.cursor = (target.index + 1) % targetCount;
       }
       const step = job.steps[job.stepIndex];
       if (!step) {
@@ -13348,7 +13392,7 @@ function runConstructionCenters(
       if (job.stepIndex >= job.steps.length) {
         delete state.constructionAutomation.jobs[entity.id];
         job = undefined;
-        if (!constructionAutomationTarget(state) && Object.keys(constructionAutomationQuantumBuffer(state, entity.id)).length > 0) {
+        if (!constructionAutomationTarget(state, undefined, undefined, schedulingContext) && Object.keys(constructionAutomationQuantumBuffer(state, entity.id)).length > 0) {
           refundConstructionAutomationQuantumBuffer(state, entity.id);
         }
       }

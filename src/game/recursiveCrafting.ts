@@ -426,6 +426,8 @@ function planRecipeWithContext(context: PlannerContext, inventory: Partial<Recor
 
 export interface RecursiveCraftPlanner {
   producers(itemId: ItemId): readonly RecipeDefinition[];
+  /** Conservative closure of every possible input route, including fallbacks. */
+  inventoryDependencies(requirements: readonly ItemAmount[]): ReadonlySet<ItemId>;
   requirements(inventory: Partial<Record<ItemId, number>>, requirements: ItemAmount[]): RecursiveCraftPlan;
   recipe(inventory: Partial<Record<ItemId, number>>, recipe: RecipeDefinition, batches: number): RecursiveCraftPlan;
 }
@@ -435,6 +437,19 @@ export function createRecursiveCraftPlanner(options: Parameters<typeof plannerCo
   const context = plannerContext(options);
   return {
     producers: (itemId) => producingRecipes(context, itemId),
+    inventoryDependencies: (requirements) => {
+      const items = new Set<ItemId>();
+      const pending = requirements.map((requirement) => requirement.itemId);
+      while (pending.length > 0) {
+        const itemId = pending.pop()!;
+        if (items.has(itemId)) continue;
+        items.add(itemId);
+        for (const recipe of producingRecipes(context, itemId)) {
+          for (const input of recipe.inputs) pending.push(input.itemId);
+        }
+      }
+      return items;
+    },
     requirements: (inventory, requirements) => planRequirementsWithContext(context, inventory, requirements),
     recipe: (inventory, recipe, batches) => planRecipeWithContext(context, inventory, recipe, batches),
   };

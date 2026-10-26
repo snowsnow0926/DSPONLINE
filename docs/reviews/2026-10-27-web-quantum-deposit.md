@@ -78,4 +78,3 @@ UTF-8 SHA-256 均为 `932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae
 旧候选 `web-primary-checkpoint-dist` 与源码 `94e263cc562d` 保留；本轮没有存档迁移。
 未执行 Android / Windows 发包或实机检查。暂停后的剩余工作为转换卡顿、内存副本及制造计算预算；
 恢复开发须等待用户后续指令。
-

@@ -1,6 +1,6 @@
 # 网页保存：减少传输压缩与校验重复工作
 
-状态：实现、同档实测及全量回归通过，待最终冻结包验证；未发布。
+状态：本轮开发验收完成；未发布。
 
 ## 范围
 
@@ -31,7 +31,8 @@ Blob 保留压缩、伪造 SHA proof、同长度正文破坏、旧槽位不被�
 `6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf`。
 普通模式，110,042 个实体、233,300 条运输线；工厂暂停、时间扭曲和自动保存关闭。
 Chrome 147.0.7727.138，独立临时上下文，API 请求屏蔽。每个入口各三次基线和三次候选，
-实测时不并行运行构建或测试套件。基线为 `1.3.1+23ae7dde4d81`，候选使用本轮源码生产构建。
+实测时不并行运行构建或测试套件。基线为 `1.3.1+23ae7dde4d81`，实测候选为
+`1.3.1+04d3d8e8e0ad.dirty`，最终干净构建身份见下文。
 
 | 指标（中位） | 槽位基线 | 槽位候选 | 手动快照基线 | 手动快照候选 |
 | --- | ---: | ---: | ---: | ---: |
@@ -67,12 +68,26 @@ Chrome 147.0.7727.138，独立临时上下文，API 请求屏蔽。每个入口�
 
 专项单元 9/9、专项 Chromium 11/11、Web 构建和启动/原生边界检查通过。
 完整单元 3,555 通过 / 38 条件跳过（412 文件通过 / 16 文件跳过）；
-完整 Chromium 484 通过 / 33 条件跳过。最终干净源码及冻结包复验待完成。
+完整 Chromium 484 通过 / 33 条件跳过。最终生产 PWA 缓存升级/离线重开 1/1 通过，
+冻结包的大档槽位和手动快照保存 2/2 通过；两次完整状态摘要均与基线一致，实际使用原始传输。
 本轮未修改服务端，没有把历史服务端测试记作本轮通过。
+
+运行源码提交：`1fa77ea8bbc5f230cde61044dafad1ad532aabdf`，从干净工作树构建。
+Web buildId：`1.3.1+1fa77ea8bbc5`。
+
+- 冻结目录：`D:/GameDev/DSPidle2/artifacts/web-performance-loop-20261026/web-save-verification-dist`
+- 清单：同目录上级的 `web-save-verification-manifest.json`
+- 原构建和冻结副本 196 件文件均逐一验证；聚合 SHA-256：`6667ac0ac331951fea47895694d8806c8d00bc99707eb46547bce2aed22e0e6d`
+- 归档：同目录上级的 `web-1.3.1-1fa77ea8.tar.gz`
+- 归档 SHA-256：`d84211a5f96586675a179d4f8d5b59c04caf1a2669f02ea6e871c0d639d29e5e`
+
+本轮没有原生实机发布或线上切换。香港 Web 仍为 `1.3.1-9af159f1b38e`，API 仍为
+`api-1.3.0-4c8d0c13a714`。上一轮 `23ae7dde4d81` 的冻结包及各轮输入/证据均保留。
 
 诊断及逐次结果位于本机 `D:/GameDev/DSPidle2/artifacts/web-performance-loop-20261026/`，
 前缀为 `save-verify-`；复现入口为 `experiments/web-save-checkpoints/run-series.ps1`，
 汇总为 `save-verification-summary.mjs`。没有提交真实存档或生产写入凭据。
+最终包复验记录为 `save-verify-slot-frozen-1.json` 和 `save-verify-snapshot-frozen-1.json`。
 
 ## 后续
 

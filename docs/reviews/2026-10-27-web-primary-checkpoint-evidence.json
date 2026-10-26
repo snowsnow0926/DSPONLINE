@@ -233,5 +233,44 @@
     "Real-clock terminal totals differ by session duration; this is not a deterministic engine A/B.",
     "Do not infer whole-game FPS, input latency, a general speed percentage, or lower memory from these samples.",
     "Explicit-checkpoint stability improved in two cleared-debt candidate runs, but 1-2 second transition gaps and roughly 5 GB process peaks remain."
-  ]
+  ],
+  "finalFrozenSmoke": {
+    "buildId": "1.3.1+94e263cc562d",
+    "observationSeconds": 5,
+    "outcome": "completed",
+    "savedIntegrity": "valid",
+    "entityCount": 110042,
+    "beltCount": 233300,
+    "stateVersion": 47,
+    "paused": "true",
+    "autosaveIntervalSeconds": 0,
+    "rawEvidenceSha256": "daccf3b95e3fe2c9c1fb64985ad122c48661a125dc990646ac34525694b62d04"
+  },
+  "finalArtifact": {
+    "git": {
+      "sha": "94e263cc562d50c59a8ac9e1946927f2db32c516",
+      "clean": true
+    },
+    "buildId": "1.3.1+94e263cc562d",
+    "fileCount": 196,
+    "aggregateSha256": "49d5ebb0846d1cf78e995e56ac5e03cddc8602e00f73abbe021c3b3e4d270f52",
+    "archiveSha256": "74866482436e22ae9c1725afda07512b5ed4736851d9bf73cddfdd09914b94f2"
+  },
+  "validation": {
+    "unit": {
+      "passed": 3555,
+      "skipped": 38
+    },
+    "chromium": {
+      "passed": 484,
+      "skipped": 33
+    },
+    "productionPwa": {
+      "passed": 1
+    },
+    "finalLargeSaveSmoke": {
+      "passed": 1
+    },
+    "webBuild": "passed"
+  }
 }

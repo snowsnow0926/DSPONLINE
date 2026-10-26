@@ -146,12 +146,14 @@ import type { QuantumSettlementInput, QuantumSettlementOutput } from "./quantumL
 import { compareQuantumInteger } from "./quantumLogisticsNetwork";
 import type { ConstructionQuantumDeliveryFlow } from "./types";
 import {
+  createRecursiveCraftPlanner,
   getRecipeNetOutput,
   planRecursiveRequirements,
   planSelectedRecipe,
   type RecursiveCraftBlocker,
   type RecursiveCraftDecision,
   type RecursiveCraftPlan,
+  type RecursiveCraftPlanner,
 } from "./recursiveCrafting";
 import { advanceSpeedrunClock, createSpeedrunState, evaluateSpeedrunMilestones } from "./speedrun";
 import { createIdleSettlementState } from "./idleSettlement";
@@ -2343,35 +2345,13 @@ export function createSimulationLookupContext(
     group.routes.push(route);
     route.sourceGroupIndex = group.index;
     context.beltRuntime.groupKeyByBeltId.set(route.belt.id, key);
-    if (beltHasRuntimeSignal(route.belt)) context.beltRuntime.activeGroupKeys.add(key);
   }
-  let initiallyDormantRouteCount = 0;
   for (const group of context.beltRuntime.routeGroups) {
     [...group.routes]
       .sort((left, right) => compareUtf8(left.belt.id, right.belt.id))
       .forEach((route, index) => { route.stableSourceOrder = index; });
-    const sourceAmount = group.source?.outputs[group.itemId] ?? 0;
-    // Input settlement establishes this step's belt credit before production.
-    // A source that can produce during the step must therefore stay awake even
-    // with an empty checkpoint buffer; otherwise its first output is delayed by
-    // one simulation boundary. Only groups with a closed no-production proof
-    // are counted as dormant.
-    const active = sourceAmount > EPSILON || group.potentiallyProduces ||
-      context.beltRuntime.activeGroupKeys.has(group.key);
-    const planetRuntime = context.beltRuntime.byPlanet.get(group.planetId);
-    for (const route of group.routes) {
-      if (active) planetRuntime?.activeBelts.add(route.belt.id);
-      else {
-        initiallyDormantRouteCount += 1;
-        planetRuntime?.inputStarvedBelts.add(route.belt.id);
-      }
-    }
   }
-  context.beltRuntime.initiallyDormantRouteCount = initiallyDormantRouteCount;
-  const dormantRouteThreshold = context.beltRoutes.length >= 50_000
-    ? Math.max(256, Math.ceil(context.beltRoutes.length * 0.02))
-    : Math.max(64, Math.ceil(context.beltRoutes.length * 0.1));
-  context.beltRuntime.activeQueueEnabled = initiallyDormantRouteCount >= dormantRouteThreshold;
+  refreshBeltRuntimeActivity(context);
   for (const group of context.beltRuntime.routeGroups) {
     if (group.routes.length === 1) {
       context.beltRuntime.settlementEntries.push(group.routes[0]);
@@ -5791,6 +5771,51 @@ function ensureDynamicRouteLookup(state: GameState, lookup: SimulationLookupCont
 export function ensureSimulationDynamicRouteLookup(state: GameState, lookup: SimulationLookupContext): SimulationLookupContext {
   ensureDynamicRouteLookup(state, lookup);
   return lookup;
+}
+
+/** Reuse topology within an isolated inventory-only macro transaction. The
+ * caller must reject changed arrays, settings, recipes and research first. */
+export function refreshSimulationLookupAfterInventoryMutation(state: GameState, lookup: SimulationLookupContext): void {
+  lookup.stationPeerMatches.clear();
+  lookup.blockedStationDispatch.clear();
+  lookup.dispatchResultsBySlot.clear();
+  lookup.routeEconomics.clear();
+  lookup.interstellarPaths.clear();
+  lookup.constructionAutomationPlanCache.clear();
+  refreshBeltRuntimeActivity(lookup);
+  rebuildDynamicRouteLookup(state, lookup);
+}
+
+function refreshBeltRuntimeActivity(lookup: SimulationLookupContext): void {
+  // Rehydrate the same activity directory a fresh lookup would create, but
+  // retain immutable routes, capacity groups and their deterministic order.
+  const runtime = lookup.beltRuntime;
+  runtime.activeGroupKeys.clear();
+  for (const planet of runtime.byPlanet.values()) {
+    planet.activeBelts.clear();
+    planet.blockedBelts.clear();
+    planet.inputStarvedBelts.clear();
+    planet.outputFullBelts.clear();
+    planet.powerLimitedBelts.clear();
+  }
+  let dormant = 0;
+  for (const group of runtime.routeGroups) {
+    const signal = group.routes.some((route) => beltHasRuntimeSignal(route.belt));
+    if (signal) runtime.activeGroupKeys.add(group.key);
+    // Sources that can produce in this step need input-settlement credit
+    // even with an empty checkpoint buffer, so they must remain awake.
+    const active = (group.source?.outputs[group.itemId] ?? 0) > EPSILON || group.potentiallyProduces || signal;
+    const planet = runtime.byPlanet.get(group.planetId);
+    for (const route of group.routes) {
+      if (active) planet?.activeBelts.add(route.belt.id);
+      else { dormant += 1; planet?.inputStarvedBelts.add(route.belt.id); }
+    }
+  }
+  runtime.initiallyDormantRouteCount = dormant;
+  const threshold = lookup.beltRoutes.length >= 50_000
+    ? Math.max(256, Math.ceil(lookup.beltRoutes.length * 0.02))
+    : Math.max(64, Math.ceil(lookup.beltRoutes.length * 0.1));
+  runtime.activeQueueEnabled = dormant >= threshold;
 }
 
 /** Builds the hydrated read-only indexes used by one P6 planet-phase batch. */
@@ -11218,6 +11243,20 @@ interface InternalConstructionQuickCraftPlan extends ConstructionQuickCraftPlan 
 const recursiveManufacturingRecipes = (): RecipeDefinition[] =>
   Object.values(RECIPES).filter((recipe) => isRecursiveManufacturingRecipe(recipe.id));
 
+interface ConstructionPlanningContext {
+  planner: RecursiveCraftPlanner;
+  version: string;
+}
+
+function createConstructionPlanningContext(state: GameState): ConstructionPlanningContext {
+  return {
+    planner: createRecursiveCraftPlanner({
+      recipes: recursiveManufacturingRecipes(), completedTechnologyIds: state.research.completedTechIds,
+    }),
+    version: `${[...state.research.completedTechIds].sort().join(",")}|${state.contentPacks.map((pack) => `${pack.id}@${pack.version}`).sort().join(",")}`,
+  };
+}
+
 function recursiveManufacturingInventory(state: GameState): Partial<Record<ItemId, number>> {
   return {
     ...state.tray,
@@ -11732,6 +11771,7 @@ function buildConstructionAutomationPlan(
   definition: ConstructionAutomationTargetDefinition,
   planetId: PlanetId,
   extraInventory: Partial<Record<ItemId, number>> = {},
+  context?: ConstructionPlanningContext,
 ): ConstructionAutomationPlan {
   const tray = trayForPlanet(state, planetId);
   const inventory = Object.fromEntries((Object.entries(tray) as Array<[ItemId, number]>).map(([itemId, amount]) => [
@@ -11742,23 +11782,10 @@ function buildConstructionAutomationPlan(
     const normalized = Math.max(0, Math.floor(amount ?? 0));
     if (normalized > 0) inventory[itemId] = Math.min(Number.MAX_SAFE_INTEGER, (inventory[itemId] ?? 0) + normalized);
   }
-  const recipes = recursiveManufacturingRecipes();
+  const planner = (context ?? createConstructionPlanningContext(state)).planner;
   const plan = definition.kind === "fleet" && definition.recipeId
-    ? planSelectedRecipe({
-      inventory,
-      recipe: RECIPES[definition.recipeId],
-      batches: 1,
-      recipes,
-      completedTechnologyIds: state.research.completedTechIds,
-      allowRecipe: (recipe) => isRecursiveManufacturingRecipe(recipe.id),
-    })
-    : planRecursiveRequirements({
-      inventory,
-      requirements: definition.costs,
-      recipes,
-      completedTechnologyIds: state.research.completedTechIds,
-      allowRecipe: (recipe) => isRecursiveManufacturingRecipe(recipe.id),
-    });
+    ? planner.recipe(inventory, RECIPES[definition.recipeId], 1)
+    : planner.requirements(inventory, definition.costs);
   if (!plan.possible) return { steps: [], blocker: constructionAutomationBlocker(plan.blocker) };
   const steps: ConstructionAutomationStep[] = plan.steps.map((step) => ({
     kind: "material",
@@ -12160,6 +12187,7 @@ function repairConstructionAutomationJob(
   job: ConstructionAutomationJob,
   step: ConstructionAutomationStep,
   entityId?: string,
+  context?: ConstructionPlanningContext,
 ): boolean {
   const missing = constructionAutomationMissingRequirement(state, planetId, job, step, entityId);
   if (!missing) return false;
@@ -12172,7 +12200,7 @@ function repairConstructionAutomationJob(
       if (amount > 0) extraInventory[itemId] = Math.floor((extraInventory[itemId] ?? 0) + amount);
     }
   }
-  const replanned = buildConstructionAutomationPlan(state, definition, planetId, extraInventory);
+  const replanned = buildConstructionAutomationPlan(state, definition, planetId, extraInventory, context);
   if (replanned.blocker || replanned.steps.length < 1) return false;
   // Keep the completed prefix for deterministic save/reload history, but
   // replace every uncommitted step with a fresh plan built from current tray,
@@ -12358,6 +12386,7 @@ function analyzeRepeatableConstructionAutomationPlan(
   state: GameState,
   definition: ConstructionAutomationTargetDefinition,
   plan: ConstructionAutomationPlan,
+  context?: ConstructionPlanningContext,
 ): RepeatableConstructionAutomationBatch | null {
   if (plan.steps.length === 0) return null;
   const inventory: Partial<Record<ItemId, number>> = {};
@@ -12366,13 +12395,23 @@ function analyzeRepeatableConstructionAutomationPlan(
   const fleetReturns: Partial<Record<ItemId, number>> = {};
   const producedItems: Partial<Record<ItemId, number>> = {};
   const touchedTrayItems = new Set<ItemId>();
-  const job: ConstructionAutomationJob = {
-    constructionId: definition.id,
-    steps: plan.steps,
-    stepIndex: 0,
-    elapsedSeconds: 0,
-    inventory,
-  };
+  // Every forward step needs the same backward suffix calculation. Build it
+  // once instead of rescanning the remaining recipe chain after every step.
+  const suffixNeeds: Partial<Record<ItemId, number>>[] = new Array(plan.steps.length + 1);
+  suffixNeeds[plan.steps.length] = {};
+  for (let index = plan.steps.length - 1; index >= 0; index -= 1) {
+    const step = plan.steps[index];
+    const needed = { ...suffixNeeds[index + 1] };
+    for (const requirement of constructionAutomationRequirements(step)) {
+      needed[requirement.itemId] = Math.max(0, Math.floor((needed[requirement.itemId] ?? 0) + requirement.amount));
+    }
+    if (step.kind === "material") {
+      for (const output of getRecipe(step.recipeId)?.outputs ?? []) {
+        needed[output.itemId] = Math.max(0, Math.floor((needed[output.itemId] ?? 0) - output.amount * step.batches));
+      }
+    }
+    suffixNeeds[index] = needed;
+  }
   for (let stepIndex = 0; stepIndex < plan.steps.length; stepIndex += 1) {
     const step = plan.steps[stepIndex];
     for (const requirement of constructionAutomationRequirements(step)) {
@@ -12393,7 +12432,7 @@ function analyzeRepeatableConstructionAutomationPlan(
         producedItems[output.itemId] = Math.floor((producedItems[output.itemId] ?? 0) + amount);
       }
     }
-    const needed = constructionAutomationRemainingInventoryNeed(job, stepIndex + 1);
+    const needed = suffixNeeds[stepIndex + 1];
     const retained: Partial<Record<ItemId, number>> = {};
     for (const [itemId, rawAmount] of Object.entries(inventory) as Array<[ItemId, number]>) {
       const amount = Math.max(0, Math.floor(rawAmount ?? 0));
@@ -12413,13 +12452,12 @@ function analyzeRepeatableConstructionAutomationPlan(
     if (fallback.reason === "technology") return [];
     return getRecipe(fallback.recipeId)?.inputs.map((input) => input.itemId) ?? [];
   }));
-  const recipes = recursiveManufacturingRecipes();
+  const planner = pending.length > 0 ? (context ?? createConstructionPlanningContext(state)).planner : undefined;
   while (pending.length > 0) {
     const itemId = pending.pop()!;
     if (relevant.has(itemId)) continue;
     relevant.add(itemId);
-    for (const recipe of recipes) {
-      if (getRecipeNetOutput(recipe, itemId) <= 0) continue;
+    for (const recipe of planner!.producers(itemId)) {
       for (const input of recipe.inputs) pending.push(input.itemId);
     }
   }
@@ -12455,7 +12493,18 @@ interface CachedConstructionAutomationPlan {
   plan: ConstructionAutomationPlan;
   batch: RepeatableConstructionAutomationBatch | null;
   inventorySnapshot: Partial<Record<ItemId, number>>;
-  materialInventoryVersion: string;
+  /** At most three other material phases; flat and owned by this cache entry. */
+  alternatives?: CachedConstructionAutomationPlan[];
+}
+
+function retainConstructionPlanPhases(
+  selected: CachedConstructionAutomationPlan,
+  previous: readonly CachedConstructionAutomationPlan[],
+): CachedConstructionAutomationPlan {
+  const alternatives = previous.filter((plan) => plan !== selected).slice(0, 3);
+  for (const plan of previous) delete plan.alternatives;
+  if (alternatives.length > 0) selected.alternatives = alternatives;
+  return selected;
 }
 
 interface ConstructionAutomationComputeBudget {
@@ -12469,26 +12518,21 @@ function constructionAutomationInventorySnapshot(
   relevantItems?: readonly ItemId[],
 ): Partial<Record<ItemId, number>> {
   const tray = trayForPlanet(state, planetId);
-  const entries = relevantItems
-    ? relevantItems.map((itemId) => [itemId, tray[itemId] ?? 0] as [ItemId, number])
-    : Object.entries(tray) as Array<[ItemId, number]>;
-  return Object.fromEntries(entries
-    .map(([itemId, amount]) => [itemId, Math.max(0, Math.floor(amount ?? 0))] as const)
-    .filter(([, amount]) => amount > 0)
-    .sort(([left], [right]) => left.localeCompare(right))) as Partial<Record<ItemId, number>>;
-}
-
-function constructionAutomationInventoryVersion(inventory: Partial<Record<ItemId, number>>): string {
-  return (Object.entries(inventory) as Array<[ItemId, number]>)
-    .map(([itemId, amount]) => `${itemId}:${amount}`)
-    .join("|");
+  const snapshot: Partial<Record<ItemId, number>> = {};
+  for (const itemId of relevantItems ?? Object.keys(tray) as ItemId[]) {
+    const amount = Math.max(0, Math.floor(tray[itemId] ?? 0));
+    if (amount > 0) snapshot[itemId] = amount;
+  }
+  return snapshot;
 }
 
 function constructionAutomationPlanCacheKey(
   state: GameState,
   definition: ConstructionAutomationTargetDefinition,
   planetId: PlanetId,
+  context?: ConstructionPlanningContext,
 ): string {
+  if (context) return `${planetId}|${definition.id}|${definition.recipeId ?? "building"}|${context.version}`;
   const technologyVersion = [...state.research.completedTechIds].sort().join(",");
   const contentVersion = state.contentPacks.map((pack) => `${pack.id}@${pack.version}`).sort().join(",");
   return `${planetId}|${definition.id}|${definition.recipeId ?? "building"}|${technologyVersion}|${contentVersion}`;
@@ -12561,10 +12605,11 @@ function constructionAutomationCachedPlanValid(
   cached: CachedConstructionAutomationPlan,
 ): boolean {
   const inventorySnapshot = constructionAutomationInventorySnapshot(state, planetId, cached.batch?.relevantItems);
-  const materialInventoryVersion = constructionAutomationInventoryVersion(inventorySnapshot);
   if (cached.batch && cached.batch.jobsPerCycle > 1 &&
     !constructionAutomationCycleStateMatches(state, planetId, cached.batch)) return false;
-  if (materialInventoryVersion === cached.materialInventoryVersion) return true;
+  const itemIds = Object.keys(inventorySnapshot) as ItemId[];
+  if (itemIds.length === Object.keys(cached.inventorySnapshot).length &&
+    itemIds.every((itemId) => inventorySnapshot[itemId] === cached.inventorySnapshot[itemId])) return true;
   if (cached.plan.blocker) return false;
   // A proven two-job cycle intentionally consumes a byproduct from the first
   // job in the second job. Its tray snapshot therefore changes on every
@@ -12580,14 +12625,18 @@ function constructionAutomationCachedPlanValid(
       !(cached.batch?.cycleStateItems ?? []).includes(itemId));
     if (materialAdded) return false;
     cached.inventorySnapshot = inventorySnapshot;
-    cached.materialInventoryVersion = materialInventoryVersion;
     return true;
   }
   const materialAdded = (Object.entries(inventorySnapshot) as Array<[ItemId, number]>).some(([itemId, amount]) =>
     amount > Math.max(0, Math.floor(cached.inventorySnapshot[itemId] ?? 0)));
-  if (materialAdded || !constructionAutomationPlanInputsAvailable(state, planetId, cached.plan)) return false;
+  if (materialAdded) return false;
+  // The batch records the full external prefix cost of this exact step list.
+  // Recheck that ledger directly instead of cloning and replaying every step.
+  const inputsAvailable = cached.batch
+    ? constructionAutomationBatchInputsAvailable(state, planetId, cached.batch)
+    : constructionAutomationPlanInputsAvailable(state, planetId, cached.plan);
+  if (!inputsAvailable) return false;
   cached.inventorySnapshot = inventorySnapshot;
-  cached.materialInventoryVersion = materialInventoryVersion;
   return true;
 }
 
@@ -12728,6 +12777,7 @@ function tryBuildStableConstructionAutomationCycle(
   budget: ConstructionAutomationComputeBudget,
   profiler?: SimulationProfiler,
   entityId?: string,
+  context?: ConstructionPlanningContext,
 ): RepeatableConstructionAutomationBatch | null {
   const maxProbeJobs = 8;
   if (first.jobsPerCycle !== 1 || budget.remainingPlanBuilds < 1) return null;
@@ -12747,11 +12797,12 @@ function tryBuildStableConstructionAutomationCycle(
       definition,
       planetId,
       entityId ? constructionAutomationQuantumBuffer(planning, entityId) : undefined,
+      context,
     );
     budget.remainingPlanBuilds -= 1;
     if (profiler) profiler.constructionPlanBuilds += 1;
     if (nextPlan.blocker) return null;
-    const next = analyzeRepeatableConstructionAutomationPlan(planning, definition, nextPlan);
+    const next = analyzeRepeatableConstructionAutomationPlan(planning, definition, nextPlan, context);
     if (!next) return null;
     for (const itemId of Object.keys(next.trayReturns) as ItemId[]) cycleStateItems.add(itemId);
     if (constructionAutomationCycleFingerprint(planning, planetId, next) === initialFingerprint) {
@@ -12779,20 +12830,29 @@ function resolveConstructionAutomationPlan(
   cache: Map<string, CachedConstructionAutomationPlan>,
   budget: ConstructionAutomationComputeBudget,
   profiler?: SimulationProfiler,
+  context?: ConstructionPlanningContext,
 ): CachedConstructionAutomationPlan | null {
-  const cacheKey = constructionAutomationPlanCacheKey(state, definition, planetId);
+  const cacheKey = constructionAutomationPlanCacheKey(state, definition, planetId, context);
   const cached = cache.get(cacheKey);
   if (cached && constructionAutomationCachedPlanValid(state, planetId, cached)) {
     if (profiler) profiler.constructionPlanCacheHits += 1;
     return cached;
   }
+  const previous = cached ? [cached, ...(cached.alternatives ?? [])] : [];
+  for (const alternative of previous.slice(1)) {
+    if (!constructionAutomationCachedPlanValid(state, planetId, alternative)) continue;
+    const selected = retainConstructionPlanPhases(alternative, previous);
+    cache.set(cacheKey, selected);
+    if (profiler) profiler.constructionPlanCacheHits += 1;
+    return selected;
+  }
   if (budget.remainingPlanBuilds < 1) return null;
   budget.remainingPlanBuilds -= 1;
-  const plan = buildConstructionAutomationPlan(state, definition, planetId);
-  const batch = plan.blocker ? null : analyzeRepeatableConstructionAutomationPlan(state, definition, plan);
+  const plan = buildConstructionAutomationPlan(state, definition, planetId, undefined, context);
+  const batch = plan.blocker ? null : analyzeRepeatableConstructionAutomationPlan(state, definition, plan, context);
   const resolvedBatch = batch && !constructionAutomationBatchCanRepeat(state, planetId, batch)
     ? (hasSingleConstructionAutomationTarget(state, definition.id)
-      ? (tryBuildStableConstructionAutomationCycle(state, definition, planetId, batch, budget, profiler) ?? batch)
+      ? (tryBuildStableConstructionAutomationCycle(state, definition, planetId, batch, budget, profiler, undefined, context) ?? batch)
       : batch)
     : batch;
   // The dependency closure includes inputs to higher-priority fallback
@@ -12809,9 +12869,8 @@ function resolveConstructionAutomationPlan(
     // bounded batch fallback for the multi-target case.
     batch: resolvedBatch,
     inventorySnapshot,
-    materialInventoryVersion: constructionAutomationInventoryVersion(inventorySnapshot),
   };
-  cache.set(cacheKey, resolved);
+  cache.set(cacheKey, retainConstructionPlanPhases(resolved, previous));
   if (profiler) profiler.constructionPlanBuilds += 1;
   return resolved;
 }
@@ -13006,6 +13065,7 @@ function runConstructionCenters(
     .filter(isQuantumStation).reduce((sum, tower) => sum + Math.max(0, tower.machineCount), 0);
   const warehouseForPlanning = towerStacks > 0 ? constructionQuantumWarehouseInventory(state) : {};
   const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
+  const planningContext = state.constructionAutomation.enabled ? createConstructionPlanningContext(state) : undefined;
   const activeTargetCountForBudget = getActiveConstructionAutomationTargets(state).length;
   const extendedBudget = batchConstructionAutomation && activeTargetCountForBudget > 1 &&
     centerEntities.some((entity) => entity.machineCount >= CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD);
@@ -13104,7 +13164,7 @@ function runConstructionCenters(
           if (profiler) profiler.constructionPlanBuilds += 1;
           resolved = {
             plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId,
-              constructionQuantumPlanningInventory(quantumBuffer, warehouseForPlanning)),
+              constructionQuantumPlanningInventory(quantumBuffer, warehouseForPlanning), planningContext),
             batch: null,
           };
         } else if (Object.keys(quantumBuffer).length > 0 || Object.keys(warehouseForPlanning).length > 0) {
@@ -13128,10 +13188,10 @@ function runConstructionCenters(
             budget.remainingPlanBuilds -= 1;
             if (profiler) profiler.constructionPlanBuilds += 1;
             const directPlan = buildConstructionAutomationPlan(state, target.definition, entity.planetId,
-              constructionQuantumPlanningInventory(quantumBuffer, warehouseForPlanning));
+              constructionQuantumPlanningInventory(quantumBuffer, warehouseForPlanning), planningContext);
             const directBaseBatch = directPlan.blocker
               ? null
-              : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan);
+              : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan, planningContext);
             const directBatch = directBaseBatch &&
               !constructionAutomationBatchCanRepeat(state, entity.planetId, directBaseBatch) &&
               hasSingleConstructionAutomationTarget(state, target.definition.id)
@@ -13143,6 +13203,7 @@ function runConstructionCenters(
                 budget,
                 profiler,
                 entity.id,
+                planningContext,
               ) ?? directBaseBatch)
               : directBaseBatch;
             resolved = {
@@ -13159,7 +13220,7 @@ function runConstructionCenters(
             }
           }
         } else {
-          resolved = resolveConstructionAutomationPlan(state, target.definition, entity.planetId, planCache, budget, profiler);
+          resolved = resolveConstructionAutomationPlan(state, target.definition, entity.planetId, planCache, budget, profiler, planningContext);
         }
         if (!resolved) {
           if (profiler) profiler.constructionGuardHits += 1;
@@ -13207,7 +13268,9 @@ function runConstructionCenters(
         }
         job = {
           constructionId: target.definition.id,
-          steps: plan.steps,
+          // A persisted job may repair its remaining suffix. Keep cached
+          // plans immutable so a later phase cannot inherit that repair.
+          steps: plan.steps.map((step) => ({ ...step })),
           stepIndex: 0,
           elapsedSeconds: 0,
           inventory: {},
@@ -13231,7 +13294,7 @@ function runConstructionCenters(
           constructionMaterialsAvailable(job.inventory, trayForPlanet(state, entity.planetId),
           constructionQuantumPlanningInventory(constructionAutomationQuantumBuffer(state, entity.id), warehouseForPlanning),
           constructionAutomationRequirements(step))) break;
-        if (repairConstructionAutomationJob(state, entity.planetId, job, step, entity.id)) continue;
+        if (repairConstructionAutomationJob(state, entity.planetId, job, step, entity.id, planningContext)) continue;
         break;
       }
       if (!reserveConstructionAutomationInputs(state, entity.planetId, job, step, entity.id)) break;

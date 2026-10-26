@@ -69,8 +69,9 @@ describe.skipIf(!fixturePath)("construction automation real-save recovery", () =
       if (!cpu) return;
       await new Promise<void>((resolve, reject) => cpu.post("Profiler.stop", (error, result) => {
         if (error) return reject(error);
-        mkdirSync("artifacts/endgame-construction-20261026", { recursive: true });
-        writeFileSync(`artifacts/endgame-construction-20261026/${name}.cpuprofile`, JSON.stringify(result.profile));
+        const directory = process.env.DSP_CONSTRUCTION_PROFILE_DIR ?? "artifacts/endgame-deep-20261026";
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(`${directory}/${name}.cpuprofile`, JSON.stringify(result.profile));
         resolve();
       }));
     };
@@ -85,11 +86,12 @@ describe.skipIf(!fixturePath)("construction automation real-save recovery", () =
     const timeWarpMs = performance.now() - timeWarpStartedAt;
     await stopCpu("time-warp");
     cpu?.disconnect();
-    console.log(`REAL_TIME_WARP_PROFILE ${JSON.stringify({ constructionMs, construction, timeWarpMs, report: timeWarp.report })}`);
-
     expect(timeWarp.state.elapsedSeconds - source!.elapsedSeconds).toBeCloseTo(64, 6);
     expect(timeWarp.report.algorithmVersion).toBe(TIME_WARP_APPROXIMATION_ALGORITHM_VERSION);
-    expect(inspectSave(serializeEnvelope(timeWarp.state)).valid).toBe(true);
+    const serialized = serializeEnvelope(timeWarp.state, 1_800_000_000_000);
+    expect(inspectSave(serialized).valid).toBe(true);
+    console.log(`REAL_TIME_WARP_PROFILE ${JSON.stringify({ constructionMs, construction, timeWarpMs,
+      report: timeWarp.report, persistedSha256: createHash("sha256").update(serialized).digest("hex") })}`);
     expect(createHash("sha256").update(readFileSync(fixturePath!, "utf8")).digest("hex")).toBe(sourceSha256);
   });
 

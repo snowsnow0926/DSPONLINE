@@ -57,14 +57,10 @@ interface OptionResult {
 
 const cloneWork = (work: PlannerWork): PlannerWork => ({
   inventory: { ...work.inventory },
-  steps: work.steps.map((step) => ({ ...step })),
-  decisions: work.decisions.map((decision) => ({
-    ...decision,
-    fallbacks: decision.fallbacks.map((fallback) => ({
-      ...fallback,
-      blocker: fallback.blocker ? { ...fallback.blocker } : undefined,
-    })),
-  })),
+  // Existing entries are immutable within one planning call. Branches append
+  // to their own arrays; cloning every prior entry makes a long chain quadratic.
+  steps: [...work.steps],
+  decisions: [...work.decisions],
 });
 
 function normalizedInventory(source: Partial<Record<ItemId, number>>): Partial<Record<ItemId, number>> {
@@ -112,6 +108,7 @@ function ensureItemOptions(
   requiredAmount: number,
   resolving: ReadonlySet<ItemId>,
   depth: number,
+  recipeOverride?: readonly RecipeDefinition[],
 ): OptionResult {
   const required = Math.max(0, Math.floor(requiredAmount));
   const current = Math.max(0, Math.floor(work.inventory[itemId] ?? 0));
@@ -120,7 +117,7 @@ function ensureItemOptions(
     return { options: [], blockers: [{ itemId, current, required, reason: "cycle", depth }] };
   }
 
-  const recipes = producingRecipes(context, itemId);
+  const recipes = recipeOverride ?? producingRecipes(context, itemId);
   if (recipes.length === 0) {
     return {
       options: [],
@@ -226,6 +223,93 @@ function planRequirementsFromWork(
   return { works: candidates, blockers };
 }
 
+/**
+ * The same ordered, capped option stream as the eager planner. Each input
+ * keeps its own option cap, so later requirements can backtrack without
+ * exploring candidates the original planner would have pruned. Usually the
+ * first complete plan is enough; unused alternatives need never be copied.
+ */
+function lazyRequirements(
+  context: PlannerContext,
+  works: Iterable<PlannerWork>,
+  requirements: readonly ItemAmount[],
+  resolving: ReadonlySet<ItemId>,
+  depth: number,
+): Iterable<PlannerWork> {
+  let candidates = works;
+  for (const requirement of requirements) {
+    const previous = candidates;
+    candidates = (function* () {
+      let emitted = 0;
+      for (const candidate of previous) {
+        for (const option of lazyItemOptions(context, candidate, requirement.itemId, requirement.amount, resolving, depth)) {
+          const next = cloneWork(option);
+          next.inventory[requirement.itemId] = Math.max(0, Math.floor((next.inventory[requirement.itemId] ?? 0) - requirement.amount));
+          yield next;
+          if (++emitted >= context.optionLimit) return;
+        }
+      }
+    })();
+  }
+  return candidates;
+}
+
+function* lazyItemOptions(
+  context: PlannerContext,
+  work: PlannerWork,
+  itemId: ItemId,
+  requiredAmount: number,
+  resolving: ReadonlySet<ItemId>,
+  depth: number,
+): Generator<PlannerWork> {
+  const required = Math.max(0, Math.floor(requiredAmount));
+  const current = Math.max(0, Math.floor(work.inventory[itemId] ?? 0));
+  if (current >= required) { yield work; return; }
+  if (resolving.has(itemId)) return;
+  const nextResolving = new Set(resolving);
+  nextResolving.add(itemId);
+  const earlierAttempts: Array<{ recipeId: RecipeId; viable: boolean; blocker?: RecursiveCraftBlocker }> = [];
+  let emitted = 0;
+  for (const recipe of producingRecipes(context, itemId)) {
+    if (recipe.requiredTechId && !context.completedTechnologyIds.has(recipe.requiredTechId)) {
+      earlierAttempts.push({ recipeId: recipe.id, viable: false, blocker: {
+        itemId, current, required, reason: "technology", recipeId: recipe.id, technologyId: recipe.requiredTechId,
+      } });
+      continue;
+    }
+    const batches = Math.max(1, Math.ceil((required - current) / getRecipeNetOutput(recipe, itemId)));
+    const primary = recipe.outputs.find((output) => output.itemId === itemId && output.amount > 0)!;
+    let viable = false;
+    for (const candidate of lazyRequirements(context, [cloneWork(work)], recipe.inputs.map((input) => ({
+      itemId: input.itemId, amount: input.amount * batches,
+    })), nextResolving, depth + 1)) {
+      viable = true;
+      for (const output of recipe.outputs) {
+        candidate.inventory[output.itemId] = Math.floor((candidate.inventory[output.itemId] ?? 0) + output.amount * batches);
+      }
+      candidate.steps.push({ recipeId: recipe.id, batches, outputItemId: itemId, outputAmount: primary.amount * batches });
+      candidate.decisions.push({ itemId, recipeId: recipe.id, fallbacks: earlierAttempts.map((attempt) => ({
+        recipeId: attempt.recipeId, blocker: attempt.blocker,
+        reason: attempt.viable ? "conflict" : attempt.blocker?.reason === "technology" ? "technology" : "materials",
+      })) });
+      yield candidate;
+      if (++emitted >= context.optionLimit) return;
+    }
+    // Failed routes retain the exact eager diagnostic, including deepest
+    // blockers in pruned branches. This path does not enumerate successful
+    // alternatives and never commits the probe's inventory.
+    const blocker = viable ? undefined
+      : preferredBlocker(ensureItemOptions(context, work, itemId, required, resolving, depth, [recipe]).blockers);
+    earlierAttempts.push({ recipeId: recipe.id, viable, blocker });
+  }
+}
+
+function firstLazyPlan(context: PlannerContext, initial: PlannerWork, requirements: ItemAmount[]): PlannerWork | undefined {
+  const iterator = lazyRequirements(context, [initial], requirements, new Set(), 0)[Symbol.iterator]();
+  try { return iterator.next().value; }
+  finally { iterator.return?.(); }
+}
+
 function plannerContext({ recipes, completedTechnologyIds, allowRecipe, optionLimit }: {
   recipes: RecipeDefinition[];
   completedTechnologyIds: readonly TechId[];
@@ -264,11 +348,18 @@ export function planRecursiveRequirements({ inventory, requirements, recipes, co
   allowRecipe?: (recipe: RecipeDefinition) => boolean;
   optionLimit?: number;
 }): RecursiveCraftPlan {
+  return planRequirementsWithContext(plannerContext({ recipes, completedTechnologyIds, allowRecipe, optionLimit }), inventory, requirements);
+}
+
+function planRequirementsWithContext(context: PlannerContext, inventory: Partial<Record<ItemId, number>>, requirements: ItemAmount[]): RecursiveCraftPlan {
   const initial: PlannerWork = { inventory: normalizedInventory(inventory), steps: [], decisions: [] };
+  const normalizedRequirements = requirements.map((requirement) => ({ ...requirement, amount: Math.max(0, Math.floor(requirement.amount)) }));
+  const first = firstLazyPlan(context, initial, normalizedRequirements);
+  if (first) return { possible: true, inventory: first.inventory, steps: first.steps, decisions: first.decisions };
   const result = planRequirementsFromWork(
-    plannerContext({ recipes, completedTechnologyIds, allowRecipe, optionLimit }),
+    context,
     [initial],
-    requirements.map((requirement) => ({ ...requirement, amount: Math.max(0, Math.floor(requirement.amount)) })),
+    normalizedRequirements,
   );
   const selected = result.works[0];
   return selected
@@ -285,8 +376,11 @@ export function planSelectedRecipe({ inventory, recipe, batches, recipes, comple
   allowRecipe?: (candidate: RecipeDefinition) => boolean;
   optionLimit?: number;
 }): RecursiveCraftPlan {
+  return planRecipeWithContext(plannerContext({ recipes, completedTechnologyIds, allowRecipe, optionLimit }), inventory, recipe, batches);
+}
+
+function planRecipeWithContext(context: PlannerContext, inventory: Partial<Record<ItemId, number>>, recipe: RecipeDefinition, batches: number): RecursiveCraftPlan {
   const count = Math.max(1, Math.floor(batches));
-  const context = plannerContext({ recipes, completedTechnologyIds, allowRecipe, optionLimit });
   const initial: PlannerWork = { inventory: normalizedInventory(inventory), steps: [], decisions: [] };
   if (recipe.requiredTechId && !context.completedTechnologyIds.has(recipe.requiredTechId)) {
     const output = recipe.outputs[0];
@@ -305,10 +399,12 @@ export function planSelectedRecipe({ inventory, recipe, batches, recipes, comple
       },
     };
   }
-  const result = planRequirementsFromWork(context, [initial], recipe.inputs.map((input) => ({
+  const requirements = recipe.inputs.map((input) => ({
     itemId: input.itemId,
     amount: input.amount * count,
-  })));
+  }));
+  const first = firstLazyPlan(context, initial, requirements);
+  const result = first ? { works: [first], blockers: [] } : planRequirementsFromWork(context, [initial], requirements);
   const selected = result.works[0];
   if (!selected) return {
     possible: false,
@@ -326,4 +422,20 @@ export function planSelectedRecipe({ inventory, recipe, batches, recipes, comple
     selected.decisions.push({ itemId: primary.itemId, recipeId: recipe.id, fallbacks: [] });
   }
   return { possible: true, inventory: selected.inventory, steps: selected.steps, decisions: selected.decisions };
+}
+
+export interface RecursiveCraftPlanner {
+  producers(itemId: ItemId): readonly RecipeDefinition[];
+  requirements(inventory: Partial<Record<ItemId, number>>, requirements: ItemAmount[]): RecursiveCraftPlan;
+  recipe(inventory: Partial<Record<ItemId, number>>, recipe: RecipeDefinition, batches: number): RecursiveCraftPlan;
+}
+
+/** Invocation-owned catalog/technology snapshot, never stored in GameState. */
+export function createRecursiveCraftPlanner(options: Parameters<typeof plannerContext>[0]): RecursiveCraftPlanner {
+  const context = plannerContext(options);
+  return {
+    producers: (itemId) => producingRecipes(context, itemId),
+    requirements: (inventory, requirements) => planRequirementsWithContext(context, inventory, requirements),
+    recipe: (inventory, recipe, batches) => planRecipeWithContext(context, inventory, recipe, batches),
+  };
 }

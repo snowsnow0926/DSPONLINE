@@ -450,6 +450,23 @@ describe("offline macro contract experiment", () => {
     } finally { clone.mockRestore(); }
   });
 
+  it.each([
+    [{ inventory: [{ amount: "-1" }] }, false],
+    [{ totalDestroyed: { iron_ore: "1.5" } }, false],
+    [{ nested: { warpers: "NaN" } }, false],
+    [{ stationRoutes: [{ nested: { cargo: 0.5 } }] }, false],
+    [{ ordinary: Number.MAX_SAFE_INTEGER + 1 }, false],
+    [{ arbitraryKw: { nested: Number.MAX_SAFE_INTEGER + 1 } }, true],
+    [{ inventory: { iron_ore: "900719925474099300000" } }, true],
+    [{ ordinary: "1.5", nested: { cargo: "100" } }, true],
+    [{ storedEnergyMj: 1e20, nested: { inventory: { iron_ore: "-1" } } }, false],
+    [{ stationRoutes: [{ cargo: 1e20 }], arbitraryKw: 1e20 }, false],
+  ])("preserves nested number validation for %j", (probe, valid) => {
+    const source = stableEmptyState();
+    Object.assign(source, { validationProbe: probe });
+    expect(runConservativeOfflineSettlement(source, 0).status).toBe(valid ? "conservative" : "invalid-source");
+  });
+
   it("discards an invalid calibration candidate and keeps the valid source on a bounded conservative prefix", () => {
     const source = stableEmptyState();
     source.tray.iron_ore = 25;

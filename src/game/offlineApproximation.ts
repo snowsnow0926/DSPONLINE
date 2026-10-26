@@ -26,6 +26,7 @@ import {
   hasActiveResearch,
   normalizeConstructionAutomationCursor,
   refreshDysonGenerationSnapshot,
+  refreshSimulationLookupAfterInventoryMutation,
   refreshTimeWarpPowerSnapshotInPlace,
   getResourceReserveSnapshot,
   getVeinConsumptionMultiplier,
@@ -33,6 +34,7 @@ import {
   type SimulationPowerAuditSample,
   type SimulationAdvanceSession,
   type SimulationProfiler,
+  type SimulationLookupContext,
 } from "./engine";
 import { getDifficultyDefinition } from "./difficulty";
 import type { FactoryEntity, GameState, ItemId, PlanetId, PowerGridId } from "./types";
@@ -690,6 +692,25 @@ function cacheIsAwayFromBoundary(state: GameState): string | null {
 interface ExactSimulationWindowOptions {
   isolateConstructionAutomation?: boolean;
   onPowerPlan?: (sample: SimulationPowerAuditSample) => void;
+  reusableLookup?: ExactWindowLookup;
+}
+
+interface ExactWindowLookup {
+  lookup?: SimulationLookupContext;
+  entities?: GameState["entities"];
+  belts?: GameState["belts"];
+  configuration?: string;
+}
+
+function exactWindowConfiguration(state: GameState): string {
+  return JSON.stringify([
+    state.settings,
+    state.research.completedTechIds,
+    Object.entries(state.endgame.infiniteResearch).map(([id, research]) => [id, research?.level]),
+    state.galaxy.profiles,
+    state.exploration.unlockedSystemIds,
+    state.contentPacks,
+  ]);
 }
 
 function runExact(
@@ -719,9 +740,15 @@ function runExact(
     const fraction = Math.min(1, simulationFraction, wallFraction);
     const chunkSeconds = remainingSeconds * fraction;
     const chunkWallSeconds = remainingWallSeconds * fraction;
+    const retained = options.reusableLookup;
+    const configuration = retained ? exactWindowConfiguration(state) : undefined;
+    const lookup = retained?.entities === state.entities && retained.belts === state.belts && retained.configuration === configuration
+      ? retained.lookup : undefined;
+    if (lookup) refreshSimulationLookupAfterInventoryMutation(state, lookup);
     const session = createSimulationAdvanceSession(state, chunkSeconds, {
       mutateState: true,
       wallSeconds: chunkWallSeconds,
+      lookup,
       ...(options.isolateConstructionAutomation || options.onPowerPlan ? {
         contractExperiment: {
           ...(options.isolateConstructionAutomation ? { isolateConstructionAutomation: true } : {}),
@@ -732,7 +759,15 @@ function runExact(
     while (session.remainingSeconds > EPSILON || session.remainingWallSeconds > EPSILON) {
       advanceSimulationSession(session, 256);
     }
+    const entities = session.state.entities;
+    const belts = session.state.belts;
     state = completeSimulationAdvanceSession(session);
+    if (retained) {
+      retained.lookup = state.entities === entities && state.belts === belts ? session.lookup : undefined;
+      retained.entities = state.entities;
+      retained.belts = state.belts;
+      retained.configuration = configuration;
+    }
     remainingSeconds = Math.max(0, remainingSeconds - chunkSeconds);
     remainingWallSeconds = Math.max(0, remainingWallSeconds - chunkWallSeconds);
   }
@@ -5028,38 +5063,49 @@ const FAST_DECIMAL_VALIDATION_CONTAINERS: ReadonlySet<string> = new Set(["warper
 
 // Validation never retains a path: only an error serializes it immediately.
 // Reuse one depth-first path instead of allocating an array at every field.
-function findInvalidFastNumber(value: unknown, path: AffinePath = [], seen = new Set<object>()): string | null {
+function findInvalidFastNumber(value: unknown, path: AffinePath = [], seen = new Set<object>(), ancestorFlags = 0): string | null {
+  const last = path[path.length - 1];
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return `${JSON.stringify(path)}=${String(value)} 不是有限数值`;
-    if (path.at(-1) === "cargo" && path.includes("stationRoutes") &&
+    if (last === "cargo" && (ancestorFlags & 4) !== 0 &&
       (!Number.isSafeInteger(value) || value < 0)) {
       return `${JSON.stringify(path)}=${String(value)} 不是合法非负航线货物`;
     }
-    if (Number.isInteger(value) && !Number.isSafeInteger(value) && !isFastFiniteFloatPath(path)) {
+    if (Number.isInteger(value) && !Number.isSafeInteger(value) && (ancestorFlags & 2) === 0 &&
+      !(typeof last === "string" && (FAST_FINITE_FLOAT_KEYS.has(last) || last.endsWith("Kw")))) {
       return `${JSON.stringify(path)}=${String(value)} 超过安全整数`;
     }
     return null;
   }
-  if (typeof value === "string" && (isDecimalAffinePath(path) || pathHasString(path, FAST_DECIMAL_VALIDATION_CONTAINERS))) {
+  if (typeof value === "string" && ((ancestorFlags & 1) !== 0 || typeof last === "string" &&
+    (AFFINE_DECIMAL_KEYS.has(last) || AFFINE_DECIMAL_CONTAINERS.has(last) || FAST_DECIMAL_VALIDATION_CONTAINERS.has(last)))) {
     return /^\d+$/.test(value) ? null : `${JSON.stringify(path)} 不是合法非负十进制整数`;
   }
   if (!value || typeof value !== "object") return null;
   if (seen.has(value)) return null;
   seen.add(value);
+  let childFlags = ancestorFlags;
+  if (typeof last === "string") {
+    if (AFFINE_DECIMAL_CONTAINERS.has(last) || FAST_DECIMAL_VALIDATION_CONTAINERS.has(last)) childFlags |= 1;
+    if (FAST_FINITE_FLOAT_KEYS.has(last) || last.endsWith("Kw")) childFlags |= 2;
+    if (last === "stationRoutes") childFlags |= 4;
+  }
   if (Array.isArray(value)) {
     for (let index = 0; index < value.length; index += 1) {
       path.push(index);
       let failure: string | null;
-      try { failure = findInvalidFastNumber(value[index], path, seen); }
+      try { failure = findInvalidFastNumber(value[index], path, seen, childFlags); }
       finally { path.pop(); }
       if (failure) return failure;
     }
     return null;
   }
-  for (const [key, child] of Object.entries(value)) {
+  // Keep the same own-key order without allocating an entry pair for every
+  // field in a 100 MiB graph. Values are still validated, including zeros.
+  for (const key of Object.keys(value)) {
     path.push(key);
     let failure: string | null;
-    try { failure = findInvalidFastNumber(child, path, seen); }
+    try { failure = findInvalidFastNumber((value as Record<string, unknown>)[key], path, seen, childFlags); }
     finally { path.pop(); }
     if (failure) return failure;
   }
@@ -6174,6 +6220,7 @@ function runTimeWarpApproximateSettlementUnsafe(
   const constructionSampleOptions = {
     isolateConstructionAutomation: true,
     onPowerPlan: constructionPowerAudit.onPowerPlan,
+    reusableLookup: {} as ExactWindowLookup,
   };
   let calibrated = runExact(structuredClone(state), calibrationSeconds, calibrationWallSeconds, constructionSampleOptions);
   calibrationPowerResources.push(captureTimeWarpExhaustiblePowerResources(calibrated));

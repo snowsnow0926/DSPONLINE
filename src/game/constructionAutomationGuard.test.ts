@@ -79,6 +79,49 @@ function expectSafeIntegerInventories(state: GameState): void {
 }
 
 describe("construction automation compute protection", () => {
+  it("reuses bounded material phases while matching cold replanning", () => {
+    const source = createProtectedConstructionState();
+    source.entities.find((entity) => entity.buildingId === "construction_center")!.machineCount = 30;
+    source.constructionAutomation.targetStock = { arc_smelter: 1_000_000 };
+    const warm = createPersistentSimulationRuntime(structuredClone(source));
+    const cold = createPersistentSimulationRuntime(structuredClone(source));
+    const warmProfile = createSimulationProfiler();
+    const coldProfile = createSimulationProfiler();
+    for (let second = 0; second < 24; second += 1) {
+      warm.state.tray.iron_ingot = cold.state.tray.iron_ingot = [0, 100, 200, 100][second % 4];
+      cold.lookup?.constructionAutomationPlanCache.clear();
+      advancePersistentSimulationRuntime(warm, 1, 1, warmProfile);
+      advancePersistentSimulationRuntime(cold, 1, 1, coldProfile);
+      expect(warm.state, `second ${second}`).toEqual(cold.state);
+      for (const plan of warm.lookup!.constructionAutomationPlanCache.values()) {
+        expect(plan.alternatives?.length ?? 0).toBeLessThanOrEqual(3);
+        expect(plan.alternatives?.every((phase) => !phase.alternatives) ?? true).toBe(true);
+      }
+    }
+    expect(warmProfile.constructionPlanBuilds).toBeLessThan(coldProfile.constructionPlanBuilds);
+  });
+
+  it.each([1, 7, 23, 71])("matches cold replanning across inventory additions and depletion (seed %i)", (seed) => {
+    const source = createProtectedConstructionState();
+    source.entities.find((entity) => entity.buildingId === "construction_center")!.machineCount = 30;
+    const target = (["plane_smelter", "quantum_chemical_plant", "artificial_star", "ray_receiver"] as const)[seed % 4];
+    source.constructionAutomation.targetStock = { [target]: 1_000_000 };
+    source.construction[target] = 0;
+    for (const item of RAW_ITEMS) source.tray[item] = 200 + seed;
+    const warm = createPersistentSimulationRuntime(structuredClone(source));
+    const cold = createPersistentSimulationRuntime(structuredClone(source));
+    for (let second = 0; second < 12; second += 1) {
+      const item = RAW_ITEMS[(second * 7 + seed) % RAW_ITEMS.length];
+      const amount = second % 3 === 0 ? 0 : 250 + second * seed;
+      warm.state.tray[item] = amount;
+      cold.state.tray[item] = amount;
+      cold.lookup?.constructionAutomationPlanCache.clear();
+      advancePersistentSimulationRuntime(warm, 1, 1);
+      advancePersistentSimulationRuntime(cold, 1, 1);
+      expect(warm.state, `second ${second}`).toEqual(cold.state);
+    }
+  });
+
   it("keeps a valid plan when only an unrelated inventory item is added", () => {
     const state = createProtectedConstructionState();
     state.constructionAutomation.targetStock = { arc_smelter: 1_000_000 };

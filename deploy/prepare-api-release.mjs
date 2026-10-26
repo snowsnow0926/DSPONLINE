@@ -84,6 +84,8 @@ export const API_SERVER_RELEASE_FILES = Object.freeze([
   "server/package.json",
   "server/package-lock.json",
   "server/persistence-atomicity.integration.test.mjs",
+  "server/presence-atomicity.integration.test.mjs",
+  "server/presence-http-benchmark.mjs",
   "server/runtime-indexes.mjs",
   "server/runtime-indexes.test.mjs",
   "server/runtime-indexes.integration.test.mjs",

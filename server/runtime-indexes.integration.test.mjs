@@ -284,9 +284,11 @@ test("server close waits for response-ended request cleanup before closing SQLit
       return originalStoreClose();
     };
 
-    const request = running.call("/api/presence", {
+    // Use an ordinary atomic route: presence now commits its narrow delta
+    // before producing the response, outside the generic runAtomic wrapper.
+    const request = running.call("/api/feedback", {
       method: "POST",
-      body: JSON.stringify({ playerId: `drain_player_${"0".repeat(40)}` }),
+      body: JSON.stringify({ kind: "feedback", message: "Synthetic request drain regression" }),
     });
     await enteredRequestTail.promise;
     assert.equal((await request).response.status, 202);

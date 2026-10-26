@@ -1050,6 +1050,28 @@ function cloneStoreData(data) {
   return structuredClone(data);
 }
 
+function createPresenceUpdate(data, { playerHash, requestDay, timeZone }) {
+  const now = Date.now();
+  const activeDay = metricDay(now, timeZone);
+  const previous = data.players[playerHash];
+  const newDailyPlayer = !previous || previous.lastActiveDay !== activeDay;
+  const player = { ...previous, firstSeenAt: previous?.firstSeenAt ?? now, lastSeenAt: now, lastActiveDay: activeDay };
+  const dayMetric = { ...data.dailyMetrics[requestDay] };
+  for (const key of ["requests", "errors", "feedback", "leaderboardSubmissions", "cloudUploads", "players"]) {
+    if (!Number.isFinite(dayMetric[key])) dayMetric[key] = 0;
+  }
+  dayMetric.requests += 1;
+  if (newDailyPlayer) dayMetric.players += 1;
+  return { now, player, dayMetric, operation: newDailyPlayer ? "presence.update" : "presence.touch" };
+}
+
+function presenceCancelledError() {
+  const error = new Error("Anonymous heartbeat disconnected before commit");
+  error.code = "PRESENCE_CANCELLED";
+  error.persistenceFailure = false;
+  return error;
+}
+
 function persistenceErrorCategory(error) {
   const code = typeof error?.code === "string" ? error.code.toUpperCase() : "";
   if (code.includes("FULL") || code === "ENOSPC") return "capacity";
@@ -1125,17 +1147,20 @@ class AtomicStoreBase {
 
   runAtomic(operation) {
     if (this.currentMutation()) return operation();
+    return this.enqueueMutation(() => {
+      const mutation = this.createStandaloneMutation();
+      return this.mutationStorage.run(mutation, operation);
+    });
+  }
+
+  enqueueMutation(operation) {
     if (!this.acceptingMutations) {
       const error = new Error("服务正在安全关闭，请稍后重试");
       error.statusCode = 503;
       error.code = "SERVER_SHUTTING_DOWN";
       return Promise.reject(error);
     }
-    const execute = () => {
-      const mutation = this.createStandaloneMutation();
-      return this.mutationStorage.run(mutation, operation);
-    };
-    const result = this.mutationQueue.then(execute);
+    const result = this.mutationQueue.then(operation);
     this.mutationQueue = result.catch(() => undefined);
     return result;
   }
@@ -1203,9 +1228,7 @@ class AtomicStoreBase {
       // and legacy staging cleanup are deliberately best-effort and must never
       // turn a durable success into a failed HTTP response.
       try { this.afterMutationCommitted(mutation); } catch { /* durable state remains authoritative */ }
-      for (const observer of this.commitObservers) {
-        try { observer({ data: this._data, context, runtimeIndexEvents }); } catch { /* durable state remains authoritative */ }
-      }
+      this.notifyCommitted(context, runtimeIndexEvents);
       mutation.writes.clear();
       mutation.fileWrites?.clear();
       mutation.deletes.clear();
@@ -1243,6 +1266,24 @@ class AtomicStoreBase {
     if (typeof observer !== "function") throw new TypeError("commit observer must be a function");
     this.commitObservers.add(observer);
     return () => this.commitObservers.delete(observer);
+  }
+
+  notifyCommitted(context, runtimeIndexEvents) {
+    for (const observer of this.commitObservers) {
+      try { observer({ data: this._data, context, runtimeIndexEvents }); } catch { /* durable state remains authoritative */ }
+    }
+  }
+
+  recordPresence(options) {
+    return this.runAtomic(async () => {
+      if (options.isCancelled()) return null;
+      const update = createPresenceUpdate(this.data, options);
+      this.data.players[options.playerHash] = update.player;
+      this.data.dailyMetrics[options.requestDay] = update.dayMetric;
+      this.recordRuntimeIndexEvent({ type: "presence", playerHash: options.playerHash, seenAt: update.now });
+      await this.persist({ operation: update.operation });
+      return update.now;
+    });
   }
 
   setPersistenceObserver(observer) {
@@ -1676,6 +1717,51 @@ class SqliteStore extends AtomicStoreBase {
       appStateFingerprint: runtimeAppStateFingerprint(migrated.payload),
     });
     this.rebuildCloudPayloadReferenceIndex();
+  }
+
+  recordPresence(options) {
+    // Legacy callers may already own a full transaction or have staged cloud
+    // payloads. They must keep the ordinary all-or-nothing commit boundary.
+    if (this.currentMutation() || !this.runtimeStatePersistence || this.pendingCloudSaveWrites.size ||
+      this.pendingCloudSaveDeletes.size || this.pendingCloudSaveUserDeletes.size) {
+      return super.recordPresence(options);
+    }
+    return this.enqueueMutation(() => {
+      if (options.isCancelled()) return null;
+      return this.enqueueWrite(() => {
+        if (options.isCancelled()) throw presenceCancelledError();
+        const update = createPresenceUpdate(this._data, options);
+        const { playerHash, requestDay } = options;
+        const context = { operation: update.operation };
+        const runtimeIndexEvents = [{ type: "presence", playerHash, seenAt: update.now }];
+        const before = { players: { [playerHash]: this._data.players[playerHash] }, dailyMetrics: { [requestDay]: this._data.dailyMetrics[requestDay] } };
+        const after = { players: { [playerHash]: update.player }, dailyMetrics: { [requestDay]: update.dayMetric } };
+        const plan = createRuntimeStatePersistencePlan(before, after, {
+          ...context, runtimeIndexEvents, dirtyServiceDays: [requestDay],
+        });
+        // Allocate the published snapshot before committing. Copy only the
+        // two map shells; unrelated metadata and immutable records are shared.
+        // No request-owned graph is retained in an AsyncLocalStorage context.
+        const published = {
+          ...this._data,
+          players: { ...this._data.players, [playerHash]: update.player },
+          dailyMetrics: { ...this._data.dailyMetrics, [requestDay]: update.dayMetric },
+        };
+        let result;
+        this.database.transaction(() => {
+          this.maybeInjectPersistenceFault("before-sqlite-transaction", context);
+          result = this.runtimeStatePersistence.applyPlanInTransaction(plan, context);
+          // Preserve the existing final metadata-commit fault boundary even
+          // though a heartbeat never writes the app_state blob.
+          this.maybeInjectPersistenceFault("after-app-state-write", context);
+        })();
+        this._data = published;
+        this.commitGeneration += 1;
+        try { this.runtimeStatePersistence.observeCommitted(plan, result); } catch { /* durable state remains authoritative */ }
+        this.notifyCommitted(context, runtimeIndexEvents);
+        return update.now;
+      });
+    });
   }
 
   createStandaloneMutation() {
@@ -4811,26 +4897,12 @@ export async function createCloudServer({
         const body = await readJson(request);
         const playerId = normalizedPlayerId(body.playerId);
         if (!playerId) return send(response, 400, { error: "匿名玩家标识格式无效" });
-        const now = Date.now();
-        const activeDay = metricDay(now, metricsTimeZone);
         const playerHash = sha256(`player:${playerId}`);
-        let player = store.data.players[playerHash];
-        let persistRequired = false;
-        if (!player) {
-          player = { firstSeenAt: now, lastSeenAt: now, lastActiveDay: activeDay };
-          store.data.players[playerHash] = player;
-          dayMetric.players += 1;
-          persistRequired = true;
-        } else {
-          player.lastSeenAt = now;
-          if (player.lastActiveDay !== activeDay) {
-            player.lastActiveDay = activeDay;
-            dayMetric.players += 1;
-            persistRequired = true;
-          }
-        }
-        store.recordRuntimeIndexEvent?.({ type: "presence", playerHash, seenAt: now });
-        await store.persist({ operation: persistRequired ? "presence.update" : "presence.touch" });
+        const now = await store.recordPresence({
+          playerHash, requestDay: day, timeZone: metricsTimeZone,
+          isCancelled: () => request.aborted || response.destroyed,
+        });
+        if (now === null) return undefined;
         return send(response, 202, { accepted: true, players: presenceIndex.metrics(now) });
       }
 
@@ -5996,6 +6068,7 @@ export async function createCloudServer({
 
       return send(response, 404, { error: "接口不存在" });
     } catch (error) {
+      if (error?.code === "PRESENCE_CANCELLED") return undefined;
       if (error?.code === "DOWNLOAD_CANCELLED") return undefined;
       if (error?.code === "ACCOUNT_ARCHIVE_ABORTED") return undefined;
       if (response.headersSent) throw error;
@@ -6058,7 +6131,10 @@ export async function createCloudServer({
     const mutatingRequest = !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "GET") || atomicGetRoutes.has(requestUrl.pathname);
     const streamedAccountImport = request.method === "POST"
       && (requestUrl.pathname === "/api/account/import/archive" || requestUrl.pathname === "/api/account/import/legacy-json");
-    const atomicRequest = mutatingRequest && !streamedAccountImport;
+    // Read/validate the small heartbeat before acquiring the shared mutation
+    // queue, then let recordPresence own its narrow durable transaction.
+    const presenceRequest = request.method === "POST" && requestUrl.pathname === "/api/presence";
+    const atomicRequest = mutatingRequest && !streamedAccountImport && !presenceRequest;
     if (runtime.shuttingDown && mutatingRequest) {
       response.setHeader("connection", "close");
       return send(response, 503, { error: "服务正在安全关闭，请稍后重试", code: "SERVER_SHUTTING_DOWN" }, { "retry-after": "1" });

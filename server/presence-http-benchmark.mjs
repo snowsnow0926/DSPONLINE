@@ -53,6 +53,7 @@ try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const requestTimes = [], probeTimes = [], samples = [];
+  const probeStatusCounts = {};
   let accepted = 0, failed = 0, probeFailures = 0, sequence = 0;
   const started = performance.now(), deadline = started + durationMs;
   console.log(JSON.stringify({ phase: "started", syntheticOnly: true, metadataBytes, accounts: 2000, revisions: 40000, players: 16000, durationMs, concurrency: 8, targetRequestsPerSecond: 20 }));
@@ -78,8 +79,9 @@ try {
         const at = performance.now();
         try {
           const response = await fetch(base + `/api/${route}`, { signal: AbortSignal.timeout(2000) });
+          probeStatusCounts[response.status] = (probeStatusCounts[response.status] ?? 0) + 1;
           await response.arrayBuffer(); if (response.status !== 200) probeFailures += 1;
-        } catch { probeFailures += 1; }
+        } catch { probeFailures += 1; probeStatusCounts.timeout = (probeStatusCounts.timeout ?? 0) + 1; }
         probeTimes.push(performance.now() - at);
       }
       if (!samples.length || performance.now() - samples.at(-1).elapsedMs - started >= 10_000) {
@@ -87,7 +89,9 @@ try {
         samples.push({ elapsedMs: Math.round(performance.now() - started), ...process.memoryUsage(), pendingWrites: server.store.pendingWriteOperations });
         console.log(JSON.stringify({ phase: "sample", ...samples.at(-1), accepted, failed, cleanupCommits }));
       }
-      await sleep(300);
+      // The API permits 120 reads per IP/route/minute. Probe each route once
+      // per second so a faster server does not turn this into a limiter test.
+      await sleep(1000);
     }
   })();
   await Promise.all([...workers, probes]);
@@ -96,14 +100,18 @@ try {
   const percentile = (values, fraction) => [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(values.length * fraction))];
   const result = {
     syntheticOnly: true, modulePath, durationMs: performance.now() - started, metadataBytes,
-    accepted, failed, probeFailures, probes: probeTimes.length,
+    accepted, failed, probeFailures, probeStatusCounts, probes: probeTimes.length,
     requestP95Ms: percentile(requestTimes, 0.95), probeP95Ms: percentile(probeTimes, 0.95),
     fullMutations: fullMutations - beforeMutations, cleanupCommits,
     savesPreserved: savedDigest() === beforeDigest, payloadRows: server.store.database.prepare("SELECT count(*) AS n FROM cloud_save_payloads").get().n,
     pendingWrites: server.store.pendingWriteOperations, finalMemory: process.memoryUsage(), samples,
+    committedHeartbeats: Object.values(server.store.data.dailyMetrics).reduce((sum, day) => sum + day.requests, 0),
+    totalPlayers: Object.keys(server.store.data.players).length,
   };
   assert.equal(result.savesPreserved, true);
   assert.equal(result.payloadRows, 40000);
+  assert.equal(result.totalPlayers, 16000);
+  if (failed === 0) assert.equal(result.committedHeartbeats, accepted);
   await writeFile(path.join(directory, "result.json"), JSON.stringify(result, null, 2));
   console.log(JSON.stringify({ phase: "complete", resultPath: path.join(directory, "result.json"), ...result }));
 } finally {

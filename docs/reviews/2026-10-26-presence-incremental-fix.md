@@ -1,4 +1,6 @@
-# 匿名心跳增量事务修复（开发完成，未发布）
+# 匿名心跳增量事务修复（开发验证记录）
+
+> 后续发布状态：`d39420f96259` 首次部署的匿名统计观察未通过；进一步修复主档审计后，`4c8d0c13a714` 已通过真实流量验收并恢复统计。以下为开发阶段记录，不能替代线上验收。见 [最终发布记录](../releases/ops-hk-current-main-audit-release-2026-10-26.md) 与 [首次发布记录](../releases/ops-hk-presence-incremental-release-2026-10-26.md)。
 
 2026-10-26，Role: develop。用户明确将本任务转为修复开发，接续 [运维恢复试验与交接](../releases/ops-hk-presence-recovery-attempt-2026-10-26.md)。本轮没有 SSH、上传或修改生产配置；线上是否恢复统计须由后续发布验收确认。
 

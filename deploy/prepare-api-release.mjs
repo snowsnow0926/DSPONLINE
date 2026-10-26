@@ -47,6 +47,8 @@ export const API_SERVER_RELEASE_FILES = Object.freeze([
   "server/cloud-payload-maintenance.test.mjs",
   "server/cloud-payload-store.mjs",
   "server/cloud-payload-store.test.mjs",
+  "server/current-main-payload-audit.mjs",
+  "server/current-main-payload-audit.test.mjs",
   "server/cloud-quota.integration.test.mjs",
   "server/cloud-quota.mjs",
   "server/cloud-quota.test.mjs",

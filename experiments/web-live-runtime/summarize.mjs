@@ -28,7 +28,7 @@ for (const path of process.argv.slice(2)) {
   }
   const memories = (evidence.processSamples ?? []).flatMap((sample) => sample.memory ?? []);
   console.log(JSON.stringify({ path, supply: evidence.supply, profiled: evidence.profiled,
-    phases, stopMs: evidence.stopMs,
+    phases, warmup: evidence.warmup, stopMs: evidence.stopMs,
     regularWorkerMs: distribution(regular.map((event) => event.durationMs)),
     regularProfileTotals: Object.fromEntries(Object.entries(profileTotals).sort((a, b) => b[1] - a[1])),
     macroWorkerMs: distribution(macros.filter((event) => event.type === "advanced").map((event) => event.durationMs)),

@@ -37,6 +37,22 @@ node experiments/web-construction-wasm/run.mjs --entry=large-save --prepared=D:/
 
 响应测试加 `--memory=1` 时启用 Chrome 精确页面堆信息，并在 Windows 读取当前测试浏览器的 renderer 工作集。进程峰值包含整个测试生命周期，不是某个函数的净分配；`--collect-memory=1` 另在源状态和返回文本均存活时主动收集垃圾，比较保留堆。内存参数用于独立诊断，不能把测试点击或页面堆当作完整游戏 FPS/总内存。
 
+## 普通运行与量子入库对照
+
+`--entry=quantum-runtime` 使用原库存，不补充材料，按 1、10、30 个累计模拟秒推进普通
+持久运行时。读取、索引准备和完整状态哈希分别计时；最终对比包含运行诊断字段的完整
+GameState JSON 及量子网络摘要，不只比较总产量。
+
+```powershell
+node experiments/web-construction-wasm/run.mjs --entry=quantum-runtime --prepared=D:/private/prepared.json --runtime-ref=c07b8ad6 --name=normal-old
+node experiments/web-construction-wasm/run.mjs --entry=quantum-runtime --prepared=D:/private/prepared.json --name=normal-new
+```
+
+`--runtime-ref` 只替换指定提交的 `engine.ts` 与 `quantumLogisticsNetwork.ts`，其他模块沿用
+当前工作树，因此先核对生产改动仅限这两个文件。输出记录运行文件摘要和实际 bundle
+摘要。此参数也可用于 `large-save` 的产率复制对照。只在一个测量结束后再开始下一个，
+不要并行构建或跑测试；普通引擎耗时不等同于实际网页帧率。
+
 ## 当前结论
 
 现有 Rust 代码可在浏览器中运行，但这个 JSON 适配器尚无接入收益：简单计算的速度优势被传输和转换抵消；递归分支还会提前计算许多用不到的路线。继续前应验证按需规划、紧凑输入/输出及 JS 回退；不能仅因采用 Rust 就宣布更快。具体数值及候选身份见 [循环记录](../../docs/reviews/2026-10-26-web-performance-loop.md)。

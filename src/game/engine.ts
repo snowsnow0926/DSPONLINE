@@ -129,6 +129,7 @@ import {
   beginOrbitalCollectorQuantumModeChange,
   beginOrbitalCollectorQuantumModeChanges,
   depositIntoQuantumInventory,
+  createQuantumInventoryDepositBatch,
   createEmptyQuantumLogisticsNetworkState,
   beginQuantumAttachment,
   beginQuantumAttachments,
@@ -142,7 +143,7 @@ import {
   QUANTUM_SETTLEMENT_SECONDS,
   QUANTUM_UNIT_CAP_PER_MINUTE,
 } from "./quantumLogisticsNetwork";
-import type { QuantumSettlementInput, QuantumSettlementOutput } from "./quantumLogisticsNetwork";
+import type { QuantumInventoryDepositBatch, QuantumSettlementInput, QuantumSettlementOutput } from "./quantumLogisticsNetwork";
 import { compareQuantumInteger } from "./quantumLogisticsNetwork";
 import type { ConstructionQuantumDeliveryFlow } from "./types";
 import {
@@ -1750,7 +1751,10 @@ function receiveQuantumSupplyMaterial(
   return kept + (requested - kept - remaining) + localRemainder;
 }
 
-function flushQuantumSupplyBuffer(state: GameState, station: FactoryEntity, itemId: ItemId, lookup?: SimulationLookupContext): number {
+function flushQuantumSupplyBuffer(
+  state: GameState, station: FactoryEntity, itemId: ItemId, lookup?: SimulationLookupContext,
+  deposits?: QuantumInventoryDepositBatch,
+): number {
   const slot = quantumSupplySlot(station, itemId);
   if (!slot || !state.quantumLogisticsNetwork?.enabled) return 0;
   const input = Math.max(0, Math.floor(station.inputs[itemId] ?? 0));
@@ -1760,7 +1764,9 @@ function flushQuantumSupplyBuffer(state: GameState, station: FactoryEntity, item
   const uploadable = Math.max(0, output - reserve - reservedOutgoing) +
     Math.max(0, input - Math.max(0, reserve - output));
   if (uploadable < 1) return 0;
-  const deposited = depositIntoQuantumInventory(state.quantumLogisticsNetwork, itemId, uploadable);
+  const deposited = deposits
+    ? deposits.deposit(state.quantumLogisticsNetwork, itemId, uploadable)
+    : depositIntoQuantumInventory(state.quantumLogisticsNetwork, itemId, uploadable);
   state.quantumLogisticsNetwork = deposited.state;
   const accepted = Number(deposited.accepted);
   if (accepted < 1) return 0;
@@ -4544,6 +4550,7 @@ function gridStoredEnergy(state: GameState, planetId: PlanetId, gridId?: PowerGr
 }
 
 function transferLogisticsBuffers(state: GameState, lookup?: SimulationLookupContext): void {
+  const deposits = state.quantumLogisticsNetwork?.enabled ? createQuantumInventoryDepositBatch() : undefined;
   if (lookup) {
     for (const { entity, itemId, capacity } of lookup.logisticsBufferRuntimes) {
       if (entity.kind === "station" && entity.buildingId !== "orbital_collector" && !entity.stationSlots) ensureStationSlots(entity);
@@ -4552,7 +4559,7 @@ function transferLogisticsBuffers(state: GameState, lookup?: SimulationLookupCon
       const moved = Math.min(incoming, Math.max(0, capacity - stored));
       entity.inputs[itemId] = incoming - moved;
       entity.outputs[itemId] = stored + moved;
-      if (isQuantumStation(entity)) flushQuantumSupplyBuffer(state, entity, itemId, lookup);
+      if (isQuantumStation(entity)) flushQuantumSupplyBuffer(state, entity, itemId, lookup, deposits);
     }
     return;
   }
@@ -4572,7 +4579,7 @@ function transferLogisticsBuffers(state: GameState, lookup?: SimulationLookupCon
       const moved = Math.min(incoming, Math.max(0, capacity - stored));
       entity.inputs[slot.itemId] = incoming - moved;
       entity.outputs[slot.itemId] = stored + moved;
-      if (isQuantumStation(entity)) flushQuantumSupplyBuffer(state, entity, slot.itemId, lookup);
+      if (isQuantumStation(entity)) flushQuantumSupplyBuffer(state, entity, slot.itemId, lookup, deposits);
     }
   }
 }
@@ -7081,13 +7088,14 @@ function settleQuantumNetworkUploads(
   // Existing tower buffers are an overflow path only. Drain them directly
   // before building the legacy boundary requests so newly freed inventory is
   // never throttled by the five-second upload budget.
+  const deposits = createQuantumInventoryDepositBatch();
   if (lookup) {
-    for (const plan of lookup.quantumUploadSlots) flushQuantumSupplyBuffer(state, plan.endpoint, plan.itemId, lookup);
+    for (const plan of lookup.quantumUploadSlots) flushQuantumSupplyBuffer(state, plan.endpoint, plan.itemId, lookup, deposits);
   } else {
     for (const endpoint of endpoints) {
       if (!isQuantumStation(endpoint)) continue;
       for (const slot of getStationSlots(endpoint)) {
-        if (slot.itemId && slot.remoteMode === "supply") flushQuantumSupplyBuffer(state, endpoint, slot.itemId, lookup);
+        if (slot.itemId && slot.remoteMode === "supply") flushQuantumSupplyBuffer(state, endpoint, slot.itemId, lookup, deposits);
       }
     }
   }

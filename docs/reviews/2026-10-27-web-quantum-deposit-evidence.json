@@ -1,0 +1,377 @@
+{
+  "schemaVersion": 1,
+  "task": "web-quantum-deposit-batch-20261027",
+  "fixture": {
+    "private": true,
+    "preparedBytes": 205464026,
+    "preparedSha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf"
+  },
+  "browser": "147.0.7727.138",
+  "referenceCommit": "c07b8ad6838a340ac2ef5e8632e8d4a8c108eac9",
+  "order": [
+    "baseline-01",
+    "candidate-01",
+    "candidate-02",
+    "baseline-02",
+    "baseline-03",
+    "candidate-03"
+  ],
+  "normalRuntime": {
+    "variant": "stock",
+    "simulatedSeconds": 30,
+    "medianBeforeMs": 49465,
+    "medianAfterMs": 26410.100000023842,
+    "timeReductionPercent": 46.608511068384026,
+    "trials": [
+      {
+        "name": "quantum-runtime-baseline-01",
+        "side": "baseline",
+        "totalMs": 49465,
+        "setupMs": 995.5,
+        "hashMs": 2603.600000023842,
+        "buckets": [
+          {
+            "targetSimulationSeconds": 1,
+            "milliseconds": 1171.7999999523163,
+            "logisticsMs": 483.10000002384186,
+            "quantumMs": 0,
+            "beltsMs": 351.5
+          },
+          {
+            "targetSimulationSeconds": 10,
+            "milliseconds": 13152.800000071526,
+            "logisticsMs": 5456.199999928474,
+            "quantumMs": 1526.6000001430511,
+            "beltsMs": 3231.5999999046326
+          },
+          {
+            "targetSimulationSeconds": 30,
+            "milliseconds": 35140.39999997616,
+            "logisticsMs": 15581.700000405312,
+            "quantumMs": 3752.7999999523163,
+            "beltsMs": 8680.000000476837
+          }
+        ],
+        "fullStateJsonLength": 205529767,
+        "fullStateSha256": "932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae3720a5",
+        "quantumSha256": "f497973e3429e51dbb8a56185fe0233b2b5e3e581157cfdf0e37f12de63212d5",
+        "elapsedSeconds": 5346607.2683,
+        "entities": 110042,
+        "belts": 233300,
+        "runtimeReference": "c07b8ad6838a340ac2ef5e8632e8d4a8c108eac9",
+        "runtimeSourceHashes": null,
+        "bundleSha256": null,
+        "evidenceSha256": "6f518d4380e60ba8e22745b3a3d56aadc7f38ffc1b958e4aca1e6c65d77bf812"
+      },
+      {
+        "name": "quantum-runtime-baseline-02",
+        "side": "baseline",
+        "totalMs": 49661.200000047684,
+        "setupMs": 1035.6000000238419,
+        "hashMs": 2601.1999999284744,
+        "buckets": [
+          {
+            "targetSimulationSeconds": 1,
+            "milliseconds": 1169.1000000238419,
+            "logisticsMs": 477.7000000476837,
+            "quantumMs": 0,
+            "beltsMs": 353.6999999284744
+          },
+          {
+            "targetSimulationSeconds": 10,
+            "milliseconds": 13248.100000023842,
+            "logisticsMs": 5523.10000038147,
+            "quantumMs": 1538.200000166893,
+            "beltsMs": 3220.2000000476837
+          },
+          {
+            "targetSimulationSeconds": 30,
+            "milliseconds": 35244,
+            "logisticsMs": 15609.200000047684,
+            "quantumMs": 3786.399999976158,
+            "beltsMs": 8701.200000166893
+          }
+        ],
+        "fullStateJsonLength": 205529767,
+        "fullStateSha256": "932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae3720a5",
+        "quantumSha256": "f497973e3429e51dbb8a56185fe0233b2b5e3e581157cfdf0e37f12de63212d5",
+        "elapsedSeconds": 5346607.2683,
+        "entities": 110042,
+        "belts": 233300,
+        "runtimeReference": "c07b8ad6838a340ac2ef5e8632e8d4a8c108eac9",
+        "runtimeSourceHashes": {
+          "src/game/engine.ts": "bc9435b4455c2583d2a1b26414a7053d6eea359960ba7d2edbc237d829ff2b06",
+          "src/game/quantumLogisticsNetwork.ts": "4dd5f6f2ed23938e43c858ed77830e8c806a173902246fbb1656465ab28b88f1"
+        },
+        "bundleSha256": "24b61ee73fc05d9927610eceb372e3620a723238723687952be79210c97dbf36",
+        "evidenceSha256": "e22f69f9c0944bf8e9d7dc9567c88b460ff06a02b6653221b637ea609112bfe9"
+      },
+      {
+        "name": "quantum-runtime-baseline-03",
+        "side": "baseline",
+        "totalMs": 49073.39999997616,
+        "setupMs": 1009,
+        "hashMs": 2645.2999999523163,
+        "buckets": [
+          {
+            "targetSimulationSeconds": 1,
+            "milliseconds": 1189.1999999284744,
+            "logisticsMs": 486.89999997615814,
+            "quantumMs": 0,
+            "beltsMs": 352.2000000476837
+          },
+          {
+            "targetSimulationSeconds": 10,
+            "milliseconds": 12986.899999976158,
+            "logisticsMs": 5461.500000119209,
+            "quantumMs": 1530.1999998092651,
+            "beltsMs": 3074.7000000476837
+          },
+          {
+            "targetSimulationSeconds": 30,
+            "milliseconds": 34897.300000071526,
+            "logisticsMs": 15645.499999642372,
+            "quantumMs": 3733.4000000953674,
+            "beltsMs": 8525.300000548363
+          }
+        ],
+        "fullStateJsonLength": 205529767,
+        "fullStateSha256": "932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae3720a5",
+        "quantumSha256": "f497973e3429e51dbb8a56185fe0233b2b5e3e581157cfdf0e37f12de63212d5",
+        "elapsedSeconds": 5346607.2683,
+        "entities": 110042,
+        "belts": 233300,
+        "runtimeReference": "c07b8ad6838a340ac2ef5e8632e8d4a8c108eac9",
+        "runtimeSourceHashes": {
+          "src/game/engine.ts": "bc9435b4455c2583d2a1b26414a7053d6eea359960ba7d2edbc237d829ff2b06",
+          "src/game/quantumLogisticsNetwork.ts": "4dd5f6f2ed23938e43c858ed77830e8c806a173902246fbb1656465ab28b88f1"
+        },
+        "bundleSha256": "24b61ee73fc05d9927610eceb372e3620a723238723687952be79210c97dbf36",
+        "evidenceSha256": "782cb1a4de127d86be60d85fffceda512229ae9864394c3d0e57ee686180b404"
+      },
+      {
+        "name": "quantum-runtime-candidate-01",
+        "side": "candidate",
+        "totalMs": 26410.100000023842,
+        "setupMs": 1007.8999999761581,
+        "hashMs": 2612.7999999523163,
+        "buckets": [
+          {
+            "targetSimulationSeconds": 1,
+            "milliseconds": 806.2000000476837,
+            "logisticsMs": 99.79999995231628,
+            "quantumMs": 0,
+            "beltsMs": 355
+          },
+          {
+            "targetSimulationSeconds": 10,
+            "milliseconds": 5840.199999928474,
+            "logisticsMs": 804.7999999523163,
+            "quantumMs": 397.39999997615814,
+            "beltsMs": 2333.000000357628
+          },
+          {
+            "targetSimulationSeconds": 30,
+            "milliseconds": 19763.700000047684,
+            "logisticsMs": 2980.0000002384186,
+            "quantumMs": 1184.1000000238419,
+            "beltsMs": 8650
+          }
+        ],
+        "fullStateJsonLength": 205529767,
+        "fullStateSha256": "932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae3720a5",
+        "quantumSha256": "f497973e3429e51dbb8a56185fe0233b2b5e3e581157cfdf0e37f12de63212d5",
+        "elapsedSeconds": 5346607.2683,
+        "entities": 110042,
+        "belts": 233300,
+        "runtimeReference": null,
+        "runtimeSourceHashes": null,
+        "bundleSha256": null,
+        "evidenceSha256": "3f1c00dd4a099613a0ed1e83f7ee8b12fd0097b0ac27db719b243c456f62d813"
+      },
+      {
+        "name": "quantum-runtime-candidate-02",
+        "side": "candidate",
+        "totalMs": 26624,
+        "setupMs": 1015.8999999761581,
+        "hashMs": 2616.7999999523163,
+        "buckets": [
+          {
+            "targetSimulationSeconds": 1,
+            "milliseconds": 794.1999999284744,
+            "logisticsMs": 100.79999995231628,
+            "quantumMs": 0,
+            "beltsMs": 351.39999997615814
+          },
+          {
+            "targetSimulationSeconds": 10,
+            "milliseconds": 6053.5,
+            "logisticsMs": 823.7000000476837,
+            "quantumMs": 392.299999833107,
+            "beltsMs": 2454.1000003814697
+          },
+          {
+            "targetSimulationSeconds": 30,
+            "milliseconds": 19776.300000071526,
+            "logisticsMs": 2938.0000001192093,
+            "quantumMs": 1222.6999999284744,
+            "beltsMs": 8634.500000596046
+          }
+        ],
+        "fullStateJsonLength": 205529767,
+        "fullStateSha256": "932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae3720a5",
+        "quantumSha256": "f497973e3429e51dbb8a56185fe0233b2b5e3e581157cfdf0e37f12de63212d5",
+        "elapsedSeconds": 5346607.2683,
+        "entities": 110042,
+        "belts": 233300,
+        "runtimeReference": null,
+        "runtimeSourceHashes": {
+          "src/game/engine.ts": "e3b60ec1c2e3c1f849d47ab7f2a37d753a70a277588af9d3f4ab7a52a5f952f5",
+          "src/game/quantumLogisticsNetwork.ts": "5b65aaa4b542b7229178da6e2c68c51a82cc54d54d522aee588ebd1c350c91c5"
+        },
+        "bundleSha256": "9b559547c5f1dd207ed2da3b5328b51fe49e8599a8d50f46a24d696a3c643496",
+        "evidenceSha256": "a9223449b1897625222f7884f9aae5378e76e1bae7cfd935b6b6ced94409fd1a"
+      },
+      {
+        "name": "quantum-runtime-candidate-03",
+        "side": "candidate",
+        "totalMs": 26407.100000023842,
+        "setupMs": 1018.6999999284744,
+        "hashMs": 2624.5,
+        "buckets": [
+          {
+            "targetSimulationSeconds": 1,
+            "milliseconds": 806.5,
+            "logisticsMs": 100.90000009536743,
+            "quantumMs": 0,
+            "beltsMs": 355.7999999523163
+          },
+          {
+            "targetSimulationSeconds": 10,
+            "milliseconds": 5828.100000023842,
+            "logisticsMs": 803.0999999046326,
+            "quantumMs": 390.39999985694885,
+            "beltsMs": 2327.000000357628
+          },
+          {
+            "targetSimulationSeconds": 30,
+            "milliseconds": 19772.5,
+            "logisticsMs": 2811.7999999523163,
+            "quantumMs": 1199.4999998807907,
+            "beltsMs": 8722.299999952316
+          }
+        ],
+        "fullStateJsonLength": 205529767,
+        "fullStateSha256": "932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae3720a5",
+        "quantumSha256": "f497973e3429e51dbb8a56185fe0233b2b5e3e581157cfdf0e37f12de63212d5",
+        "elapsedSeconds": 5346607.2683,
+        "entities": 110042,
+        "belts": 233300,
+        "runtimeReference": null,
+        "runtimeSourceHashes": {
+          "src/game/engine.ts": "e3b60ec1c2e3c1f849d47ab7f2a37d753a70a277588af9d3f4ab7a52a5f952f5",
+          "src/game/quantumLogisticsNetwork.ts": "5b65aaa4b542b7229178da6e2c68c51a82cc54d54d522aee588ebd1c350c91c5"
+        },
+        "bundleSha256": "9b559547c5f1dd207ed2da3b5328b51fe49e8599a8d50f46a24d696a3c643496",
+        "evidenceSha256": "27cbe71aa54654b488346b982faf20d1051fd299c56c5c24612fe48ea774cc92"
+      }
+    ]
+  },
+  "replication": [
+    {
+      "name": "quantum-replication-baseline-01",
+      "side": "baseline",
+      "variant": "supplied tray stress",
+      "buckets": [
+        {
+          "targetWallSeconds": 1,
+          "milliseconds": 12.399999976158142
+        },
+        {
+          "targetWallSeconds": 10,
+          "milliseconds": 540.4000000953674
+        },
+        {
+          "targetWallSeconds": 30,
+          "milliseconds": 1133.1999999284744
+        }
+      ],
+      "finalHash": "2b56509b5cd28c50e187f1a4c9030bb3fd2b459a9740e57a870c3e51c1613acd",
+      "serializedBytes": 110869315,
+      "simulatedSeconds": 240,
+      "evidenceSha256": "01d61e5cf8710c61d9fe2376991166ec64da2038e76ba898bc3eaf08990cebb8"
+    },
+    {
+      "name": "quantum-replication-candidate-01",
+      "side": "candidate",
+      "variant": "supplied tray stress",
+      "buckets": [
+        {
+          "targetWallSeconds": 1,
+          "milliseconds": 12.700000047683716
+        },
+        {
+          "targetWallSeconds": 10,
+          "milliseconds": 554.8999999761581
+        },
+        {
+          "targetWallSeconds": 30,
+          "milliseconds": 1171.6000000238419
+        }
+      ],
+      "finalHash": "2b56509b5cd28c50e187f1a4c9030bb3fd2b459a9740e57a870c3e51c1613acd",
+      "serializedBytes": 110869315,
+      "simulatedSeconds": 240,
+      "evidenceSha256": "e6295dde509096fd5c894946a0282cd0d5774c6ea3225e4584f48841a439f10c"
+    }
+  ],
+  "limits": [
+    "Engine calls exclude fixture reading, lookup setup, hashing, persistence and UI scheduling.",
+    "This does not establish an FPS improvement or lower whole-browser peak memory.",
+    "Replication stress supplies copied planet trays, unlike the ordinary stock variant.",
+    "Only one production-page pair was measured; the longest warmup frame did not improve, so no general UI smoothness claim is made."
+  ],
+  "livePage": [
+    {
+      "name": "quantum-ui-baseline-01",
+      "side": "baseline",
+      "warmup": {
+        "wallMs": 97265,
+        "simulationSeconds": 40.904099999926984
+      },
+      "workerMedianMs": 1629.2000000476837,
+      "workerP95Ms": 2659.2000000476837,
+      "warmupFrameMaxMs": 164.69999992847443,
+      "warmupFrameP95Ms": 7.100000023841858,
+      "normalRendererPeakWorkingSetBytes": 3249508352,
+      "stopMs": 18942,
+      "terminalSaveValid": true,
+      "paused": "true",
+      "entityCount": 110042,
+      "beltCount": 233300,
+      "observationSeconds": 5,
+      "evidenceSha256": "3bfeb4ad5c8941ca38ffaff8608881aad6fe70b5fdc32cf2a031b6cd903f321d"
+    },
+    {
+      "name": "quantum-ui-candidate-01",
+      "side": "candidate",
+      "warmup": {
+        "wallMs": 67776,
+        "simulationSeconds": 40.997999999672174
+      },
+      "workerMedianMs": 967.1000000238419,
+      "workerP95Ms": 1701.7999999523163,
+      "warmupFrameMaxMs": 323,
+      "warmupFrameP95Ms": 7.199999928474426,
+      "normalRendererPeakWorkingSetBytes": 3066920960,
+      "stopMs": 17863,
+      "terminalSaveValid": true,
+      "paused": "true",
+      "entityCount": 110042,
+      "beltCount": 233300,
+      "observationSeconds": 5,
+      "evidenceSha256": "c456e88742d973adf551ae1f66ac4ceaf6b826f90834e66765b7b3c1614ccba7"
+    }
+  ],
+  "liveTimeReductionPercent": 30.318202847889786
+}

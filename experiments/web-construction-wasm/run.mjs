@@ -12,13 +12,17 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
 const callable = entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
-  : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection" : "runConstructionWasmProbe";
+  : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
+    : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
 const decoderFiles = ["src/game/storage.ts", "src/game/saveTransferDecode.ts"];
 const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["decoder-ref"]}^{commit}`],
+  { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
+const runtimeFiles = ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts"];
+const runtimeReference = options["runtime-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["runtime-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
 const label = options.name ?? (fixtureMode ? `browser-${entry}` : "browser-wasm-probe");
 if (!/^[a-z0-9-]+$/i.test(label)) throw new Error("Invalid artifact name");
@@ -31,9 +35,10 @@ const inputHash = fixtureMode ? await fileHash(options.prepared) : null;
 const wasmPath = options.wasm ?? resolve(output, "target/wasm32-unknown-unknown/release/dsp_web_construction_probe.wasm");
 await mkdir(output, { recursive: true });
 const bundle = await build({ root, configFile: false, publicDir: false, logLevel: "error",
-  plugins: decoderReference ? [{ name: "frozen-save-decoder-reference", enforce: "pre", load(id) {
+  plugins: decoderReference || runtimeReference ? [{ name: "frozen-runtime-reference", enforce: "pre", load(id) {
     const relative = id.replaceAll("\\", "/").replace(`${sourceRoot.replaceAll("\\", "/")}/`, "").split("?")[0];
-    if (decoderFiles.includes(relative)) return execFileSync("git", ["show", `${decoderReference}:${relative}`],
+    const reference = runtimeFiles.includes(relative) ? runtimeReference : decoderFiles.includes(relative) ? decoderReference : null;
+    if (reference) return execFileSync("git", ["show", `${reference}:${relative}`],
       { cwd: sourceRoot, encoding: "utf8" });
   } }] : [],
   resolve: { alias: [{ find: /^\.\.\/\.\.\/src\/game\//, replacement: `${sourceRoot.replaceAll("\\", "/")}/src/game/` }] },
@@ -88,8 +93,16 @@ try {
   if (pageErrors.length) throw new Error(pageErrors.join("\n"));
   if (fixtureMode && inputHash !== await fileHash(options.prepared)) throw new Error("Input fixture changed during the run");
   const evidence = { browser: await browser.version(), sourceCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim(),
+    sourceDirty: Boolean(execFileSync("git", ["status", "--porcelain"], { cwd: sourceRoot, encoding: "utf8" }).trim()),
+    bundleSha256: createHash("sha256").update(code).digest("hex"),
     ...(rendererMemory ? { rendererMemory } : {}),
     ...(decoderReference ? { decoderReference, decoderFiles } : {}),
+    ...(runtimeReference || entry === "quantum-runtime" ? { runtimeReference, runtimeFiles,
+      runtimeSourceHashes: Object.fromEntries(await Promise.all(runtimeFiles.map(async (file) => [file,
+        runtimeReference
+          ? createHash("sha256").update(execFileSync("git", ["show", `${runtimeReference}:${file}`], { cwd: sourceRoot })).digest("hex")
+          : await fileHash(resolve(sourceRoot, file)),
+      ]))) } : {}),
     ...(fixtureMode ? { inputHash } : { wasmBytes: wasm.length, wasmSha256: createHash("sha256").update(wasm).digest("hex") }), ...result };
   await writeFile(resolve(output, `${label}.json`), `${JSON.stringify(evidence, null, 2)}\n`);
   console.log(JSON.stringify(fixtureMode ? evidence : { browser: evidence.browser, wasmBytes: evidence.wasmBytes,

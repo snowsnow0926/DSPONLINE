@@ -131,9 +131,21 @@ export function depositIntoQuantumInventory(
   itemId: ItemId,
   amount: DecimalIntegerString | number,
 ): QuantumInventoryDepositResult {
+  return depositIntoNormalizedQuantumInventory(normalizeDepositNetwork(network), itemId, amount);
+}
+
+function normalizeDepositNetwork(network: QuantumLogisticsNetworkState): QuantumLogisticsNetworkState {
   const runtimeFlow = network.runtimeFlow;
   const state = normalizeQuantumLogisticsNetworkState(network);
   if (runtimeFlow) state.runtimeFlow = runtimeFlow;
+  return state;
+}
+
+function depositIntoNormalizedQuantumInventory(
+  state: QuantumLogisticsNetworkState,
+  itemId: ItemId,
+  amount: DecimalIntegerString | number,
+): QuantumInventoryDepositResult {
   const requested = integer(amount);
   if (!state.enabled || requested <= 0n) {
     return { accepted: "0", remainder: decimal(requested), state };
@@ -147,6 +159,28 @@ export function depositIntoQuantumInventory(
     accepted: decimal(accepted),
     remainder: decimal(requested - accepted),
     state,
+  };
+}
+
+export interface QuantumInventoryDepositBatch {
+  deposit(network: QuantumLogisticsNetworkState, itemId: ItemId, amount: DecimalIntegerString | number): QuantumInventoryDepositResult;
+}
+
+/**
+ * A synchronous engine phase may chain deposits without normalizing and copying
+ * the whole warehouse for every tower slot. The first input is copied; later
+ * calls feed back the returned, batch-owned state. Only deposits and runtime-flow
+ * bookkeeping may mutate it during the phase. A replacement input starts a new
+ * copy. Do not retain intermediate results as immutable snapshots or reuse the
+ * batch across phases that withdraw material or change configuration.
+ */
+export function createQuantumInventoryDepositBatch(): QuantumInventoryDepositBatch {
+  let current: QuantumLogisticsNetworkState | undefined;
+  return {
+    deposit(network, itemId, amount) {
+      if (current === undefined || network !== current) current = normalizeDepositNetwork(network);
+      return depositIntoNormalizedQuantumInventory(current, itemId, amount);
+    },
   };
 }
 

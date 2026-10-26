@@ -175,6 +175,7 @@ try {
   // the replication window through the normal authoritative timeline.
   const warmupTarget = seeded.elapsedSeconds + 40;
   const warmupStarted = Date.now();
+  let warmup;
   console.log("Accumulating the live production-rate window");
   await page.getByRole("button", { name: "继续模拟", exact: true }).click({ noWaitAfter: true });
   while (Date.now() - warmupStarted < 180_000) {
@@ -182,7 +183,10 @@ try {
     const progress = await bounded(page.evaluate(() => ({ elapsed: globalThis.__LIVE_RUNTIME_TRACE__.lastElapsed,
       responses: globalThis.__LIVE_RUNTIME_TRACE__.events.length, notice: document.querySelector(".game-notice")?.textContent })));
     console.log(JSON.stringify({ warmupSimulationSeconds: progress.elapsed - seeded.elapsedSeconds, wallSeconds: (Date.now() - warmupStarted) / 1000, responses: progress.responses, notice: progress.notice }));
-    if (progress.elapsed >= warmupTarget) break;
+    if (progress.elapsed >= warmupTarget) {
+      warmup = { wallMs: Date.now() - warmupStarted, simulationSeconds: progress.elapsed - seeded.elapsedSeconds };
+      break;
+    }
   }
   if (await page.evaluate((target) => globalThis.__LIVE_RUNTIME_TRACE__.lastElapsed < target, warmupTarget)) throw Error("Real timeline could not fill the replication window within 180 seconds");
   await page.getByRole("button", { name: "暂停模拟", exact: true }).click({ noWaitAfter: true });
@@ -190,6 +194,7 @@ try {
   // Manual pause discards unsubmitted normal-play debt at the next scheduler
   // tick. Let that established rule run before comparing macro transitions.
   if (!options["retain-debt"]) await page.waitForTimeout(1_500);
+  await sampleProcesses("normal simulation warmed");
   await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "starting"; });
   console.log("Starting replication through the real UI");
   await start.click({ noWaitAfter: true });
@@ -253,7 +258,7 @@ try {
   const evidence = { browser: await browser.version(), supply, observationSeconds: seconds, profiled: Boolean(options.profile),
     engineProfiled: Boolean(options["engine-profile"]),
     retainedNormalDebt: Boolean(options["retain-debt"]),
-    seeded, stopMs, visibleSummary, trace, processSamples, durable };
+    seeded, warmup, stopMs, visibleSummary, trace, processSamples, durable };
   await writeFile(resolve(output, `${name}.json`), JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify({ supply, stopMs, events: trace.events.filter((event) => event.summary),
     runningMaxFrameGap: Math.max(0, ...trace.frames.filter((frame) => frame.phase === "running").map((frame) => frame.gap)) }, null, 2));

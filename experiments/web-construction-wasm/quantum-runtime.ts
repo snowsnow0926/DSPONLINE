@@ -21,6 +21,9 @@ async function runQuantumRuntimeProbe() {
   const setupStarted = performance.now();
   const runtime = createPersistentSimulationRuntime(state, setup);
   const setupMs = performance.now() - setupStarted;
+  const initialRouteIndex = { reservationEntries: runtime.lookup?.reservedOutgoing.size ?? null,
+    activeQueueEnabled: runtime.lookup?.beltRuntime.activeQueueEnabled ?? null,
+    initiallyDormantRoutes: runtime.lookup?.beltRuntime.initiallyDormantRouteCount ?? null };
   const buckets = [];
   let previous = 0;
   for (const target of [1, 10, 30]) {
@@ -28,14 +31,15 @@ async function runQuantumRuntimeProbe() {
     const started = performance.now();
     const duration = target - previous;
     advancePersistentSimulationRuntime(runtime, duration, duration, profile);
-    buckets.push({ targetSimulationSeconds: target, milliseconds: performance.now() - started, profile });
+    buckets.push({ targetSimulationSeconds: target, milliseconds: performance.now() - started, profile,
+      reservationEntries: runtime.lookup?.reservedOutgoing.size ?? null });
     previous = target;
   }
   const hashStarted = performance.now();
   const rawState = JSON.stringify(runtime.state);
   const fullStateSha256 = await digest(rawState);
   const quantumSha256 = await digest(JSON.stringify(runtime.state.quantumLogisticsNetwork));
-  return { setupMs, buckets, hashMs: performance.now() - hashStarted,
+  return { setupMs, initialRouteIndex, buckets, hashMs: performance.now() - hashStarted,
     fullStateJsonLength: rawState.length, fullStateSha256, quantumSha256,
     entities: runtime.state.entities.length, belts: runtime.state.belts.length,
     elapsedSeconds: runtime.state.elapsedSeconds,

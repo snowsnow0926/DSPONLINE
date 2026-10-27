@@ -248,7 +248,9 @@ async function installProbe(page: Page, observeStopState = false): Promise<void>
     await route.fulfill({ response, body });
   });
   await page.route("**/src/game/saveTransferDecode.ts*", async (route) => {
-    const response = await route.fetch();
+    // Retry one transport-level ECONNRESET while fetching this read-only local
+    // instrumentation module. Product requests and HTTP failures are untouched.
+    const response = await route.fetch({ maxRetries: 1 });
     const source = await response.text();
     const boundary = "function yieldSaveTransferWork(";
     if (!source.includes(boundary)) throw new Error("terminal decode observation boundary changed");

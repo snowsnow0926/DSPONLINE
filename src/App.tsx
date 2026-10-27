@@ -1939,6 +1939,7 @@ function finishSimulationCheckpointChunks(accumulator: SimulationCheckpointAccum
 }
 
 type RuntimePersistenceKind = "autosave" | "manual" | "pure-idle-stop" | "return" | "lifecycle" | "other";
+type PureIdleStartupOperation = { cancelled: boolean; saveProgressId: number | null };
 type RuntimePersistencePhase = "checkpoint" | "serialize-write-readback" | "complete" | "failed";
 
 const LIFECYCLE_SEALED_SAVE_MESSAGE = "页面正在退出，已保留当前 durable recovery 供下次精确恢复";
@@ -2717,6 +2718,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     if (durableWorkerRecoveryInFlightRef.current) {
       setNotice("正在从 durable recovery 精确重建模拟 Worker，请稍候");
+      return true;
+    }
+    if (pureIdleStartupOperationRef.current) {
+      setNotice("正在建立纯挂机检查点；本次操作未应用，启动完成后进入纯挂机界面");
       return true;
     }
     if (allowEditsDuringSaveRef.current) return false;
@@ -5111,6 +5116,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const cloudAutoSyncAbortRef = useRef<AbortController | null>(null);
   const cloudAutoSyncInFlightRef = useRef(false);
   const pureIdleStopTargetRef = useRef<{ sessionId: string; targetWallSeconds: number } | null>(null);
+  const pureIdleStartupOperationRef = useRef<PureIdleStartupOperation | null>(null);
+  // The startup snapshot is a full private copy, held only until its primary
+  // write finishes. It must never authorize streaming an ordinary live state.
+  const pureIdleStartupCheckpointRef = useRef<{
+    state: GameState;
+    sessionId: string;
+    authorityLease: LegacyAuthorityAsyncLeaseToken;
+    operation: PureIdleStartupOperation;
+  } | null>(null);
   // Retain exactly one verified terminal result while persistence is retried.
   // Its frozen timeline and authority lease must never cross a new idle run.
   const pureIdleStopCandidateRef = useRef<({
@@ -5149,6 +5163,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     pureIdleMacroActiveRef.current = false;
     pureIdleActiveRef.current = false;
     pureIdleStopCandidateRef.current = null;
+    pureIdleStartupCheckpointRef.current = null;
+    pureIdleStartupOperationRef.current = null;
     pureIdleBackgroundOfflineAbortRef.current?.abort();
     pureIdleBackgroundOfflineAbortRef.current = null;
     const recovery = pureIdleRecoveryRef.current;
@@ -7630,7 +7646,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       stopCandidate.state === state && stopCandidate.terminalState === true &&
       legacyJavaScriptAuthorityLeaseIsCurrent(stopCandidate.authorityLease)
       ? stopCandidate : null;
-    const ownsBarrier = state === undefined || preparedTerminal !== null;
+    const startupCheckpoint = pureIdleStartupCheckpointRef.current;
+    const preparedStartup = state !== undefined && startupCheckpoint?.state === state &&
+      pureIdleStartupOperationRef.current === startupCheckpoint.operation && !startupCheckpoint.operation.cancelled &&
+      isLargeRuntimeState(state) && legacyJavaScriptAuthorityLeaseIsCurrent(startupCheckpoint.authorityLease)
+      ? startupCheckpoint : null;
+    const preparedFrozenCheckpoint = preparedTerminal ?? preparedStartup;
+    const ownsBarrier = state === undefined || preparedFrozenCheckpoint !== null;
     if (ownsBarrier) {
       simulationSaveBarrierDepthRef.current += 1;
       simulationCheckpointBarrierRef.current = true;
@@ -7846,9 +7868,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       } else {
         result = await saveVerifiedPrimaryCheckpoint(saveState, {
           deferBackup: kind === "autosave", force: kind !== "autosave",
-          ...(preparedTerminal && isLargeRuntimeState(saveState) ? { frozenStateIsCurrent: () =>
-            pureIdleStopCandidateRef.current === preparedTerminal && pureIdleMacroActiveRef.current &&
-            legacyJavaScriptAuthorityLeaseIsCurrent(preparedTerminal.authorityLease) &&
+          ...(preparedFrozenCheckpoint && isLargeRuntimeState(saveState) ? { frozenStateIsCurrent: () =>
+            (preparedTerminal ? pureIdleStopCandidateRef.current === preparedTerminal :
+              pureIdleStartupCheckpointRef.current === preparedStartup && pureIdleStartupOperationRef.current === preparedStartup?.operation &&
+              preparedStartup?.operation.cancelled === false) &&
+            pureIdleMacroActiveRef.current && legacyJavaScriptAuthorityLeaseIsCurrent(preparedFrozenCheckpoint.authorityLease) &&
             simulationCheckpointBarrierRef.current && simulationSaveBarrierDepthRef.current > 0 &&
             !simulationSubmissionRef.current && !simulationRecoveryRef.current &&
             !simulationCheckpointRequestRef.current && !deferredDurableUiSubmissionRef.current &&
@@ -8729,6 +8753,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           setNotice("Windows 原生权威状态正在变化，旧纯挂机启动已取消");
           return;
         }
+        const startupOperation: PureIdleStartupOperation = { cancelled: false, saveProgressId: null };
+        pureIdleStartupOperationRef.current = startupOperation;
+        const startupIsCurrent = () => pureIdleStartupOperationRef.current === startupOperation &&
+          !startupOperation.cancelled && legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease);
         pureIdleMacroActiveRef.current = true;
         pureIdleStopTargetRef.current = null;
         pureIdleMacroRestartCountRef.current = 0;
@@ -8744,9 +8772,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               setNotice("终局工厂当前 Worker 切片正在收尾；完成后会自动进入纯挂机，无需再次点击…");
             }
             await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
-            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+            if (!startupIsCurrent()) return;
           }
-          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+          if (!startupIsCurrent()) return;
           if (simulationSubmissionRef.current) {
             pureIdleMacroActiveRef.current = false;
             setNotice("当前 Worker 切片 60 秒内仍未提交；已保留进度并暂停，可立即重试纯挂机");
@@ -8794,13 +8822,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           // points, so do the same durable T0 bootstrap the menu normally
           // performs before creating a pure-idle recovery journal.
           if (!await ensureDurableRecoveryBaseline(gameRef.current)) {
-            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+            if (!startupIsCurrent()) return;
             pureIdleMacroActiveRef.current = false;
             setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
             return;
           }
           setNotice("正在取得纯挂机恢复日志写入权…");
-          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+          if (!startupIsCurrent()) return;
           const claim = await createPureIdleRecovery(
             checkpoint,
             mode,
@@ -8809,20 +8837,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             Date.now(),
             startedPaused,
           );
-          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+          if (!startupIsCurrent()) return;
           if (!claim.ok) {
             pureIdleMacroActiveRef.current = false;
             setNotice(claim.message);
             return;
           }
           setNotice("正在写入并读回纯挂机开始检查点…");
-          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
-          const saved = await persistPrimarySave(checkpoint);
-          if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+          if (!startupIsCurrent()) return;
+          const startupCheckpoint = { state: checkpoint, sessionId: claim.record.sessionId, authorityLease, operation: startupOperation };
+          pureIdleStartupCheckpointRef.current = startupCheckpoint;
+          let saved: SaveGameResult;
+          try {
+            const previousProgressId = runtimePersistenceProgressIdRef.current;
+            const pendingSave = persistPrimarySave(checkpoint);
+            if (runtimePersistenceProgressIdRef.current !== previousProgressId) startupOperation.saveProgressId = runtimePersistenceProgressIdRef.current;
+            saved = await pendingSave;
+          } finally {
+            if (pureIdleStartupCheckpointRef.current === startupCheckpoint) pureIdleStartupCheckpointRef.current = null;
+          }
+          if (!startupIsCurrent()) return;
           if (lifecycleExitStartedRef.current) return;
           if (!saved.success) {
             await clearPureIdleRecovery(claim.record.sessionId, pureIdleOwnerTokenRef.current);
-            if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+            if (!startupIsCurrent()) return;
             pureIdleMacroActiveRef.current = false;
             setNotice("无法创建纯挂机检查点，主存档未改变");
             return;
@@ -8840,6 +8878,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             : mode === "stable" ? "正在启动稳定宏观纯挂机" : "正在启动终局极限纯挂机");
           await initializePureIdleMacroClient(claim.record, authorityLease);
         })().catch((error) => {
+          if (pureIdleStartupOperationRef.current !== startupOperation) return;
           // Startup owns no committed macro output yet. An unexpected browser,
           // lock, or persistence exception must return the UI to an immediately
           // retryable state instead of leaving a hidden active latch forever.
@@ -8852,6 +8891,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           setNotice(error instanceof Error
             ? `纯挂机启动失败：${error.message}；主存档未改变，可立即重试`
             : "纯挂机启动失败；主存档未改变，可立即重试");
+        }).finally(() => {
+          if (pureIdleStartupOperationRef.current !== startupOperation) return;
+          pureIdleStartupOperationRef.current = null;
+          if (!pureIdleActiveRef.current) {
+            pureIdleMacroActiveRef.current = false;
+            if (startupOperation.cancelled && startupOperation.saveProgressId !== null) {
+              setRuntimePersistenceProgress(current => current?.id === startupOperation.saveProgressId ? null : current);
+            }
+          }
         });
         return;
       }
@@ -12696,6 +12744,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [handlePureIdleLeaseLost, initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleWorkerFailure, publishPureIdleMacroSummary, publishPureIdleTerminalGameBehindOverlay, pureIdleActive, settlePureIdleBackgroundRecovery]);
 
   useEffect(() => () => {
+    pureIdleStartupCheckpointRef.current = null;
+    pureIdleStartupOperationRef.current = null;
     pureIdleMacroClientRef.current?.close();
     const authorityLease = issueLegacyJavaScriptAuthorityLease();
     if (!authorityLease || !legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
@@ -13028,6 +13078,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       // callback may already be queued behind this synchronous event; it must
       // not enqueue a new primary write after pagehide chose the recovery path.
       lifecycleExitStartedRef.current = true;
+      if (pureIdleStartupOperationRef.current) pureIdleStartupOperationRef.current.cancelled = true;
+      pureIdleStartupCheckpointRef.current = null;
       if (nativeAuthorityPersistenceProtectedRef.current || readNativeAuthorityPersistenceBoundary().protected) {
         // Synchronous unload cannot wait for a Rust checkpoint. The native
         // host keeps its last durable revision; writing the renderer mirror

@@ -1,0 +1,287 @@
+{
+  "scope": "Local development; not deployed; overall performance objective remains unfinished.",
+  "baseline": {
+    "runtimeCommit": "c0d1a9182a07f499d8a54870c0e747fc84880cb9",
+    "buildId": "1.3.2+c0d1a9182a07",
+    "manifestSha256": "598ac472d3c297f37313dcaa491f4d9edc38b5fa0bdd90a1571b31b063ef09af"
+  },
+  "candidateSourceSha256": {
+    "src/App.tsx": "8a63cdd9e69dac20d0a5b651ded3f6077bde6e989f783eee20f380056626fc94",
+    "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+    "src/game/pureIdleRecovery.ts": "1401a66245f080aa5b58999f2640d58e3e23f9087f280d88efa95b4cfe37589c",
+    "src/game/authoritativeSaveSerializationClient.ts": "98312b84dec7df378af19333bdf9a766b8531996510649d80b012704af5630f6",
+    "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+    "src/game/saveStateChunkTransfer.ts": "c2c42c89d9871a587a6d45d105a7eb46d1a56438045f3761997d28d3eb4643bb",
+    "src/game/authoritativeSavePersistenceClient.ts": "6cdf87cb74977e7b541b3851a0d4933e1d2dc67dc6b04330e5cb5b3115d9ba59",
+    "src/game/authoritativeSavePersistence.worker.ts": "cbe421da6daa1c5dddf80a748bcd13dab2ffda2b80e561b698350e13a36c934b",
+    "src/game/localSaveStore.ts": "d53b7ee0f0b72aa3b989fe6f40421ac58f28d6b79ea149868a8d383afdf8d1a2",
+    "native/native-coverage-manifest.json": "72dfe224d8b5e56dbef0301033891e26badcb78ed2683c8fac757e65911d7215",
+    "experiments/web-construction-wasm/persistence-retirement.ts": "12a1ba69332cb5618772d0117e9c26ccd53c33055227267fd51941ce47bf6e6b",
+    "experiments/web-construction-wasm/run.mjs": "353ec330c3a9b4698375563bc0db4223f2540f26e6d8f7e9fc59c4837f3c6050",
+    "tests/e2e/v149-pure-idle-start-checkpoint.spec.ts": "a8b3860b30e688c4b671a6a4c332dd7daf9240639cf7ccc35947b8d343d44446"
+  },
+  "measuredDistRegistrySha256": "d3d8a08051ca223e823bebc3f00312662374d544bfdcec2ad304e512e089e392",
+  "servedBundleIdentity": [
+    {
+      "variant": "baseline",
+      "indexSha256": "c336f96dc50b196cb99eba1d6198cda6d78d8de8862bccfba3231cbdbe556cc7",
+      "mainScript": "/assets/index-BNSRaG0f.js",
+      "mainScriptSha256": "db10e63708ea6e2a9c6e456d4beea4357ffc8c1b8590e05d42aac542ce9d23b2",
+      "matchesExpectedFiles": true
+    },
+    {
+      "variant": "candidate",
+      "indexSha256": "903f3093cd741b821c5f92e65894c0813e9d5103e5f04ea11f8465fa96fbbff5",
+      "mainScript": "/assets/index-K8DXFhsA.js",
+      "mainScriptSha256": "bdd0e58b34657513ff70420867b08a13ecce44b3b31c3fba430a8e6bb209774c",
+      "matchesExpectedFiles": true
+    }
+  ],
+  "inputPreservation": [
+    {
+      "label": "original",
+      "bytes": 107637967,
+      "sha256": "d64b5646f6117f3c089fba4dc95a95e84bedd9375f75b3c8c917b2e7cf473bc1",
+      "unchanged": true
+    },
+    {
+      "label": "prepared",
+      "bytes": 205464026,
+      "sha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+      "unchanged": true
+    }
+  ],
+  "qualification": {
+    "scope": "Two alternating unprofiled whole-page pairs; stock copy, 8x replication, 5 s observation, 3 s post-stop. Not whole-game FPS, long-term resident memory, or low-memory qualification.",
+    "rows": [
+      {
+        "name": "startup-final-baseline-01",
+        "variant": "baseline",
+        "evidenceSha256": "17513833f3e3f409ec92420844a316b032c821660fa1345b94ece51c7da1299b",
+        "startMs": 11271,
+        "stopMs": 13550,
+        "maxStartingSaveSendMs": 534,
+        "rendererPeakWorkingSetBytes": 5476470784,
+        "rendererEndWorkingSetBytes": 2613809152,
+        "sampledBrowserEndWorkingSetBytes": 3270737920,
+        "sourcePrimaryChecksum": "d28d6a63",
+        "durableValid": true,
+        "countsAndSettingsPreserved": true,
+        "startingMaxFrameGapMs": 1162.9000000953674,
+        "startingFramesOver100Ms": 6,
+        "startingLongTaskTotalMs": 2615,
+        "stoppingMaxFrameGapMs": 315,
+        "stoppingFramesOver100Ms": 2,
+        "stoppingLongTaskTotalMs": 501,
+        "post-stopMaxFrameGapMs": 51.80000019073486,
+        "post-stopFramesOver100Ms": 0,
+        "post-stopLongTaskTotalMs": 0
+      },
+      {
+        "name": "startup-final-candidate-01",
+        "variant": "candidate",
+        "evidenceSha256": "4d45f5e0c0a79eac5b7a6164531c83784de36ce7e1070d446e0ff36c3e1e10f7",
+        "startMs": 10666,
+        "stopMs": 13555,
+        "maxStartingSaveSendMs": 3.0999999046325684,
+        "rendererPeakWorkingSetBytes": 5565038592,
+        "rendererEndWorkingSetBytes": 2073505792,
+        "sampledBrowserEndWorkingSetBytes": 2733703168,
+        "sourcePrimaryChecksum": "d28d6a63",
+        "durableValid": true,
+        "countsAndSettingsPreserved": true,
+        "startingMaxFrameGapMs": 1150.8999998569489,
+        "startingFramesOver100Ms": 5,
+        "startingLongTaskTotalMs": 2040,
+        "stoppingMaxFrameGapMs": 327.2999999523163,
+        "stoppingFramesOver100Ms": 2,
+        "stoppingLongTaskTotalMs": 512,
+        "post-stopMaxFrameGapMs": 49.200000047683716,
+        "post-stopFramesOver100Ms": 0,
+        "post-stopLongTaskTotalMs": 0
+      },
+      {
+        "name": "startup-final-candidate-02",
+        "variant": "candidate",
+        "evidenceSha256": "ca323570e3131ea700811ff4467b20f3572755ae0875080346905274ba0d81ad",
+        "startMs": 10806,
+        "stopMs": 13180,
+        "maxStartingSaveSendMs": 2.9000000953674316,
+        "rendererPeakWorkingSetBytes": 5483925504,
+        "rendererEndWorkingSetBytes": 2068262912,
+        "sampledBrowserEndWorkingSetBytes": 2730749952,
+        "sourcePrimaryChecksum": "d28d6a63",
+        "durableValid": true,
+        "countsAndSettingsPreserved": true,
+        "startingMaxFrameGapMs": 1157.3999998569489,
+        "startingFramesOver100Ms": 7,
+        "startingLongTaskTotalMs": 2081,
+        "stoppingMaxFrameGapMs": 323.39999985694885,
+        "stoppingFramesOver100Ms": 2,
+        "stoppingLongTaskTotalMs": 506,
+        "post-stopMaxFrameGapMs": 22.40000009536743,
+        "post-stopFramesOver100Ms": 0,
+        "post-stopLongTaskTotalMs": 0
+      },
+      {
+        "name": "startup-final-baseline-02",
+        "variant": "baseline",
+        "evidenceSha256": "7582d44acc1bd7e3b0a5f980260969dc20e891577dfb48d9b5934d6b84e763be",
+        "startMs": 10969,
+        "stopMs": 13031,
+        "maxStartingSaveSendMs": 496.7000000476837,
+        "rendererPeakWorkingSetBytes": 5586292736,
+        "rendererEndWorkingSetBytes": 2695041024,
+        "sampledBrowserEndWorkingSetBytes": 3349635072,
+        "sourcePrimaryChecksum": "d28d6a63",
+        "durableValid": true,
+        "countsAndSettingsPreserved": true,
+        "startingMaxFrameGapMs": 1145.7000000476837,
+        "startingFramesOver100Ms": 7,
+        "startingLongTaskTotalMs": 2546,
+        "stoppingMaxFrameGapMs": 313.09999990463257,
+        "stoppingFramesOver100Ms": 2,
+        "stoppingLongTaskTotalMs": 494,
+        "post-stopMaxFrameGapMs": 52.299999952316284,
+        "post-stopFramesOver100Ms": 0,
+        "post-stopLongTaskTotalMs": 0
+      }
+    ],
+    "metrics": {
+      "startMs": {
+        "baselineMedian": 11120.0,
+        "candidateMedian": 10736.0,
+        "percentChange": -3.453237410071941
+      },
+      "stopMs": {
+        "baselineMedian": 13290.5,
+        "candidateMedian": 13367.5,
+        "percentChange": 0.5793611978480939
+      },
+      "maxStartingSaveSendMs": {
+        "baselineMedian": 515.3500000238419,
+        "candidateMedian": 3.0,
+        "percentChange": -99.41787134959519
+      },
+      "rendererPeakWorkingSetBytes": {
+        "baselineMedian": 5531381760.0,
+        "candidateMedian": 5524482048.0,
+        "percentChange": -0.12473758455608941
+      },
+      "rendererEndWorkingSetBytes": {
+        "baselineMedian": 2654425088.0,
+        "candidateMedian": 2070884352.0,
+        "percentChange": -21.98369577796878
+      },
+      "sampledBrowserEndWorkingSetBytes": {
+        "baselineMedian": 3310186496.0,
+        "candidateMedian": 2732226560.0,
+        "percentChange": -17.460041502145017
+      },
+      "startingMaxFrameGapMs": {
+        "baselineMedian": 1154.3000000715256,
+        "candidateMedian": 1154.1499998569489,
+        "percentChange": -0.012994907265651001
+      },
+      "startingFramesOver100Ms": {
+        "baselineMedian": 6.5,
+        "candidateMedian": 6.0,
+        "percentChange": -7.692307692307687
+      },
+      "startingLongTaskTotalMs": {
+        "baselineMedian": 2580.5,
+        "candidateMedian": 2060.5,
+        "percentChange": -20.151133501259444
+      },
+      "stoppingMaxFrameGapMs": {
+        "baselineMedian": 314.0499999523163,
+        "candidateMedian": 325.34999990463257,
+        "percentChange": 3.5981531456876326
+      },
+      "stoppingFramesOver100Ms": {
+        "baselineMedian": 2.0,
+        "candidateMedian": 2.0,
+        "percentChange": 0.0
+      },
+      "stoppingLongTaskTotalMs": {
+        "baselineMedian": 497.5,
+        "candidateMedian": 509.0,
+        "percentChange": 2.311557788944718
+      },
+      "post-stopMaxFrameGapMs": {
+        "baselineMedian": 52.050000071525574,
+        "candidateMedian": 35.800000071525574,
+        "percentChange": -31.219980744802555
+      },
+      "post-stopFramesOver100Ms": {
+        "baselineMedian": 0.0,
+        "candidateMedian": 0.0,
+        "percentChange": null
+      },
+      "post-stopLongTaskTotalMs": {
+        "baselineMedian": 0.0,
+        "candidateMedian": 0.0,
+        "percentChange": null
+      }
+    },
+    "fixedStartupParity": {
+      "stateSha256": "6fbdc4a6fb45e0805ae0126caf056edcef64313521c9456c3d4d0dcf0795c14a",
+      "callerUnchanged": true,
+      "entityCount": 110042,
+      "beltCount": 233300,
+      "commits": [
+        {
+          "transport": "bulk",
+          "sha256": "3c917e53981dc552ded9917f8414635525d1f3848f7ffd01de65885ad601f69a",
+          "bytes": 110673773,
+          "revision": 1,
+          "backupSaved": false
+        },
+        {
+          "transport": "chunks",
+          "sha256": "3c917e53981dc552ded9917f8414635525d1f3848f7ffd01de65885ad601f69a",
+          "bytes": 110673773,
+          "revision": 2,
+          "backupSaved": false
+        }
+      ]
+    }
+  },
+  "validation": {
+    "unit": {
+      "pass": 3684,
+      "skip": 38,
+      "fail": 0
+    },
+    "defaultChromium": {
+      "pass": 508,
+      "skip": 34,
+      "fail": 0,
+      "flaky": 0
+    },
+    "startupRepeated": {
+      "pass": 20,
+      "skip": 0,
+      "fail": 0
+    },
+    "optionalRecoveryCombination": {
+      "pass": 21,
+      "skip": 19,
+      "fail": 0,
+      "flaky": 0
+    },
+    "nativeBoundaryTools": {
+      "pass": 6,
+      "fail": 0
+    },
+    "runtimeLicensePackages": 127,
+    "experimentalTypes": "passed",
+    "webBuild": "passed; clean rebuild and final PWA pending"
+  },
+  "limits": [
+    "Ordinary T0 retained; first skip-T0 candidate unresponsive and explicitly cancelled, cause unconfirmed, timings excluded.",
+    "Short observation, not long-term residency or low-memory/mobile large-save qualification.",
+    "GameState v47, envelope v2, schema, item rules and backup settings unchanged.",
+    "No production, native packaging or new Rust integration."
+  ]
+}

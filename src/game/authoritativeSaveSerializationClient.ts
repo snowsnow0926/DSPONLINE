@@ -58,7 +58,7 @@ interface AuthoritativeSaveSerializationOptions {
   expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
   compressTransport?: boolean;
-  /** Exclusive JSON-derived canonical snapshot; caller keeps it immutable until
+  /** Exclusive canonical or independently copied runtime snapshot; keep it immutable until
    * completion. Recheck the owning timeline before every bounded clone. */
   frozenStateIsCurrent?: () => boolean;
 }

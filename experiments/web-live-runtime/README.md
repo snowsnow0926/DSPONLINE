@@ -88,6 +88,15 @@ node experiments/web-live-runtime/analyze-profile.mjs --profile=D:/private/diagn
 解析器使用仓库已安装的 TypeScript 解码源码映射，无需新增依赖。诊断构建可额外输出隐藏映射，但必须先逐字节比对所有 JavaScript 与待采样的冻结包；复现构建身份时仅在该诊断命令内指定已知的 `npm_package_version`、`DSP_GIT_SHA`、`DSP_GIT_DIRTY` 和 `DSP_BUILD_ID`，不能将这个目录当成发布包。
 
 CPU 采样自身可能引入很长的初始化停顿和其它开销。`*-profile-timeline.json` 记录启动边界；采样结果只用于定位函数，性能百分比来自独立、未采样的旧/新对照。`--profile-phase=all` 保留整个转换旅程采样入口。
+停止采样同样记录 Profiler.stop 前后页面时钟，可用 profile 总时长与首尾边界求交，
+缩小启用采样造成的时钟不确定区间。采样停止或写出失败会另存 `*-profile-error.json`，
+在主流程本来成功时让诊断退出失败，不将缺失 CPU 数据当作成功定位。
+
+`--style-read-diagnostics=1` 是独立样式查询诊断：仅在停止和恢复阶段包装
+`getComputedStyle`，主动读取 display/visibility 以计入懒求值，保留不少于 1 ms
+的最多 200 条查询。只记录标签、焦点资格与样式等结构摘要，不记录元素 ID、
+文字或存档内容。该选项将运行标为 `profiled: true`，有探针开销，不能用于
+未采样性能资格；用于核对昂贵焦点检查的实际目标是否可聚焦。
 
 ## 堆占用归因
 

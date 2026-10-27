@@ -68,6 +68,44 @@ afterEach(() => {
 });
 
 describe("AccessibleDialog", () => {
+  it("closes a dialog opened from body focus without forcing a body style query", () => {
+    expect(document.activeElement).toBe(document.body);
+    render(<AccessibleDialog open title="页面焦点" onRequestClose={() => undefined}>
+      <button data-page-focus-action>确认</button>
+    </AccessibleDialog>);
+    expect(document.activeElement).toBe(document.querySelector("[data-page-focus-action]"));
+    const styleReads = vi.spyOn(window, "getComputedStyle");
+    try {
+      render(<></>);
+      expect(document.activeElement).toBe(document.body);
+      expect(styleReads.mock.calls.filter(([element]) => element === document.body)).toHaveLength(0);
+      expect(host.hasAttribute("inert")).toBe(false);
+      expect(document.body.style.overflow).toBe("scroll");
+      expect(document.documentElement.style.overflow).toBe("visible");
+    } finally {
+      styleReads.mockRestore();
+    }
+  });
+
+  it("still returns focus to a negative-tabindex target only while it is visible", () => {
+    const target = document.createElement("div");
+    target.tabIndex = -1;
+    document.body.append(target);
+    const dialog = <AccessibleDialog open title="程序焦点" onRequestClose={() => undefined}>
+      <button>确认</button>
+    </AccessibleDialog>;
+    target.focus();
+    render(dialog);
+    render(<></>);
+    expect(document.activeElement).toBe(target);
+    render(dialog);
+    target.style.visibility = "hidden";
+    render(<></>);
+    expect(document.activeElement).toBe(document.body);
+    expect(target.hasAttribute("inert")).toBe(false);
+    target.remove();
+  });
+
   it("keeps the top portal interactive when a workspace and report mount in the same commit", () => {
     function Harness() {
       const [workspaceOpen, setWorkspaceOpen] = useState(false);

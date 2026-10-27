@@ -131,13 +131,17 @@ function isHiddenOrInert(element: HTMLElement): boolean {
 }
 
 function canReceiveProgrammaticFocus(element: HTMLElement): boolean {
-  if (!element.isConnected || isDisabled(element) || isHiddenOrInert(element)) return false;
-  if (element.tabIndex >= 0 || element.hasAttribute("tabindex")) return true;
-  return element.matches("a[href], area[href], button, input, select, textarea, iframe, object, embed, [contenteditable='true']");
+  if (!element.isConnected || isDisabled(element)) return false;
+  // A surface opened from ordinary page focus can return to body. Reject
+  // non-focusable targets before a style read flushes the entire factory in
+  // the middle of React's background restoration commit.
+  const focusable = element.tabIndex >= 0 || element.hasAttribute("tabindex") ||
+    element.matches("a[href], area[href], button, input, select, textarea, iframe, object, embed, [contenteditable='true']");
+  return focusable && !isHiddenOrInert(element);
 }
 
 function isTabbable(element: HTMLElement): boolean {
-  return canReceiveProgrammaticFocus(element) && element.tabIndex >= 0;
+  return element.tabIndex >= 0 && canReceiveProgrammaticFocus(element);
 }
 
 function getTabbableElements(surface: HTMLElement): HTMLElement[] {

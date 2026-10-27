@@ -4975,6 +4975,10 @@ function transferBelts(
   // once instead of once per belt; the persisted rounding behavior is intact.
   const flowDecay = Math.pow(0.8, Math.max(0, seconds));
   const congestionDecay = Math.pow(0.85, Math.max(0, seconds));
+  // These inputs stay fixed throughout this belt phase. In a quantum-only
+  // network an empty reservation directory needs no per-source key or lookup.
+  const creditLimit = seconds > 0 ? normalizeBuildingBufferLimit(state.settings.beltBufferLimit) : 0;
+  const hasSourceReservations = !lookup || lookup.reservedOutgoing.size > 0;
 
   if (lookup?.beltRuntime.activeQueueEnabled) {
     for (const planetRuntime of lookup.beltRuntime.byPlanet.values()) {
@@ -5026,7 +5030,6 @@ function transferBelts(
     const capacity = route.capacity;
     if (seconds > 0) {
       const currentCredit = Math.max(0, belt.progress ?? 0);
-      const creditLimit = normalizeBuildingBufferLimit(state.settings.beltBufferLimit);
       belt.progress = round(currentCredit > creditLimit
         ? currentCredit
         : Math.min(creditLimit, currentCredit + capacity * seconds));
@@ -5034,7 +5037,7 @@ function transferBelts(
     const groupIndex = route.sourceGroupIndex;
     let sourceAvailability = groupIndex === undefined ? undefined : indexedSourceAvailability[groupIndex];
     if (!sourceAvailability || sourceAvailability.epoch !== runtimeEpoch) {
-      const reserved = stationReservedOutgoing(state, source.id, belt.itemId, lookup);
+      const reserved = hasSourceReservations ? stationReservedOutgoing(state, source.id, belt.itemId, lookup) : 0;
       sourceAvailability ??= { epoch: runtimeEpoch, available: 0, reserved: 0 };
       sourceAvailability.epoch = runtimeEpoch;
       sourceAvailability.available = Math.floor((source.outputs[belt.itemId] ?? 0) - reserved + EPSILON);
@@ -5349,6 +5352,7 @@ function reserveBeltStepOutputCapacity(
   forceFlatRouteOracle = false,
 ): BeltStepOutputReservation {
   const startedAt = profiler ? profileNow() : 0;
+  const creditLimit = normalizeBuildingBufferLimit(state.settings.beltBufferLimit);
   const allowanceByBelt = new Map<string, number>();
   const outputCredits = new Map<string, number>();
   const remainingTargetCapacity = new Map<string, number>();
@@ -5396,7 +5400,7 @@ function reserveBeltStepOutputCapacity(
     remainingTargetCapacity.set(targetKey, Math.max(0, targetFree - reserved));
     const sourceKey = outputCapacityCreditKey(source.id, belt.itemId);
     outputCredits.set(sourceKey, Math.min(
-      normalizeBuildingBufferLimit(state.settings.beltBufferLimit),
+      creditLimit,
       (outputCredits.get(sourceKey) ?? 0) + reserved,
     ));
   }

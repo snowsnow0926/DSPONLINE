@@ -53,6 +53,13 @@ node experiments/web-construction-wasm/run.mjs --entry=large-save --prepared=D:/
 
 ## 普通运行与量子入库对照
 
+`--entry=belt-flow` 是 UI 流量投影的独立正确性探针。在只读大档的真实拓扑上构造
+0、1、5、6、9、12 秒的恒定速率新快照，检查填满五秒窗口后观察值不变时仍能正确
+投影。每一步对索引路径、全量路径和原输入的完整 GameState JSON 求 SHA-256，
+不输出存档正文；不推进生产或写库。`--runtime-ref` 在此入口只替换 `beltFlow.ts`。
+任一全文不一致或输入变化会保存失败证据并以 1 退出。局部 `projectionMs` 不代表
+实际游戏帧率、存盘等待或整页内存资格。
+
 `--entry=quantum-runtime` 使用原库存，不补充材料，按 1、10、30 个累计模拟秒推进普通
 持久运行时。读取、索引准备和完整状态哈希分别计时；最终对比包含运行诊断字段的完整
 GameState JSON 及量子网络摘要，不只比较总产量。

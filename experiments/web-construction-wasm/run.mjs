@@ -12,9 +12,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
-const callable = entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
+const callable = entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
       : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
@@ -41,7 +41,7 @@ const macroProfileFunctions = {
   "src/game/offlineApproximation.ts": ["advancePureIdleConstructionDomainInPlace", "captureConstructionRecipeStageSnapshot", "createConstructionRecipeReceipt", "createConstructionPowerAllocation"],
   "src/game/pureIdleReplication.ts": ["advancePureIdleReplicationInPlace"],
 };
-const runtimeFiles = entry === "read-models"
+const runtimeFiles = entry === "belt-flow" ? ["src/game/beltFlow.ts"] : entry === "read-models"
   ? ["src/game/nativeFactoryInteractionFrame.ts", "src/game/webFactoryReadModelAdapter.ts"]
   : ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts"];
 const runtimeReference = options["runtime-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["runtime-ref"]}^{commit}`],
@@ -197,7 +197,7 @@ try {
     ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(entry === "save-state-chunks" ? { chunkTransportSourceSha256: await fileHash(resolve(sourceRoot, "src/game/saveStateChunkTransfer.ts")) } : {}),
     ...(entry === "power-matrix" ? { probeSourceSha256: await fileHash(resolve(root, "experiments/web-construction-wasm/power-matrix.ts")) } : {}),
-    ...(runtimeReference || ["quantum-runtime", "power-snapshot", "power-matrix", "read-models"].includes(entry) ? { runtimeReference, runtimeFiles,
+    ...(runtimeReference || ["quantum-runtime", "power-snapshot", "power-matrix", "read-models", "belt-flow"].includes(entry) ? { runtimeReference, runtimeFiles,
       runtimeSourceHashes: Object.fromEntries(await Promise.all(runtimeFiles.map(async (file) => [file,
         runtimeReference
           ? createHash("sha256").update(execFileSync("git", ["show", `${runtimeReference}:${file}`], { cwd: sourceRoot })).digest("hex")
@@ -210,6 +210,7 @@ try {
       name, fixtures, mismatches: mismatches.length, benchmarks: benchmarks.map(({ name, medianJsMs, medianRustMs }) => ({ name, medianJsMs, medianRustMs })),
     })) }, null, 2));
   if (!fixtureMode && evidence.reports.some((report) => report.mismatches.length)) process.exitCode = 1;
+  if (entry === "belt-flow" && !evidence.passed) process.exitCode = 1;
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

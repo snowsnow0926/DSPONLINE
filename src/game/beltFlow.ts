@@ -14,6 +14,13 @@ export interface BeltFlowObservation {
   sampling: boolean;
 }
 
+function matchesObservation(belt: BeltConnection, observation: BeltFlowObservation): boolean {
+  return belt.lastFlow === observation.flowPerSecond &&
+    belt.recentFlowSampleSeconds === observation.sampleSeconds &&
+    belt.recentFlowTransferred === observation.transferred &&
+    belt.recentFlowSampling === observation.sampling;
+}
+
 function normalizedTotal(belt: BeltConnection): number {
   return Math.max(0, Math.floor(belt.totalTransferred ?? 0));
 }
@@ -33,13 +40,13 @@ function interpolateTotal(before: BeltFlowPoint, after: BeltFlowPoint, elapsedSe
 export class BeltFlowSampler {
   private readonly histories = new Map<string, BeltFlowPoint[]>();
   private readonly latest = new Map<string, BeltFlowObservation>();
-  private readonly changedIndexes = new Set<number>();
+  private projectionIndexes: number[] = [];
 
   sample(state: GameState, options: { planetId?: PlanetId } = {}): ReadonlyMap<string, BeltFlowObservation> {
     const elapsedSeconds = Math.max(0, state.elapsedSeconds);
     const activeIds = new Set<string>();
 
-    this.changedIndexes.clear();
+    this.projectionIndexes.length = 0;
     for (let index = 0; index < state.belts.length; index += 1) {
       const belt = state.belts[index];
       if (options.planetId && belt.planetId !== options.planetId) continue;
@@ -73,13 +80,11 @@ export class BeltFlowSampler {
         transferred: Math.round(transferred * 1_000) / 1_000,
         sampling: sampleSeconds + 0.000_001 < BELT_FLOW_WINDOW_SECONDS,
       } satisfies BeltFlowObservation;
-      const previousObservation = this.latest.get(belt.id);
-      if (!previousObservation || previousObservation.flowPerSecond !== nextObservation.flowPerSecond ||
-        previousObservation.sampleSeconds !== nextObservation.sampleSeconds ||
-        previousObservation.transferred !== nextObservation.transferred ||
-        previousObservation.sampling !== nextObservation.sampling) {
-        this.changedIndexes.add(index);
-      }
+      // Every publication starts from a fresh authoritative snapshot. Even a
+      // stable window must replace that snapshot's instantaneous lastFlow and
+      // missing UI-only fields; comparison with the previous observation would
+      // incorrectly omit these belts after the five-second window fills.
+      if (!matchesObservation(belt, nextObservation)) this.projectionIndexes.push(index);
       this.latest.set(belt.id, nextObservation);
     }
 
@@ -92,17 +97,17 @@ export class BeltFlowSampler {
     return this.latest;
   }
 
-  /** Consume indexes whose display observation changed in the latest sample. */
-  consumeChangedIndexes(): number[] {
-    const changed = [...this.changedIndexes];
-    this.changedIndexes.clear();
-    return changed;
+  /** Consume indexes that need projection onto the exact state just sampled. */
+  consumeProjectionIndexes(): number[] {
+    const indexes = this.projectionIndexes;
+    this.projectionIndexes = [];
+    return indexes;
   }
 
   reset(): void {
     this.histories.clear();
     this.latest.clear();
-    this.changedIndexes.clear();
+    this.projectionIndexes.length = 0;
   }
 }
 
@@ -110,7 +115,7 @@ export function applyBeltFlowObservations(
   state: GameState,
   observations: ReadonlyMap<string, BeltFlowObservation>,
   planetId?: PlanetId,
-  changedIndexes?: readonly number[],
+  projectionIndexes?: readonly number[],
 ): GameState {
   if (state.belts.length === 0) return state;
   // Flow observations are a UI projection. Most large-factory publications
@@ -119,15 +124,13 @@ export function applyBeltFlowObservations(
   // same. When a value changes, preserve untouched belt identities so React
   // Flow and diagnostics do not retain a second full belt object tree.
   let nextBelts: BeltConnection[] | null = null;
-  const indexes = changedIndexes ?? state.belts.map((_, index) => index);
-  for (const index of indexes) {
+  const count = projectionIndexes?.length ?? state.belts.length;
+  for (let position = 0; position < count; position += 1) {
+    const index = projectionIndexes ? projectionIndexes[position] : position;
     if (index < 0 || index >= state.belts.length) continue;
     const belt = state.belts[index];
     const observation = planetId && belt.planetId !== planetId ? undefined : observations.get(belt.id);
-    if (!observation || (belt.lastFlow === observation.flowPerSecond &&
-      belt.recentFlowSampleSeconds === observation.sampleSeconds &&
-      belt.recentFlowTransferred === observation.transferred &&
-      belt.recentFlowSampling === observation.sampling)) continue;
+    if (!observation || matchesObservation(belt, observation)) continue;
     nextBelts ??= state.belts.slice();
     nextBelts[index] = {
       ...belt,

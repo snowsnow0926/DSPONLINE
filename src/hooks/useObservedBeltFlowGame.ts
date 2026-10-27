@@ -12,8 +12,9 @@ export function useObservedBeltFlowGame(game: GameState, sampleEnabled = true): 
     // a new source state.
     if (!sampleEnabled) return game;
     return measureRuntimeTransitionPhase("belt-flow-observation", () => {
-      const observations = samplerRef.current!.sample(game, { planetId: game.activePlanetId });
-      const observed = applyBeltFlowObservations(game, observations, game.activePlanetId);
+      const sampler = samplerRef.current!;
+      const observations = sampler.sample(game, { planetId: game.activePlanetId });
+      const observed = applyBeltFlowObservations(game, observations, game.activePlanetId, sampler.consumeChangedIndexes());
       trackRuntimeRetentionReference("belt-observed-game", observed);
       trackRuntimeRetentionReference("belt-observed-belts", observed.belts);
       trackRuntimeRetentionReference("belt-observed-belt-sample", observed.belts[0]);

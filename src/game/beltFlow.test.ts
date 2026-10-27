@@ -38,6 +38,19 @@ describe("BeltFlowSampler", () => {
     }
   });
 
+  it("reports only indexes whose display observation changed", () => {
+    const sampler = new BeltFlowSampler();
+    const state = stateWithBelt();
+    sampler.sample(state);
+    expect(sampler.consumeChangedIndexes()).toEqual([0]);
+    sampler.sample(state);
+    expect(sampler.consumeChangedIndexes()).toEqual([]);
+    state.elapsedSeconds = 1;
+    state.belts[0].totalTransferred = 12;
+    sampler.sample(state);
+    expect(sampler.consumeChangedIndexes()).toEqual([0]);
+  });
+
   it("interpolates a coarse publish interval without changing the measured rate", () => {
     const sampler = new BeltFlowSampler();
     const state = stateWithBelt();

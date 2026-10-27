@@ -33,12 +33,15 @@ function interpolateTotal(before: BeltFlowPoint, after: BeltFlowPoint, elapsedSe
 export class BeltFlowSampler {
   private readonly histories = new Map<string, BeltFlowPoint[]>();
   private readonly latest = new Map<string, BeltFlowObservation>();
+  private readonly changedIndexes = new Set<number>();
 
   sample(state: GameState, options: { planetId?: PlanetId } = {}): ReadonlyMap<string, BeltFlowObservation> {
     const elapsedSeconds = Math.max(0, state.elapsedSeconds);
     const activeIds = new Set<string>();
 
-    for (const belt of state.belts) {
+    this.changedIndexes.clear();
+    for (let index = 0; index < state.belts.length; index += 1) {
+      const belt = state.belts[index];
       if (options.planetId && belt.planetId !== options.planetId) continue;
       activeIds.add(belt.id);
       const totalTransferred = normalizedTotal(belt);
@@ -64,12 +67,20 @@ export class BeltFlowSampler {
       const transferred = Math.max(0, totalTransferred - baseTotal);
       const fallback = Math.max(0, Number.isFinite(belt.lastFlow) ? belt.lastFlow : 0);
       const flowPerSecond = sampleSeconds > 0.000_001 ? transferred / sampleSeconds : fallback;
-      this.latest.set(belt.id, {
+      const nextObservation = {
         flowPerSecond: Math.round(Math.max(0, flowPerSecond) * 1_000) / 1_000,
         sampleSeconds: Math.round(sampleSeconds * 1_000) / 1_000,
         transferred: Math.round(transferred * 1_000) / 1_000,
         sampling: sampleSeconds + 0.000_001 < BELT_FLOW_WINDOW_SECONDS,
-      });
+      } satisfies BeltFlowObservation;
+      const previousObservation = this.latest.get(belt.id);
+      if (!previousObservation || previousObservation.flowPerSecond !== nextObservation.flowPerSecond ||
+        previousObservation.sampleSeconds !== nextObservation.sampleSeconds ||
+        previousObservation.transferred !== nextObservation.transferred ||
+        previousObservation.sampling !== nextObservation.sampling) {
+        this.changedIndexes.add(index);
+      }
+      this.latest.set(belt.id, nextObservation);
     }
 
     for (const beltId of this.histories.keys()) {
@@ -81,9 +92,17 @@ export class BeltFlowSampler {
     return this.latest;
   }
 
+  /** Consume indexes whose display observation changed in the latest sample. */
+  consumeChangedIndexes(): number[] {
+    const changed = [...this.changedIndexes];
+    this.changedIndexes.clear();
+    return changed;
+  }
+
   reset(): void {
     this.histories.clear();
     this.latest.clear();
+    this.changedIndexes.clear();
   }
 }
 
@@ -91,6 +110,7 @@ export function applyBeltFlowObservations(
   state: GameState,
   observations: ReadonlyMap<string, BeltFlowObservation>,
   planetId?: PlanetId,
+  changedIndexes?: readonly number[],
 ): GameState {
   if (state.belts.length === 0) return state;
   // Flow observations are a UI projection. Most large-factory publications
@@ -99,7 +119,9 @@ export function applyBeltFlowObservations(
   // same. When a value changes, preserve untouched belt identities so React
   // Flow and diagnostics do not retain a second full belt object tree.
   let nextBelts: BeltConnection[] | null = null;
-  for (let index = 0; index < state.belts.length; index += 1) {
+  const indexes = changedIndexes ?? state.belts.map((_, index) => index);
+  for (const index of indexes) {
+    if (index < 0 || index >= state.belts.length) continue;
     const belt = state.belts[index];
     const observation = planetId && belt.planetId !== planetId ? undefined : observations.get(belt.id);
     if (!observation || (belt.lastFlow === observation.flowPerSecond &&

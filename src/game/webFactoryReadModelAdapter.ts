@@ -152,12 +152,12 @@ export function createWebFactorySelectionToolbarReadModel(
   let selectedBeltCount = 0;
   let canLock = false;
   let canUnlock = false;
-  for (const entity of state.entities) {
+  if (selectedEntityIdSet.size > 0) for (const entity of state.entities) {
     if (entity.planetId !== state.activePlanetId || !selectedEntityIdSet.has(entity.id)) continue;
     if (entity.interactionLocked) canUnlock = true;
     else canLock = true;
   }
-  for (const belt of state.belts) {
+  if (selectedBeltIdSet.size > 0) for (const belt of state.belts) {
     if (belt.planetId === state.activePlanetId && selectedBeltIdSet.has(belt.id)) selectedBeltCount += 1;
   }
   return {
@@ -372,10 +372,10 @@ export function createFactorySelectionReadModel(
   const beltIds = uniquePrefix(request.selectedBeltIds, FACTORY_READ_MODEL_LIMITS.selectedBeltRows);
   const requestedEntityIds = new Set(entityIds);
   const requestedBeltIds = new Set(beltIds);
-  const entitiesById = new Map(state.entities
+  const entitiesById = new Map(requestedEntityIds.size === 0 ? [] : state.entities
     .filter((entity) => requestedEntityIds.has(entity.id))
     .map((entity) => [entity.id, entity] as const));
-  const beltsById = new Map(state.belts
+  const beltsById = new Map(requestedBeltIds.size === 0 ? [] : state.belts
     .filter((belt) => requestedBeltIds.has(belt.id))
     .map((belt) => [belt.id, belt] as const));
   const entityRows = entityIds.flatMap((id) => {
@@ -532,6 +532,15 @@ function viewportBeltRow(belt: GameState["belts"][number]): FactoryViewportBeltR
   };
 }
 
+/** Keep request ordering and duplicates without indexing the whole planet. */
+function presentPinnedIds(ids: readonly string[], records: readonly { id: string }[]): string[] {
+  if (ids.length === 0) return [];
+  const requested = new Set(ids);
+  const present = new Set<string>();
+  for (const record of records) if (requested.has(record.id)) present.add(record.id);
+  return ids.filter((id) => present.has(id));
+}
+
 /** Complete Web fallback and same-revision semantic oracle for viewport-v2. */
 export function createWebFactoryViewportReadModel(
   state: GameState,
@@ -539,13 +548,11 @@ export function createWebFactoryViewportReadModel(
 ): FactoryViewportReadModel {
   const planetEntities = state.entities.filter((entity) => entity.planetId === request.planetId);
   const planetBelts = state.belts.filter((belt) => belt.planetId === request.planetId);
-  const entityById = new Map(planetEntities.map((entity) => [entity.id, entity] as const));
-  const beltById = new Map(planetBelts.map((belt) => [belt.id, belt] as const));
   const visibleEntityIds = new Set(planetEntities
     .filter((entity) => viewportPointInside(entity.position, request.bounds))
     .map((entity) => entity.id));
-  const pinnedEntityIds = request.pinnedEntityIds.filter((id) => entityById.has(id));
-  const pinnedBeltIds = request.pinnedBeltIds.filter((id) => beltById.has(id));
+  const pinnedEntityIds = presentPinnedIds(request.pinnedEntityIds, planetEntities);
+  const pinnedBeltIds = presentPinnedIds(request.pinnedBeltIds, planetBelts);
   const beltSourceEntityIds = new Set([...visibleEntityIds, ...pinnedEntityIds]);
   const ordinaryBelts = planetBelts.filter((belt) =>
     beltSourceEntityIds.has(belt.source) || beltSourceEntityIds.has(belt.target));

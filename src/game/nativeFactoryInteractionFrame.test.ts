@@ -215,6 +215,27 @@ function throwingRows<Row>(): Row[] {
 }
 
 describe("native factory interaction atom", () => {
+  it.each(["none", "entity-only", "belt-only"])("does not traverse unrequested Web arrays for %s selection", (mode) => {
+    const state = createInitialState();
+    state.entities = mode === "entity-only" ? [entity("selected", 10)] : throwingRows<FactoryEntity>();
+    state.belts = mode === "belt-only" ? [belt("selected-belt", "source", "target")] : throwingRows<BeltConnection>();
+    const rows = createWebFactoryInteractionRows(state, {
+      selectedEntityIds: mode === "entity-only" ? ["selected"] : [],
+      selectedBeltIds: mode === "belt-only" ? ["selected-belt"] : [],
+      primarySelectedBeltId: mode === "belt-only" ? "selected-belt" : null,
+    });
+    expect(rows.projectionEntities).toBe(state.entities);
+    expect(rows.projectionBelts).toBe(state.belts);
+    expect(rows.selectedEntity?.id ?? null).toBe(mode === "entity-only" ? "selected" : null);
+    expect(rows.selectedBelt?.id ?? null).toBe(mode === "belt-only" ? "selected-belt" : null);
+    expect(rows.selectionToolbarReadModel).toMatchObject({
+      selectedCount: mode === "entity-only" ? 1 : 0,
+      selectedBeltCount: mode === "belt-only" ? 1 : 0,
+      canLock: mode === "entity-only",
+      canUnlock: false,
+    });
+  });
+
   it("preserves the Rust station configuration row and rejects viewport/selection drift", () => {
     const projectedStation: FactoryEntity = {
       ...entity("source", 10),

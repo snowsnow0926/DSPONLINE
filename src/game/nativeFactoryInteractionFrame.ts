@@ -420,10 +420,10 @@ export function createWebFactoryInteractionRows(
   const requestedBelts = new Set(beltIds);
   const entityById = new Map<string, FactoryEntity>();
   const beltById = new Map<string, BeltConnection>();
-  for (const entity of state.entities) {
+  if (entityIds.size > 0) for (const entity of state.entities) {
     if (entity.planetId === state.activePlanetId && entityIds.has(entity.id)) entityById.set(entity.id, entity);
   }
-  for (const belt of state.belts) {
+  if (requestedBelts.size > 0) for (const belt of state.belts) {
     if (belt.planetId === state.activePlanetId && requestedBelts.has(belt.id)) beltById.set(belt.id, belt);
   }
   const selectedEntities = selection.selectedEntityIds.flatMap((id) => {

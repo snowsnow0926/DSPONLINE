@@ -3,7 +3,7 @@ import { advancePersistentSimulationRuntime, createPersistentSimulationRuntime, 
 import { createPureIdleMacroSession, advancePureIdleMacroSession, finalizePureIdleMacroCandidate } from "../../src/game/pureIdleMacro";
 import { capturePureIdleReplicationTelemetry } from "../../src/game/pureIdleReplicationTelemetry";
 import { serializeEnvelope } from "../../src/game/storage";
-import type { GameState } from "../../src/game/types";
+import type { GameState, ItemId } from "../../src/game/types";
 
 // Localhost-only fixture supplied by the runner; no save is written or uploaded.
 // Setup, reading, hashing and serialization are reported separately from advance.
@@ -26,7 +26,7 @@ async function runLargeSaveProbe(supply = "tray") {
   if (supply === "quantum") {
     if (!state.quantumLogisticsNetwork.enabled) throw new Error("Quantum fixture requires an enabled network");
     state.constructionAutomation.quantumSourceEnabled = true;
-    for (const item of Object.keys(ITEMS)) state.quantumLogisticsNetwork.inventory[item] = "1000000000";
+    for (const item of Object.keys(ITEMS) as ItemId[]) state.quantumLogisticsNetwork.inventory[item] = "1000000000";
   }
   const runtime = createPersistentSimulationRuntime(state);
   advancePersistentSimulationRuntime(runtime, 0.1, 0.1);

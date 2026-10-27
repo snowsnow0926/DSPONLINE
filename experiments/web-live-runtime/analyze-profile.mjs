@@ -9,6 +9,11 @@ const { decodeMappings } = require("typescript");
 const options = Object.fromEntries(process.argv.slice(2).map((arg) => arg.replace(/^--/, "").split(/=(.*)/s, 2)));
 if (!options.profile || !options.dist || !options.output) throw new Error("Specify --profile, --dist and --output");
 const profile = JSON.parse(readFileSync(resolve(options.profile), "utf8"));
+const fromMs = Number(options["from-ms"] ?? 0);
+const toMs = Number(options["to-ms"] ?? Infinity);
+if (!Number.isFinite(fromMs) || fromMs < 0 || !(toMs > fromMs)) {
+  throw new Error("Specify a nonnegative --from-ms and a larger --to-ms (relative to profile start)");
+}
 const dist = resolve(options.dist);
 const maps = new Map();
 function sourcePosition(frame) {
@@ -59,9 +64,14 @@ const labels = new Map(profile.nodes.map((node) => {
     : `${node.callFrame.functionName || "(anonymous)"} ${node.callFrame.url || ""}:${node.callFrame.lineNumber + 1}`];
 }));
 const self = new Map(), inclusive = new Map(), leafNodes = new Map();
-let mappedSampleMs = 0;
+let mappedSampleMs = 0, elapsedMs = 0, selectedSampleCount = 0;
 for (let i = 0; i < profile.samples.length; i++) {
-  const id = profile.samples[i], ms = profile.timeDeltas[i] / 1000, label = labels.get(id);
+  const intervalStartMs = elapsedMs;
+  elapsedMs += profile.timeDeltas[i] / 1000;
+  const ms = Math.max(0, Math.min(elapsedMs, toMs) - Math.max(intervalStartMs, fromMs));
+  if (ms === 0) continue;
+  selectedSampleCount++;
+  const id = profile.samples[i], label = labels.get(id);
   self.set(label, (self.get(label) ?? 0) + ms);
   leafNodes.set(id, (leafNodes.get(id) ?? 0) + ms);
   if (locations.get(id)) mappedSampleMs += ms;
@@ -81,6 +91,7 @@ const topStacks = [...leafNodes].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([
 });
 const summary = { scope: "Sampled main-thread CPU in an isolated diagnostic run, not unprofiled performance; inclusive weights count each symbol once per sample.",
   sampleCount: profile.samples.length, profileDurationMs: (profile.endTime - profile.startTime) / 1000,
+  selectedSampleCount, range: { fromMs, toMs: Number.isFinite(toMs) ? toMs : null },
   mappedSampleMs, mapsRead: maps.size, topSelf: ranked(self), topInclusiveApp: ranked(inclusive, (name) => name.startsWith("src/")), topStacks };
 writeFileSync(resolve(options.output), `${JSON.stringify(summary, null, 2)}\n`);
 console.log(JSON.stringify({ sampleCount: summary.sampleCount, mapsRead: summary.mapsRead, topSelf: summary.topSelf.slice(0, 14), topInclusiveApp: summary.topInclusiveApp.slice(0, 16) }, null, 2));

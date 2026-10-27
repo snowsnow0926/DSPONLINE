@@ -14,6 +14,7 @@ import type {
   RecipeId,
 } from "./types";
 import {
+  createFactorySelectionReadModel,
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryConstructionWorkspaceReadModel,
   createWebFactoryInspectorSummaryReadModel,
@@ -483,5 +484,31 @@ describe("Web/PWA factory read-model adapter", () => {
     expect(model.pinnedEntityIds).toEqual([]);
     expect(model.pinnedBeltIds).toEqual(["belt-pinned"]);
     expect(model.worldBounds).toEqual({ minX: 0, minY: 0, maxX: 100, maxY: 100 });
+
+    const pinned = createWebFactoryViewportReadModel(state, {
+      planetId: "home",
+      bounds: model.bounds,
+      pinnedEntityIds: ["entity-c", "missing-entity", "entity-c"],
+      pinnedBeltIds: ["belt-pinned", "missing-belt", "belt-pinned"],
+    });
+    expect(pinned.pinnedEntityIds).toEqual(["entity-c", "entity-c"]);
+    expect(pinned.pinnedBeltIds).toEqual(["belt-pinned", "belt-pinned"]);
+    expect(pinned.viewportTotals).toEqual({ entities: 2, belts: 3 });
+    expect(pinned.entities.map((row) => row.id)).toEqual(["entity-a", "entity-b", "entity-c"]);
+    expect(pinned.belts).toEqual(model.belts);
+  });
+
+  it("returns an empty selection without traversing factory records", () => {
+    const state = createInitialState();
+    state.entities = new Proxy(state.entities, { get() { throw Error("Unrequested entities traversed"); } });
+    state.belts = new Proxy(state.belts, { get() { throw Error("Unrequested belts traversed"); } });
+    expect(createFactorySelectionReadModel(state)).toEqual({
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      activePlanetId: state.activePlanetId,
+      requestedEntityCount: 0,
+      requestedBeltCount: 0,
+      entityRows: { rows: [], totalCount: 0, truncated: false },
+      beltRows: { rows: [], totalCount: 0, truncated: false },
+    });
   });
 });

@@ -11300,6 +11300,7 @@ interface ConstructionPlanningContext {
   version: string;
   projectInventory: boolean;
   inventoryDependencies: Map<ConstructionAutomationTargetId, ReadonlySet<ItemId>>;
+  batchAnalyses: Map<string, RepeatableConstructionAutomationBatch | null>;
   targets: readonly ConstructionAutomationTargetDefinition[];
   targetById: ReadonlyMap<ConstructionAutomationTargetId, ConstructionAutomationTargetDefinition>;
   eligibleTargets: readonly ConstructionAutomationTargetDefinition[];
@@ -11318,6 +11319,7 @@ function createConstructionPlanningContext(state: GameState, projectInventory = 
     version: `${[...state.research.completedTechIds].sort().join(",")}|${state.contentPacks.map((pack) => `${pack.id}@${pack.version}`).sort().join(",")}`,
     projectInventory,
     inventoryDependencies: new Map(),
+    batchAnalyses: new Map(),
     targets,
     targetById: new Map(targets.map((target) => [target.id, target])),
     eligibleTargets,
@@ -12473,6 +12475,34 @@ interface RepeatableConstructionAutomationBatch {
 }
 
 function analyzeRepeatableConstructionAutomationPlan(
+  state: GameState,
+  definition: ConstructionAutomationTargetDefinition,
+  plan: ConstructionAutomationPlan,
+  context?: ConstructionPlanningContext,
+): RepeatableConstructionAutomationBatch | null {
+  if (!context) return createRepeatableConstructionAutomationBatch(state, definition, plan);
+  // Replanning still reads live stock and chooses the best available recipe.
+  // Only its pure step-to-ledger analysis is shared inside this one phase.
+  const fallbackRecipes = (plan.recursiveDecisions ?? []).flatMap(decision =>
+    decision.fallbacks.filter(fallback => fallback.reason !== "technology").map(fallback => fallback.recipeId));
+  const workSeconds = plan.steps.reduce((sum, step) => sum + constructionAutomationStepDuration(state, step), 0);
+  const key = JSON.stringify([definition.id, plan.steps, fallbackRecipes, workSeconds]);
+  let batch: RepeatableConstructionAutomationBatch | null;
+  if (context.batchAnalyses.has(key)) batch = context.batchAnalyses.get(key)!;
+  else {
+    batch = createRepeatableConstructionAutomationBatch(state, definition, plan, context);
+    if (context.batchAnalyses.size >= 128) {
+      const oldest = context.batchAnalyses.keys().next().value;
+      if (oldest !== undefined) context.batchAnalyses.delete(oldest);
+    }
+    context.batchAnalyses.set(key, batch);
+  }
+  // A finite-cycle probe annotates its first batch. Never let that annotation
+  // escape back into the cached one-job analysis or another center's plan.
+  return batch ? { ...batch, cycleStateItems: [], cycleStartInventory: {} } : null;
+}
+
+function createRepeatableConstructionAutomationBatch(
   state: GameState,
   definition: ConstructionAutomationTargetDefinition,
   plan: ConstructionAutomationPlan,

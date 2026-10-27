@@ -59,4 +59,28 @@ describe("construction scheduling catalog snapshot", () => {
     expect(fast.portableFleet.logistics_drone).toBeGreaterThan(0);
     expect(hashGameState(fast)).toBe(hashGameState(reference));
   });
+
+  it("keeps shared batch analyses independent across centers and capacity changes", () => {
+    let fast = fixture();
+    fast.research.completedTechIds = fast.research.completedTechIds.filter(id =>
+      id !== "construction_capacity_1" && id !== "construction_capacity_2");
+    const center = fast.entities.find(entity => entity.buildingId === "construction_center")!;
+    center.machineCount = 2;
+    fast.entities.push({ ...structuredClone(center), id: "second-analysis-center", position: { x: 180, y: 0 } });
+    fast.constructionAutomation.targetStock = { arc_smelter: 20, plane_smelter: 20, logistics_drone: 20 };
+    let reference = structuredClone(fast);
+    for (const seconds of [0.5, 1, 2, 3]) {
+      fast = advance(fast, seconds, true);
+      reference = advance(reference, seconds, false);
+      expect(fast).toEqual(reference);
+    }
+    fast.research.completedTechIds.push("construction_capacity_1");
+    reference.research.completedTechIds.push("construction_capacity_1");
+    for (const seconds of [1, 2, 4]) {
+      fast = advance(fast, seconds, true);
+      reference = advance(reference, seconds, false);
+      expect(fast).toEqual(reference);
+    }
+    expect(fast.constructionAutomation.totalCrafted).toBeGreaterThan(0);
+  });
 });

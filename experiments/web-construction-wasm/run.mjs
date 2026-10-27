@@ -32,6 +32,15 @@ const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-pars
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
 if (entry === "terminal-decode-cooperative" && decoderReference) throw new Error("Use terminal-decode/sync for a frozen decoder reference");
 const migrationPhases = entry === "terminal-decode" && options["migration-phases"] === "1";
+const macroProfile = entry === "large-save" && options["macro-profile"] === "1";
+const constructionPhaseCacheLimit = Number(options["construction-phases"] ?? 4);
+if (![4, 8, 16, 32].includes(constructionPhaseCacheLimit)) throw new Error("Invalid construction phase cache limit");
+if (constructionPhaseCacheLimit !== 4 && entry !== "large-save") throw new Error("Construction phase experiment requires large-save");
+const macroProfileFunctions = {
+  "src/game/engine.ts": ["advanceConstructionAutomationMacroInPlace", "runConstructionCenters", "resolveConstructionAutomationPlan", "tryRunConstructionAutomationBatch", "constructionAutomationPlanCacheKey", "constructionAutomationCachedPlanValid", "constructionAutomationInventorySnapshot", "buildConstructionAutomationPlan", "retainConstructionPlanPhases", "analyzeRepeatableConstructionAutomationPlan", "tryBuildStableConstructionAutomationCycle", "constructionAutomationBatchSignature"],
+  "src/game/offlineApproximation.ts": ["advancePureIdleConstructionDomainInPlace", "captureConstructionRecipeStageSnapshot", "createConstructionRecipeReceipt", "createConstructionPowerAllocation"],
+  "src/game/pureIdleReplication.ts": ["advancePureIdleReplicationInPlace"],
+};
 const runtimeFiles = ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts"];
 const runtimeReference = options["runtime-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["runtime-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
@@ -46,12 +55,19 @@ const inputHash = fixtureMode ? await fileHash(options.prepared) : null;
 const wasmPath = options.wasm ?? resolve(output, "target/wasm32-unknown-unknown/release/dsp_web_construction_probe.wasm");
 await mkdir(output, { recursive: true });
 const bundle = await build({ root, configFile: false, publicDir: false, logLevel: "error",
-  plugins: decoderReference || runtimeReference || migrationPhases ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
+  plugins: decoderReference || runtimeReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
     const relative = id.replaceAll("\\", "/").replace(`${sourceRoot.replaceAll("\\", "/")}/`, "").split("?")[0];
     const reference = runtimeFiles.includes(relative) ? runtimeReference : decoderFiles.includes(relative) ? decoderReference : null;
-    if (!reference && !(migrationPhases && relative === "src/game/storage.ts")) return;
+    const profileFunctions = macroProfile ? macroProfileFunctions[relative] : undefined;
+    const overridePhaseCache = constructionPhaseCacheLimit !== 4 && relative === "src/game/engine.ts";
+    if (!reference && !(migrationPhases && relative === "src/game/storage.ts") && !profileFunctions && !overridePhaseCache) return;
     let code = reference ? execFileSync("git", ["show", `${reference}:${relative}`],
       { cwd: sourceRoot, encoding: "utf8" }) : await readFile(resolve(sourceRoot, relative), "utf8");
+    if (overridePhaseCache) {
+      const anchor = "const alternatives = previous.filter((plan) => plan !== selected).slice(0, 3);";
+      if (code.split(anchor).length !== 2) throw new Error("Construction phase cache anchor changed");
+      code = code.replace(anchor, `const alternatives = previous.filter((plan) => plan !== selected).slice(0, ${constructionPhaseCacheLimit - 1});`);
+    }
     if (migrationPhases && relative === "src/game/storage.ts") {
       for (const [anchor, phase] of [
         [code.includes("  const entities = saved.entities.filter") ? "  const entities = saved.entities.filter" : "  const normalizeEntity =", "setup"],
@@ -65,6 +81,23 @@ const bundle = await build({ root, configFile: false, publicDir: false, logLevel
         if (!code.includes(anchor)) throw new Error(`Migration phase anchor changed: ${phase}`);
         code = code.replace(anchor, `  globalThis.__terminalMigrationPhases?.push({ phase: ${JSON.stringify(phase)}, at: performance.now() });\n${anchor}`);
       }
+    }
+    for (const name of profileFunctions ?? []) {
+      const pattern = new RegExp(`(^|\\n)(export )?function ${name}\\(`, "g");
+      const matches = [...code.matchAll(pattern)];
+      if (matches.length !== 1) throw new Error(`Macro profile function changed: ${relative}:${name}`);
+      const exported = Boolean(matches[0][2]);
+      const original = `__macroProbe_${name}`;
+      code = code.replace(pattern, (_match, lead) => `${lead}function ${original}(`);
+      code += `\n${exported ? "export " : ""}function ${name}(...args: Parameters<typeof ${original}>): ReturnType<typeof ${original}> {
+        const start = performance.now();
+        try { return ${original}(...args); }
+        finally {
+          const bag = (globalThis as any).__dspMacroProbeProfile ??= {};
+          const row = bag[${JSON.stringify(name)}] ??= { calls: 0, milliseconds: 0 };
+          row.calls += 1; row.milliseconds += performance.now() - start;
+        }
+      }\n`;
     }
     return code;
   } }] : [],
@@ -110,7 +143,9 @@ try {
   if (entry === "save-responsiveness" || entry.startsWith("terminal-decode") || entry === "save-state-chunks" || entry === "terminal-owner") await page.exposeFunction("requestSaveInputProbe", () => page.mouse.click(20, 20));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction((name) => typeof globalThis[name] === "function", callable);
-  const result = entry === "terminal-parity"
+  const result = entry === "large-save"
+    ? await page.evaluate(({ name, supply }) => globalThis[name](supply), { name: callable, supply: options.supply ?? "tray" })
+    : entry === "terminal-parity"
     ? await page.evaluate(({ name, path, scenario }) => globalThis[name](path, scenario),
       { name: callable, path: options["terminal-path"] ?? "legacy", scenario: options["research-case"] ?? "natural" })
     : entry === "terminal-decode" || entry === "save-state-chunks" || entry === "terminal-owner" || entry === "startup-idb"
@@ -131,6 +166,11 @@ try {
   if (pageErrors.length) throw new Error(pageErrors.join("\n"));
   if (fixtureMode && inputHash !== await fileHash(options.prepared)) throw new Error("Input fixture changed during the run");
   const evidence = { browser: await browser.version(), sourceCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim(),
+    ...(entry === "large-save" ? { macroProfile, constructionPhaseCacheLimit, macroSourceHashes: Object.fromEntries(await Promise.all([
+      ...Object.keys(macroProfileFunctions), "src/game/pureIdleMacro.ts", "experiments/web-construction-wasm/large-save.ts",
+    ].map(async file => [file, runtimeReference && runtimeFiles.includes(file)
+      ? createHash("sha256").update(execFileSync("git", ["show", `${runtimeReference}:${file}`], { cwd: sourceRoot })).digest("hex")
+      : await fileHash(resolve(sourceRoot, file))]))) } : {}),
     sourceDirty: Boolean(execFileSync("git", ["status", "--porcelain"], { cwd: sourceRoot, encoding: "utf8" }).trim()),
     bundleSha256: createHash("sha256").update(code).digest("hex"),
     ...(rendererMemory ? { rendererMemory } : {}),

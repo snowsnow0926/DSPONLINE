@@ -269,7 +269,7 @@ function cloneFactoryEntity(entity: FactoryEntity): FactoryEntity {
   };
 }
 
-function copyState(state: GameState): GameState {
+function copyState(state: GameState, records?: { entities: FactoryEntity[]; belts: BeltConnection[] }): GameState {
   const sourceEndgame = state.endgame ?? createEndgameState();
   const planetTrays = Object.fromEntries(Object.entries(state.planetTrays).map(([planetId, tray]) => [
     planetId,
@@ -277,8 +277,8 @@ function copyState(state: GameState): GameState {
   ])) as GameState["planetTrays"];
   return {
     ...state,
-    entities: state.entities.map(cloneFactoryEntity),
-    belts: state.belts.map((belt) => ({ ...belt })),
+    entities: records?.entities ?? state.entities.map(cloneFactoryEntity),
+    belts: records?.belts ?? state.belts.map((belt) => ({ ...belt })),
     canvasBookmarks: state.canvasBookmarks.map((bookmark) => ({ ...bookmark, viewport: { ...bookmark.viewport } })),
     canvasRegions: state.canvasRegions.map((region) => ({ ...region })),
     cargo: state.cargo ? { ...state.cargo, origin: state.cargo.origin ? { ...state.cargo.origin } : undefined } : null,
@@ -8547,6 +8547,57 @@ export function refreshTimeWarpPowerSnapshotInPlace(state: GameState): void {
 export function refreshTimeWarpPowerSnapshot(state: GameState): GameState {
   const next = copyState(state);
   refreshTimeWarpPowerSnapshotInPlace(next);
+  return next;
+}
+
+export interface TimeWarpPowerSnapshotCopyOptions {
+  yieldControl: () => Promise<void>;
+  isCurrent?: () => boolean;
+  signal?: AbortSignal;
+  batchSize?: number;
+}
+
+/** Copy a quiescent authority snapshot without publishing a partial view.
+ * Callers must keep their submission/edit barrier and authority lease until
+ * this resolves. The private copy uses the same normalization as copyState. */
+export async function refreshTimeWarpPowerSnapshotChunked(
+  state: GameState,
+  options: TimeWarpPowerSnapshotCopyOptions,
+): Promise<GameState> {
+  const cancelled = (): never => {
+    const error = new Error("纯挂机启动状态已变化，供电快照已取消");
+    error.name = "AbortError";
+    throw error;
+  };
+  const assertCurrent = () => {
+    if (options.signal?.aborted || options.isCurrent?.() === false) cancelled();
+  };
+  assertCurrent();
+  const sourceEntities = state.entities;
+  const sourceBelts = state.belts;
+  const entities = new Array<FactoryEntity>(sourceEntities.length);
+  const belts = new Array<BeltConnection>(sourceBelts.length);
+  const next = copyState(state, { entities, belts });
+  const batchSize = Number.isFinite(options.batchSize)
+    ? Math.max(1, Math.min(65_536, Math.floor(options.batchSize!))) : 4_096;
+  const yieldCopy = async () => {
+    await options.yieldControl();
+    assertCurrent();
+    if (state.entities !== sourceEntities || state.belts !== sourceBelts ||
+      sourceEntities.length !== entities.length || sourceBelts.length !== belts.length) cancelled();
+  };
+  for (let index = 0; index < sourceEntities.length; index += 1) {
+    entities[index] = cloneFactoryEntity(sourceEntities[index]);
+    if ((index + 1) % batchSize === 0 && index + 1 < sourceEntities.length) await yieldCopy();
+  }
+  await yieldCopy();
+  for (let index = 0; index < sourceBelts.length; index += 1) {
+    belts[index] = { ...sourceBelts[index] };
+    if ((index + 1) % batchSize === 0 && index + 1 < sourceBelts.length) await yieldCopy();
+  }
+  await yieldCopy();
+  refreshTimeWarpPowerSnapshotInPlace(next);
+  assertCurrent();
   return next;
 }
 

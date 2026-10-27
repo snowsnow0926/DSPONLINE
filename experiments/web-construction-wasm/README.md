@@ -76,6 +76,12 @@ node experiments/web-construction-wasm/run.mjs --entry=quantum-runtime --prepare
 
 ## 时间扭曲供电快照对照
 
+`--entry=power-copy --copy-mode=sync|chunked` 比较同一私有初态的同步/分批私有复制与
+供电快照。允许 `--runtime-ref`，旧提交没有分批 API 时必须明确选 `sync`；分批 API
+缺失会失败，不自动回退。计时包括复制和全部调度让出，1 ms 定时器另外记录操作期间
+最长回调间隔；哈希在计时外。比较完整结果、源输入不变、以及关闭时间扭曲后继续一个
+普通模拟秒的完整摘要。该独立页面诊断不等于整页 FPS、保存等待或内存资格。
+
 `--entry=power-snapshot` 只对同一份准备态启用控制器并刷新供电快照，不推进生产或
 提供新材料。单独记录刷新耗时，完成后再计算完整状态 JSON 的 SHA-256；哈希计算
 不计入刷新耗时。使用 `--runtime-ref` 冻结旧引擎，按旧/新/新/旧/旧/新运行。

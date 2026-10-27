@@ -12,9 +12,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
-const callable = entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
+const callable = entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
       : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
@@ -155,7 +155,9 @@ try {
         mode: entry === "terminal-owner" ? options["owner-mode"] ?? "ui"
           : entry === "startup-idb" ? options["transport-mode"] ?? "main"
           : entry === "save-state-chunks" ? options["transport-mode"] ?? "clone" : options["decode-mode"] ?? "profile" })
-      : await page.evaluate((name) => globalThis[name](), callable);
+      : entry === "power-copy"
+        ? await page.evaluate(({ name, mode }) => globalThis[name](mode), { name: callable, mode: options["copy-mode"] ?? "chunked" })
+        : await page.evaluate((name) => globalThis[name](), callable);
   let rendererMemory;
   if (options.memory && process.platform === "win32") {
     const cdp = await browser.newBrowserCDPSession();
@@ -197,7 +199,7 @@ try {
     ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(entry === "save-state-chunks" ? { chunkTransportSourceSha256: await fileHash(resolve(sourceRoot, "src/game/saveStateChunkTransfer.ts")) } : {}),
     ...(entry === "power-matrix" ? { probeSourceSha256: await fileHash(resolve(root, "experiments/web-construction-wasm/power-matrix.ts")) } : {}),
-    ...(runtimeReference || ["quantum-runtime", "power-snapshot", "power-matrix", "read-models", "belt-flow"].includes(entry) ? { runtimeReference, runtimeFiles,
+    ...(runtimeReference || ["quantum-runtime", "power-snapshot", "power-matrix", "read-models", "belt-flow", "power-copy"].includes(entry) ? { runtimeReference, runtimeFiles,
       runtimeSourceHashes: Object.fromEntries(await Promise.all(runtimeFiles.map(async (file) => [file,
         runtimeReference
           ? createHash("sha256").update(execFileSync("git", ["show", `${runtimeReference}:${file}`], { cwd: sourceRoot })).digest("hex")

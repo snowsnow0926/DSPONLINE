@@ -275,7 +275,7 @@ import {
   setBlackHolePaused,
   setTimeWarpController,
   setTimeWarpEnabled,
-  refreshTimeWarpPowerSnapshot,
+  refreshTimeWarpPowerSnapshotChunked,
   setTimeWarpRequestedMultiplier,
   setInfiniteResearchAutomation,
   autoConnectDysonLayer,
@@ -283,6 +283,7 @@ import {
   renameBlueprint,
   renameCanvasBookmark,
 } from "./game/engine";
+import { yieldSaveTransferWork } from "./game/saveTransferDecode";
 import { formatQuantityCompact } from "./game/quantityFormat";
 import { readOfflineApproximationEnabled } from "./game/offlineApproximation";
 import { getAchievement, getNewAchievementIds, unlockAchievements } from "./game/progression";
@@ -8808,16 +8809,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           }
           const pendingWallSeconds = Math.max(0, simulationPendingWallSecondsRef.current);
           const startedPaused = gameRef.current.paused;
-          simulationPendingSecondsRef.current = 0;
-          simulationPendingWallSecondsRef.current = 0;
-          setTimeWarpPendingUi(0);
           const startedAtMs = Date.now() - pendingWallSeconds * 1_000;
           const mode: PureIdleMacroMode = requestedMode === "replication"
             ? "replication"
             : endgameExtremeMode ? "extreme" : "stable";
-          const checkpoint = refreshTimeWarpPowerSnapshot(
+          const checkpoint = await refreshTimeWarpPowerSnapshotChunked(
             setTimeWarpEnabled(setPaused(gameRef.current, false), true),
+            { yieldControl: yieldSaveTransferWork, isCurrent: startupIsCurrent, signal: startupOperation.abort.signal },
           );
+          if (!startupIsCurrent()) return;
+          // A cancelled copy has not claimed any pending wall time. Consume
+          // that debt only after the complete private power snapshot exists.
+          simulationPendingSecondsRef.current = 0;
+          simulationPendingWallSecondsRef.current = 0;
+          setTimeWarpPendingUi(0);
           checkpoint.timeWarp = {
             ...checkpoint.timeWarp,
             pendingSimulationSeconds: 0,

@@ -54,6 +54,12 @@ existing engine subsystem timers. An earlier comprehensive Worker-attachment
 CDP diagnostic timed out during stop; that source and evidence remain in private
 artifacts and excluded from timing comparisons. The separate bounded heap-only
 checkpoint mode described below has its own scope and evidence.
+`--profile=1 --profile-phase=starting` restricts CPU sampling to the start
+transition, after the real rolling-rate warmup and through the ready message.
+It records before/after page-clock anchors for both Profiler boundaries in
+`*-profile-timeline.json`, then stops and detaches before observing and stopping
+replication. The run remains diagnostic (`profiled: true`); its durations and
+working sets must not be mixed with the unprofiled qualification cohort.
 `--retain-debt=1` tests the separate transition with
 unsubmitted normal simulation debt carried into replication. Frame gaps
 are not input-latency measurements, and isolated overlay responsiveness is not a

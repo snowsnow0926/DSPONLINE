@@ -14,6 +14,8 @@ async function install(page: Page, injectQuota = false, lowerRetirementThreshold
       macroInitializePersistence: [] as { starts: number; terminations: number }[],
       crash: false, crashes: 0, terminations: 0, quotaWorkers: 0, hold: false, blocked: false,
       holdRecovery: false, recoveryBlocked: false, recoveryAttempts: 0, elapsed: -1,
+      holdSnapshot: false, snapshotBlocked: false, snapshotYields: 0, failSnapshot: false,
+      releaseSnapshot: null as (() => void) | null,
       release: null as (() => void) | null, releaseRecovery: null as (() => void) | null };
     Object.assign(window, { __startupCheckpoint: probe });
     const NativeWorker = window.Worker;
@@ -87,6 +89,31 @@ async function install(page: Page, injectQuota = false, lowerRetirementThreshold
     await route.fulfill({ response, body: source.replace(boundary,
       "new AuthoritativeSavePersistenceClient({ largePayloadThresholdBytes: 1 })") });
   });
+  await page.route("**/src/game/engine.ts*", async route => {
+    const response = await route.fetch(); const source = await response.text();
+    const boundary = "async function refreshTimeWarpPowerSnapshotChunked(";
+    if (source.split(boundary).length !== 2) throw new Error("Startup private copy boundary changed");
+    const body = source.replace(boundary, "async function observedRefreshTimeWarpPowerSnapshotChunked(") + `
+      export async function refreshTimeWarpPowerSnapshotChunked(state, options) {
+        return observedRefreshTimeWarpPowerSnapshotChunked(state, { ...options, yieldControl: async () => {
+          const probe = globalThis.__startupCheckpoint;
+          if (probe?.active) {
+            probe.snapshotYields += 1;
+            if (probe.failSnapshot) {
+              probe.failSnapshot = false;
+              throw new Error('injected private copy scheduler failure');
+            }
+            if (probe.holdSnapshot) {
+              probe.holdSnapshot = false; probe.snapshotBlocked = true;
+              await new Promise(resolve => { probe.releaseSnapshot = resolve; });
+            }
+          }
+          await options.yieldControl();
+        } });
+      }
+    `;
+    await route.fulfill({ response, body });
+  });
   await page.route("**/src/game/pureIdleRecovery.ts*", async route => {
     const response = await route.fetch(); const source = await response.text();
     const boundary = "async function createPureIdleRecovery(";
@@ -157,7 +184,7 @@ async function arm(page: Page, patch: Record<string, unknown> = {}) {
 }
 async function probe(page: Page) {
   return page.evaluate(() => {
-    const { release: _release, releaseRecovery: _recovery, ...value } = (window as unknown as { __startupCheckpoint: { release: unknown; [key: string]: unknown } }).__startupCheckpoint;
+    const { release: _release, releaseRecovery: _recovery, releaseSnapshot: _snapshot, ...value } = (window as unknown as { __startupCheckpoint: { release: unknown; [key: string]: unknown } }).__startupCheckpoint;
     return value;
   });
 }
@@ -303,4 +330,45 @@ test("completed startup persistence retires before macro initialization and rest
   expect(saved.timeWarp.enabled).toBe(false);
   expect(saved.tray.iron_ingot).toBe(123);
   expect(saved.settings.autosaveIntervalSeconds).toBe(0);
+});
+
+test("a private copy scheduling failure preserves the primary and permits immediate retry", async ({ page }) => {
+  await install(page); const seeded = await seed(page); await arm(page, { failSnapshot: true }); await start(page);
+  await expect(page.locator(".game-notice")).toContainText("injected private copy scheduler failure");
+  expect(await primary(page)).toBe(seeded.raw);
+  expect((await probe(page)).recoveryAttempts).toBe(0);
+  expect((await probe(page)).begins).toBe(0);
+  expect((await probe(page)).ready).toBe(0);
+  await start(page);
+  await expect.poll(async () => (await probe(page)).ready, { timeout: 20_000 }).toBe(1);
+  expect((await probe(page)).recoveryAttempts).toBe(1);
+  expect((await probe(page)).begins).toBe(1);
+  expect(JSON.parse((await primary(page))!).state.tray.iron_ingot).toBe(123);
+});
+
+test("pagehide cancels a partial private copy before it can create a macro checkpoint", async ({ page }) => {
+  await install(page); const seeded = await seed(page); await arm(page, { holdSnapshot: true }); await start(page);
+  await expect.poll(async () => (await probe(page)).snapshotBlocked).toBe(true);
+  expect((await probe(page)).recoveryAttempts).toBe(0);
+  expect((await probe(page)).begins).toBe(0);
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    (window as unknown as { __startupCheckpoint: { releaseSnapshot: () => void } }).__startupCheckpoint.releaseSnapshot();
+  });
+  await expect.poll(async () => (await probe(page)).snapshotYields).toBe(1);
+  await page.waitForTimeout(250);
+  expect((await probe(page)).recoveryAttempts).toBe(0);
+  expect((await probe(page)).begins).toBe(0);
+  expect((await probe(page)).ready).toBe(0);
+  const prior = JSON.parse(seeded.raw).state;
+  const retained = JSON.parse((await primary(page))!).state;
+  expect(retained.timeWarp.enabled).toBe(false);
+  expect(retained.paused).toBe(true);
+  expect(retained.elapsedSeconds).toBe(prior.elapsedSeconds);
+  expect(retained.tray).toEqual(prior.tray);
+  expect(retained.planetTrays).toEqual(prior.planetTrays);
+  expect(retained.entities.map((entity: { id: string; inputs: object; outputs: object }) =>
+    ({ id: entity.id, inputs: entity.inputs, outputs: entity.outputs }))).toEqual(
+    prior.entities.map((entity: { id: string; inputs: object; outputs: object }) =>
+      ({ id: entity.id, inputs: entity.inputs, outputs: entity.outputs })));
 });

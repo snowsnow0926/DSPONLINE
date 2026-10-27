@@ -28,7 +28,7 @@ const runtimeRetention = mainHeapSnapshot || options["runtime-retention"] === "1
 if (runtimeRetention && (!workerHeapMemory || !workerHeapGc)) throw new Error("--runtime-retention requires --worker-heaps and --worker-heap-gc; diagnostic only");
 const runtimeTransitions = options["runtime-transitions"] === "1";
 const profilePhase = options["profile-phase"] ?? "all";
-if (!["all", "stopping"].includes(profilePhase)) throw new Error("Invalid profiler phase");
+if (!["all", "starting", "stopping"].includes(profilePhase)) throw new Error("Invalid profiler phase");
 const timelinePhase = options.timeline ?? null;
 if (timelinePhase !== null && timelinePhase !== "stopping") throw new Error("Only --timeline=stopping is supported");
 if (timelinePhase && options.profile) throw new Error("Capture CPU sampling and browser timeline in separate diagnostic runs");
@@ -448,6 +448,14 @@ try {
   // tick. Let that established rule run before comparing macro transitions.
   if (!options["retain-debt"]) await page.waitForTimeout(1_500);
   await sampleProcesses("normal simulation warmed");
+  if (options.profile && profilePhase === "starting") {
+    profiler = await context.newCDPSession(page);
+    await profiler.send("Profiler.enable");
+    const beforeMs = await page.evaluate(() => performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt);
+    await profiler.send("Profiler.start");
+    const afterMs = await page.evaluate(() => performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt);
+    profilerTimeline = { phase: profilePhase, startTraceBeforeMs: beforeMs, startTraceAfterMs: afterMs };
+  }
   await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "starting"; });
   console.log("Starting replication through the real UI");
   const startStartedAt = Date.now();
@@ -473,6 +481,16 @@ try {
     await page.waitForFunction(() => globalThis.__LIVE_RUNTIME_TRACE__.events.some((event) => event.type === "ready"));
   } finally { clearInterval(statusTimer); }
   const startMs = Date.now() - startStartedAt;
+  if (profiler && profilePhase === "starting") {
+    const beforeMs = await page.evaluate(() => performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt);
+    const capture = await profiler.send("Profiler.stop");
+    const afterMs = await page.evaluate(() => performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt);
+    profilerTimeline = { ...profilerTimeline, stopTraceBeforeMs: beforeMs, stopTraceAfterMs: afterMs };
+    await writeFile(resolve(output, `${name}.cpuprofile`), JSON.stringify(capture.profile));
+    await writeFile(resolve(output, `${name}-profile-timeline.json`), JSON.stringify(profilerTimeline, null, 2));
+    await profiler.detach();
+    profiler = undefined;
+  }
   if (backgroundPresentationExperiment) await page.evaluate(() => {
     const root = document.querySelector(".game-shell[data-factory-canvas-source]");
     const overlay = root?.querySelector(".time-warp-idle-overlay");

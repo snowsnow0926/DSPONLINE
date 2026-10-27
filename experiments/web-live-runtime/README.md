@@ -70,6 +70,8 @@ sanitized aggregates belong in review documentation.
 
 未采样性能资格用 `run-pairs.ps1`，与构建和其它测试串行。每组旧/新顺序交替，`-PostStopSeconds 3 -AllProcessMemory` 额外记录恢复画布后的帧和浏览器进程时点内存；`stopMs` 仍在弹窗关闭时截断。进程峰值计数器覆盖整个旅程，离散工作集加总还可能重复计算共享页。
 
+修改源码后，应先重启两端 Vite 夹具服务再开始整组资格测试。热更新残留可能让 `storage.ts` 引用带旧时间戳的 `localSaveStore.ts?t=...`，而直接动态导入另一个模块实例，导致初始化和保存使用不同的本地存储后端。先核对两端的存储依赖 URL 及冻结 `index.html` 字节；准备阶段失败的运行保留诊断，但不得计入性能对照，也不得通过关闭保存校验继续测量。
+
 ## CPU 归因
 
 ```powershell

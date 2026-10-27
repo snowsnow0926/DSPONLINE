@@ -1,5 +1,6 @@
 import { chromium } from "@playwright/test";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -17,6 +18,12 @@ const postStopSeconds = Number(options["post-stop-seconds"] ?? 0);
 if (!Number.isFinite(postStopSeconds) || postStopSeconds < 0 || postStopSeconds > 10) throw new Error("Invalid post-stop observation window");
 const allProcessMemory = options["all-process-memory"] === "1";
 const workerHeapMemory = options["worker-heaps"] === "1";
+const workerHeapGc = options["worker-heap-gc"] === "1";
+if (workerHeapGc && !workerHeapMemory) throw new Error("--worker-heap-gc requires --worker-heaps; diagnostic only");
+const mainHeapAllocations = options["main-heap-allocations"] === "1";
+if (mainHeapAllocations && !workerHeapMemory) throw new Error("--main-heap-allocations requires --worker-heaps; diagnostic only");
+const mainHeapSnapshot = options["main-heap-snapshot"] === "1";
+if (mainHeapSnapshot && (!workerHeapMemory || !workerHeapGc)) throw new Error("--main-heap-snapshot requires --worker-heaps and --worker-heap-gc; private diagnostic only");
 const profilePhase = options["profile-phase"] ?? "all";
 if (!["all", "stopping"].includes(profilePhase)) throw new Error("Invalid profiler phase");
 const timelinePhase = options.timeline ?? null;
@@ -35,6 +42,8 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 900 
 let page;
 let profiler;
 let profilerTimeline;
+let allocationSession;
+let mainHeapSnapshotResult;
 let timelineSession, timelineComplete, timelineTiming;
 let primaryFailed = false;
 const errors = [];
@@ -43,30 +52,75 @@ const heapSamples = [];
 const startupBufferSamples = [];
 const bounded = (promise, ms = 5000) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(Error("diagnostic timeout")), ms))]);
 
+async function capturePrivateMainHeap(session, stage) {
+  const file = `${name}-private-main.heapsnapshot`;
+  const stream = createWriteStream(resolve(output, file), { flags: "wx" });
+  let bytes = 0, truncated = false, streamError, captureError;
+  const closed = new Promise(resolve => stream.once("close", resolve));
+  stream.on("error", error => { streamError = error; });
+  const onChunk = ({ chunk }) => {
+    if (truncated || streamError) return;
+    const size = Buffer.byteLength(chunk);
+    if (bytes + size > 4 * 1024 * 1024 * 1024 || stream.writableLength > 16 * 1024 * 1024) {
+      truncated = true; return;
+    }
+    bytes += size;
+    stream.write(chunk);
+  };
+  session.on("HeapProfiler.addHeapSnapshotChunk", onChunk);
+  try {
+    await session.send("HeapProfiler.takeHeapSnapshot", { reportProgress: false, captureNumericValue: false, exposeInternals: false });
+  } catch (error) { captureError = String(error); }
+  finally {
+    session.off("HeapProfiler.addHeapSnapshotChunk", onChunk);
+    stream.end();
+    await closed;
+  }
+  mainHeapSnapshotResult = { stage, file, bytes, private: true, complete: !truncated && !streamError && !captureError,
+    truncated, ...(streamError ? { streamError: String(streamError) } : {}), ...(captureError ? { captureError } : {}) };
+  await writeFile(resolve(output, `${name}-private-main-metadata.json`), JSON.stringify(mainHeapSnapshotResult, null, 2));
+  if (!mainHeapSnapshotResult.complete) throw Error("Private main heap snapshot incomplete; retain metadata and exclude from analysis");
+}
+
 async function sampleHeaps(stage) {
   const session = await browser.newBrowserCDPSession();
   const workers = [];
   let main;
   try {
     const pageSession = await context.newCDPSession(page);
-    try { main = await pageSession.send("Runtime.getHeapUsage"); } finally { await pageSession.detach(); }
+    try {
+      if (workerHeapGc) await pageSession.send("HeapProfiler.collectGarbage");
+      main = await pageSession.send("Runtime.getHeapUsage");
+      if (mainHeapSnapshot && stage === "normal simulation warmed") await capturePrivateMainHeap(pageSession, stage);
+    } finally { await pageSession.detach(); }
+    if (allocationSession) {
+      const { profile } = await allocationSession.send("HeapProfiler.getSamplingProfile");
+      await writeFile(resolve(output, `${name}-allocations-${stage.replace(/[^a-z0-9]+/gi, "-")}.json`), JSON.stringify(profile));
+    }
     const { targetInfos } = await session.send("Target.getTargets");
     for (const target of targetInfos.filter((item) => item.type === "worker" && item.url.startsWith(base.origin + "/"))) {
       let sessionId;
       let listener;
       try {
         ({ sessionId } = await session.send("Target.attachToTarget", { targetId: target.targetId, flatten: false }));
-        const response = new Promise((resolve, reject) => {
-          listener = (event) => {
-            if (event.sessionId !== sessionId) return;
-            const message = JSON.parse(event.message);
-            if (message.id === 1) message.error ? reject(new Error(message.error.message)) : resolve(message.result);
-          };
-          session.on("Target.receivedMessageFromTarget", listener);
-        });
-        const [usage] = await Promise.all([bounded(response, 3000), session.send("Target.sendMessageToTarget", {
-          sessionId, message: JSON.stringify({ id: 1, method: "Runtime.getHeapUsage" }),
-        })]);
+        const requestWorker = async (id, method) => {
+          const response = new Promise((resolve, reject) => {
+            listener = (event) => {
+              if (event.sessionId !== sessionId) return;
+              const message = JSON.parse(event.message);
+              if (message.id === id) message.error ? reject(new Error(message.error.message)) : resolve(message.result);
+            };
+            session.on("Target.receivedMessageFromTarget", listener);
+          });
+          try {
+            const [result] = await Promise.all([bounded(response, workerHeapGc ? 10000 : 3000), session.send("Target.sendMessageToTarget", {
+              sessionId, message: JSON.stringify({ id, method }),
+            })]);
+            return result;
+          } finally { session.off("Target.receivedMessageFromTarget", listener); listener = undefined; }
+        };
+        if (workerHeapGc) await requestWorker(2, "HeapProfiler.collectGarbage");
+        const usage = await requestWorker(1, "Runtime.getHeapUsage");
         workers.push({ script: new URL(target.url).pathname.split("/").at(-1), ...usage });
       } catch (error) {
         workers.push({ script: new URL(target.url).pathname.split("/").at(-1), error: String(error) });
@@ -75,7 +129,7 @@ async function sampleHeaps(stage) {
         if (sessionId) await session.send("Target.detachFromTarget", { sessionId }).catch(() => {});
       }
     }
-    heapSamples.push({ stage, main, workers });
+    heapSamples.push({ stage, ...(workerHeapGc ? { forcedGc: true } : {}), main, workers });
   } finally { await session.detach(); }
 }
 
@@ -119,8 +173,9 @@ try {
     } finally { await session.detach(); }
   });
   await context.route("**/api/**", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"isolated runtime test"}' }));
-  await context.addInitScript(({ profileSteps, idbOperations, startupBufferGc, startupWorkerHeaps }) => {
+  await context.addInitScript(({ profileSteps, idbOperations, startupBufferGc, startupWorkerHeaps, mainHeapSnapshot }) => {
     if (location.hostname !== "127.0.0.1") return;
+    if (mainHeapSnapshot) globalThis.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {} };
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.2");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
@@ -230,7 +285,7 @@ try {
     new PerformanceObserver((list) => {
       if (trace.active) for (const entry of list.getEntries()) trace.tasks.push({ phase: trace.phase, at: entry.startTime - trace.startedAt, duration: entry.duration });
     }).observe({ type: "longtask" });
-  }, { profileSteps: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupWorkerHeaps });
+  }, { profileSteps: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupWorkerHeaps, mainHeapSnapshot });
   context.on("page", (opened) => {
     opened.setDefaultTimeout(120_000);
     opened.on("pageerror", (error) => { errors.push(error.message); console.log(`Page error: ${error.message}`); });
@@ -328,6 +383,12 @@ try {
   page = await context.newPage();
   await page.addInitScript((entries) => { for (const [key, value] of entries) sessionStorage.setItem(key, value); }, seeded.sessionEntries);
   delete seeded.sessionEntries;
+  if (mainHeapAllocations) {
+    allocationSession = await context.newCDPSession(page);
+    // Live allocation stacks only. Sampling/GC runs are diagnostics and must
+    // never be used as uninstrumented latency or memory qualification.
+    await allocationSession.send("HeapProfiler.startSampling", { samplingInterval: 65536 });
+  }
   await page.goto(new URL("/?factory=1&storageMigration=production&performanceProduction=1", base).href, { waitUntil: "domcontentloaded" });
   await page.locator('.game-shell[data-simulation-worker="active"]').waitFor();
   console.log("Factory ready; selecting time-warp controller");
@@ -487,8 +548,11 @@ try {
   if (startupWorkerHeaps && heapSamples.filter(sample => sample.stage === "before-macro-initialize").length !== 1) {
     throw Error("Startup Worker diagnostic did not capture its exact boundary");
   }
-  const evidence = { browser: await browser.version(), supply, observationSeconds: seconds, profiled: Boolean(options.profile) || Boolean(timelinePhase), profilePhase, timelinePhase, backgroundPresentationExperiment,
-    postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, heapSamples,
+  if (mainHeapSnapshot && !mainHeapSnapshotResult?.complete) throw Error("Private main heap snapshot did not complete");
+  const evidence = { browser: await browser.version(), supply, observationSeconds: seconds,
+    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapGc || mainHeapAllocations || mainHeapSnapshot,
+    profilePhase, timelinePhase, backgroundPresentationExperiment,
+    postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
     retainedNormalDebt: Boolean(options["retain-debt"]),
     seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };
@@ -536,6 +600,7 @@ try {
     try { const capture = await bounded(profiler.send("Profiler.stop")); await writeFile(resolve(output, `${name}.cpuprofile`), JSON.stringify(capture.profile)); } catch { /* keep primary outcome */ }
     if (profilerTimeline) await writeFile(resolve(output, `${name}-profile-timeline.json`), JSON.stringify(profilerTimeline, null, 2));
   }
+  if (allocationSession) await allocationSession.detach().catch(() => {});
   await browser.close();
   if (timelineFailure && !primaryFailed) throw timelineFailure;
 }

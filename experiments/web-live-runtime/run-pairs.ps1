@@ -5,7 +5,9 @@ param(
   [ValidatePattern('^[a-z0-9-]+$')][string]$Prefix = 'transition',
   [ValidateRange(1, 5)][int]$Repetitions = 2,
   [ValidateRange(5, 120)][int]$ObservationSeconds = 30,
-  [switch]$Profile
+  [switch]$Profile,
+  [ValidateRange(0, 10)][int]$PostStopSeconds = 0,
+  [switch]$AllProcessMemory
 )
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
@@ -22,6 +24,8 @@ try {
       Write-Output "Running $name"
       $nodeArguments = @('experiments/web-live-runtime/run.mjs', "--url=$url", '--supply=stock', "--seconds=$ObservationSeconds", "--output=$OutputDirectory", "--name=$name")
       if ($Profile) { $nodeArguments += '--profile=1' }
+      if ($PostStopSeconds -gt 0) { $nodeArguments += "--post-stop-seconds=$PostStopSeconds" }
+      if ($AllProcessMemory) { $nodeArguments += '--all-process-memory=1' }
       & node @nodeArguments *> $log
       if ($LASTEXITCODE -ne 0) { throw "Runtime probe failed; inspect $log" }
       Write-Output "Completed $name"

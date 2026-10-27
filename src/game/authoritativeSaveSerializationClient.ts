@@ -1,5 +1,6 @@
 import { loadContentPackRegistry } from "./contentPacks";
 import { SaveStateChunkProtocolError, SaveStateChunkSender } from "./saveStateChunkTransfer";
+import { claimCanonicalTerminalOwner, discardCanonicalTerminalOwner, type AuthoritativeSaveWorkerChannel } from "./canonicalTerminalOwnerRegistry";
 import type { GameState } from "./types";
 import type { SimulationStateTransfer } from "./simulationRuntimeProtocol";
 import type {
@@ -100,9 +101,16 @@ function serializeAuthoritativeSaveSourceInWorker(
     ));
   }
   return new Promise((resolve, reject) => {
-    let worker: Worker;
+    let worker: AuthoritativeSaveWorkerChannel;
+    let retainedOwner = false;
+    const contentPackRegistry = loadContentPackRegistry();
     try {
-      worker = new Worker(new URL("./save.worker.ts", import.meta.url), { type: "module", name: "authoritative-save-serialization" });
+      const owner = source.kind === "cloned-state" && !includeSourceStateTransfer && kind === "primary" && slot === "main" &&
+        !options.checkpointOverlay && options.frozenStateIsCurrent
+        ? claimCanonicalTerminalOwner(source.state, contentPackRegistry, options.frozenStateIsCurrent) : null;
+      if (!owner && source.kind === "cloned-state") discardCanonicalTerminalOwner(source.state);
+      retainedOwner = owner !== null;
+      worker = owner ?? new Worker(new URL("./save.worker.ts", import.meta.url), { type: "module", name: "authoritative-save-serialization" });
     } catch (error) {
       reject(new AuthoritativeSaveSerializationClientError(
         "unsupported",
@@ -213,7 +221,7 @@ function serializeAuthoritativeSaveSourceInWorker(
           : source.kind === "envelope"
             ? { envelopeTransfer: source.transfer }
             : { state: source.state }),
-      contentPackRegistry: loadContentPackRegistry(),
+      contentPackRegistry,
       includePayloadSha256: true,
       includeAuthoritativeProof: true,
       ...(!includeSourceStateTransfer ? { includeSourceStateTransfer: false as const } : {}),
@@ -222,7 +230,7 @@ function serializeAuthoritativeSaveSourceInWorker(
       ...(options.compressTransport === false ? { compressTransport: false } : {}),
     };
     try {
-      if (options.frozenStateIsCurrent) {
+      if (options.frozenStateIsCurrent && !retainedOwner) {
         chunkSender = new SaveStateChunkSender(worker);
         void chunkSender.send(request as Extract<AuthoritativeSaveSerializationRequest, { state: GameState }>, options.frozenStateIsCurrent).catch((error) => {
           if (!settled) finish(() => reject(new AuthoritativeSaveSerializationClientError(

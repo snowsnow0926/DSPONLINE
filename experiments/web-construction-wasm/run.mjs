@@ -12,14 +12,17 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
 const callable = entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
       : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
         : entry === "terminal-decode-cooperative" ? "runTerminalDecodeCooperativeProbe"
-          : entry === "save-state-chunks" ? "runSaveStateChunksProbe" : "runConstructionWasmProbe";
+          : entry === "save-state-chunks" ? "runSaveStateChunksProbe"
+            : entry === "terminal-owner" ? "runTerminalOwnerProbe"
+              : entry === "terminal-owner-faults" ? "runTerminalOwnerFaults"
+                : entry === "canonical-owner-parity" ? "runCanonicalOwnerParity" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
 const decoderFiles = ["src/game/storage.ts", "src/game/saveTransferDecode.ts"];
 const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["decoder-ref"]}^{commit}`],
@@ -99,15 +102,16 @@ try {
   }
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  if (entry === "save-responsiveness" || entry.startsWith("terminal-decode") || entry === "save-state-chunks") await page.exposeFunction("requestSaveInputProbe", () => page.mouse.click(20, 20));
+  if (entry === "save-responsiveness" || entry.startsWith("terminal-decode") || entry === "save-state-chunks" || entry === "terminal-owner") await page.exposeFunction("requestSaveInputProbe", () => page.mouse.click(20, 20));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction((name) => typeof globalThis[name] === "function", callable);
   const result = entry === "terminal-parity"
     ? await page.evaluate(({ name, path, scenario }) => globalThis[name](path, scenario),
       { name: callable, path: options["terminal-path"] ?? "legacy", scenario: options["research-case"] ?? "natural" })
-    : entry === "terminal-decode" || entry === "save-state-chunks"
+    : entry === "terminal-decode" || entry === "save-state-chunks" || entry === "terminal-owner"
       ? await page.evaluate(({ name, mode }) => globalThis[name](mode), { name: callable,
-        mode: entry === "save-state-chunks" ? options["transport-mode"] ?? "clone" : options["decode-mode"] ?? "profile" })
+        mode: entry === "terminal-owner" ? options["owner-mode"] ?? "ui"
+          : entry === "save-state-chunks" ? options["transport-mode"] ?? "clone" : options["decode-mode"] ?? "profile" })
       : await page.evaluate((name) => globalThis[name](), callable);
   let rendererMemory;
   if (options.memory && process.platform === "win32") {
@@ -129,9 +133,11 @@ try {
       decoderReference ? createHash("sha256").update(execFileSync("git", ["show", `${decoderReference}:${file}`], { cwd: sourceRoot })).digest("hex")
         : await fileHash(resolve(sourceRoot, file)),
     ]))) } : {}),
-    ...(entry === "terminal-parity" || entry === "save-state-chunks" ? { saveSourceFiles: Object.fromEntries(await Promise.all([
+    ...(entry === "terminal-parity" || entry === "save-state-chunks" || entry === "terminal-owner" || entry === "canonical-owner-parity" ? { saveSourceFiles: Object.fromEntries(await Promise.all([
       "src/game/authoritativeSaveSerializationClient.ts", "src/game/save.worker.ts", "src/game/storage.ts",
       "src/game/pureIdleMacroClient.ts", "src/App.tsx",
+      ...(entry === "terminal-owner" || entry === "canonical-owner-parity" ? ["src/game/canonicalTerminalOwnerClient.ts", "src/game/canonicalTerminalOwnerRegistry.ts",
+        "src/game/canonicalTerminalOwnerProtocol.ts", "src/game/canonicalTerminalOwner.worker.ts", "src/game/saveStateChunkTransfer.ts", "src/game/saveTransferDecode.ts"] : []),
     ].map(async (file) => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(entry === "save-state-chunks" ? { chunkTransportSourceSha256: await fileHash(resolve(sourceRoot, "src/game/saveStateChunkTransfer.ts")) } : {}),
     ...(runtimeReference || ["quantum-runtime", "power-snapshot"].includes(entry) ? { runtimeReference, runtimeFiles,

@@ -112,6 +112,28 @@ node experiments/web-construction-wasm/run.mjs --entry=save-state-chunks --trans
 这只是保存 Worker 往返，不包含 IndexedDB 或整页退出。整页资格应另用
 `experiments/web-live-runtime/run-pairs.ps1`，旧/新/新/旧顺序且与构建、测试串行。
 
+## 终态标准化与保存复用同一后台
+
+`terminal-owner` 对比当前界面分段解码加保存（`ui`）、后台解码后再发给另一个保存后台
+（`worker-return`）、同一后台在交回完整标准化状态后生成保存证明（`worker-owner`）。
+`worker-owner-blob` 保留不可变源数据以便失败重试；`integrated-blob` 使用真正的生产
+`CanonicalTerminalDecoder`、来源登记表及既有保存响应校验器。完整状态与实际解压正文
+SHA-256 在计时后核对；计时不含数据库、宏观结算、源数据生成或最终哈希。
+
+Blob 的准备成本单列，未计入局部往返；整页对照必须包含宏观后台的实际 Blob 生成。
+进程峰值包含准备与验证，不能把这个孤立原型的内存比例当作整页或整个浏览器的收益。
+`terminal-owner-faults` 使用公开合成工厂在真实 Worker 中验证七项错误及失败后的完整状态回退。
+
+```powershell
+node experiments/web-construction-wasm/run.mjs --entry=terminal-owner --owner-mode=ui --prepared=D:/private/prepared.json --name=owner-ui
+node experiments/web-construction-wasm/run.mjs --entry=terminal-owner --owner-mode=integrated-blob --prepared=D:/private/prepared.json --name=owner-integrated
+node experiments/web-construction-wasm/run.mjs --entry=terminal-owner-faults --prepared=D:/private/prepared.json --name=owner-faults
+```
+
+整页可使用 `run-pairs.ps1 -PostStopSeconds 3 -AllProcessMemory`，同时观察退出后的画面和
+浏览器自身进程列表的工作集/私有字节采样总和。采样总和不是连续物理内存峰值，
+仍应独立报告渲染进程旅程峰值、时点采样及其测量边界。
+
 ## Rust/WASM 结论
 
 现有 Rust 代码可在浏览器中运行，但这个 JSON 适配器尚无接入收益：简单计算的速度优势被传输和转换抵消；递归分支还会提前计算许多用不到的路线。继续前应验证按需规划、紧凑输入/输出及 JS 回退；不能仅因采用 Rust 就宣布更快。具体数值及候选身份见 [循环记录](../../docs/reviews/2026-10-26-web-performance-loop.md)。

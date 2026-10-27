@@ -16,6 +16,8 @@ import type { GameState, IdleSettlementState, ItemId } from "./types";
 import { decodeVerifiedSaveTransfer } from "./saveTransfer";
 import { parseTrustedWorkerEnvelope, parseTrustedWorkerEnvelopeChunked } from "./storage";
 import { decodeVerifiedSaveTransferChunked } from "./saveTransferDecode";
+import { CanonicalTerminalDecoder } from "./canonicalTerminalOwnerClient";
+import { loadContentPackRegistry } from "./contentPacks";
 import {
   isWorkerBinaryPayload,
   workerBinaryPayloadByteLength,
@@ -84,6 +86,8 @@ export interface PureIdleMacroFinalizeOptions {
   binaryTransport?: "array-buffer" | "blob";
   /** The transferred envelope remains available while the session graph is released. */
   closeBeforeDecode?: boolean;
+  /** Explicit owner for a large frozen terminal timeline, never a live state. */
+  canonicalOwner?: { isCurrent: () => boolean };
 }
 
 export interface PureIdleMacroInitializeOptions {
@@ -102,6 +106,7 @@ export class PureIdleMacroClient {
   private nextId = 0;
   private pending = new Map<number, PendingRequest>();
   private closed = false;
+  private terminalDecoder: CanonicalTerminalDecoder | null = null;
   private readonly onProgress?: (progress: PureIdleMacroProgress) => void;
   private readonly operationDeadlineMs: number;
   private initializedRegistryFingerprint: string | null = null;
@@ -282,10 +287,42 @@ export class PureIdleMacroClient {
     targetWallSeconds: number,
     options: PureIdleMacroFinalizeOptions = {},
   ): Promise<PureIdleMacroFinalResult> {
-    const result = await this.finalizeEnvelope(targetWallSeconds, options);
+    const ownerRequested = options.terminal === true && options.closeBeforeDecode === true && options.canonicalOwner !== undefined;
+    // An immutable Blob keeps the original envelope available after a decoder
+    // crash while avoiding another main-thread copy of the full input bytes.
+    const result = await this.finalizeEnvelope(targetWallSeconds, ownerRequested && options.binaryTransport === undefined
+      ? { ...options, binaryTransport: "blob" } : options);
     if (options.closeBeforeDecode) this.close();
     const { finalEnvelope } = result;
     const cooperative = finalEnvelope.verification.byteLength >= 1024 * 1024;
+    const identity = finalEnvelope.identity;
+    const summary = result.summary;
+    const validateState = (state: GameState) => {
+      const mismatch = finalizedIdentityMismatch(state, identity);
+      if (mismatch || summary.algorithmVersion !== identity.algorithmVersion ||
+        summary.settledWallSeconds !== identity.settledWallSeconds ||
+        summary.settledSimulationSeconds !== identity.settledSimulationSeconds) {
+        throw new Error(`纯挂机 Worker 结果摘要与重载状态不一致${mismatch ? `（${mismatch}）` : ""}`);
+      }
+    };
+    if (ownerRequested && cooperative && finalEnvelope.payloadBytes instanceof Blob) {
+      let decoder: CanonicalTerminalDecoder | null = null;
+      try {
+        decoder = new CanonicalTerminalDecoder(finalEnvelope.payloadBytes, finalEnvelope.verification, loadContentPackRegistry(), {
+          isCurrent: options.canonicalOwner!.isCurrent, validateState, signal: options.signal,
+        });
+        this.terminalDecoder = decoder;
+        const state = await decoder.state;
+        return { state, ...result };
+      } catch (error) {
+        decoder?.close(error instanceof Error ? error : undefined);
+        if (options.signal?.aborted) throw options.signal.reason ?? error;
+        throw new PureIdleMacroClientError("operation", error instanceof Error ? error.message : "终态后台无法重载",
+          { recoverable: true, finalEnvelope });
+      } finally {
+        if (this.terminalDecoder === decoder) this.terminalDecoder = null;
+      }
+    }
     let raw: string;
     try {
       const bytes = await workerBinaryPayloadToArrayBuffer(finalEnvelope.payloadBytes);
@@ -303,13 +340,7 @@ export class PureIdleMacroClient {
       const state = cooperative
         ? await parseTrustedWorkerEnvelopeChunked(raw, finalEnvelope.verification, undefined, { signal: options.signal })
         : parseTrustedWorkerEnvelope(raw, finalEnvelope.verification);
-      const identityMismatch = finalizedIdentityMismatch(state, finalEnvelope.identity);
-      if (identityMismatch ||
-        result.summary.algorithmVersion !== finalEnvelope.identity.algorithmVersion ||
-        result.summary.settledWallSeconds !== finalEnvelope.identity.settledWallSeconds ||
-        result.summary.settledSimulationSeconds !== finalEnvelope.identity.settledSimulationSeconds) {
-        throw new Error(`纯挂机 Worker 结果摘要与重载状态不一致${identityMismatch ? `（${identityMismatch}）` : ""}`);
-      }
+      validateState(state);
       return {
         state,
         ...result,
@@ -325,10 +356,14 @@ export class PureIdleMacroClient {
   }
 
   cancel(message = "纯挂机计算已取消"): void {
+    this.terminalDecoder?.close(new DOMException(`${message}，原存档保持不变`, "AbortError"));
+    this.terminalDecoder = null;
     this.failAll(new DOMException(`${message}，原存档保持不变`, "AbortError"), true);
   }
 
   close(): void {
+    this.terminalDecoder?.close();
+    this.terminalDecoder = null;
     this.failAll(new PureIdleMacroClientError("closed", "纯挂机 Worker 已终止"));
   }
 }

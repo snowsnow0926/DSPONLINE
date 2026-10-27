@@ -10,6 +10,9 @@ const supply = options.supply ?? "stock";
 if (!["stock", "tray", "quantum"].includes(supply)) throw new Error("Unknown material variant");
 const seconds = Number(options.seconds ?? 30);
 if (!Number.isFinite(seconds) || seconds < 5 || seconds > 120) throw new Error("Invalid observation window");
+const postStopSeconds = Number(options["post-stop-seconds"] ?? 0);
+if (!Number.isFinite(postStopSeconds) || postStopSeconds < 0 || postStopSeconds > 10) throw new Error("Invalid post-stop observation window");
+const allProcessMemory = options["all-process-memory"] === "1";
 const output = resolve(options.output ?? "artifacts/web-live-runtime");
 const name = options.name ?? `live-${supply}`;
 if (!/^[a-z0-9-]+$/i.test(name)) throw new Error("Invalid evidence name");
@@ -26,10 +29,16 @@ async function sampleProcesses(stage) {
   try {
     const session = await bounded(browser.newBrowserCDPSession());
     const { processInfo } = await bounded(session.send("SystemInfo.getProcessInfo"));
-    const ids = processInfo.filter((item) => item.type === "renderer").map((item) => item.id);
-    const memory = process.platform === "win32" && ids.length ? JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-Command",
+    const rendererIds = new Set(processInfo.filter((item) => item.type === "renderer").map((item) => item.id));
+    const ids = processInfo.filter((item) => Number.isSafeInteger(item.id) && item.id > 0 && (allProcessMemory || rendererIds.has(item.id))).map((item) => item.id);
+    const sampled = process.platform === "win32" && ids.length ? JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-Command",
       `Get-Process -Id ${ids.join(",")} -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64,PeakWorkingSet64,PrivateMemorySize64 | ConvertTo-Json -Compress`], { encoding: "utf8" }) || "null") : null;
-    processSamples.push({ stage, processInfo, memory });
+    const rows = sampled ? Array.isArray(sampled) ? sampled : [sampled] : [];
+    const rendererRows = rows.filter((row) => rendererIds.has(row.Id));
+    const memory = rendererRows.length === 1 ? rendererRows[0] : rendererRows.length ? rendererRows : null;
+    processSamples.push({ stage, processInfo, memory, ...(allProcessMemory ? { allProcessMemory: rows,
+      sampledBrowserWorkingSetBytes: rows.reduce((sum, row) => sum + row.WorkingSet64, 0),
+      sampledBrowserPrivateBytes: rows.reduce((sum, row) => sum + row.PrivateMemorySize64, 0) } : {}) });
     await session.detach();
     await writeFile(resolve(output, `${name}-processes.json`), JSON.stringify(processSamples, null, 2));
   } catch { /* process sampling must not change the game outcome */ }
@@ -232,6 +241,10 @@ try {
   await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click({ noWaitAfter: true });
   await overlay.waitFor({ state: "hidden" });
   const stopMs = Date.now() - stopStarted;
+  if (postStopSeconds > 0) {
+    await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "post-stop"; });
+    await page.waitForTimeout(postStopSeconds * 1000);
+  }
   const trace = await page.evaluate(() => { const trace = globalThis.__LIVE_RUNTIME_TRACE__; trace.active = false; return trace; });
   await sampleProcesses("replication stopped");
   const durable = await page.evaluate(async () => {
@@ -256,6 +269,7 @@ try {
   }
   if (errors.length) throw Error(errors.join("\n"));
   const evidence = { browser: await browser.version(), supply, observationSeconds: seconds, profiled: Boolean(options.profile),
+    postStopObservationSeconds: postStopSeconds, allProcessMemory,
     engineProfiled: Boolean(options["engine-profile"]),
     retainedNormalDebt: Boolean(options["retain-debt"]),
     seeded, warmup, stopMs, visibleSummary, trace, processSamples, durable };

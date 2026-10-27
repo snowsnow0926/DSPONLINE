@@ -33,9 +33,17 @@ type StopProbe = {
   chunkCompletes: number;
   crashChunkTransfer: boolean;
   chunkCrashes: number;
+  ownerStarts: number;
+  ownerSerializations: number;
+  failOwnerSerialization: boolean;
+  ownerFailures: number;
+  crashCanonicalDecode: boolean;
+  decoderCrashes: number;
+  ownerTerminations: number;
+  failTerminalMemoryGate: boolean;
 };
 
-async function installProbe(page: Page): Promise<void> {
+async function installProbe(page: Page, observeStopState = false): Promise<void> {
   await page.addInitScript((durable) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.2");
@@ -51,6 +59,10 @@ async function installProbe(page: Page): Promise<void> {
       holdTerminalDecode: false, terminalDecodeBlocked: false, terminalEnvelopeBytes: 0, terminalChecksums: [],
       postFinalizeCheckpoints: 0, latestFactoryElapsed: null,
       chunkBegins: 0, chunkRecords: 0, chunkCompletes: 0, crashChunkTransfer: false, chunkCrashes: 0,
+      ownerStarts: 0, ownerSerializations: 0, failOwnerSerialization: false, ownerFailures: 0,
+      crashCanonicalDecode: false, decoderCrashes: 0,
+      ownerTerminations: 0,
+      failTerminalMemoryGate: false,
     };
     sessionStorage.removeItem("v127-stop-fail-next-boot");
     Object.assign(window, { __stopRecoveryProbe: probe });
@@ -90,6 +102,11 @@ async function installProbe(page: Page): Promise<void> {
     class ObservedWorker extends NativeWorker {
       private readonly workerName: string;
 
+      override terminate(): void {
+        if (this.workerName === "canonical-terminal-decoder") probe.ownerTerminations += 1;
+        super.terminate();
+      }
+
       constructor(scriptURL: string | URL, options?: WorkerOptions) {
         super(scriptURL, options);
         this.workerName = options?.name ?? "";
@@ -101,11 +118,37 @@ async function installProbe(page: Page): Promise<void> {
         if (this.workerName === "pure-idle-macro") this.addEventListener("message", ({ data }) => {
           if (data.finalEnvelope?.verification) probe.terminalEnvelopeBytes = data.finalEnvelope.verification.byteLength;
         });
+        if (this.workerName === "canonical-terminal-decoder") this.addEventListener("message", (event) => {
+          if (event.data?.type === "state-records" && probe.holdTerminalDecode) {
+            event.stopImmediatePropagation();
+            probe.terminalDecodeBlocked = true;
+            Object.assign(window, { __releaseStopDecode: () => this.dispatchEvent(new MessageEvent("message", { data: event.data })) });
+          }
+        });
       }
 
       override postMessage(message: unknown, transfer?: Transferable[]): void {
         const request = message as { id?: number; type?: string; kind?: string;
           targetWallSeconds?: number; key?: string; payload?: ArrayBuffer; proof?: { stateChecksum: string } } | null;
+        if (this.workerName === "canonical-terminal-decoder") {
+          if (request?.type === "canonical-start") {
+            probe.ownerStarts += 1;
+            if (probe.crashCanonicalDecode) {
+              probe.crashCanonicalDecode = false; probe.decoderCrashes += 1;
+              super.postMessage(message, transfer ?? []);
+              queueMicrotask(() => this.dispatchEvent(new ErrorEvent("error", { message: "injected canonical decoder crash" })));
+              return;
+            }
+          }
+          if (request?.type === "canonical-serialize") {
+            probe.ownerSerializations += 1;
+            if (probe.failOwnerSerialization) {
+              probe.failOwnerSerialization = false; probe.ownerFailures += 1;
+              queueMicrotask(() => this.dispatchEvent(new ErrorEvent("error", { message: "injected canonical proof failure" })));
+              return;
+            }
+          }
+        }
         if (this.workerName === "authoritative-save-serialization") {
           if (request?.type === "state-begin") probe.chunkBegins += 1;
           if (request?.type === "state-complete") probe.chunkCompletes += 1;
@@ -161,6 +204,14 @@ async function installProbe(page: Page): Promise<void> {
   }, durableMode);
 
   // Observe the real boot entry without mocking claim/readback or its result.
+  if (observeStopState) await page.route("**/src/App.tsx*", async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const boundary = "const pureIdleStoppingRef = useRef(false);";
+    if (!source.includes(boundary)) throw new Error("stop lifecycle observation boundary changed");
+    const body = source.replace(boundary, `${boundary}\nif (globalThis.__stopRecoveryProbe) globalThis.__readStopInFlight = () => pureIdleStoppingRef.current;`);
+    await route.fulfill({ response, body });
+  });
   await page.route("**/src/game/pureIdleRecovery.ts*", async (route) => {
     const response = await route.fetch();
     const source = await response.text();
@@ -179,6 +230,21 @@ async function installProbe(page: Page): Promise<void> {
       }
       return result;
     }\n`;
+    await route.fulfill({ response, body });
+  });
+  await page.route("**/src/game/memoryBudget.ts*", async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const boundary = "function evaluateMemoryGuard(";
+    if (!source.includes(boundary)) throw new Error("terminal memory observation boundary changed");
+    const body = source.replace(boundary, "function observedEvaluateMemoryGuard(") + `
+      export function evaluateMemoryGuard(input) {
+        const result = observedEvaluateMemoryGuard(input);
+        const probe = globalThis.__stopRecoveryProbe;
+        return probe?.failTerminalMemoryGate && probe.ownerStarts > 0 && input.saveInFlight
+          ? { ...result, shouldPause: true, reason: 'injected terminal memory gate' } : result;
+      }
+    `;
     await route.fulfill({ response, body });
   });
   await page.route("**/src/game/saveTransferDecode.ts*", async (route) => {
@@ -693,7 +759,7 @@ test("a failed cancellation marker blocks the pending save and visibly requires 
   expect((await readPrimary(page)).inventory).toEqual(seeded.inventory);
 });
 
-test("cancelling a cooperative terminal decode cannot later write its completed candidate", async ({ page }) => {
+test("cancelling bounded terminal delivery cannot later write its completed candidate", async ({ page }) => {
   test.skip(durableMode, "This mode keeps the terminal envelope outside the UI decoder.");
   test.setTimeout(90_000);
   await installProbe(page);
@@ -720,7 +786,93 @@ test("cancelling a cooperative terminal decode cannot later write its completed 
   expect((await readRecovery(page))?.committed).toBe(false);
 });
 
-test("large frozen terminal chunks retry the same settlement after a failed primary write", async ({ page }) => {
+test("cancelling after canonical delivery reclaims its idle Worker and preserves the primary", async ({ page }) => {
+  test.skip(durableMode, "Canonical decoding belongs to the default coordinator.");
+  test.setTimeout(90_000);
+  await installProbe(page);
+  const seeded = await seedRecoverableRun(page, true, false, false, true);
+  await openRecovery(page, seeded);
+  const writes = (await readProbe(page)).primaryWrites;
+  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.holdValidatingJournal = true; });
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect.poll(async () => (await readProbe(page)).validatingJournalBlocked).toBe(true);
+  expect((await readProbe(page)).ownerStarts).toBe(1);
+  expect((await readProbe(page)).ownerSerializations).toBe(0);
+  await overlay.getByRole("button", { name: "取消结算并保留原存档", exact: true }).click();
+  await expect.poll(async () => (await readRecovery(page))?.stopReason).toBe("user-cancelled");
+  await expect.poll(async () => (await readProbe(page)).ownerTerminations).toBe(1);
+  await page.evaluate(() => {
+    const runtime = window as typeof window & { __stopRecoveryProbe: StopProbe; __releaseStopJournal: () => void };
+    runtime.__stopRecoveryProbe.holdValidatingJournal = false; runtime.__releaseStopJournal();
+  });
+  await expect(overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true })).toBeEnabled();
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  expect((await readProbe(page)).primaryWrites).toBe(writes);
+  expect((await readProbe(page)).ownerSerializations).toBe(0);
+});
+
+test("memory admission failure releases the canonical Worker and retries from the complete UI candidate", async ({ page }) => {
+  test.skip(durableMode, "Canonical decoding belongs to the default coordinator.");
+  test.setTimeout(90_000);
+  await installProbe(page);
+  const seeded = await seedRecoverableRun(page, true, false, false, true);
+  await openRecovery(page, seeded);
+  const writes = (await readProbe(page)).primaryWrites;
+  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.failTerminalMemoryGate = true; });
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect(overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true })).toBeVisible();
+  const frozen = await readRecovery(page);
+  expect((await readProbe(page)).ownerStarts).toBe(1);
+  expect((await readProbe(page)).ownerSerializations).toBe(0);
+  await expect.poll(async () => (await readProbe(page)).ownerTerminations).toBe(1);
+  expect((await readProbe(page)).primaryWrites).toBe(writes);
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.failTerminalMemoryGate = false; });
+  await overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true }).click();
+  await expect(overlay).toBeHidden();
+  const after = await readProbe(page);
+  expect(after.finalizes).toBe(1); expect(after.ownerStarts).toBe(1);
+  expect(after.ownerSerializations).toBe(0); expect(after.chunkCompletes).toBe(1);
+  const persisted = await readPrimary(page);
+  expect(persisted.inventory).toEqual(seeded.inventory);
+  expect(persisted.totalIdleTime).toBeCloseTo(frozen!.targetWallSeconds!, 6);
+  expect(await readRecovery(page)).toBeNull();
+});
+
+test("a cancelled journal operation drains before a new stop can safely start", async ({ page }) => {
+  test.skip(durableMode, "Canonical decoding belongs to the default coordinator.");
+  test.setTimeout(90_000);
+  await installProbe(page, true);
+  const seeded = await seedRecoverableRun(page, true, false, false, true);
+  await openRecovery(page, seeded);
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.holdValidatingJournal = true; });
+  await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect.poll(async () => (await readProbe(page)).validatingJournalBlocked).toBe(true);
+  await overlay.getByRole("button", { name: "取消结算并保留原存档", exact: true }).click();
+  await expect.poll(async () => (await readRecovery(page))?.stopReason).toBe("user-cancelled");
+  expect(await page.evaluate(() => (window as typeof window & { __readStopInFlight: () => boolean }).__readStopInFlight())).toBe(true);
+  expect((await readProbe(page)).ownerStarts).toBe(1);
+  await page.evaluate(() => {
+    const runtime = window as typeof window & { __stopRecoveryProbe: StopProbe; __releaseStopJournal: () => void };
+    runtime.__stopRecoveryProbe.holdValidatingJournal = false;
+    runtime.__releaseStopJournal();
+  });
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __readStopInFlight: () => boolean }).__readStopInFlight())).toBe(false);
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect(overlay).toBeHidden();
+  const after = await readProbe(page);
+  expect(after.finalizes).toBe(2); expect(after.ownerSerializations).toBe(1); expect(after.ownerStarts).toBe(2);
+  const persisted = await readPrimary(page);
+  expect(persisted.inventory).toEqual(seeded.inventory);
+  expect(persisted.totalIdleTime).toBeCloseTo(after.targets[1], 6);
+  expect(await readRecovery(page)).toBeNull();
+});
+
+test("large canonical owner retries the same settlement after a failed primary write", async ({ page }) => {
   test.skip(durableMode, "Chunked canonical-state delivery belongs to the default coordinator.");
   test.setTimeout(90_000);
   await installProbe(page);
@@ -729,17 +881,18 @@ test("large frozen terminal chunks retry the same settlement after a failed prim
   await stopWithFailure(page);
   const frozen = await readRecovery(page);
   const failed = await readProbe(page);
-  expect(failed.chunkBegins).toBe(1);
-  expect(failed.chunkCompletes).toBe(1);
-  expect(failed.chunkRecords).toBeGreaterThan(1);
+  expect(failed.ownerSerializations).toBe(1);
+  expect(failed.chunkBegins).toBe(0);
+  expect(failed.chunkCompletes).toBe(0);
   expect((await readPrimary(page)).raw).toBe(seeded.primary);
   await armWriteFailure(page, false);
   const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
   await overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true }).click();
   await expect(overlay).toBeHidden();
   const after = await readProbe(page);
-  expect(after.chunkBegins).toBe(2);
-  expect(after.chunkCompletes).toBe(2);
+  expect(after.ownerSerializations).toBe(1);
+  expect(after.chunkBegins).toBe(1);
+  expect(after.chunkCompletes).toBe(1);
   expect(after.finalizes).toBe(1);
   expect(new Set(after.terminalChecksums).size).toBe(1);
   expect(after.terminalChecksums).toHaveLength(2);
@@ -750,16 +903,22 @@ test("large frozen terminal chunks retry the same settlement after a failed prim
   expect(await readRecovery(page)).toBeNull();
 });
 
-test("a mid-chunk save Worker crash keeps the frozen candidate for one safe retry", async ({ page }) => {
+test("owner proof failure then a fallback chunk crash keep one frozen settlement for retry", async ({ page }) => {
   test.skip(durableMode, "Chunked canonical-state delivery belongs to the default coordinator.");
   test.setTimeout(90_000);
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true, false, false, true);
   await openRecovery(page, seeded);
   const writes = (await readProbe(page)).primaryWrites;
-  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.crashChunkTransfer = true; });
+  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.failOwnerSerialization = true; });
   const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
   await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect(overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true })).toBeVisible();
+  expect((await readProbe(page)).ownerFailures).toBe(1);
+  expect((await readProbe(page)).primaryWrites).toBe(writes);
+  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.crashChunkTransfer = true; });
+  await overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true }).click();
+  await expect.poll(async () => (await readProbe(page)).chunkCrashes).toBe(1);
   await expect(overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true })).toBeVisible();
   const frozen = await readRecovery(page);
   const failed = await readProbe(page);
@@ -775,6 +934,34 @@ test("a mid-chunk save Worker crash keeps the frozen candidate for one safe retr
   expect(persisted).toMatchObject({ enabled: false, paused: true });
   expect((await readProbe(page)).finalizes).toBe(1);
   expect((await readProbe(page)).chunkCompletes).toBe(1);
+  expect(await readRecovery(page)).toBeNull();
+});
+
+test("canonical decoder crash preserves the original primary and frozen target for recalculation", async ({ page }) => {
+  test.skip(durableMode, "Canonical decoding belongs to the default coordinator.");
+  test.setTimeout(90_000);
+  await installProbe(page);
+  const seeded = await seedRecoverableRun(page, true, false, false, true);
+  await openRecovery(page, seeded);
+  const writes = (await readProbe(page)).primaryWrites;
+  await page.evaluate(() => { (window as typeof window & { __stopRecoveryProbe: StopProbe }).__stopRecoveryProbe.crashCanonicalDecode = true; });
+  const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
+  await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click();
+  await expect(overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true })).toBeVisible();
+  const frozen = await readRecovery(page);
+  expect((await readProbe(page)).decoderCrashes).toBe(1);
+  expect((await readProbe(page)).primaryWrites).toBe(writes);
+  expect((await readPrimary(page)).raw).toBe(seeded.primary);
+  await overlay.getByRole("button", { name: "重试恢复纯挂机", exact: true }).click();
+  await expect(overlay).toBeHidden();
+  const after = await readProbe(page);
+  expect(after.finalizes).toBe(2);
+  expect(after.targets).toHaveLength(2);
+  expect(after.targets[1]).toBe(after.targets[0]);
+  expect(after.ownerSerializations).toBe(1);
+  const persisted = await readPrimary(page);
+  expect(persisted.inventory).toEqual(seeded.inventory);
+  expect(persisted.totalIdleTime).toBeCloseTo(frozen!.targetWallSeconds!, 6);
   expect(await readRecovery(page)).toBeNull();
 });
 

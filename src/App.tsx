@@ -316,6 +316,7 @@ import {
 } from "./game/blueprintExchange";
 import { exportBinaryFile, exportTextFile } from "./game/fileExport";
 import { compressSaveTextToGzipBlob, decodeSaveFileBytes } from "./game/saveFileCodec";
+import { discardCanonicalTerminalOwner } from "./game/canonicalTerminalOwnerRegistry";
 import { alignToDevicePixel } from "./game/displayPixels";
 import {
   getDesktopBridge,
@@ -7756,6 +7757,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           code: "conflict",
         };
         pauseForMemoryPressure(saveMemoryDecision.reason ?? "存档需要的临时内存过高");
+        // Retain the UI candidate but release its extra unclaimed Worker graph.
+        discardCanonicalTerminalOwner(saveState);
         // A guard rejection is an expected, terminal save outcome rather than
         // an exception. Publish the same failed phase/transition as the catch
         // path so autosave overlays and diagnostics cannot remain "in flight".
@@ -8995,7 +8998,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           // validated state, the ordinary primary save verifies it, and only
           // then is the independent recovery log marked committed/cleared.
           const legacyFinalized = candidate?.kind === "state" ? candidate
-            : await finalizer!.finalize(frozenTarget, { terminal: true, closeBeforeDecode: true })
+            : await finalizer!.finalize(frozenTarget, {
+              terminal: true, closeBeforeDecode: true,
+              ...(isLargeRuntimeState(gameRef.current) ? { canonicalOwner: { isCurrent: () =>
+                legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease) &&
+                pureIdleStopTargetRef.current === stopTarget && !lifecycleExitStartedRef.current,
+              } } : {}),
+            })
               .then(({ state, summary }) => ({ state, summary })).finally(() => {
                 finalizer?.close();
                 if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
@@ -9141,6 +9150,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         if (pureIdleMacroClientRef.current === finalizer) pureIdleMacroClientRef.current = null;
       } catch (error) {
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;
+        // Cancelling the decoder rejects immediately. Its revoked target must
+        // not overwrite the cancellation marker with a late Worker failure.
+        if (pureIdleStopTargetRef.current !== stopTarget) return;
         if (!macroFinalized && isCountedPureIdleWorkerFailure(error)) {
           const restartCount = await persistPureIdleWorkerFailure(record, error instanceof Error ? error.message : "纯挂机停止结算失败", authorityLease, pureIdleStopReasonForError(error));
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) return;

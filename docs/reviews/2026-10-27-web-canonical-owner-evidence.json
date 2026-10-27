@@ -1,0 +1,342 @@
+{
+  "schemaVersion": 1,
+  "developmentBaseCommit": "996be28b7973108a97ecae30f6d9da8feef38086",
+  "notPublished": true,
+  "sizes": {
+    "originalSampleBytes": 107637967,
+    "preparedExpandedRuntimeJsonBytes": 205464026,
+    "fixedActualPrimaryBodyBytes": 110673715,
+    "note": "The approximately 105 MiB primary and expanded prepared runtime JSON are different representations; the 205 MB figure is not player save growth."
+  },
+  "fixtureSha256": {
+    "original": "d64b5646f6117f3c089fba4dc95a95e84bedd9375f75b3c8c917b2e7cf473bc1",
+    "prepared": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf"
+  },
+  "qualifiedRuntimeSourceSha256": {
+    "src/game/authoritativeSaveSerializationClient.ts": "c3cd314f6d4dc3ece87c4fc0d07cc72540b224730b1255442ba149b073317672",
+    "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+    "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+    "src/game/pureIdleMacroClient.ts": "782d219a20ec02fe6cd2fb00a2560a29b4f9591a3dc6242499960f4fe14b5b93",
+    "src/App.tsx": "fe3cbda393292459598ed33ed3ec3bff8a1d4fe70408fa3d19e7f157bda0db4e",
+    "src/game/canonicalTerminalOwnerClient.ts": "d35451af32da5ab5077498d266887152ce6b939cd4ad1f9086e52c14232bc186",
+    "src/game/canonicalTerminalOwnerRegistry.ts": "2e52c53b053ecdb5ffba02c0dbf8a8acb54f993b0df91440d41babc578afebc3",
+    "src/game/canonicalTerminalOwnerProtocol.ts": "b025f6c504f7e281132921512cd2fca95d92f4a9e1bb8c8dadc7a472c797a20e",
+    "src/game/canonicalTerminalOwner.worker.ts": "0ceeb80d51e0c1aba294963b0932d36c32ed1a05cd36abfc65963705c221900a",
+    "src/game/saveStateChunkTransfer.ts": "c2c42c89d9871a587a6d45d105a7eb46d1a56438045f3761997d28d3eb4643bb",
+    "src/game/saveTransferDecode.ts": "ba79bb4c94d33fd4ea7fa6a51497db2c4c44e296ce52b5e8a5beaa64d9badc09"
+  },
+  "fixedInputRealApi": {
+    "scope": "Actual decoder, retained owner and original proof validator, six new isolated Chrome runs, preparation and final full-hash verification excluded from elapsed timing; renderer journey peak includes preparation and extra verification, not game-wide net memory.",
+    "trials": [
+      {
+        "mode": "ui",
+        "totalMs": 4326.700000047684,
+        "maxFrameGapMs": 342.2000000476837,
+        "inputPreparationBlobMs": 0,
+        "stateSha256": "2c58b9b1c25abc9b0f5ffd86a781e53fcc9aac950749d94ec32aa2fb07045b99",
+        "persistedSha256": "267aecfbe342ab14f7456b4894c25196fcfe64ac8920e35123aec0d2aac03f6d",
+        "persistedBytes": 110673715,
+        "createdWorkers": [
+          "authoritative-save-serialization"
+        ],
+        "entityCount": 110042,
+        "beltCount": 233300,
+        "name": "integrated-ui-1",
+        "rendererJourneyPeakBytes": 3283181568
+      },
+      {
+        "mode": "integrated-blob",
+        "totalMs": 4414.099999904633,
+        "maxFrameGapMs": 19.200000047683716,
+        "inputPreparationBlobMs": 42.89999985694885,
+        "stateSha256": "2c58b9b1c25abc9b0f5ffd86a781e53fcc9aac950749d94ec32aa2fb07045b99",
+        "persistedSha256": "267aecfbe342ab14f7456b4894c25196fcfe64ac8920e35123aec0d2aac03f6d",
+        "persistedBytes": 110673715,
+        "createdWorkers": [
+          "canonical-terminal-decoder"
+        ],
+        "entityCount": 110042,
+        "beltCount": 233300,
+        "name": "integrated-owner-1",
+        "rendererJourneyPeakBytes": 2693623808
+      },
+      {
+        "mode": "integrated-blob",
+        "totalMs": 4392.900000095367,
+        "maxFrameGapMs": 37.09999990463257,
+        "inputPreparationBlobMs": 42.60000014305115,
+        "stateSha256": "2c58b9b1c25abc9b0f5ffd86a781e53fcc9aac950749d94ec32aa2fb07045b99",
+        "persistedSha256": "267aecfbe342ab14f7456b4894c25196fcfe64ac8920e35123aec0d2aac03f6d",
+        "persistedBytes": 110673715,
+        "createdWorkers": [
+          "canonical-terminal-decoder"
+        ],
+        "entityCount": 110042,
+        "beltCount": 233300,
+        "name": "integrated-owner-2",
+        "rendererJourneyPeakBytes": 2690945024
+      },
+      {
+        "mode": "ui",
+        "totalMs": 4337.899999856949,
+        "maxFrameGapMs": 345.59999990463257,
+        "inputPreparationBlobMs": 0,
+        "stateSha256": "2c58b9b1c25abc9b0f5ffd86a781e53fcc9aac950749d94ec32aa2fb07045b99",
+        "persistedSha256": "267aecfbe342ab14f7456b4894c25196fcfe64ac8920e35123aec0d2aac03f6d",
+        "persistedBytes": 110673715,
+        "createdWorkers": [
+          "authoritative-save-serialization"
+        ],
+        "entityCount": 110042,
+        "beltCount": 233300,
+        "name": "integrated-ui-2",
+        "rendererJourneyPeakBytes": 3283808256
+      },
+      {
+        "mode": "ui",
+        "totalMs": 4271.5,
+        "maxFrameGapMs": 333.39999985694885,
+        "inputPreparationBlobMs": 0,
+        "stateSha256": "2c58b9b1c25abc9b0f5ffd86a781e53fcc9aac950749d94ec32aa2fb07045b99",
+        "persistedSha256": "267aecfbe342ab14f7456b4894c25196fcfe64ac8920e35123aec0d2aac03f6d",
+        "persistedBytes": 110673715,
+        "createdWorkers": [
+          "authoritative-save-serialization"
+        ],
+        "entityCount": 110042,
+        "beltCount": 233300,
+        "name": "integrated-ui-3",
+        "rendererJourneyPeakBytes": 3287150592
+      },
+      {
+        "mode": "integrated-blob",
+        "totalMs": 4397.599999904633,
+        "maxFrameGapMs": 16.40000009536743,
+        "inputPreparationBlobMs": 42.200000047683716,
+        "stateSha256": "2c58b9b1c25abc9b0f5ffd86a781e53fcc9aac950749d94ec32aa2fb07045b99",
+        "persistedSha256": "267aecfbe342ab14f7456b4894c25196fcfe64ac8920e35123aec0d2aac03f6d",
+        "persistedBytes": 110673715,
+        "createdWorkers": [
+          "canonical-terminal-decoder"
+        ],
+        "entityCount": 110042,
+        "beltCount": 233300,
+        "name": "integrated-owner-3",
+        "rendererJourneyPeakBytes": 2694443008
+      }
+    ],
+    "summary": {
+      "totalMs": {
+        "baselineMedian": 4326.700000047684,
+        "candidateMedian": 4397.599999904633,
+        "changePercent": 1.6386622565966569
+      },
+      "maxFrameGapMs": {
+        "baselineMedian": 342.2000000476837,
+        "candidateMedian": 19.200000047683716,
+        "changePercent": -94.389246041786
+      },
+      "rendererJourneyPeakBytes": {
+        "baselineMedian": 3283808256,
+        "candidateMedian": 2693623808,
+        "changePercent": -17.97256118476608
+      }
+    }
+  },
+  "publicCompatibility": {
+    "scope": "real production decoder and ordinary proof client under a fixed wall clock; public normal/speedrun/enabled-pack with building override fixtures",
+    "passed": 3,
+    "failed": 0,
+    "reports": [
+      {
+        "scenario": "normal",
+        "stateSha256": "435e91ae022d081931bfa02daef7ff510101b404d3c04cda65aa45d25c54e0fd",
+        "body": {
+          "sha256": "5b46d6df13a69169a793988c193578874467842601842c8494efc0cfb7dd463f",
+          "bytes": 90660
+        },
+        "inputAndOutputIntegersPreserved": true
+      },
+      {
+        "scenario": "speedrun",
+        "stateSha256": "d233e98fa9ab5e5c45ee24b9eb995310bd4a47a554a87e62ee269356786b3220",
+        "body": {
+          "sha256": "b63fdb2e74df8b7e4f713549d8c027a9ec7b38234ec20e91e58139c66776866e",
+          "bytes": 90442
+        },
+        "inputAndOutputIntegersPreserved": true
+      },
+      {
+        "scenario": "enabled-pack-and-overrides",
+        "stateSha256": "27497c638ff9031805d105691fe6dadeb4a37782b98c8c5c1c918dc86edd9fcf",
+        "body": {
+          "sha256": "d3aeabc78a6b2c1ef4c17e963b4de4d4080465f06aedeb61495f5b33d8e9a290",
+          "bytes": 91053
+        },
+        "inputAndOutputIntegersPreserved": true
+      }
+    ]
+  },
+  "fullPage": {
+    "scope": "Four isolated production-page Chrome trials, old/new/new/old. Replication 8x, five seconds observation, same private input, stock unchanged, three seconds post-stop. Journey peak counters are cumulative; all-process working/private sums are only five sampled points and may count shared pages more than once. Long-task excess is sum(max(duration - 50ms, 0)) over the stop window, not page-load Lighthouse TBT.",
+    "trials": [
+      {
+        "name": "canonical-stop-baseline-01",
+        "variant": "baseline",
+        "stopMs": 13112,
+        "maxStopFrameMs": 310.89999985694885,
+        "stopLongTaskExcessMs": 639,
+        "stopLongTaskDurationMs": 939,
+        "stopFramesOver100ms": 4,
+        "rendererJourneyPeakBytes": 5519872000,
+        "sampledBrowserWorkingSetMaxBytes": 5370908672,
+        "sampledBrowserPrivateMaxBytes": 5373345792,
+        "endMainRendererWorkingSetBytes": 3803107328,
+        "decodeWindowMaxFrameMs": 213.29999995231628,
+        "postStopMaxFrameMs": 109.09999990463257,
+        "primaryValid": true,
+        "paused": true,
+        "primaryStateBatches": 329
+      },
+      {
+        "name": "canonical-stop-candidate-01",
+        "variant": "candidate",
+        "stopMs": 13096,
+        "maxStopFrameMs": 317.2000000476837,
+        "stopLongTaskExcessMs": 351,
+        "stopLongTaskDurationMs": 601,
+        "stopFramesOver100ms": 2,
+        "rendererJourneyPeakBytes": 5511520256,
+        "sampledBrowserWorkingSetMaxBytes": 5283692544,
+        "sampledBrowserPrivateMaxBytes": 5372342272,
+        "endMainRendererWorkingSetBytes": 3970654208,
+        "decodeWindowMaxFrameMs": 36.799999952316284,
+        "postStopMaxFrameMs": 85.29999995231628,
+        "primaryValid": true,
+        "paused": true,
+        "primaryStateBatches": 0
+      },
+      {
+        "name": "canonical-stop-candidate-02",
+        "variant": "candidate",
+        "stopMs": 13313,
+        "maxStopFrameMs": 327.5,
+        "stopLongTaskExcessMs": 361,
+        "stopLongTaskDurationMs": 611,
+        "stopFramesOver100ms": 2,
+        "rendererJourneyPeakBytes": 5511897088,
+        "sampledBrowserWorkingSetMaxBytes": 5324128256,
+        "sampledBrowserPrivateMaxBytes": 5312405504,
+        "endMainRendererWorkingSetBytes": 3705008128,
+        "decodeWindowMaxFrameMs": 39,
+        "postStopMaxFrameMs": 22.799999952316284,
+        "primaryValid": true,
+        "paused": true,
+        "primaryStateBatches": 0
+      },
+      {
+        "name": "canonical-stop-baseline-02",
+        "variant": "baseline",
+        "stopMs": 13222,
+        "maxStopFrameMs": 310.90000009536743,
+        "stopLongTaskExcessMs": 583,
+        "stopLongTaskDurationMs": 933,
+        "stopFramesOver100ms": 4,
+        "rendererJourneyPeakBytes": 5529985024,
+        "sampledBrowserWorkingSetMaxBytes": 5368774656,
+        "sampledBrowserPrivateMaxBytes": 5358055424,
+        "endMainRendererWorkingSetBytes": 4509253632,
+        "decodeWindowMaxFrameMs": 224,
+        "postStopMaxFrameMs": 77.70000004768372,
+        "primaryValid": true,
+        "paused": true,
+        "primaryStateBatches": 329
+      }
+    ],
+    "summary": {
+      "stopMs": {
+        "baselineMedian": 13167.0,
+        "candidateMedian": 13204.5,
+        "changePercent": 0.2848029163818655
+      },
+      "maxStopFrameMs": {
+        "baselineMedian": 310.89999997615814,
+        "candidateMedian": 322.35000002384186,
+        "changePercent": 3.682856239485943
+      },
+      "stopLongTaskExcessMs": {
+        "baselineMedian": 611.0,
+        "candidateMedian": 356.0,
+        "changePercent": -41.734860883797054
+      },
+      "stopLongTaskDurationMs": {
+        "baselineMedian": 936.0,
+        "candidateMedian": 606.0,
+        "changePercent": -35.256410256410255
+      },
+      "stopFramesOver100ms": {
+        "baselineMedian": 4.0,
+        "candidateMedian": 2.0,
+        "changePercent": -50.0
+      },
+      "rendererJourneyPeakBytes": {
+        "baselineMedian": 5524928512.0,
+        "candidateMedian": 5511708672.0,
+        "changePercent": -0.23927621816801636
+      },
+      "sampledBrowserWorkingSetMaxBytes": {
+        "baselineMedian": 5369841664.0,
+        "candidateMedian": 5303910400.0,
+        "changePercent": -1.2278064815581136
+      },
+      "sampledBrowserPrivateMaxBytes": {
+        "baselineMedian": 5365700608.0,
+        "candidateMedian": 5342373888.0,
+        "changePercent": -0.434737636408955
+      },
+      "endMainRendererWorkingSetBytes": {
+        "baselineMedian": 4156180480.0,
+        "candidateMedian": 3837831168.0,
+        "changePercent": -7.659660438999993
+      },
+      "decodeWindowMaxFrameMs": {
+        "baselineMedian": 218.64999997615814,
+        "candidateMedian": 37.89999997615814,
+        "changePercent": -82.6663617743925
+      }
+    }
+  },
+  "validation": {
+    "unit": {
+      "passed": 3666,
+      "skipped": 38,
+      "failed": 0
+    },
+    "defaultBrowserFull": {
+      "passed": 493,
+      "skipped": 34,
+      "failed": 0,
+      "flaky": 0
+    },
+    "subsequentFocusedDefault": {
+      "startTime": "2026-10-27T00:18:14.291Z",
+      "duration": 71515.665,
+      "expected": 18,
+      "skipped": 1,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "nativeBoundaryPassed": 49,
+    "relatedUnitPassed": 60,
+    "durableBrowser": {
+      "startTime": "2026-10-27T00:19:48.114Z",
+      "duration": 48615.559,
+      "expected": 17,
+      "skipped": 9,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "distinctDefaultBrowserPassed": 494
+  },
+  "immutableBuild": null
+}

@@ -102,7 +102,10 @@ async function seed(page: Page, large = true, pausedBeforeStart = true) {
     state.entities.push({ ...base, id: "startup-clock", kind: "machine", buildingId: "time_warp_device", position: { x: 300, y: 0 } });
     if (big) for (let i = 0; i < 10_000; i += 1) state.entities.push({ ...base, id: `startup-padding-${i}`,
       kind: "machine", buildingId: "assembling_machine_mk1", machineCount: 0, position: { x: 20_000 + i * 100, y: 20_000 } });
-    state.belts = []; state.paused = paused; state.timeWarp.enabled = false;
+    // Loading the synthetic fixture paused keeps elapsed build/startup time
+    // from creating an unrelated offline session. The running-start case
+    // resumes through the real toolbar below.
+    state.belts = []; state.paused = true; state.timeWarp.enabled = false;
     state.timeWarp.controllerEntityId = "startup-clock"; state.timeWarp.requestedMultiplier = 8;
     state.tray.iron_ingot = 123; state.planetTrays.home = { ...state.tray };
     state.planetViewports.home = { x: 100, y: 200, zoom: 0.8 };
@@ -118,6 +121,10 @@ async function seed(page: Page, large = true, pausedBeforeStart = true) {
   await page.goto("/?factory=1&storageMigration=production");
   await expect(page.locator('.game-shell[data-simulation-worker="active"]')).toBeVisible();
   await expect.poll(async () => Number((await probe(page)).elapsed), { timeout: 15_000 }).toBeGreaterThanOrEqual(0);
+  if (!pausedBeforeStart) {
+    await page.getByRole("button", { name: "继续模拟", exact: true }).click();
+    await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-paused", "false");
+  }
   await page.locator('.react-flow__node[data-id="startup-clock"]').click();
   await expect(page.getByRole("button", { name: "开始纯挂机（守恒模式）", exact: true })).toBeVisible();
   return seeded;

@@ -1605,11 +1605,11 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toHaveAttribute("aria-label", "时间扭曲切换与大档流畅度优化");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.3");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(releaseNotes).toContainText("量子入库计算更轻");
-  await expect(releaseNotes).toContainText("建筑制造减少重复规划");
-  await expect(releaseNotes).toContainText("大档保存更少阻塞操作");
-  await expect(releaseNotes).toContainText("快照与挂机切换减少大档复制");
-  await expect(releaseNotes).toContainText("原有存档与材料规则保留");
+  await expect(releaseNotes).toContainText("时间扭曲启动更顺畅");
+  await expect(releaseNotes).toContainText("停止结算与保存更少卡顿");
+  await expect(releaseNotes).toContainText("取消、重试与恢复更可靠");
+  await expect(releaseNotes).toContainText("减少保存后的内存滞留与画布重复计算");
+  await expect(releaseNotes).toContainText("工厂、材料和备份设置保持");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });

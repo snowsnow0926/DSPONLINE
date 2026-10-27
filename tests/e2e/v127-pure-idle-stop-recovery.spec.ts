@@ -455,6 +455,12 @@ for (const failures of [1, 2]) {
 }
 
 test("terminal save retry skips the obsolete checkpoint and ordinary simulation resumes from the settled state", async ({ page }) => {
+  // A slow restore may legitimately retain an ordinary offline report.
+  // Acknowledge that modal like a player before interacting with the resumed
+  // factory; its independent preservation case remains asserted below.
+  await page.addLocatorHandler(page.getByRole("dialog", { name: "离线结算报告", exact: true }), async report => {
+    await report.getByRole("button", { name: "关闭离线结算报告", exact: true }).click();
+  });
   test.setTimeout(90_000);
   test.skip(durableMode, "The decoded-state retry belongs to the default runtime");
   await installProbe(page);

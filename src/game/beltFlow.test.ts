@@ -74,6 +74,22 @@ describe("BeltFlowSampler", () => {
     expect(state.belts[0].recentFlowSampleSeconds).toBeUndefined();
   });
 
+  it("reuses the state and untouched belt records when displayed flow values do not change", () => {
+    const state = stateWithBelt();
+    state.belts.push({ ...state.belts[0], id: "belt_flow_untouched", planetId: "home",
+      recentFlowSampleSeconds: 0, recentFlowTransferred: 0, recentFlowSampling: false });
+    const observations = new Map([
+      ["belt_flow_test", { flowPerSecond: 2, sampleSeconds: 5, transferred: 10, sampling: false }],
+      ["belt_flow_untouched", { flowPerSecond: 0, sampleSeconds: 0, transferred: 0, sampling: false }],
+    ]);
+    const first = applyBeltFlowObservations(state, observations);
+    expect(first).not.toBe(state);
+    expect(first.belts[1]).toBe(state.belts[1]);
+    const same = applyBeltFlowObservations(first, observations);
+    expect(same).toBe(first);
+    expect(same.belts).toBe(first.belts);
+  });
+
   function siliconLine(prefillTarget = false) {
     let state = createInitialState(12_345);
     state.research.completedTechIds.push("high_strength_crystal", "high_speed_logistics");

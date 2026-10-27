@@ -93,18 +93,27 @@ export function applyBeltFlowObservations(
   planetId?: PlanetId,
 ): GameState {
   if (state.belts.length === 0) return state;
-  return {
-    ...state,
-    belts: state.belts.map((belt) => {
-      const observation = planetId && belt.planetId !== planetId ? undefined : observations.get(belt.id);
-      if (!observation) return belt;
-      return {
-        ...belt,
-        lastFlow: observation.flowPerSecond,
-        recentFlowSampleSeconds: observation.sampleSeconds,
-        recentFlowTransferred: observation.transferred,
-        recentFlowSampling: observation.sampling,
-      };
-    }),
-  };
+  // Flow observations are a UI projection. Most large-factory publications
+  // do not change every belt's displayed window; avoid allocating a new
+  // 233k-record array and cloning every belt when all observed values are the
+  // same. When a value changes, preserve untouched belt identities so React
+  // Flow and diagnostics do not retain a second full belt object tree.
+  let nextBelts: BeltConnection[] | null = null;
+  for (let index = 0; index < state.belts.length; index += 1) {
+    const belt = state.belts[index];
+    const observation = planetId && belt.planetId !== planetId ? undefined : observations.get(belt.id);
+    if (!observation || (belt.lastFlow === observation.flowPerSecond &&
+      belt.recentFlowSampleSeconds === observation.sampleSeconds &&
+      belt.recentFlowTransferred === observation.transferred &&
+      belt.recentFlowSampling === observation.sampling)) continue;
+    nextBelts ??= state.belts.slice();
+    nextBelts[index] = {
+      ...belt,
+      lastFlow: observation.flowPerSecond,
+      recentFlowSampleSeconds: observation.sampleSeconds,
+      recentFlowTransferred: observation.transferred,
+      recentFlowSampling: observation.sampling,
+    };
+  }
+  return nextBelts ? { ...state, belts: nextBelts } : state;
 }

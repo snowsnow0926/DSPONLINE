@@ -1,0 +1,264 @@
+{
+  "scope": "Released Hong Kong Web 1.3.2 versus current frozen development build; two whole-page pairs. Development paused after handoff, not deployed.",
+  "releasedBaseline": {
+    "runtimeCommit": "34f3dd45e467cb3578c9be6415667ec861eb61f3",
+    "buildId": "1.3.2+34f3dd45e467",
+    "originalManifestSha256": "96537c71c923f1fd32be6632a4d113dc30c37646e2873f33fae54cf4a4ae1c83",
+    "relocatedOriginal196FilesVerified": true,
+    "relocation": "Original dist/ manifest paths mapped only to immutable release-1.3.2/web-dist; original manifest unchanged."
+  },
+  "currentFrozenBuild": {
+    "runtimeCommit": "b2d8e4ec054a3723d4edb3bd98ffb5a2d3e60ba2",
+    "fileCount": 197,
+    "workerCount": 15,
+    "allMeasuredWorkersMatch": true,
+    "qualifiedSourceFilesMatch": 13,
+    "archive": "web-1.3.2-b2d8e4ec.tar.gz",
+    "archiveSha256": "ba1d89378a4a42e3341f6960d3270577f4a3d0d16b9c7cce93c00344e89bc27e",
+    "allArchiveMembersVerified": true,
+    "buildId": "1.3.2+b2d8e4ec054a",
+    "manifestSha256": "d7e810c5af8ef686129c484ca017418ac7319ddcf8e2afe0ba30a1159efe05d8",
+    "aggregateSha256": "166251ce7e84b86b9f2f6186c87dbce38d27ce4497af4c90103b72eb93717f46",
+    "productionPwa": {
+      "pass": 1,
+      "skip": 0,
+      "fail": 0,
+      "flaky": 0
+    }
+  },
+  "servedBundleIdentity": [
+    {
+      "variant": "released-1.3.2",
+      "indexSha256": "8246cf114fe9f869db4304cf2af38ca25c02002f24243a4cbb028e393b3aff71",
+      "mainScript": "/assets/index-CS2AwLu3.js",
+      "mainScriptSha256": "72e75cc14272018712b426819936f7020b98d51cff2f00ead84088c976df0d65",
+      "matchesFrozenFiles": true
+    },
+    {
+      "variant": "current-frozen",
+      "indexSha256": "5d6e88cfcc007461314b9a07e6c08b044de2012ac6577f72609542a84a9dd947",
+      "mainScript": "/assets/index-NriCDXMx.js",
+      "mainScriptSha256": "3edda0021c5bae7c020bb82fb7fcba3452ba87f2cbc96112de302be06c3dfc01",
+      "matchesFrozenFiles": true
+    }
+  ],
+  "directComparison": {
+    "scope": "Released 1.3.2 (34f3dd45e467) versus frozen candidate b2d8e4ec054a, two alternating unprofiled whole-page pairs; stock copy, 8x replication, 5 s observation, 3 s post-stop. Not whole-game FPS, long-term resident memory, or low-memory qualification.",
+    "rows": [
+      {
+        "name": "since132-qualified-baseline-01",
+        "variant": "baseline",
+        "evidenceSha256": "7ec5d61759f1634207518d14a6ef3f7babede6b54a2aea74e2bbf4cecf2b6526",
+        "startMs": 19690,
+        "stopMs": 30331,
+        "maxStartingSaveSendMs": 856.3999998569489,
+        "rendererPeakWorkingSetBytes": 5515444224,
+        "rendererEndWorkingSetBytes": 3832340480,
+        "sampledBrowserEndWorkingSetBytes": 4376264704,
+        "sourcePrimaryChecksum": "d28d6a63",
+        "durableValid": true,
+        "countsAndSettingsPreserved": true,
+        "startingMaxFrameGapMs": 2073.9000000953674,
+        "startingFramesOver100Ms": 13,
+        "startingLongTaskTotalMs": 5625,
+        "stoppingMaxFrameGapMs": 2181.4000000953674,
+        "stoppingFramesOver100Ms": 12,
+        "stoppingLongTaskTotalMs": 5912,
+        "post-stopMaxFrameGapMs": 148.89999985694885,
+        "post-stopFramesOver100Ms": 1,
+        "post-stopLongTaskTotalMs": 186
+      },
+      {
+        "name": "since132-qualified-candidate-01",
+        "variant": "candidate",
+        "evidenceSha256": "41e8e1f31280cc431ffe731000145f6c2ebf5244e919507fc365703b941b07d9",
+        "startMs": 11348,
+        "stopMs": 13437,
+        "maxStartingSaveSendMs": 3.4000000953674316,
+        "rendererPeakWorkingSetBytes": 5136265216,
+        "rendererEndWorkingSetBytes": 2159415296,
+        "sampledBrowserEndWorkingSetBytes": 2816561152,
+        "sourcePrimaryChecksum": "d28d6a63",
+        "durableValid": true,
+        "countsAndSettingsPreserved": true,
+        "startingMaxFrameGapMs": 1206.2999999523163,
+        "startingFramesOver100Ms": 5,
+        "startingLongTaskTotalMs": 2147,
+        "stoppingMaxFrameGapMs": 278.40000009536743,
+        "stoppingFramesOver100Ms": 3,
+        "stoppingLongTaskTotalMs": 325,
+        "post-stopMaxFrameGapMs": 52.5,
+        "post-stopFramesOver100Ms": 0,
+        "post-stopLongTaskTotalMs": 111
+      },
+      {
+        "name": "since132-qualified-candidate-02",
+        "variant": "candidate",
+        "evidenceSha256": "7063859e776e90463ce4f3fb80c7913abbe27cc2fe20f53969796f86711f0619",
+        "startMs": 11595,
+        "stopMs": 13823,
+        "maxStartingSaveSendMs": 3.5,
+        "rendererPeakWorkingSetBytes": 5419917312,
+        "rendererEndWorkingSetBytes": 2558500864,
+        "sampledBrowserEndWorkingSetBytes": 3207770112,
+        "sourcePrimaryChecksum": "d28d6a63",
+        "durableValid": true,
+        "countsAndSettingsPreserved": true,
+        "startingMaxFrameGapMs": 1310.0999999046326,
+        "startingFramesOver100Ms": 7,
+        "startingLongTaskTotalMs": 2279,
+        "stoppingMaxFrameGapMs": 298.39999985694885,
+        "stoppingFramesOver100Ms": 3,
+        "stoppingLongTaskTotalMs": 434,
+        "post-stopMaxFrameGapMs": 57.40000009536743,
+        "post-stopFramesOver100Ms": 0,
+        "post-stopLongTaskTotalMs": 119
+      },
+      {
+        "name": "since132-qualified-baseline-02",
+        "variant": "baseline",
+        "evidenceSha256": "1d7bb17f4217f5b83585c0c74445fb3c4db033765cee526807782e0df04aede0",
+        "startMs": 12798,
+        "stopMs": 18361,
+        "maxStartingSaveSendMs": 579.5999999046326,
+        "rendererPeakWorkingSetBytes": 5177131008,
+        "rendererEndWorkingSetBytes": 3651256320,
+        "sampledBrowserEndWorkingSetBytes": 4194304000,
+        "sourcePrimaryChecksum": "d28d6a63",
+        "durableValid": true,
+        "countsAndSettingsPreserved": true,
+        "startingMaxFrameGapMs": 1206.7999999523163,
+        "startingFramesOver100Ms": 10,
+        "startingLongTaskTotalMs": 3482,
+        "stoppingMaxFrameGapMs": 1247.7999999523163,
+        "stoppingFramesOver100Ms": 7,
+        "stoppingLongTaskTotalMs": 3760,
+        "post-stopMaxFrameGapMs": 85,
+        "post-stopFramesOver100Ms": 0,
+        "post-stopLongTaskTotalMs": 0
+      }
+    ],
+    "metrics": {
+      "startMs": {
+        "baselineMedian": 16244.0,
+        "candidateMedian": 11471.5,
+        "percentChange": -29.38007879832554
+      },
+      "stopMs": {
+        "baselineMedian": 24346.0,
+        "candidateMedian": 13630.0,
+        "percentChange": -44.01544401544402
+      },
+      "maxStartingSaveSendMs": {
+        "baselineMedian": 717.9999998807907,
+        "candidateMedian": 3.450000047683716,
+        "percentChange": -99.51949860052137
+      },
+      "rendererPeakWorkingSetBytes": {
+        "baselineMedian": 5346287616.0,
+        "candidateMedian": 5278091264.0,
+        "percentChange": -1.2755833000062777
+      },
+      "rendererEndWorkingSetBytes": {
+        "baselineMedian": 3741798400.0,
+        "candidateMedian": 2358958080.0,
+        "percentChange": -36.956569333077915
+      },
+      "sampledBrowserEndWorkingSetBytes": {
+        "baselineMedian": 4285284352.0,
+        "candidateMedian": 3012165632.0,
+        "percentChange": -29.709083818575966
+      },
+      "startingMaxFrameGapMs": {
+        "baselineMedian": 1640.3500000238419,
+        "candidateMedian": 1258.1999999284744,
+        "percentChange": -23.296857383473835
+      },
+      "startingFramesOver100Ms": {
+        "baselineMedian": 11.5,
+        "candidateMedian": 6.0,
+        "percentChange": -47.82608695652174
+      },
+      "startingLongTaskTotalMs": {
+        "baselineMedian": 4553.5,
+        "candidateMedian": 2213.0,
+        "percentChange": -51.40002196112881
+      },
+      "stoppingMaxFrameGapMs": {
+        "baselineMedian": 1714.6000000238419,
+        "candidateMedian": 288.39999997615814,
+        "percentChange": -83.17975038072157
+      },
+      "stoppingFramesOver100Ms": {
+        "baselineMedian": 9.5,
+        "candidateMedian": 3.0,
+        "percentChange": -68.42105263157895
+      },
+      "stoppingLongTaskTotalMs": {
+        "baselineMedian": 4836.0,
+        "candidateMedian": 379.5,
+        "percentChange": -92.15260545905707
+      },
+      "post-stopMaxFrameGapMs": {
+        "baselineMedian": 116.94999992847443,
+        "candidateMedian": 54.950000047683716,
+        "percentChange": -53.0141085239071
+      },
+      "post-stopFramesOver100Ms": {
+        "baselineMedian": 0.5,
+        "candidateMedian": 0.0,
+        "percentChange": -100.0
+      },
+      "post-stopLongTaskTotalMs": {
+        "baselineMedian": 93.0,
+        "candidateMedian": 115.0,
+        "percentChange": 23.655913978494624
+      }
+    },
+    "fixedStartupParity": {
+      "stateSha256": "6fbdc4a6fb45e0805ae0126caf056edcef64313521c9456c3d4d0dcf0795c14a",
+      "callerUnchanged": true,
+      "entityCount": 110042,
+      "beltCount": 233300,
+      "commits": [
+        {
+          "transport": "bulk",
+          "sha256": "3c917e53981dc552ded9917f8414635525d1f3848f7ffd01de65885ad601f69a",
+          "bytes": 110673773,
+          "revision": 1,
+          "backupSaved": false
+        },
+        {
+          "transport": "chunks",
+          "sha256": "3c917e53981dc552ded9917f8414635525d1f3848f7ffd01de65885ad601f69a",
+          "bytes": 110673773,
+          "revision": 2,
+          "backupSaved": false
+        }
+      ]
+    }
+  },
+  "pairedReductionsPercent": [
+    {
+      "pair": 1,
+      "startMs": 42.366683595733875,
+      "stopMs": 55.698790016814485,
+      "stoppingMaxFrameGapMs": 87.2375538606768,
+      "rendererEndWorkingSetBytes": 43.652832850592645
+    },
+    {
+      "pair": 2,
+      "startMs": 9.399906235349276,
+      "stopMs": 24.715429442840808,
+      "stoppingMaxFrameGapMs": 76.08591121426895,
+      "rendererEndWorkingSetBytes": 29.928204437863183
+    }
+  ],
+  "limits": [
+    "Only two pairs; old-version startup and stop durations varied substantially. Report paired ranges, not a guaranteed global percentage.",
+    "No whole-game FPS, long-term resident memory, mobile or low-memory qualification.",
+    "Stage percentages are historical adjacent-version measurements and cannot be summed.",
+    "Initial setup used original manifest paths against current dist and no old server was started. Setup failure excluded; only since132-qualified four complete runs used.",
+    "After 1.3.2, most accepted work improves transitions/persistence/UI, without new gameplay math or a proven general long-run manufacturing throughput gain."
+  ]
+}

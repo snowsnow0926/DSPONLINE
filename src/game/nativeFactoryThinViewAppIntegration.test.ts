@@ -128,7 +128,9 @@ describe("factory thin-view App consumption", () => {
     // Upgrade and Copy now have separately bounded Rust paths and derive their
     // native scopes from the exact thin-view selection, never the hollow
     // renderer GameState.
-    expect(app).toMatch(/canUpgrade=\{nativePlayerAuthorityOwnsRuntime[\s\S]*?selectedEntityIds\.length > 0[\s\S]*?: canUpgradeEntities\(game, selectedEntityIds\)\}/);
+    expect(app).toMatch(/const canUpgradeSelectedEntities = useMemo\(\s*\(\) => nativePlayerAuthorityOwnsRuntime \? selectedEntityIds\.length > 0 : canUpgradeEntities\(game, selectedEntityIds\)/);
+    expect(app).toMatch(/<SelectionToolbar[\s\S]*?canUpgrade=\{canUpgradeSelectedEntities\}/);
+    expect(app).toMatch(/<MobileSelectionContextBar[\s\S]*?canUpgrade=\{canUpgradeSelectedEntities\}/);
     expect(app).toMatch(/createNativeFactoryBatchCommand\(baseRevision,[\s\S]*?kind: "upgrade-buildings"/);
     expect(app).toMatch(/copyActionEnabled=\{!nativePlayerAuthorityOwnsRuntime \|\| Boolean\([\s\S]*?nativeBlueprintCaptureSelection/);
     expect(app).toMatch(/eligibleCount=\{nativePlayerAuthorityOwnsRuntime[\s\S]*?nativeBlueprintCaptureSelection\?\.entityIds\.length[\s\S]*?: blueprintEligibleIds\.length\}/);

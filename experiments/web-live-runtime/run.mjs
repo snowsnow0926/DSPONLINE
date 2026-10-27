@@ -13,6 +13,9 @@ if (!Number.isFinite(seconds) || seconds < 5 || seconds > 120) throw new Error("
 const postStopSeconds = Number(options["post-stop-seconds"] ?? 0);
 if (!Number.isFinite(postStopSeconds) || postStopSeconds < 0 || postStopSeconds > 10) throw new Error("Invalid post-stop observation window");
 const allProcessMemory = options["all-process-memory"] === "1";
+const workerHeapMemory = options["worker-heaps"] === "1";
+const profilePhase = options["profile-phase"] ?? "all";
+if (!["all", "stopping"].includes(profilePhase)) throw new Error("Invalid profiler phase");
 const output = resolve(options.output ?? "artifacts/web-live-runtime");
 const name = options.name ?? `live-${supply}`;
 if (!/^[a-z0-9-]+$/i.test(name)) throw new Error("Invalid evidence name");
@@ -21,9 +24,47 @@ const browser = await chromium.launch({ channel: "chrome", headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: "block" });
 let page;
 let profiler;
+let profilerTimeline;
 const errors = [];
 const processSamples = [];
+const heapSamples = [];
 const bounded = (promise, ms = 5000) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(Error("diagnostic timeout")), ms))]);
+
+async function sampleHeaps(stage) {
+  const session = await browser.newBrowserCDPSession();
+  const workers = [];
+  let main;
+  try {
+    const pageSession = await context.newCDPSession(page);
+    try { main = await pageSession.send("Runtime.getHeapUsage"); } finally { await pageSession.detach(); }
+    const { targetInfos } = await session.send("Target.getTargets");
+    for (const target of targetInfos.filter((item) => item.type === "worker" && item.url.startsWith(base.origin + "/"))) {
+      let sessionId;
+      let listener;
+      try {
+        ({ sessionId } = await session.send("Target.attachToTarget", { targetId: target.targetId, flatten: false }));
+        const response = new Promise((resolve, reject) => {
+          listener = (event) => {
+            if (event.sessionId !== sessionId) return;
+            const message = JSON.parse(event.message);
+            if (message.id === 1) message.error ? reject(new Error(message.error.message)) : resolve(message.result);
+          };
+          session.on("Target.receivedMessageFromTarget", listener);
+        });
+        const [usage] = await Promise.all([bounded(response, 3000), session.send("Target.sendMessageToTarget", {
+          sessionId, message: JSON.stringify({ id: 1, method: "Runtime.getHeapUsage" }),
+        })]);
+        workers.push({ script: new URL(target.url).pathname.split("/").at(-1), ...usage });
+      } catch (error) {
+        workers.push({ script: new URL(target.url).pathname.split("/").at(-1), error: String(error) });
+      } finally {
+        if (listener) session.off("Target.receivedMessageFromTarget", listener);
+        if (sessionId) await session.send("Target.detachFromTarget", { sessionId }).catch(() => {});
+      }
+    }
+    heapSamples.push({ stage, main, workers });
+  } finally { await session.detach(); }
+}
 
 async function sampleProcesses(stage) {
   try {
@@ -41,6 +82,10 @@ async function sampleProcesses(stage) {
       sampledBrowserPrivateBytes: rows.reduce((sum, row) => sum + row.PrivateMemorySize64, 0) } : {}) });
     await session.detach();
     await writeFile(resolve(output, `${name}-processes.json`), JSON.stringify(processSamples, null, 2));
+    if (workerHeapMemory) {
+      await sampleHeaps(stage);
+      await writeFile(resolve(output, `${name}-heaps.json`), JSON.stringify(heapSamples, null, 2));
+    }
   } catch { /* process sampling must not change the game outcome */ }
 }
 
@@ -174,7 +219,7 @@ try {
   const start = page.getByRole("button", { name: "开始产率复制挂机", exact: true });
   await start.waitFor();
   await sampleProcesses("factory mounted");
-  if (options.profile) {
+  if (options.profile && profilePhase === "all") {
     profiler = await context.newCDPSession(page);
     await profiler.send("Profiler.enable");
     await profiler.send("Profiler.start");
@@ -233,9 +278,21 @@ try {
   await page.waitForTimeout(seconds * 1000);
   const visibleSummary = (await overlay.innerText()).slice(0, 5000);
   await sampleProcesses("replication running");
+  const geometryBeforeStop = await page.evaluate(() => {
+    const canvas = document.querySelector(".canvas-belt-layer__topology");
+    return canvas ? { builds: canvas.getAttribute("data-hit-index-builds"), reuses: canvas.getAttribute("data-hit-index-reuses") } : null;
+  });
   const beforeStop = await page.evaluate(() => globalThis.__LIVE_RUNTIME_TRACE__);
   await writeFile(resolve(output, `${name}-prestop.json`), JSON.stringify({ browser: await browser.version(), supply, seeded, trace: beforeStop, processSamples }));
   await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "stopping"; });
+  if (options.profile && profilePhase === "stopping") {
+    profiler = await context.newCDPSession(page);
+    await profiler.send("Profiler.enable");
+    const beforeMs = await page.evaluate(() => performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt);
+    await profiler.send("Profiler.start");
+    const afterMs = await page.evaluate(() => performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt);
+    profilerTimeline = { phase: profilePhase, startTraceBeforeMs: beforeMs, startTraceAfterMs: afterMs };
+  }
   const stopStarted = Date.now();
   console.log("Stopping replication and committing the verified checkpoint");
   await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click({ noWaitAfter: true });
@@ -246,6 +303,10 @@ try {
     await page.waitForTimeout(postStopSeconds * 1000);
   }
   const trace = await page.evaluate(() => { const trace = globalThis.__LIVE_RUNTIME_TRACE__; trace.active = false; return trace; });
+  const geometryAfterStop = await page.evaluate(() => {
+    const canvas = document.querySelector(".canvas-belt-layer__topology");
+    return canvas ? { builds: canvas.getAttribute("data-hit-index-builds"), reuses: canvas.getAttribute("data-hit-index-reuses") } : null;
+  });
   await sampleProcesses("replication stopped");
   const durable = await page.evaluate(async () => {
     const request = (operation) => new Promise((resolve, reject) => {
@@ -268,11 +329,11 @@ try {
     }
   }
   if (errors.length) throw Error(errors.join("\n"));
-  const evidence = { browser: await browser.version(), supply, observationSeconds: seconds, profiled: Boolean(options.profile),
-    postStopObservationSeconds: postStopSeconds, allProcessMemory,
+  const evidence = { browser: await browser.version(), supply, observationSeconds: seconds, profiled: Boolean(options.profile), profilePhase,
+    postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]),
     retainedNormalDebt: Boolean(options["retain-debt"]),
-    seeded, warmup, stopMs, visibleSummary, trace, processSamples, durable };
+    seeded, warmup, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };
   await writeFile(resolve(output, `${name}.json`), JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify({ supply, stopMs, events: trace.events.filter((event) => event.summary),
     runningMaxFrameGap: Math.max(0, ...trace.frames.filter((frame) => frame.phase === "running").map((frame) => frame.gap)) }, null, 2));
@@ -288,6 +349,7 @@ try {
 } finally {
   if (profiler) {
     try { const capture = await bounded(profiler.send("Profiler.stop")); await writeFile(resolve(output, `${name}.cpuprofile`), JSON.stringify(capture.profile)); } catch { /* keep primary outcome */ }
+    if (profilerTimeline) await writeFile(resolve(output, `${name}-profile-timeline.json`), JSON.stringify(profilerTimeline, null, 2));
   }
   await browser.close();
 }

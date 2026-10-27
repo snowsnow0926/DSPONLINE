@@ -111,7 +111,8 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime \|\| Boolean\([\s\S]*?nativeAuthoritativeFactoryCanvasFrame/);
     expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRecipeOverridePending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeBlueprintEnqueuePending &&[\s\S]*?!nativeBlueprintDirectDeployPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeFactoryInspectorPanel[\s\S]*?: <StableInspectorPanel/);
-    expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| game\.entities\.some/);
+    expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| hasConstructionCenter\}/);
+    expect(app).toMatch(/const hasConstructionCenter = useMemo\(\s*\(\) => !nativePlayerAuthorityOwnsRuntime && game\.entities\.some/);
     expect(app).toMatch(/constructionCenterOpen \? nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeConstructionCenterWorkspace[\s\S]*?: \([\s\S]*?<ConstructionCenterWorkspace/);
     expect(app).toMatch(/nodesConnectable=\{!nativePlayerAuthorityOwnsRuntime \|\| nativeOrdinaryBeltConnectionEnabled\}/);
     expect(app).toMatch(/connectOnClick=\{!nativePlayerAuthorityOwnsRuntime \|\| nativeOrdinaryBeltConnectionEnabled\}/);

@@ -14,7 +14,9 @@ describe("native construction-center App boundary", () => {
     expect(app).toMatch(/import \{ NativeConstructionCenterWorkspace \} from "\.\/components\/NativeConstructionCenterWorkspace"/);
     expect(app).toMatch(/selectNativeConstructionCenterWorkspaceFrame\(nativeAuthoritativeFactoryWorkspaceFrame\)/);
     expect(app).toMatch(/nativeConstructionCenterLatestIdentity[\s\S]*?nativeFactoryInventoryIdentity[\s\S]*?nativeFactoryProjectionPlanetId/);
-    expect(app).toMatch(/constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| game\.entities\.some/);
+    expect(app).toMatch(/constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| hasConstructionCenter\}/);
+    expect(app).toMatch(/const hasConstructionCenter = useMemo\(\s*\(\) => !nativePlayerAuthorityOwnsRuntime && game\.entities\.some/);
+    expect(app).toMatch(/\[game\.entities, nativePlayerAuthorityOwnsRuntime\]/);
     expect(panels).toMatch(/const showConstructionCenter = constructionCenterVisible \?\?/);
     expect(panels).toMatch(/\{showConstructionCenter \? <button[\s\S]*?onClick=\{onOpenConstructionCenter\}/);
     expect(app).toMatch(/if \(!nativePlayerAuthorityOwnsRuntime && rejectLegacyFactoryInteractionWhileNative\("建筑制造中心"\)\) return/);

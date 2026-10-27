@@ -467,7 +467,9 @@ describe("native blueprint workspace App integration", () => {
     expect(app).toMatch(/blueprintEligibleIds = useMemo\(\(\) => nativePlayerAuthorityOwnsRuntime \|\| selectedEntityIds\.length === 0/);
     expect(app).toMatch(/activeBlueprint = nativePlayerAuthorityOwnsRuntime[\s\S]*?\? null[\s\S]*?: game\.blueprints\.find/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && blueprintPlacementId \? <section className="canvas-placement-options/);
-    expect(app).toMatch(/canUpgrade=\{nativePlayerAuthorityOwnsRuntime[\s\S]*?selectedEntityIds\.length > 0[\s\S]*?: canUpgradeEntities/);
+    expect(app).toMatch(/const canUpgradeSelectedEntities = useMemo\(\s*\(\) => nativePlayerAuthorityOwnsRuntime \? selectedEntityIds\.length > 0 : canUpgradeEntities\(game, selectedEntityIds\)/);
+    expect(app).toMatch(/<SelectionToolbar[\s\S]*?canUpgrade=\{canUpgradeSelectedEntities\}/);
+    expect(app).toMatch(/\[game, nativePlayerAuthorityOwnsRuntime, recipeWorkspaceRegistryFingerprint, selectedEntityIds\]/);
     expect(app).toMatch(/canUpgradeBelts=\{nativePlayerAuthorityOwnsRuntime[\s\S]*?selectedBeltIds\.length > 0[\s\S]*?: selectedBelts\.some/);
     expect(app).toMatch(/if \(!nativePlayerAuthorityOwnsRuntime\) return;[\s\S]*?setBlueprintPlacementId\(null\);[\s\S]*?setBlueprintAllowOverlap\(false\);/);
     expect(app).toMatch(/const nativeBlueprintCaptureSelection = useMemo<NativeBlueprintCaptureSelectionBinding \| null>[\s\S]*?selectedEntityIds\.length < 1 \|\| selectedEntityIds\.length > 512[\s\S]*?entityIds: Object\.freeze\(\[\.\.\.selectedEntityIds\]\)/);

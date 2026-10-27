@@ -7,10 +7,11 @@ import {
   type CanvasLineNodeGeometry,
 } from "../game/canvasLineBatch";
 import {
-  buildCanvasBeltHitIndex,
+  reconcileCanvasBeltHitIndex,
   collectCanvasBeltIndicesInBounds,
   findNearestCanvasBelt,
   type CanvasBeltHit,
+  type CanvasBeltHitIndex,
 } from "../game/canvasBeltSpatialIndex";
 import {
   CANVAS_BELT_OFFSCREEN_THRESHOLD,
@@ -104,6 +105,8 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
   const drawMaxMsRef = useRef(0);
   const baseTimingSamplesRef = useRef<number[]>([]);
   const overlayTimingSamplesRef = useRef<number[]>([]);
+  const hitIndexRef = useRef<CanvasBeltHitIndex | null>(null);
+  const hitIndexStatsRef = useRef({ builds: 0, reuses: 0 });
   onUnavailableRef.current = onUnavailable;
   topologyRevisionRef.current = topologyRevision;
 
@@ -117,7 +120,13 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
     EMPTY_HIDDEN_BELTS,
     endpoints,
   ), [belts, endpoints, nodes, planetId, routeCenters, topologyRevision]);
-  const hitIndex = useMemo(() => buildCanvasBeltHitIndex(batch), [batch]);
+  const hitIndex = useMemo(() => {
+    const next = reconcileCanvasBeltHitIndex(hitIndexRef.current, batch);
+    if (hitIndexRef.current?.buckets === next.buckets) hitIndexStatsRef.current.reuses += 1;
+    else hitIndexStatsRef.current.builds += 1;
+    hitIndexRef.current = next;
+    return next;
+  }, [batch]);
   const beltItemById = useMemo(
     () => new Map(belts.map((belt) => [belt.id, belt.itemId])),
     [planetId, topologyRevision],
@@ -425,6 +434,8 @@ export const CanvasBeltLayer = forwardRef<CanvasBeltLayerHandle, CanvasBeltLayer
       className="canvas-belt-layer canvas-belt-layer__topology"
       data-segments={batch.segments}
       data-topology-revision={topologyRevision}
+      data-hit-index-builds={hitIndexStatsRef.current.builds}
+      data-hit-index-reuses={hitIndexStatsRef.current.reuses}
       data-static-dynamic-split="true"
       data-first-source-x={batch.segments > 0 ? batch.positions[0] : undefined}
       data-first-source-y={batch.segments > 0 ? batch.positions[1] : undefined}

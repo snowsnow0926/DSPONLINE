@@ -119,6 +119,30 @@ export function buildCanvasBeltHitIndex(batch: CanvasLineBatch, requestedCellSiz
   return { batch, cellSize, buckets, routeOffsets, routeCoordinates: Float32Array.from(routeCoordinates), routeBounds };
 }
 
+/** Reuses the expensive route/bucket data for equal immutable geometry. A
+ * fresh runtime/render snapshot can have different arrays with equal values.
+ * Keep one index only, and bind it to the current batch for hit identities. */
+export function reconcileCanvasBeltHitIndex(
+  previous: CanvasBeltHitIndex | null,
+  batch: CanvasLineBatch,
+  requestedCellSize = 256,
+): CanvasBeltHitIndex {
+  const cellSize = Math.max(64, Math.min(1_024, Math.floor(requestedCellSize)));
+  const source = previous?.batch;
+  let equal = Boolean(previous && source && previous.cellSize === cellSize &&
+    source.planetId === batch.planetId && source.segments === batch.segments &&
+    source.beltIds.length === batch.beltIds.length && source.positions.length === batch.positions.length &&
+    source.routeCenters.length === batch.routeCenters.length && source.routeModes.length === batch.routeModes.length);
+  if (equal && source) {
+    for (let i = 0; i < batch.beltIds.length && equal; i += 1) equal = source.beltIds[i] === batch.beltIds[i];
+    for (let i = 0; i < batch.positions.length && equal; i += 1) equal = Object.is(source.positions[i], batch.positions[i]);
+    for (let i = 0; i < batch.routeCenters.length && equal; i += 1) equal = Object.is(source.routeCenters[i], batch.routeCenters[i]);
+    for (let i = 0; i < batch.routeModes.length && equal; i += 1) equal = source.routeModes[i] === batch.routeModes[i];
+  }
+  return equal && previous ? source === batch ? previous : { ...previous, batch }
+    : buildCanvasBeltHitIndex(batch, requestedCellSize);
+}
+
 /**
  * Returns the stable batch indices whose route buckets touch a world-space
  * rectangle. Rendering can use the same topology-scoped index as hit testing

@@ -1,0 +1,379 @@
+{
+  "schemaVersion": 1,
+  "notPublished": true,
+  "sizes": {
+    "originalSampleBytes": 107637967,
+    "expandedPreparedRuntimeJsonBytes": 205464026,
+    "fixedPrimaryBodyBytes": 110673715
+  },
+  "page": {
+    "schemaVersion": 1,
+    "scope": "Four unprofiled isolated Chrome production-page trials, old/new/new/old, stock inventory, 8x replication for 5 seconds, 3 seconds post-stop. Long-task excess=sum(max(duration-50ms,0)) over stop, not Lighthouse TBT. Renderer peaks are cumulative over the whole journey; browser sums are discrete samples with possible shared-page duplication.",
+    "baselineRuntime": "25c199a0c314305b55ab6887db1f8ae9c0ef73ce",
+    "sourceSha256": {
+      "src/App.tsx": "4160e60217027f098d244eec062af2119929b6e213e0d3ec0291d87ca35287dd",
+      "src/components/CanvasBeltLayer.tsx": "2de10283fe0c9362568b9600de39aa67d18f821689b77fd9261ca0ce2e52821d",
+      "src/game/canvasBeltSpatialIndex.ts": "c391de5cd10611aee5a8da43441d41e9137e4661126fd360ab81c9b387509f4e",
+      "src/game/engine.ts": "126fd9d88070a597d6c6cd40841c7942dbbad61e1452b5db9835d1a4cf9c9965",
+      "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+      "src/game/pureIdleMacroClient.ts": "782d219a20ec02fe6cd2fb00a2560a29b4f9591a3dc6242499960f4fe14b5b93",
+      "src/game/canonicalTerminalOwnerClient.ts": "d35451af32da5ab5077498d266887152ce6b939cd4ad1f9086e52c14232bc186"
+    },
+    "trials": [
+      {
+        "name": "resume-cache-baseline-01",
+        "variant": "baseline",
+        "stopMs": 13489,
+        "maxStopFrameMs": 321.10000014305115,
+        "stopLongTaskDurationMs": 596,
+        "stopLongTaskExcessMs": 346,
+        "stopFramesOver100ms": 2,
+        "postStopMaxFrameMs": 80.79999995231628,
+        "rendererJourneyPeakBytes": 5494493184,
+        "sampledBrowserWorkingSetMaxBytes": 5502414848,
+        "sampledBrowserPrivateMaxBytes": 5561323520,
+        "geometryBeforeStop": {
+          "builds": null,
+          "reuses": null
+        },
+        "geometryAfterStop": {
+          "builds": null,
+          "reuses": null
+        },
+        "validPrimary": true,
+        "paused": true,
+        "automaticSavingDisabled": true
+      },
+      {
+        "name": "resume-cache-candidate-01",
+        "variant": "candidate",
+        "stopMs": 13174,
+        "maxStopFrameMs": 263.7999999523163,
+        "stopLongTaskDurationMs": 424,
+        "stopLongTaskExcessMs": 274,
+        "stopFramesOver100ms": 3,
+        "postStopMaxFrameMs": 25.399999856948853,
+        "rendererJourneyPeakBytes": 5584560128,
+        "sampledBrowserWorkingSetMaxBytes": 5653577728,
+        "sampledBrowserPrivateMaxBytes": 5670625280,
+        "geometryBeforeStop": {
+          "builds": "3",
+          "reuses": "39"
+        },
+        "geometryAfterStop": {
+          "builds": "3",
+          "reuses": "41"
+        },
+        "validPrimary": true,
+        "paused": true,
+        "automaticSavingDisabled": true
+      },
+      {
+        "name": "resume-cache-candidate-02",
+        "variant": "candidate",
+        "stopMs": 12984,
+        "maxStopFrameMs": 316.5,
+        "stopLongTaskDurationMs": 499,
+        "stopLongTaskExcessMs": 299,
+        "stopFramesOver100ms": 2,
+        "postStopMaxFrameMs": 53.200000047683716,
+        "rendererJourneyPeakBytes": 5562343424,
+        "sampledBrowserWorkingSetMaxBytes": 5435355136,
+        "sampledBrowserPrivateMaxBytes": 5670395904,
+        "geometryBeforeStop": {
+          "builds": "3",
+          "reuses": "39"
+        },
+        "geometryAfterStop": {
+          "builds": "3",
+          "reuses": "41"
+        },
+        "validPrimary": true,
+        "paused": true,
+        "automaticSavingDisabled": true
+      },
+      {
+        "name": "resume-cache-baseline-02",
+        "variant": "baseline",
+        "stopMs": 13006,
+        "maxStopFrameMs": 357.7999999523163,
+        "stopLongTaskDurationMs": 539,
+        "stopLongTaskExcessMs": 339,
+        "stopFramesOver100ms": 2,
+        "postStopMaxFrameMs": 82.60000014305115,
+        "rendererJourneyPeakBytes": 5503938560,
+        "sampledBrowserWorkingSetMaxBytes": 5258833920,
+        "sampledBrowserPrivateMaxBytes": 5351186432,
+        "geometryBeforeStop": {
+          "builds": null,
+          "reuses": null
+        },
+        "geometryAfterStop": {
+          "builds": null,
+          "reuses": null
+        },
+        "validPrimary": true,
+        "paused": true,
+        "automaticSavingDisabled": true
+      }
+    ],
+    "summary": {
+      "stopMs": {
+        "baselineMedian": 13247.5,
+        "candidateMedian": 13079.0,
+        "changePercent": -1.2719381015285913
+      },
+      "maxStopFrameMs": {
+        "baselineMedian": 339.4500000476837,
+        "candidateMedian": 290.14999997615814,
+        "changePercent": -14.52349390620128
+      },
+      "stopLongTaskDurationMs": {
+        "baselineMedian": 567.5,
+        "candidateMedian": 461.5,
+        "changePercent": -18.678414096916296
+      },
+      "stopLongTaskExcessMs": {
+        "baselineMedian": 342.5,
+        "candidateMedian": 286.5,
+        "changePercent": -16.35036496350365
+      },
+      "stopFramesOver100ms": {
+        "baselineMedian": 2.0,
+        "candidateMedian": 2.5,
+        "changePercent": 25.0
+      },
+      "postStopMaxFrameMs": {
+        "baselineMedian": 81.70000004768372,
+        "candidateMedian": 39.299999952316284,
+        "changePercent": -51.89718490896074
+      },
+      "rendererJourneyPeakBytes": {
+        "baselineMedian": 5499215872.0,
+        "candidateMedian": 5573451776.0,
+        "changePercent": 1.3499361677722588
+      },
+      "sampledBrowserWorkingSetMaxBytes": {
+        "baselineMedian": 5380624384.0,
+        "candidateMedian": 5544466432.0,
+        "changePercent": 3.0450378303158665
+      },
+      "sampledBrowserPrivateMaxBytes": {
+        "baselineMedian": 5456254976.0,
+        "candidateMedian": 5670510592.0,
+        "changePercent": 3.9267889228496333
+      }
+    }
+  },
+  "diagnosticCodeParity": {
+    "frozenRuntime": "25c199a0c314305b55ab6887db1f8ae9c0ef73ce",
+    "identicalJavaScriptFiles": 178,
+    "hiddenMapCount": 175,
+    "publicRuntimeChanges": false
+  },
+  "workerHeapDiagnostic": {
+    "scope": "One separate CDP heap-usage run, no forced collection. Used heap includes garbage and is not process memory or retained/live size; timing excluded from performance qualification.",
+    "samples": [
+      {
+        "stage": "factory mounted",
+        "main": {
+          "usedSize": 439240412,
+          "totalSize": 529891328,
+          "embedderHeapUsedSize": 17302248,
+          "backingStorageSize": 10978789
+        },
+        "workers": [
+          {
+            "script": "simulation.worker-Cl07kci4.js",
+            "usedSize": 206259504,
+            "totalSize": 249315328,
+            "embedderHeapUsedSize": 510496,
+            "backingStorageSize": 403900029
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 880572,
+            "totalSize": 4456448,
+            "embedderHeapUsedSize": 773712,
+            "backingStorageSize": 427164
+          }
+        ]
+      },
+      {
+        "stage": "normal simulation warmed",
+        "main": {
+          "usedSize": 1298462608,
+          "totalSize": 1391456256,
+          "embedderHeapUsedSize": 25522040,
+          "backingStorageSize": 19755409
+        },
+        "workers": [
+          {
+            "script": "simulation.worker-Cl07kci4.js",
+            "usedSize": 1211013968,
+            "totalSize": 1311850496,
+            "embedderHeapUsedSize": 638872,
+            "backingStorageSize": 2546751
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 874640,
+            "totalSize": 3670016,
+            "embedderHeapUsedSize": 773712,
+            "backingStorageSize": 1161708
+          }
+        ]
+      },
+      {
+        "stage": "replication ready",
+        "main": {
+          "usedSize": 1397249112,
+          "totalSize": 1538494464,
+          "embedderHeapUsedSize": 70879248,
+          "backingStorageSize": 216763760
+        },
+        "workers": [
+          {
+            "script": "simulation.worker-Cl07kci4.js",
+            "usedSize": 186362292,
+            "totalSize": 210169856,
+            "embedderHeapUsedSize": 510200,
+            "backingStorageSize": 2546751
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 719040,
+            "totalSize": 1572864,
+            "embedderHeapUsedSize": 407152,
+            "backingStorageSize": 332984
+          },
+          {
+            "script": "save.worker-rOnsxixx.js",
+            "usedSize": 221989956,
+            "totalSize": 224854016,
+            "embedderHeapUsedSize": 627096,
+            "backingStorageSize": 241780798
+          },
+          {
+            "script": "authoritativeSavePersistence.worker-DC04yoh3.js",
+            "usedSize": 665456000,
+            "totalSize": 675332096,
+            "embedderHeapUsedSize": 764448,
+            "backingStorageSize": 221477913
+          },
+          {
+            "script": "pureIdleMacro.worker-Pkq8xwtN.js",
+            "usedSize": 189317220,
+            "totalSize": 263041024,
+            "embedderHeapUsedSize": 637744,
+            "backingStorageSize": 506925
+          }
+        ]
+      },
+      {
+        "stage": "replication running",
+        "main": {
+          "usedSize": 1402388108,
+          "totalSize": 1538756608,
+          "embedderHeapUsedSize": 72916920,
+          "backingStorageSize": 222046463
+        },
+        "workers": [
+          {
+            "script": "simulation.worker-Cl07kci4.js",
+            "usedSize": 185773964,
+            "totalSize": 205451264,
+            "embedderHeapUsedSize": 510200,
+            "backingStorageSize": 2546751
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 719040,
+            "totalSize": 1572864,
+            "embedderHeapUsedSize": 407152,
+            "backingStorageSize": 332984
+          },
+          {
+            "script": "authoritativeSavePersistence.worker-DC04yoh3.js",
+            "usedSize": 222098176,
+            "totalSize": 231669760,
+            "embedderHeapUsedSize": 764888,
+            "backingStorageSize": 221473991
+          },
+          {
+            "script": "pureIdleMacro.worker-Pkq8xwtN.js",
+            "usedSize": 189317220,
+            "totalSize": 263041024,
+            "embedderHeapUsedSize": 637744,
+            "backingStorageSize": 506925
+          }
+        ]
+      },
+      {
+        "stage": "replication stopped",
+        "main": {
+          "usedSize": 1353252108,
+          "totalSize": 1431691264,
+          "embedderHeapUsedSize": 73185648,
+          "backingStorageSize": 15777348
+        },
+        "workers": [
+          {
+            "script": "simulation.worker-Cl07kci4.js",
+            "usedSize": 185773964,
+            "totalSize": 205451264,
+            "embedderHeapUsedSize": 638360,
+            "backingStorageSize": 2546751
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 1024124,
+            "totalSize": 3407872,
+            "embedderHeapUsedSize": 535808,
+            "backingStorageSize": 353388
+          },
+          {
+            "script": "authoritativeSavePersistence.worker-DC04yoh3.js",
+            "usedSize": 886484700,
+            "totalSize": 895983616,
+            "embedderHeapUsedSize": 744488,
+            "backingStorageSize": 221451823
+          }
+        ]
+      }
+    ],
+    "validPrimary": true
+  },
+  "regression": {
+    "unit": {
+      "success": true,
+      "numPassedTests": 3673,
+      "numFailedTests": 0,
+      "numPendingTests": 38
+    },
+    "defaultBrowser": {
+      "startTime": "2026-10-27T00:53:25.559Z",
+      "duration": 465002.016,
+      "expected": 494,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "relatedCanvasUnitPassed": 15,
+    "nativeBoundaryPassed": 6,
+    "unchangedCompiledWorkersFromBaseline": 15
+  },
+  "immutableBuild": null,
+  "inputIntegrity": {
+    "original": {
+      "bytes": 107637967,
+      "sha256": "d64b5646f6117f3c089fba4dc95a95e84bedd9375f75b3c8c917b2e7cf473bc1",
+      "unchanged": true
+    },
+    "prepared": {
+      "bytes": 205464026,
+      "sha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+      "unchanged": true
+    }
+  }
+}

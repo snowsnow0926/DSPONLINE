@@ -20958,8 +20958,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     : null,
   [game.entities, mobileActionEntityId, nativePlayerAuthorityOwnsRuntime]);
   const hasConstructionCenter = useMemo(
-    () => game.entities.some((entity) => entity.buildingId === "construction_center"),
-    [game.entities],
+    () => !nativePlayerAuthorityOwnsRuntime && game.entities.some((entity) => entity.buildingId === "construction_center"),
+    [game.entities, nativePlayerAuthorityOwnsRuntime],
+  );
+  const canUpgradeSelectedEntities = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime ? selectedEntityIds.length > 0 : canUpgradeEntities(game, selectedEntityIds),
+    [game, nativePlayerAuthorityOwnsRuntime, recipeWorkspaceRegistryFingerprint, selectedEntityIds],
   );
   const factoryCanvasRegions = useMemo(
     () => nativePlayerAuthorityOwnsRuntime
@@ -22143,7 +22147,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           typeof desktopBridge?.setNativePlayerAuthorityPaused === "function" &&
           nativePlayerAuthorityClockSnapshot.currentFrame?.schemaVersion === 1
         )}
-        constructionCenterVisible={nativePlayerAuthorityOwnsRuntime || game.entities.some((entity) => entity.buildingId === "construction_center")}
+        constructionCenterVisible={nativePlayerAuthorityOwnsRuntime || hasConstructionCenter}
         activeWorkspace={headerActiveWorkspace}
         onReturnToMenu={returnToMenuSafely}
         onOpenCampaign={() => {
@@ -22605,7 +22609,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       </section> : null}
       {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && activeMobileCanvasMode === "select" ? <MobileSelectionContextBar
         model={factorySelectionToolbarReadModel}
-        canUpgrade={nativePlayerAuthorityOwnsRuntime ? selectedEntityIds.length > 0 : canUpgradeEntities(game, selectedEntityIds)}
+        canUpgrade={canUpgradeSelectedEntities}
         canUpgradeBelts={nativePlayerAuthorityOwnsRuntime ? selectedBeltIds.length > 0 : selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
         onFocus={() => focusEntityIds(selectedEntityIds)}
         onCopy={copySelectionAsBlueprint}
@@ -23188,9 +23192,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             eligibleCount={nativePlayerAuthorityOwnsRuntime
               ? nativeBlueprintCaptureSelection?.entityIds.length ?? 0
               : blueprintEligibleIds.length}
-            canUpgrade={nativePlayerAuthorityOwnsRuntime
-              ? selectedEntityIds.length > 0
-              : canUpgradeEntities(game, selectedEntityIds)}
+            canUpgrade={canUpgradeSelectedEntities}
             canUpgradeBelts={nativePlayerAuthorityOwnsRuntime
               ? selectedBeltIds.length > 0
               : selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}

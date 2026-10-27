@@ -1,11 +1,4 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
-
-function invokeCurrentCallback<Args extends unknown[], Result>(
-  this: { current: (...args: Args) => Result },
-  ...args: Args
-): Result {
-  return this.current(...args);
-}
+import { useCallback, useLayoutEffect, useRef } from "react";
 
 /**
  * Keeps a callback identity stable while dispatching to the latest render.
@@ -23,8 +16,5 @@ export function useStableEventCallback<Args extends unknown[], Result>(
   useLayoutEffect(() => {
     callbackRef.current = callback;
   }, [callback]);
-  // A closure created in this hook can share the layout effect's lexical
-  // environment and retain the initial callback even after current changes.
-  // Binding a module function retains only the ref, including after minifying.
-  return useMemo(() => (invokeCurrentCallback<Args, Result>).bind(callbackRef), [callbackRef]);
+  return useCallback((...args: Args) => callbackRef.current(...args), []);
 }

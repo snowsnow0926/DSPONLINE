@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, type HTMLAttributes, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useLayoutEffect, useRef, type HTMLAttributes, type PointerEvent as ReactPointerEvent } from "react";
 
 type LongPressBindings<T extends HTMLElement> = Pick<HTMLAttributes<T>,
   "onPointerDownCapture" | "onPointerMoveCapture" | "onPointerUpCapture" | "onPointerCancelCapture">;
@@ -12,26 +12,6 @@ interface LongPressOptions<T extends HTMLElement> {
   onLongPress: (targetId: string, point: { x: number; y: number }) => void;
 }
 
-interface ActiveLongPress {
-  pointerId: number;
-  targetId: string;
-  x: number;
-  y: number;
-  timer: number;
-}
-
-function cancelGesture(gestureRef: { current: ActiveLongPress | null }, pointerId?: number): void {
-  const gesture = gestureRef.current;
-  if (!gesture || (pointerId != null && gesture.pointerId !== pointerId)) return;
-  window.clearTimeout(gesture.timer);
-  gestureRef.current = null;
-}
-
-function cancelAllGestures(gestureRef: { current: ActiveLongPress | null }, pointersRef: { current: Set<number> }): void {
-  cancelGesture(gestureRef);
-  pointersRef.current.clear();
-}
-
 export function useLongPress<T extends HTMLElement>({
   delayMs = 520,
   movementTolerance = 12,
@@ -41,12 +21,25 @@ export function useLongPress<T extends HTMLElement>({
   onLongPress,
 }: LongPressOptions<T>): LongPressBindings<T> {
   const activePointersRef = useRef(new Set<number>());
-  const gestureRef = useRef<ActiveLongPress | null>(null);
-  // Persistent cancellation functions must not retain this render's target
-  // and action callbacks through a shared hook environment. Bound module
-  // functions keep only the mutable gesture/pointer refs.
-  const cancel = useMemo(() => cancelGesture.bind(undefined, gestureRef), [gestureRef]);
-  const cancelAll = useMemo(() => cancelAllGestures.bind(undefined, gestureRef, activePointersRef), [gestureRef, activePointersRef]);
+  const gestureRef = useRef<{
+    pointerId: number;
+    targetId: string;
+    x: number;
+    y: number;
+    timer: number;
+  } | null>(null);
+
+  const cancel = useCallback((pointerId?: number) => {
+    const gesture = gestureRef.current;
+    if (!gesture || (pointerId != null && gesture.pointerId !== pointerId)) return;
+    window.clearTimeout(gesture.timer);
+    gestureRef.current = null;
+  }, []);
+
+  const cancelAll = useCallback(() => {
+    cancel();
+    activePointersRef.current.clear();
+  }, [cancel]);
 
   useLayoutEffect(() => {
     cancelAll();

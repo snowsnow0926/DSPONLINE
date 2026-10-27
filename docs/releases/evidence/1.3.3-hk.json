@@ -1,0 +1,332 @@
+{
+  "schemaVersion": 1,
+  "version": "1.3.3",
+  "target": "Hong Kong static Web",
+  "publishedAtAsiaShanghai": "2026-10-27 16:13:51",
+  "runtimeSha": "a0fd77efc399008b4f0484a3be74c4ee02b2b355",
+  "buildId": "1.3.3+a0fd77efc399",
+  "manifestSha256": "bbfc41f51fa73398e365c6929dda24e3f3e6f25a9c75f3b5331a53d6280525c3",
+  "aggregateSha256": "5c2d99d8237c820d20b4bb2d171ce5a624a3665d1f2981ad02765cd63f2b03bf",
+  "archiveSha256": "e1f4cec32d071b184196c506ae1a2bc6f642ba426292a79361a3a97b34ee0a33",
+  "artifact": {
+    "runtimeSha": "a0fd77efc399008b4f0484a3be74c4ee02b2b355",
+    "releaseId": "1.3.3-a0fd77efc399",
+    "buildId": "1.3.3+a0fd77efc399",
+    "fileCount": 197,
+    "workerCount": 15,
+    "workersEqualVerifiedOptimizationBuild": true,
+    "archive": "web-1.3.3-a0fd77efc399.tar.gz",
+    "archiveSha256": "e1f4cec32d071b184196c506ae1a2bc6f642ba426292a79361a3a97b34ee0a33",
+    "archiveMembersVerified": true
+  },
+  "developmentHandoff": {
+    "role": "develop",
+    "title": "1.3.3 Hong Kong Web release",
+    "runtimeSha": "a0fd77efc399008b4f0484a3be74c4ee02b2b355",
+    "releaseId": "1.3.3-a0fd77efc399",
+    "buildId": "1.3.3+a0fd77efc399",
+    "manifestSha256": "bbfc41f51fa73398e365c6929dda24e3f3e6f25a9c75f3b5331a53d6280525c3",
+    "archive": "web-1.3.3-a0fd77efc399.tar.gz",
+    "archiveSha256": "e1f4cec32d071b184196c506ae1a2bc6f642ba426292a79361a3a97b34ee0a33",
+    "fileCount": 197,
+    "workersEqualVerifiedOptimizationBuild": true,
+    "unit": {
+      "pass": 3684,
+      "skip": 38,
+      "fail": 0
+    },
+    "browserChecks": {
+      "e2e-qualified": {
+        "startTime": "2026-10-27T07:56:04.634Z",
+        "duration": 515008.957,
+        "expected": 508,
+        "skipped": 34,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "pwa-qualified": {
+        "startTime": "2026-10-27T08:06:41.924Z",
+        "duration": 7990.639,
+        "expected": 1,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "durable-qualified": {
+        "startTime": "2026-10-27T08:06:50.488Z",
+        "duration": 50644.848,
+        "expected": 21,
+        "skipped": 19,
+        "unexpected": 0,
+        "flaky": 0
+      }
+    },
+    "server": {
+      "pass": 411,
+      "skip": 2,
+      "stationPass": 4
+    },
+    "ops": {
+      "pass": 60,
+      "skip": 6
+    },
+    "nativeTools": {
+      "pass": 634,
+      "skip": 2
+    },
+    "upgradePreservation": {
+      "oldBuild": "1.3.2+34f3dd45e467",
+      "newBuild": "1.3.3+a0fd77efc399",
+      "fixture": "public synthetic paused v47, autosave disabled",
+      "bytes": 119402,
+      "sha256": "bcb5095171daacaf3a93a6916db2d527196b318923ae1e78d111c6ab69633071",
+      "oldPrimaryByteIdentical": true,
+      "newPrimaryByteIdentical": true,
+      "offlinePrimaryByteIdentical": true,
+      "offlineReopen": true,
+      "productionApiCalled": false
+    },
+    "target": "Hong Kong static Web only",
+    "constraints": [
+      "GameState v47/envelope v2/cloud schema v8 unchanged",
+      "No API/database/native/Shanghai/download switch",
+      "Automatic backups remain disabled"
+    ],
+    "unverified": [
+      "Extreme-save peak memory and long-term low-memory qualification remain unfinished"
+    ],
+    "rollback": "1.3.2-34f3dd45e467"
+  },
+  "preflight": {
+    "preflight": true,
+    "web": "1.3.2-34f3dd45e467",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "stateCurrent": {
+      "webReleaseId": "1.3.2-34f3dd45e467",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "statePrevious": {
+      "webReleaseId": "1.3.1-9af159f1b38e",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "generation": 56,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "healthOk": true,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "readyWritable": true,
+    "currentMainPayloads": {
+      "available": true,
+      "checkedAt": 1793085445675,
+      "checked": 1596,
+      "resolvable": 1594,
+      "unresolvable": 2,
+      "invalidMetadata": 0,
+      "orphanedMetadata": 0,
+      "missingPayloadRows": 2,
+      "invalidPayloadRows": 0,
+      "metadataMismatches": 0,
+      "missingBlobs": 0,
+      "blobMetadataMismatches": 0,
+      "legacyDirectRows": 0
+    },
+    "apiService": {
+      "MainPID": "3517864",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "proxyService": {
+      "MainPID": "3465101",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "nginxValid": true,
+    "nginxSha256": "34a62fe328024897f01e4ead52724cdc105a4dd3474e8cafda0267d8489b9edf",
+    "fallbackRoutes": [
+      "/canary/1.0.37-853ecdb12795/",
+      "/canary/1.0.43-fceca3eda51c/",
+      "/canary/1.0.46-d5b60dc3b7d6/",
+      "/canary/1.0.47-aab581cf0c78/",
+      "/canary/1.1.1-da53958b860c/",
+      "/canary/1.1.3-f35d60a22223/",
+      "/canary/1.1.4-7dbc149a016c/",
+      "/canary/1.1.5-a92c0d3157f3/",
+      "/canary/1.1.6-4f6d24f8c709/",
+      "/canary/1.1.8-c53497b050c4/",
+      "/canary/1.1.9-c3f4eff6cb5a/",
+      "/canary/1.2.2-8b9c93e13270/",
+      "/canary/1.2.3-25aeeb34e501/",
+      "/canary/1.2.4-3154f8cf4479/",
+      "/canary/1.2.5-0a1c6629ced1/",
+      "/canary/1.2.6-df828869e276/",
+      "/canary/1.2.7-dab2ff5066b7/",
+      "/canary/1.2.7-fccaa35e6b41/",
+      "/canary/1.2.9-0521eb63f179/",
+      "/canary/1.3.0-e8c44f8d7160/",
+      "/canary/1.3.1-9af159f1b38e/"
+    ],
+    "diskAvailableBytes": 15711502336,
+    "diskAvailableRatio": 0.212722856736595,
+    "databaseDevice": 64770,
+    "databaseInode": 663062,
+    "databaseBytes": 6439436288,
+    "serverDataWritten": false
+  },
+  "switch": {
+    "published": true,
+    "web": "1.3.3-a0fd77efc399",
+    "rollback": "1.3.2-34f3dd45e467",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "apiProcessUnchanged": true,
+    "proxyProcessUnchanged": true,
+    "databaseIdentityPreserved": true,
+    "backupState": "disabled",
+    "generation": 57,
+    "buildId": "1.3.3+a0fd77efc399",
+    "ready": true
+  },
+  "observation": {
+    "samples": 12,
+    "windowSeconds": 55,
+    "allHealthy": true,
+    "backupDisabled": true,
+    "sameApiProcess": true,
+    "web": "1.3.3-a0fd77efc399"
+  },
+  "fallback": {
+    "published": true,
+    "previousWeb": "1.3.2-34f3dd45e467",
+    "rootWeb": "1.3.3-a0fd77efc399",
+    "nginxSha256": "bf1921582d5c6dd4516eaf3d75b0690d76cf09599529eadc42debc9295578621",
+    "previousHtmlByteExact": true,
+    "oldWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "backup": "/var/backups/dsp-idle/1.3.3-a0fd77efc399/fallback/original-app.conf"
+  },
+  "publicVerification": {
+    "publicWeb": "1.3.3-a0fd77efc399",
+    "filesVerified": 197,
+    "allSizesAndSha256Match": true,
+    "publicHealth": true,
+    "publicReadyWritable": true,
+    "backupState": "disabled",
+    "previous": "1.3.2-34f3dd45e467",
+    "previousHtmlByteExact": true,
+    "previousWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "currentCacheBeforeAfterSha256": "0e2317b5adca9cff9444c223c24ec903a77dba0bc0eeeb902c6d0fd3fee560c2",
+    "fallbackCacheIsolation": true,
+    "offlineCurrentReopen": true,
+    "browserProductionApiBlocked": true,
+    "productionPlayerWrites": false
+  },
+  "postflight": {
+    "preflight": true,
+    "web": "1.3.3-a0fd77efc399",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "stateCurrent": {
+      "webReleaseId": "1.3.3-a0fd77efc399",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "statePrevious": {
+      "webReleaseId": "1.3.2-34f3dd45e467",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "stateUpdatedAtMs": 1793088831642,
+    "generation": 57,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "healthOk": true,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "readyWritable": true,
+    "currentMainPayloads": {
+      "available": true,
+      "checkedAt": 1793089337739,
+      "checked": 1608,
+      "resolvable": 1606,
+      "unresolvable": 2,
+      "invalidMetadata": 0,
+      "orphanedMetadata": 0,
+      "missingPayloadRows": 2,
+      "invalidPayloadRows": 0,
+      "metadataMismatches": 0,
+      "missingBlobs": 0,
+      "blobMetadataMismatches": 0,
+      "legacyDirectRows": 0
+    },
+    "apiService": {
+      "MainPID": "3517864",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "proxyService": {
+      "MainPID": "3465101",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "nginxValid": true,
+    "nginxSha256": "bf1921582d5c6dd4516eaf3d75b0690d76cf09599529eadc42debc9295578621",
+    "fallbackRoutes": [
+      "/canary/1.0.37-853ecdb12795/",
+      "/canary/1.0.43-fceca3eda51c/",
+      "/canary/1.0.46-d5b60dc3b7d6/",
+      "/canary/1.0.47-aab581cf0c78/",
+      "/canary/1.1.1-da53958b860c/",
+      "/canary/1.1.3-f35d60a22223/",
+      "/canary/1.1.4-7dbc149a016c/",
+      "/canary/1.1.5-a92c0d3157f3/",
+      "/canary/1.1.6-4f6d24f8c709/",
+      "/canary/1.1.8-c53497b050c4/",
+      "/canary/1.1.9-c3f4eff6cb5a/",
+      "/canary/1.2.2-8b9c93e13270/",
+      "/canary/1.2.3-25aeeb34e501/",
+      "/canary/1.2.4-3154f8cf4479/",
+      "/canary/1.2.5-0a1c6629ced1/",
+      "/canary/1.2.6-df828869e276/",
+      "/canary/1.2.7-dab2ff5066b7/",
+      "/canary/1.2.7-fccaa35e6b41/",
+      "/canary/1.2.9-0521eb63f179/",
+      "/canary/1.3.0-e8c44f8d7160/",
+      "/canary/1.3.1-9af159f1b38e/",
+      "/canary/1.3.2-34f3dd45e467/"
+    ],
+    "diskAvailableBytes": 15623376896,
+    "diskAvailableRatio": 0.21152969933209806,
+    "databaseDevice": 64770,
+    "databaseInode": 663062,
+    "databaseBytes": 6462918656,
+    "serverDataWritten": false
+  },
+  "backup": {
+    "directory": "/var/backups/dsp-idle/1.3.3-a0fd77efc399",
+    "configurationAndPointersVerified": true,
+    "databaseCopied": false,
+    "automaticBackupState": "disabled"
+  },
+  "scope": {
+    "apiChanged": false,
+    "databaseMigration": false,
+    "nativePackagesPublished": false,
+    "shanghaiChanged": false,
+    "downloadsChanged": false
+  },
+  "waivers": [],
+  "limits": [
+    "Peak memory and long-term low-memory/endgame conservative qualification remain unfinished.",
+    "Two existing missing current-main payload rows remain before and after; no data repair attempted.",
+    "First browser run: three obsolete note assertions and two ordinary-offline-modal fixture issues; final run 508/34/0. A separate local static-module ECONNRESET was addressed with one bounded read-only route.fetch retry; no product request retry changed.",
+    "Real-version PWA upgrade uses a 119402-byte public paused synthetic save. Initial fixture-entry and waiting-worker probe setup failures were corrected; final before/after/offline body is byte-identical."
+  ]
+}

@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **香港当前基线（2026-10-27，1.3.3）**：Web `1.3.3-a0fd77efc399`，直接回退及 `/canary/previous/` 为 `1.3.2-34f3dd45e467`；API `api-1.3.0-4c8d0c13a714`，green/4322，API/代理 PID 和重启数保持，generation/proxy 57/202，无 pending，备份 disabled、异地 timer inactive。197 件公网哈希与公开回退隔离通过，最终 Nginx SHA `bf1921582d5c6dd4516eaf3d75b0690d76cf09599529eadc42debc9295578621`。根 Web 回退前先恢复独立 Nginx 备份、解除旧 worker 拒绝，不回滚数据库。[配置、证据及步骤](./releases/1.3.3.md)。
+
 > **香港当前基线（2026-10-27，1.3.2）**：Web current 为 `1.3.2-34f3dd45e467`，直接回退和 `/canary/previous/` 为 `1.3.1-9af159f1b38e`；API 仍为 `api-1.3.0-4c8d0c13a714`，API/代理未重启，generation/proxy 56/202、无 pending。校正了此前落后于实际网页的发布记录；正式入口为 `/usr/local/sbin/dsp-idle-switch-release`。最终 Nginx SHA-256 `34a62fe328024897f01e4ead52724cdc105a4dd3474e8cafda0267d8489b9edf`，health/ready 与公开回退隔离通过，备份继续 disabled。根 Web 回退前须先恢复独立 Nginx 备份，解除上一版 worker 拒绝；不得回滚数据库。完整备份和步骤见 [1.3.2](./releases/1.3.2.md)。
 
 > **香港 Web 当前基线（2026-10-26 22:03）**：`current` 为 `1.3.1-9af159f1b38e`，直接回退和 `/canary/previous/` 均为 `1.3.0-e8c44f8d7160`；API 保持 `api-1.3.0-4c8d0c13a714`，未重启。Nginx snippet SHA-256 为 `fed38344d5362f15451c88fbc4818f505355b7b3efbbd9d4deb5ec79d4388e16`；health/ready 正常，自动备份仍 disabled。下载站证书过期与客户端发布按用户要求延后，公共 feed 未变。回退快照和独立 Nginx 回退边界见 [1.3.1](./releases/1.3.1.md)。

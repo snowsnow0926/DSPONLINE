@@ -13,6 +13,8 @@ import {
 } from "./workerBinaryPayload";
 
 const AUTHORITATIVE_SAVE_TIMEOUT_MS = 120_000;
+const LARGE_PAYLOAD_BYTES = 16 * 1024 * 1024;
+const LARGE_PAYLOAD_IDLE_MS = 2_000;
 
 export interface AuthoritativeSavePayloadCommitInput<Payload extends WorkerBinaryPayload = ArrayBuffer> {
   key: string;
@@ -65,6 +67,8 @@ interface PendingRequest {
 export interface AuthoritativeSavePersistenceClientOptions {
   workerFactory?: () => Worker;
   timeoutMs?: number;
+  largePayloadThresholdBytes?: number;
+  largePayloadIdleTimeoutMs?: number;
 }
 
 export class AuthoritativeSavePersistenceClient {
@@ -75,6 +79,10 @@ export class AuthoritativeSavePersistenceClient {
   private readonly pending = new Map<number, PendingRequest>();
   private readonly workerFactory: () => Worker;
   private readonly timeoutMs: number;
+  private readonly largePayloadThresholdBytes: number;
+  private readonly largePayloadIdleTimeoutMs: number;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private largePayloadSeen = false;
   private closed = false;
 
   constructor(options: AuthoritativeSavePersistenceClientOptions = {}) {
@@ -83,6 +91,29 @@ export class AuthoritativeSavePersistenceClient {
       { type: "module", name: "authoritative-save-persistence" },
     ));
     this.timeoutMs = options.timeoutMs ?? AUTHORITATIVE_SAVE_TIMEOUT_MS;
+    this.largePayloadThresholdBytes = options.largePayloadThresholdBytes ?? LARGE_PAYLOAD_BYTES;
+    this.largePayloadIdleTimeoutMs = options.largePayloadIdleTimeoutMs ?? LARGE_PAYLOAD_IDLE_MS;
+  }
+
+  private cancelIdleRetirement(): void {
+    if (this.idleTimer !== null) globalThis.clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  private scheduleIdleRetirement(): void {
+    const active = this.worker;
+    if (!active || !this.largePayloadSeen || this.closed || this.idleTimer !== null ||
+      this.inflightId !== null || this.pending.size || this.queue.length) return;
+    this.idleTimer = globalThis.setTimeout(() => {
+      this.idleTimer = null;
+      if (this.worker !== active || this.inflightId !== null || this.pending.size || this.queue.length) return;
+      // All results and returned buffers have reached their callers. This
+      // generation owns no pending work; keep the client open for a lazy restart.
+      this.worker = null;
+      this.largePayloadSeen = false;
+      active.onmessage = null; active.onerror = null; active.onmessageerror = null;
+      active.terminate();
+    }, this.largePayloadIdleTimeoutMs);
   }
 
   private ensureWorker(): Worker {
@@ -132,6 +163,8 @@ export class AuthoritativeSavePersistenceClient {
   }
 
   private failAll(code: "worker-crash" | "timeout" | "terminated", message: string, timedOutId?: number): void {
+    this.cancelIdleRetirement();
+    this.largePayloadSeen = false;
     const active = this.worker;
     this.worker = null;
     if (active) {
@@ -157,7 +190,7 @@ export class AuthoritativeSavePersistenceClient {
   private dispatchNext(): void {
     if (this.inflightId !== null) return;
     const id = this.queue.shift();
-    if (id === undefined) return;
+    if (id === undefined) { this.scheduleIdleRetirement(); return; }
     const request = this.pending.get(id);
     if (!request) {
       this.dispatchNext();
@@ -175,6 +208,7 @@ export class AuthoritativeSavePersistenceClient {
       return;
     }
     this.inflightId = id;
+    if (request.body.proof.byteLength >= this.largePayloadThresholdBytes) this.largePayloadSeen = true;
     request.dispatched = true;
     request.timer = globalThis.setTimeout(() => {
       this.failAll("timeout", `authoritative save persistence 超过 ${this.timeoutMs}ms 上限`, id);
@@ -216,6 +250,7 @@ export class AuthoritativeSavePersistenceClient {
       fence: input.fence,
       ...(input.preserveBackup === false ? { preserveBackup: false } : {}),
     };
+    this.cancelIdleRetirement();
     const id = ++this.nextId;
     return new Promise<AuthoritativeSavePersistenceResponse>((resolve, reject) => {
       const restorePayload = input.bytes instanceof ArrayBuffer

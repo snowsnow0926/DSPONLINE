@@ -137,3 +137,13 @@ node experiments/web-construction-wasm/run.mjs --entry=terminal-owner-faults --p
 ## Rust/WASM 结论
 
 现有 Rust 代码可在浏览器中运行，但这个 JSON 适配器尚无接入收益：简单计算的速度优势被传输和转换抵消；递归分支还会提前计算许多用不到的路线。继续前应验证按需规划、紧凑输入/输出及 JS 回退；不能仅因采用 Rust 就宣布更快。具体数值及候选身份见 [循环记录](../../docs/reviews/2026-10-26-web-performance-loop.md)。
+
+## 大包持久化后台的空闲回收验收
+
+`persistence-retirement` 使用同一只读准备态，先执行完整标准化，再通过真实保存客户端生成固定时间的正文与证明。随后以实际 16 MiB / 2 秒默认值，跨两次后台重建写入 IndexedDB，独立读取完整正文 SHA-256，检查 revision 各递增一次、缓冲可再次使用、禁用的备份未被写入以及调用方完整状态未变。它是数据一致性验收，包含准备和哈希，不用于游戏性能百分比。
+
+```powershell
+node experiments/web-construction-wasm/run.mjs --entry=persistence-retirement --prepared=D:/private/prepared.json --output=D:/private/results --name=persistence-parity
+```
+
+该入口单独定义网页平台以初始化真实的本地写入租约；其它旧探针的构建环境保持。公共浏览器故障用例缩短门槛和空闲期，大档整页资格仍用生产默认值及独立未采样的旧/新对照。

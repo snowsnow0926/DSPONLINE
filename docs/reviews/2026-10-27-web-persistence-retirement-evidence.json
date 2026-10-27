@@ -1,0 +1,416 @@
+{
+  "schemaVersion": 1,
+  "notPublished": true,
+  "fileSizes": {
+    "originalSampleBytes": 107637967,
+    "expandedPreparedRuntimeJsonBytes": 205464026,
+    "fixedActualPrimaryBodyBytes": 110673715
+  },
+  "page": {
+    "scope": "Four isolated unprofiled production Chrome trials, old/new/new/old; stock, 8x replication 5 seconds, post-stop observation3 seconds. End measurements are single snapshots, journey peak counters are cumulative. Browser sums are sampled and may count shared pages more than once. Long-task excess is over the stop window, not Lighthouse TBT.",
+    "baselineRuntime": "63b0e1f6a8447c7db0412ceeab3638a8291c8cbb",
+    "trials": [
+      {
+        "name": "persistence-idle-baseline-01",
+        "variant": "baseline",
+        "stopMs": 13176,
+        "maxStopFrameMs": 272.09999990463257,
+        "postStopMaxFrameMs": 31,
+        "stopLongTaskDurationMs": 491,
+        "stopLongTaskExcessMs": 291,
+        "rendererJourneyPeakBytes": 5530382336,
+        "endMainRendererWorkingSetBytes": 3109203968,
+        "endMainRendererPrivateBytes": 3081228288,
+        "endBrowserWorkingSetSumBytes": 3765321728,
+        "endBrowserPrivateSumBytes": 3747733504,
+        "sampledBrowserWorkingSetMaxBytes": 5382909952,
+        "sampledBrowserPrivateMaxBytes": 5395779584,
+        "validPrimary": true,
+        "paused": true,
+        "automaticSavingDisabled": true
+      },
+      {
+        "name": "persistence-idle-candidate-01",
+        "variant": "candidate",
+        "stopMs": 13456,
+        "maxStopFrameMs": 267.90000009536743,
+        "postStopMaxFrameMs": 51.700000047683716,
+        "stopLongTaskDurationMs": 367,
+        "stopLongTaskExcessMs": 217,
+        "rendererJourneyPeakBytes": 5517312000,
+        "endMainRendererWorkingSetBytes": 2657951744,
+        "endMainRendererPrivateBytes": 2623209472,
+        "endBrowserWorkingSetSumBytes": 3315630080,
+        "endBrowserPrivateSumBytes": 3293949952,
+        "sampledBrowserWorkingSetMaxBytes": 5381103616,
+        "sampledBrowserPrivateMaxBytes": 5353402368,
+        "validPrimary": true,
+        "paused": true,
+        "automaticSavingDisabled": true
+      },
+      {
+        "name": "persistence-idle-candidate-02",
+        "variant": "candidate",
+        "stopMs": 13141,
+        "maxStopFrameMs": 317.90000009536743,
+        "postStopMaxFrameMs": 23.100000143051147,
+        "stopLongTaskDurationMs": 499,
+        "stopLongTaskExcessMs": 299,
+        "rendererJourneyPeakBytes": 5578604544,
+        "endMainRendererWorkingSetBytes": 2708467712,
+        "endMainRendererPrivateBytes": 2678345728,
+        "endBrowserWorkingSetSumBytes": 3364184064,
+        "endBrowserPrivateSumBytes": 3344461824,
+        "sampledBrowserWorkingSetMaxBytes": 5439885312,
+        "sampledBrowserPrivateMaxBytes": 5440634880,
+        "validPrimary": true,
+        "paused": true,
+        "automaticSavingDisabled": true
+      },
+      {
+        "name": "persistence-idle-baseline-02",
+        "variant": "baseline",
+        "stopMs": 13156,
+        "maxStopFrameMs": 309.59999990463257,
+        "postStopMaxFrameMs": 23,
+        "stopLongTaskDurationMs": 492,
+        "stopLongTaskExcessMs": 292,
+        "rendererJourneyPeakBytes": 5572235264,
+        "endMainRendererWorkingSetBytes": 3741327360,
+        "endMainRendererPrivateBytes": 3711201280,
+        "endBrowserWorkingSetSumBytes": 4398256128,
+        "endBrowserPrivateSumBytes": 4380508160,
+        "sampledBrowserWorkingSetMaxBytes": 5423607808,
+        "sampledBrowserPrivateMaxBytes": 5440159744,
+        "validPrimary": true,
+        "paused": true,
+        "automaticSavingDisabled": true
+      }
+    ],
+    "summary": {
+      "stopMs": {
+        "baselineMedian": 13166.0,
+        "candidateMedian": 13298.5,
+        "changePercent": 1.0063800698769665
+      },
+      "maxStopFrameMs": {
+        "baselineMedian": 290.84999990463257,
+        "candidateMedian": 292.90000009536743,
+        "changePercent": 0.7048307345391303
+      },
+      "postStopMaxFrameMs": {
+        "baselineMedian": 27.0,
+        "candidateMedian": 37.40000009536743,
+        "changePercent": 38.51851887173123
+      },
+      "stopLongTaskDurationMs": {
+        "baselineMedian": 491.5,
+        "candidateMedian": 433.0,
+        "changePercent": -11.902339776195326
+      },
+      "stopLongTaskExcessMs": {
+        "baselineMedian": 291.5,
+        "candidateMedian": 258.0,
+        "changePercent": -11.49228130360206
+      },
+      "rendererJourneyPeakBytes": {
+        "baselineMedian": 5551308800.0,
+        "candidateMedian": 5547958272.0,
+        "changePercent": -0.060355640817533196
+      },
+      "endMainRendererWorkingSetBytes": {
+        "baselineMedian": 3425265664.0,
+        "candidateMedian": 2683209728.0,
+        "changePercent": -21.664186337401713
+      },
+      "endMainRendererPrivateBytes": {
+        "baselineMedian": 3396214784.0,
+        "candidateMedian": 2650777600.0,
+        "changePercent": -21.94905892029707
+      },
+      "endBrowserWorkingSetSumBytes": {
+        "baselineMedian": 4081788928.0,
+        "candidateMedian": 3339907072.0,
+        "changePercent": -18.175409583550127
+      },
+      "endBrowserPrivateSumBytes": {
+        "baselineMedian": 4064120832.0,
+        "candidateMedian": 3319205888.0,
+        "changePercent": -18.329055035340048
+      },
+      "sampledBrowserWorkingSetMaxBytes": {
+        "baselineMedian": 5403258880.0,
+        "candidateMedian": 5410494464.0,
+        "changePercent": 0.13391148121335572
+      },
+      "sampledBrowserPrivateMaxBytes": {
+        "baselineMedian": 5417969664.0,
+        "candidateMedian": 5397018624.0,
+        "changePercent": -0.3866954098914688
+      }
+    },
+    "qualifiedSources": {
+      "src/game/authoritativeSavePersistenceClient.ts": "6cdf87cb74977e7b541b3851a0d4933e1d2dc67dc6b04330e5cb5b3115d9ba59",
+      "src/game/authoritativeSavePersistence.worker.ts": "cbe421da6daa1c5dddf80a748bcd13dab2ffda2b80e561b698350e13a36c934b",
+      "src/game/authoritativeSavePersistenceProtocol.ts": "6254c81b23f7d8c3972017e1d69cb68e58ffc37b0fbfee94fba9d1d5591eef01",
+      "src/game/localSaveStore.ts": "d53b7ee0f0b72aa3b989fe6f40421ac58f28d6b79ea149868a8d383afdf8d1a2",
+      "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+      "src/game/authoritativeSaveSerializationClient.ts": "c3cd314f6d4dc3ece87c4fc0d07cc72540b224730b1255442ba149b073317672",
+      "src/App.tsx": "4160e60217027f098d244eec062af2119929b6e213e0d3ec0291d87ca35287dd",
+      "src/game/engine.ts": "126fd9d88070a597d6c6cd40841c7942dbbad61e1452b5db9835d1a4cf9c9965"
+    }
+  },
+  "fixedLargeCommit": {
+    "scope": "Two actual large IndexedDB commits across default 16 MiB / 2 s retirements; full independent body SHA-256 and unchanged caller state. No performance claim.",
+    "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "stateSha256": "2c58b9b1c25abc9b0f5ffd86a781e53fcc9aac950749d94ec32aa2fb07045b99",
+    "callerUnchanged": true,
+    "entityCount": 110042,
+    "beltCount": 233300,
+    "commits": [
+      {
+        "revision": 1,
+        "bytes": 110673715,
+        "sha256": "267aecfbe342ab14f7456b4894c25196fcfe64ac8920e35123aec0d2aac03f6d",
+        "backupSaved": false,
+        "payloadReturned": true,
+        "starts": 1,
+        "terminations": 1
+      },
+      {
+        "revision": 2,
+        "bytes": 110673715,
+        "sha256": "267aecfbe342ab14f7456b4894c25196fcfe64ac8920e35123aec0d2aac03f6d",
+        "backupSaved": false,
+        "payloadReturned": true,
+        "starts": 2,
+        "terminations": 2
+      }
+    ],
+    "saveSourceFiles": {
+      "src/game/authoritativeSaveSerializationClient.ts": "c3cd314f6d4dc3ece87c4fc0d07cc72540b224730b1255442ba149b073317672",
+      "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+      "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+      "src/game/pureIdleMacroClient.ts": "782d219a20ec02fe6cd2fb00a2560a29b4f9591a3dc6242499960f4fe14b5b93",
+      "src/App.tsx": "4160e60217027f098d244eec062af2119929b6e213e0d3ec0291d87ca35287dd",
+      "src/game/authoritativeSavePersistenceClient.ts": "6cdf87cb74977e7b541b3851a0d4933e1d2dc67dc6b04330e5cb5b3115d9ba59",
+      "src/game/authoritativeSavePersistence.worker.ts": "cbe421da6daa1c5dddf80a748bcd13dab2ffda2b80e561b698350e13a36c934b",
+      "src/game/localSaveStore.ts": "d53b7ee0f0b72aa3b989fe6f40421ac58f28d6b79ea149868a8d383afdf8d1a2"
+    }
+  },
+  "heapDiagnostic": {
+    "scope": "Separate five-stage main/Worker V8 heap usage, no forced GC. Not process working set or retained size. Persistence Worker absent in running and stopped snapshots.",
+    "samples": [
+      {
+        "stage": "factory mounted",
+        "main": {
+          "usedSize": 443950264,
+          "totalSize": 527941632,
+          "embedderHeapUsedSize": 17298256,
+          "backingStorageSize": 9153230
+        },
+        "workers": [
+          {
+            "script": "simulation.worker-B8Knt3IH.js",
+            "usedSize": 206637712,
+            "totalSize": 249315328,
+            "embedderHeapUsedSize": 510496,
+            "backingStorageSize": 403901019
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 880572,
+            "totalSize": 4456448,
+            "embedderHeapUsedSize": 773712,
+            "backingStorageSize": 427168
+          }
+        ]
+      },
+      {
+        "stage": "normal simulation warmed",
+        "main": {
+          "usedSize": 1288329508,
+          "totalSize": 1381830656,
+          "embedderHeapUsedSize": 25061984,
+          "backingStorageSize": 19690991
+        },
+        "workers": [
+          {
+            "script": "simulation.worker-B8Knt3IH.js",
+            "usedSize": 1154601756,
+            "totalSize": 1264893952,
+            "embedderHeapUsedSize": 638872,
+            "backingStorageSize": 2547741
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 874640,
+            "totalSize": 4456448,
+            "embedderHeapUsedSize": 773712,
+            "backingStorageSize": 1161712
+          }
+        ]
+      },
+      {
+        "stage": "replication ready",
+        "main": {
+          "usedSize": 1395954548,
+          "totalSize": 1528041472,
+          "embedderHeapUsedSize": 70825912,
+          "backingStorageSize": 216662907
+        },
+        "workers": [
+          {
+            "script": "pureIdleMacro.worker-Pkq8xwtN.js",
+            "usedSize": 189429592,
+            "totalSize": 262254592,
+            "embedderHeapUsedSize": 637744,
+            "backingStorageSize": 506925
+          },
+          {
+            "script": "authoritativeSavePersistence.worker-DC04yoh3.js",
+            "usedSize": 665438744,
+            "totalSize": 675319808,
+            "embedderHeapUsedSize": 764448,
+            "backingStorageSize": 221465451
+          },
+          {
+            "script": "save.worker-rOnsxixx.js",
+            "usedSize": 221964888,
+            "totalSize": 224579584,
+            "embedderHeapUsedSize": 627096,
+            "backingStorageSize": 226840510
+          },
+          {
+            "script": "simulation.worker-B8Knt3IH.js",
+            "usedSize": 189209448,
+            "totalSize": 293269504,
+            "embedderHeapUsedSize": 762456,
+            "backingStorageSize": 2613277
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 719040,
+            "totalSize": 1572864,
+            "embedderHeapUsedSize": 407104,
+            "backingStorageSize": 332984
+          }
+        ]
+      },
+      {
+        "stage": "replication running",
+        "main": {
+          "usedSize": 1401220988,
+          "totalSize": 1528303616,
+          "embedderHeapUsedSize": 72857096,
+          "backingStorageSize": 221945570
+        },
+        "workers": [
+          {
+            "script": "pureIdleMacro.worker-Pkq8xwtN.js",
+            "usedSize": 189429592,
+            "totalSize": 262254592,
+            "embedderHeapUsedSize": 637744,
+            "backingStorageSize": 506925
+          },
+          {
+            "script": "simulation.worker-B8Knt3IH.js",
+            "usedSize": 185810140,
+            "totalSize": 204402688,
+            "embedderHeapUsedSize": 510200,
+            "backingStorageSize": 2547741
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 719040,
+            "totalSize": 1572864,
+            "embedderHeapUsedSize": 535080,
+            "backingStorageSize": 332984
+          }
+        ]
+      },
+      {
+        "stage": "replication stopped",
+        "main": {
+          "usedSize": 1335544864,
+          "totalSize": 1435914240,
+          "embedderHeapUsedSize": 73353768,
+          "backingStorageSize": 15757903
+        },
+        "workers": [
+          {
+            "script": "simulation.worker-B8Knt3IH.js",
+            "usedSize": 185810140,
+            "totalSize": 204402688,
+            "embedderHeapUsedSize": 638360,
+            "backingStorageSize": 2547741
+          },
+          {
+            "script": "canvasBeltRender.worker-DluzM9XN.js",
+            "usedSize": 1024124,
+            "totalSize": 3670016,
+            "embedderHeapUsedSize": 663624,
+            "backingStorageSize": 353388
+          }
+        ]
+      }
+    ],
+    "validPrimary": true
+  },
+  "regression": {
+    "unit": {
+      "success": true,
+      "numPassedTests": 3680,
+      "numFailedTests": 0,
+      "numPendingTests": 38
+    },
+    "defaultBrowser": {
+      "startTime": "2026-10-27T02:10:33.851Z",
+      "duration": 463512.021,
+      "expected": 498,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durableBrowser": {
+      "startTime": "2026-10-27T02:18:57.474Z",
+      "duration": 46886.195999999996,
+      "expected": 21,
+      "skipped": 9,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "clientUnitPassed": 12,
+    "nativeToolPassed": 6,
+    "runtimeLicenses": 127,
+    "initialDefaultBrowser": {
+      "startTime": "2026-10-27T01:50:02.863Z",
+      "duration": 659904.023,
+      "expected": 496,
+      "skipped": 34,
+      "unexpected": 2,
+      "flaky": 0
+    },
+    "unchangedUiIsolated": {
+      "startTime": "2026-10-27T02:04:17.418Z",
+      "duration": 70376.35399999999,
+      "expected": 6,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    }
+  },
+  "immutableBuild": null,
+  "inputIntegrity": {
+    "original": {
+      "bytes": 107637967,
+      "sha256": "d64b5646f6117f3c089fba4dc95a95e84bedd9375f75b3c8c917b2e7cf473bc1",
+      "unchanged": true
+    },
+    "prepared": {
+      "bytes": 205464026,
+      "sha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+      "unchanged": true
+    }
+  }
+}

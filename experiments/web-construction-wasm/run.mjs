@@ -12,7 +12,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
 const callable = entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
@@ -22,7 +22,8 @@ const callable = entry === "large-save" ? "runLargeSaveProbe" : entry === "save-
           : entry === "save-state-chunks" ? "runSaveStateChunksProbe"
             : entry === "terminal-owner" ? "runTerminalOwnerProbe"
               : entry === "terminal-owner-faults" ? "runTerminalOwnerFaults"
-                : entry === "canonical-owner-parity" ? "runCanonicalOwnerParity" : "runConstructionWasmProbe";
+                : entry === "canonical-owner-parity" ? "runCanonicalOwnerParity"
+                  : entry === "persistence-retirement" ? "runPersistenceRetirement" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
 const decoderFiles = ["src/game/storage.ts", "src/game/saveTransferDecode.ts"];
 const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["decoder-ref"]}^{commit}`],
@@ -66,7 +67,9 @@ const bundle = await build({ root, configFile: false, publicDir: false, logLevel
     return code;
   } }] : [],
   resolve: { alias: [{ find: /^\.\.\/\.\.\/src\/game\//, replacement: `${sourceRoot.replaceAll("\\", "/")}/src/game/` }] },
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: { "process.env.NODE_ENV": '"production"',
+    ...(entry === "persistence-retirement" ? { __APP_PLATFORM__: '"web"' } : {}),
+  },
   build: { write: false, emptyOutDir: false, target: "chrome120", minify: false,
     lib: { entry: resolve(root, `experiments/web-construction-wasm/${entry}.ts`), name: "dspConstructionProbe", formats: ["es"] } } });
 const code = (Array.isArray(bundle) ? bundle : [bundle]).flatMap((entry) => entry.output)
@@ -133,9 +136,10 @@ try {
       decoderReference ? createHash("sha256").update(execFileSync("git", ["show", `${decoderReference}:${file}`], { cwd: sourceRoot })).digest("hex")
         : await fileHash(resolve(sourceRoot, file)),
     ]))) } : {}),
-    ...(entry === "terminal-parity" || entry === "save-state-chunks" || entry === "terminal-owner" || entry === "canonical-owner-parity" ? { saveSourceFiles: Object.fromEntries(await Promise.all([
+    ...(entry === "terminal-parity" || entry === "save-state-chunks" || entry === "terminal-owner" || entry === "canonical-owner-parity" || entry === "persistence-retirement" ? { saveSourceFiles: Object.fromEntries(await Promise.all([
       "src/game/authoritativeSaveSerializationClient.ts", "src/game/save.worker.ts", "src/game/storage.ts",
       "src/game/pureIdleMacroClient.ts", "src/App.tsx",
+      ...(entry === "persistence-retirement" ? ["src/game/authoritativeSavePersistenceClient.ts", "src/game/authoritativeSavePersistence.worker.ts", "src/game/localSaveStore.ts"] : []),
       ...(entry === "terminal-owner" || entry === "canonical-owner-parity" ? ["src/game/canonicalTerminalOwnerClient.ts", "src/game/canonicalTerminalOwnerRegistry.ts",
         "src/game/canonicalTerminalOwnerProtocol.ts", "src/game/canonicalTerminalOwner.worker.ts", "src/game/saveStateChunkTransfer.ts", "src/game/saveTransferDecode.ts"] : []),
     ].map(async (file) => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),

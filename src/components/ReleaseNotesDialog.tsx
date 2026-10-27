@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useAppLocale } from "../i18n/locale";
 import { getCurrentReleaseNotes, getReleaseNotes1039, getReleaseNotes1041, getReleaseNotes1042, getReleaseNotes1043, getReleaseNotes1044, getReleaseNotes1045, getReleaseNotes1046, getReleaseNotes115, getReleaseNotes116, getReleaseNotes117, getReleaseNotes118, getReleaseNotes119, getReleaseNotes120, getReleaseNotes121, getReleaseNotes122, getReleaseNotes123, getReleaseNotes124, getReleaseNotes125, getReleaseNotes126, getReleaseNotesUiCopy } from "../i18n/releaseNotes";
 import { NATIVE_BACK_EVENT } from "../nativeApp";
-import { getReleaseNotes127, getReleaseNotes128, getReleaseNotes129, getReleaseNotes130, getReleaseNotes131 } from "../i18n/releaseNotes";
+import { getReleaseNotes127, getReleaseNotes128, getReleaseNotes129, getReleaseNotes130, getReleaseNotes131, getReleaseNotes132 } from "../i18n/releaseNotes";
 import { AccessibleDialog } from "./AccessibleDialog";
 export { hasSeenCurrentReleaseNotes, markCurrentReleaseNotesSeen, RELEASE_NOTES_SEEN_KEY } from "./releaseNotesSeen";
 
@@ -197,6 +197,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  getReleaseNotes132("zh-CN"),
   getReleaseNotes131("zh-CN"),
   getReleaseNotes130("zh-CN"),
   getReleaseNotes129("zh-CN"),
@@ -597,6 +598,7 @@ export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: 
   const selectedReleaseRecord = RELEASE_NOTES_HISTORY.find((release) => release.id === selectedReleaseId) ?? CURRENT_RELEASE_NOTES;
   const selectedRelease = selectedReleaseRecord.id === CURRENT_RELEASE_NOTES.id
     ? localizedCurrentRelease
+    : selectedReleaseRecord.version === "1.3.2" ? getReleaseNotes132(locale)
     : selectedReleaseRecord.version === "1.3.1" ? getReleaseNotes131(locale)
     : selectedReleaseRecord.version === "1.3.0" ? getReleaseNotes130(locale)
     : selectedReleaseRecord.version === "1.2.9" ? getReleaseNotes129(locale)

@@ -46,7 +46,7 @@ type StopProbe = {
 async function installProbe(page: Page, observeStopState = false): Promise<void> {
   await page.addInitScript((durable) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.2");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.3");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     const probe: StopProbe = {

@@ -26,6 +26,7 @@ const mainHeapSnapshot = options["main-heap-snapshot"] === "1";
 if (mainHeapSnapshot && (!workerHeapMemory || !workerHeapGc)) throw new Error("--main-heap-snapshot requires --worker-heaps and --worker-heap-gc; private diagnostic only");
 const runtimeRetention = mainHeapSnapshot || options["runtime-retention"] === "1";
 if (runtimeRetention && (!workerHeapMemory || !workerHeapGc)) throw new Error("--runtime-retention requires --worker-heaps and --worker-heap-gc; diagnostic only");
+const runtimeTransitions = options["runtime-transitions"] === "1";
 const profilePhase = options["profile-phase"] ?? "all";
 if (!["all", "stopping"].includes(profilePhase)) throw new Error("Invalid profiler phase");
 const timelinePhase = options.timeline ?? null;
@@ -188,9 +189,12 @@ try {
     } finally { await session.detach(); }
   });
   await context.route("**/api/**", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"isolated runtime test"}' }));
-  await context.addInitScript(({ profileSteps, idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention }) => {
+  await context.addInitScript(({ profileSteps, idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention, runtimeTransitions }) => {
     if (location.hostname !== "127.0.0.1") return;
     if (runtimeRetention) globalThis.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {} };
+    if (runtimeTransitions && !globalThis.__DSP_RUNTIME_TRANSITIONS__) {
+      globalThis.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {} };
+    }
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.2");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
@@ -300,7 +304,7 @@ try {
     new PerformanceObserver((list) => {
       if (trace.active) for (const entry of list.getEntries()) trace.tasks.push({ phase: trace.phase, at: entry.startTime - trace.startedAt, duration: entry.duration });
     }).observe({ type: "longtask" });
-  }, { profileSteps: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention });
+  }, { profileSteps: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention, runtimeTransitions });
   context.on("page", (opened) => {
     opened.setDefaultTimeout(120_000);
     opened.on("pageerror", (error) => { errors.push(error.message); console.log(`Page error: ${error.message}`); });
@@ -531,6 +535,9 @@ try {
   }
   if (timelineSession) await page.evaluate(() => performance.mark("dsp-stop-trace-finish"));
   const trace = await page.evaluate(() => { const trace = globalThis.__LIVE_RUNTIME_TRACE__; trace.active = false; return trace; });
+  const runtimeTransitionEvidence = runtimeTransitions
+    ? await page.evaluate(() => globalThis.__DSP_RUNTIME_TRANSITIONS__ ?? null)
+    : null;
   const geometryAfterStop = await page.evaluate(() => {
     const canvas = document.querySelector(".canvas-belt-layer__topology");
     return canvas ? { builds: canvas.getAttribute("data-hit-index-builds"), reuses: canvas.getAttribute("data-hit-index-reuses") } : null;
@@ -566,9 +573,9 @@ try {
   if (mainHeapSnapshot && !mainHeapSnapshotResult?.complete) throw Error("Private main heap snapshot did not complete");
   if (runtimeRetention && retentionSamples.length !== (startupWorkerHeaps ? 6 : 5)) throw Error("Runtime retention diagnostic stages incomplete");
   const evidence = { browser: await browser.version(), supply, observationSeconds: seconds,
-    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention,
+    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions,
     profilePhase, timelinePhase, backgroundPresentationExperiment,
-    postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, heapSamples,
+    postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
     retainedNormalDebt: Boolean(options["retain-debt"]),
     seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };

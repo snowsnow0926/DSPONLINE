@@ -251,6 +251,7 @@ try {
   await sampleProcesses("normal simulation warmed");
   await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "starting"; });
   console.log("Starting replication through the real UI");
+  const startStartedAt = Date.now();
   await start.click({ noWaitAfter: true });
   console.log("Replication click dispatched");
   const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
@@ -272,6 +273,7 @@ try {
     await overlay.waitFor();
     await page.waitForFunction(() => globalThis.__LIVE_RUNTIME_TRACE__.events.some((event) => event.type === "ready"));
   } finally { clearInterval(statusTimer); }
+  const startMs = Date.now() - startStartedAt;
   await sampleProcesses("replication ready");
   await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "running"; });
   console.log(`Observing ${seconds} seconds of active replication`);
@@ -333,7 +335,7 @@ try {
     postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]),
     retainedNormalDebt: Boolean(options["retain-debt"]),
-    seeded, warmup, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };
+    seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };
   await writeFile(resolve(output, `${name}.json`), JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify({ supply, stopMs, events: trace.events.filter((event) => event.summary),
     runningMaxFrameGap: Math.max(0, ...trace.frames.filter((frame) => frame.phase === "running").map((frame) => frame.gap)) }, null, 2));

@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "decision": "rejected_and_runtime_restored",
+  "published": false,
+  "runtimeBaseline": "c0d1a9182a07f499d8a54870c0e747fc84880cb9",
+  "retainedRuntimeDelta": [],
+  "fileSizes": {
+    "originalSampleBytes": 107637967,
+    "expandedPreparedRuntimeJsonBytes": 205464026,
+    "previousFixedActualPrimaryBodyBytes": 110673715
+  },
+  "inputIntegrity": {
+    "original": {
+      "bytes": 107637967,
+      "sha256": "d64b5646f6117f3c089fba4dc95a95e84bedd9375f75b3c8c917b2e7cf473bc1",
+      "unchanged": true
+    },
+    "prepared": {
+      "bytes": 205464026,
+      "sha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+      "unchanged": true
+    }
+  },
+  "candidateSourceSha256": {
+    "src/game/engine.ts": "cf8f669cfb6c4dc8c9df6e8f76d28b8159b7e7349f30f02032032783a2eec4fe",
+    "src/game/quantumLogisticsNetwork.ts": "5b65aaa4b542b7229178da6e2c68c51a82cc54d54d522aee588ebd1c350c91c5",
+    "src/game/timeWarpPowerSnapshot.test.ts": "509cccb4c0c65455969ab9498308d71f066df73f88d4e096a5cd76872c7ee4ae",
+    "experiments/web-construction-wasm/power-snapshot.ts": "24c2e754fbf6ba58e0d625c2f0232ae25a72d9559e71ec6cde192638e10354b6",
+    "src/App.tsx": "4160e60217027f098d244eec062af2119929b6e213e0d3ec0291d87ca35287dd",
+    "src/game/pureIdleMacroClient.ts": "782d219a20ec02fe6cd2fb00a2560a29b4f9591a3dc6242499960f4fe14b5b93",
+    "src/game/pureIdleMacro.worker.ts": "1da6696457673abc6d14fcbc930cdd5ea06c988ba29458bf0070404f5858ce02",
+    "src/game/saveProjection.ts": "7d62c35d7665960f04930dcf552ce432d07d3ca4beac7bb859b85b42af8e5077",
+    "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+    "experiments/web-live-runtime/run.mjs": "0ddb8d0a1ae659652c171435fab025a4125a35c1336bd17747f1523385ef3413"
+  },
+  "candidatePatchSha256": "847ec4bee7402fd64d1ab39f66d48d41fe67e473a4076f91e5432700a4a7b8c7",
+  "fixedProbe": {
+    "trials": [
+      {
+        "name": "baseline-01",
+        "milliseconds": 378.2000000476837,
+        "fullStateSha256": "fa4b11d37ea8c011d9d025db9497d40238ec616902015c57e95576d36b3bbea5",
+        "ordinaryAfterSnapshotSha256": "36d8f79cfb611b984990406fde10e3303428d4d77df023a87702eb134579497d",
+        "inputUnchanged": true,
+        "sharedEntities": 0,
+        "sharedBelts": false
+      },
+      {
+        "name": "candidate-01",
+        "milliseconds": 289.5,
+        "fullStateSha256": "fa4b11d37ea8c011d9d025db9497d40238ec616902015c57e95576d36b3bbea5",
+        "ordinaryAfterSnapshotSha256": "36d8f79cfb611b984990406fde10e3303428d4d77df023a87702eb134579497d",
+        "inputUnchanged": true,
+        "sharedEntities": 110041,
+        "sharedBelts": true
+      },
+      {
+        "name": "candidate-02",
+        "milliseconds": 299,
+        "fullStateSha256": "fa4b11d37ea8c011d9d025db9497d40238ec616902015c57e95576d36b3bbea5",
+        "ordinaryAfterSnapshotSha256": "36d8f79cfb611b984990406fde10e3303428d4d77df023a87702eb134579497d",
+        "inputUnchanged": true,
+        "sharedEntities": 110041,
+        "sharedBelts": true
+      },
+      {
+        "name": "baseline-02",
+        "milliseconds": 395,
+        "fullStateSha256": "fa4b11d37ea8c011d9d025db9497d40238ec616902015c57e95576d36b3bbea5",
+        "ordinaryAfterSnapshotSha256": "36d8f79cfb611b984990406fde10e3303428d4d77df023a87702eb134579497d",
+        "inputUnchanged": true,
+        "sharedEntities": 0,
+        "sharedBelts": false
+      }
+    ],
+    "baselineMs": 386.60000002384186,
+    "candidateMs": 294.25,
+    "changePercent": -23.887739270084474
+  },
+  "page": {
+    "rows": [
+      {
+        "name": "baseline-01",
+        "variant": "baseline",
+        "startMs": 10960,
+        "stopMs": 12980,
+        "peak": 5582974976,
+        "endWorkingSet": 2705936384,
+        "maxEnterFrame": 1137.9000000953674,
+        "maxStopFrame": 265.60000014305115,
+        "sourceChecksum": "d28d6a63",
+        "paused": "true"
+      },
+      {
+        "name": "candidate-01",
+        "variant": "candidate",
+        "startMs": 11038,
+        "stopMs": 13158,
+        "peak": 5541752832,
+        "endWorkingSet": 2662957056,
+        "maxEnterFrame": 1165.2999999523163,
+        "maxStopFrame": 311.7999999523163,
+        "sourceChecksum": "d28d6a63",
+        "paused": "true"
+      },
+      {
+        "name": "candidate-02",
+        "variant": "candidate",
+        "startMs": 11025,
+        "stopMs": 13030,
+        "peak": 5550223360,
+        "endWorkingSet": 2687369216,
+        "maxEnterFrame": 1167.8999998569489,
+        "maxStopFrame": 319.09999990463257,
+        "sourceChecksum": "d28d6a63",
+        "paused": "true"
+      },
+      {
+        "name": "baseline-02",
+        "variant": "baseline",
+        "startMs": 10968,
+        "stopMs": 13157,
+        "peak": 5581053952,
+        "endWorkingSet": 2692812800,
+        "maxEnterFrame": 1163.8000001907349,
+        "maxStopFrame": 312.2000000476837,
+        "sourceChecksum": "d28d6a63",
+        "paused": "true"
+      }
+    ],
+    "medians": {
+      "startMs": {
+        "baseline": 10964.0,
+        "candidate": 11031.5,
+        "changePercent": 0.615651222181679
+      },
+      "stopMs": {
+        "baseline": 13068.5,
+        "candidate": 13094.0,
+        "changePercent": 0.19512568389639107
+      },
+      "peak": {
+        "baseline": 5582014464.0,
+        "candidate": 5545988096.0,
+        "changePercent": -0.6454008357080432
+      },
+      "endWorkingSet": {
+        "baseline": 2699374592.0,
+        "candidate": 2675163136.0,
+        "changePercent": -0.8969283504317693
+      },
+      "maxEnterFrame": {
+        "baseline": 1150.8500001430511,
+        "candidate": 1166.5999999046326,
+        "changePercent": 1.3685536568296186
+      },
+      "maxStopFrame": {
+        "baseline": 288.90000009536743,
+        "candidate": 315.4499999284744,
+        "changePercent": 9.190031091845864
+      }
+    },
+    "scope": "Two pairs of independent unprofiled real-page trials, old/new/new/old; stock, 8x for 5 seconds, post-stop observation3 seconds. Peak is renderer journey high-water mark. End working set is one observation endpoint. Frame gaps are not input latency; small changes are not stable causal performance conclusions."
+  },
+  "regression": {
+    "rejectedCandidate": {
+      "numPassedTests": 3685,
+      "numPendingTests": 38,
+      "numFailedTests": 0
+    },
+    "retained": {
+      "numPassedTests": 3684,
+      "numPendingTests": 38,
+      "numFailedTests": 0
+    },
+    "candidateAndRestoredBuildPassed": true,
+    "candidateFullDefaultBrowserRun": false,
+    "publicBrowserJourneyCount": 4,
+    "restoredCompiledWorkersMatchBaseline": 15
+  },
+  "next": "Validate frozen startup checkpoint chunking with exact persistence, cancellation/fencing and real-page response/memory evidence.",
+  "retainedConsistency": {
+    "inputHash": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "inputSha256": "7be8af825ceb2de765491aa631cf27d45263a5059a727bda8c638a177b2773e9",
+    "fullStateSha256": "fa4b11d37ea8c011d9d025db9497d40238ec616902015c57e95576d36b3bbea5",
+    "ordinaryAfterSnapshotSha256": "36d8f79cfb611b984990406fde10e3303428d4d77df023a87702eb134579497d",
+    "inputUnchanged": true,
+    "sharedEntities": 0,
+    "sharedBelts": false
+  }
+}

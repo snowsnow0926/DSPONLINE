@@ -5,7 +5,8 @@ import type { FactoryEntity, GameState } from "./types";
 function poweredState(): GameState {
   const state = createPlayerInitialState();
   const base = { planetId: "home", position: { x: 0, y: 0 }, inputs: {}, outputs: {}, progress: 0,
-    utilization: 0, productionRate: 0, machineCount: 1, minerCount: 0, routingCursor: 0, interactionLocked: false };
+    utilization: 0, productionRate: 0, machineCount: 1, minerCount: 0, routingCursor: 0, interactionLocked: false,
+    stationLastSupplyPeerBySlot: {}, proliferatorBonusProgress: {} };
   state.entities = [
     { ...base, id: "power", kind: "power", buildingId: "wind_turbine", machineCount: 10_000_000_000 },
     { ...base, id: "clock", kind: "machine", buildingId: "time_warp_device" },
@@ -60,4 +61,36 @@ describe("time-warp power snapshot indexes", () => {
     expect(refreshed.tray).toEqual(original.tray);
     expect(refreshed.totalProduced).toEqual(original.totalProduced);
   });
+
+  it.each(["maps", "route", "terminal", "legacy-ports"] as const)(
+    "preserves full-copy default normalization for legacy data: %s", (kind) => {
+      const state = poweredState();
+      const entity = state.entities[0];
+      if (kind === "maps") {
+        delete entity.stationLastSupplyPeerBySlot;
+        delete entity.proliferatorBonusProgress;
+      } else if (kind === "route") {
+        entity.stationRoutes = [{ id: "legacy-route" } as NonNullable<FactoryEntity["stationRoutes"]>[number]];
+      } else if (kind === "terminal") {
+        entity.buildingId = "orbital_cargo_terminal";
+        entity.orbitalCargoPortItems = ["iron_ore"];
+      } else {
+        entity.orbitalCargoPortItems = [null, null, null, null];
+      }
+      const original = structuredClone(state);
+      freeze(state);
+      const refreshed = refreshTimeWarpPowerSnapshot(state);
+      expect(refreshed.entities[0]).not.toBe(entity);
+      if (kind === "maps") {
+        expect(refreshed.entities[0].stationLastSupplyPeerBySlot).toEqual({});
+        expect(refreshed.entities[0].proliferatorBonusProgress).toEqual({});
+      } else if (kind === "route") {
+        expect(refreshed.entities[0].stationRoutes?.[0].waypointStationIds).toEqual([]);
+      } else if (kind === "terminal") {
+        expect(refreshed.entities[0].orbitalCargoPortItems).toEqual(["iron_ore", null, null, null]);
+      } else {
+        expect(refreshed.entities[0].orbitalCargoPortItems).toBeUndefined();
+      }
+      expect(state).toEqual(original);
+    });
 });

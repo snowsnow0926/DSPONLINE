@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
 const options = Object.fromEntries(process.argv.slice(2).map((arg) => arg.replace(/^--/, "").split(/=(.*)/s, 2)));
+const idbOperations = options["idb-operations"] === "1";
 const base = new URL(options.url ?? "http://127.0.0.1:4375");
 if (base.protocol !== "http:" || base.hostname !== "127.0.0.1") throw new Error("Only isolated loopback tests are allowed");
 const supply = options.supply ?? "stock";
@@ -91,13 +92,42 @@ async function sampleProcesses(stage) {
 
 try {
   await context.route("**/api/**", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"isolated runtime test"}' }));
-  await context.addInitScript(({ profileSteps }) => {
+  await context.addInitScript(({ profileSteps, idbOperations }) => {
     if (location.hostname !== "127.0.0.1") return;
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.2");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     const trace = { active: false, phase: "idle", startedAt: 0, lastElapsed: 0, frames: [], tasks: [], sends: [], events: [] };
     globalThis.__LIVE_RUNTIME_TRACE__ = trace;
+    if (idbOperations) {
+      trace.idb = [];
+      const record = (operation, start, duration, store, database, ok) => {
+        if (trace.active && trace.idb.length < 2000) trace.idb.push({
+          operation, phase: trace.phase, at: start - trace.startedAt,
+          duration, store, database, ok,
+        });
+      };
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (...args) {
+        const start = performance.now(); let ok = false;
+        try { const result = Reflect.apply(put, this, args); ok = true; return result; }
+        finally { record("put", start, performance.now() - start, this.name, this.transaction.db.name, ok); }
+      };
+      const result = Object.getOwnPropertyDescriptor(IDBRequest.prototype, "result");
+      trace.idbResultGetterObserved = Boolean(result?.configurable && result.get);
+      if (trace.idbResultGetterObserved) Object.defineProperty(IDBRequest.prototype, "result", {
+        ...result,
+        get() {
+          const start = performance.now(); let ok = false;
+          try { const value = Reflect.apply(result.get, this, []); ok = true; return value; }
+          finally {
+            const duration = performance.now() - start;
+            const source = this.source?.objectStore ?? this.source;
+            record("result", start, duration, source?.name ?? null, source?.transaction?.db?.name ?? null, ok);
+          }
+        },
+      });
+    }
     const NativeWorker = Worker;
     globalThis.Worker = class extends NativeWorker {
       constructor(url, workerOptions) {
@@ -150,7 +180,7 @@ try {
     new PerformanceObserver((list) => {
       if (trace.active) for (const entry of list.getEntries()) trace.tasks.push({ phase: trace.phase, at: entry.startTime - trace.startedAt, duration: entry.duration });
     }).observe({ type: "longtask" });
-  }, { profileSteps: Boolean(options["engine-profile"]) });
+  }, { profileSteps: Boolean(options["engine-profile"]), idbOperations });
   context.on("page", (opened) => {
     opened.setDefaultTimeout(120_000);
     opened.on("pageerror", (error) => { errors.push(error.message); console.log(`Page error: ${error.message}`); });
@@ -333,7 +363,7 @@ try {
   if (errors.length) throw Error(errors.join("\n"));
   const evidence = { browser: await browser.version(), supply, observationSeconds: seconds, profiled: Boolean(options.profile), profilePhase,
     postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, heapSamples,
-    engineProfiled: Boolean(options["engine-profile"]),
+    engineProfiled: Boolean(options["engine-profile"]), idbOperations,
     retainedNormalDebt: Boolean(options["retain-debt"]),
     seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };
   await writeFile(resolve(output, `${name}.json`), JSON.stringify(evidence, null, 2));

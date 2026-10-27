@@ -1,5 +1,11 @@
 # Production-page large-save runtime probe
 
+`--idb-operations=1` optionally records main-page `IDBObjectStore.put` and
+`IDBRequest.result` getter durations, phase, database/store names and success.
+It records no keys or values and is disabled by default. These synchronous
+call durations are not the complete asynchronous transaction/read latency.
+See the [startup diagnosis](../../docs/reviews/2026-10-27-web-startup-idb.md).
+
 This opt-in local experiment uses a private prepared save through the existing
 `web-save-checkpoints/vite.config.ts` fixture server. It launches a fresh Chrome
 context with service workers blocked and all `/api/**` requests intercepted.

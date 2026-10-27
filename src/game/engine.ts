@@ -2136,19 +2136,28 @@ export function createSimulationLookupContext(
   profiler?: SimulationProfiler,
   constructionAutomationPlanCache = new Map<string, CachedConstructionAutomationPlan>(),
 ): SimulationLookupContext {
-  return buildSimulationLookupContext(state, profiler, constructionAutomationPlanCache, true);
+  return buildSimulationLookupContext(state, profiler, constructionAutomationPlanCache, "simulation");
 }
 
 function buildSimulationLookupContext(
   state: GameState,
   profiler: SimulationProfiler | undefined,
   constructionAutomationPlanCache: Map<string, CachedConstructionAutomationPlan>,
-  includeBeltRuntime: boolean,
+  purpose: "simulation" | "power",
 ): SimulationLookupContext {
   const startedAt = profileNow();
-  const belts = includeBeltRuntime ? state.belts : [];
+  const belts = purpose === "simulation" ? state.belts : [];
+  let powerController: FactoryEntity | undefined;
+  if (purpose === "power") {
+    // Match Map's last-record-wins id semantics without allocating the full
+    // entity directory when only the controller will be read.
+    for (const entity of state.entities) {
+      if (entity.id === state.timeWarp.controllerEntityId) powerController = entity;
+    }
+  }
   const context: SimulationLookupContext = {
-    entityById: new Map(state.entities.map((entity) => [entity.id, entity])),
+    entityById: powerController ? new Map([[powerController.id, powerController]]) :
+      new Map(state.entities.map((entity) => [entity.id, entity])),
     entitiesByPlanet: new Map(),
     entitiesByPlanetGrid: new Map(),
     machinesByPlanet: new Map(),
@@ -2217,7 +2226,20 @@ function buildSimulationLookupContext(
     if (values) values.push(value);
     else map.set(key, [value]);
   };
+  const powerGridKey = powerController ? `${powerController.planetId}|${getEntityPowerGridId(powerController)}` : undefined;
   for (const entity of state.entities) {
+    if (purpose === "power" && powerGridKey !== undefined) {
+      // Legacy station readiness can inspect peers on other planets, so keep
+      // global station/source views. Only the controller grid is allocated;
+      // its ordered records need no production or logistics runtime plans.
+      if (entity.kind === "station") context.stations.push(entity);
+      const gridKey = `${entity.planetId}|${getEntityPowerGridId(entity)}`;
+      if (gridKey === powerGridKey) addTo(context.entitiesByPlanetGrid, gridKey, entity);
+      if (entity.kind === "power" || (entity.buildingId === "ray_receiver" && entity.recipeId === "ray_power")) {
+        addTo(context.powerSourcesByPlanetGrid, gridKey, entity);
+      }
+      continue;
+    }
     const planetEntities = context.entitiesByPlanet.get(entity.planetId);
     if (planetEntities) planetEntities.push(entity);
     else context.entitiesByPlanet.set(entity.planetId, [entity]);
@@ -2230,7 +2252,10 @@ function buildSimulationLookupContext(
       const machines = context.machinesByPlanet.get(entity.planetId);
       if (machines) machines.push(entity);
       else context.machinesByPlanet.set(entity.planetId, [entity]);
-      if (entity.buildingId && entity.buildingId !== "ray_receiver") {
+      // Production runtimes include output-credit arrays, recipe throughput
+      // and buffer limits for every planet. Power's existing scalar path
+      // resolves these only for actual consumers on the controller grid.
+      if (purpose === "simulation" && entity.buildingId && entity.buildingId !== "ray_receiver") {
         const recipe = getRecipe(entity.recipeId);
         if (recipe) {
           const building = getBuilding(entity.buildingId);
@@ -2389,33 +2414,43 @@ function buildSimulationLookupContext(
       context.beltRuntime.settlementEntries.push(runtimeGroup);
     }
   }
-  context.quantumStations = context.stations.filter(isQuantumStation);
-  context.quantumEndpoints = context.stations.filter((entity) => isQuantumStation(entity) || isQuantumCollector(entity));
-  const quantumDownloadByKey = new Map<string, IndexedQuantumSlotPlan>();
-  const quantumUploadByKey = new Map<string, IndexedQuantumSlotPlan>();
-  for (const endpoint of context.quantumStations) {
-    for (const slot of getStationSlots(endpoint)) {
-      if (!slot.itemId || (slot.remoteMode !== "demand" && slot.remoteMode !== "supply")) continue;
-      const key = `${endpoint.id}:${slot.itemId}`;
-      const target = slot.remoteMode === "demand" ? quantumDownloadByKey : quantumUploadByKey;
-      const existing = target.get(key);
-      if (!existing || (slot.priority ?? 1) > existing.priority) {
-        target.set(key, { endpoint, itemId: slot.itemId, key, priority: slot.priority ?? 1, slot });
+  if (purpose === "simulation") {
+    context.quantumStations = context.stations.filter(isQuantumStation);
+    context.quantumEndpoints = context.stations.filter((entity) => isQuantumStation(entity) || isQuantumCollector(entity));
+    const quantumDownloadByKey = new Map<string, IndexedQuantumSlotPlan>();
+    const quantumUploadByKey = new Map<string, IndexedQuantumSlotPlan>();
+    for (const endpoint of context.quantumStations) {
+      for (const slot of getStationSlots(endpoint)) {
+        if (!slot.itemId || (slot.remoteMode !== "demand" && slot.remoteMode !== "supply")) continue;
+        const key = `${endpoint.id}:${slot.itemId}`;
+        const target = slot.remoteMode === "demand" ? quantumDownloadByKey : quantumUploadByKey;
+        const existing = target.get(key);
+        if (!existing || (slot.priority ?? 1) > existing.priority) {
+          target.set(key, { endpoint, itemId: slot.itemId, key, priority: slot.priority ?? 1, slot });
+        }
       }
     }
+    context.quantumDownloadSlots = [...quantumDownloadByKey.values()];
+    context.quantumUploadSlots = [...quantumUploadByKey.values()];
+    context.quantumTowerStacks = context.quantumStations.reduce((sum, entity) =>
+      sum + Math.max(0, Math.floor(entity.machineCount)), 0);
+    context.quantumCollectorStacks = context.quantumEndpoints.reduce((sum, entity) =>
+      sum + (isQuantumCollector(entity) ? Math.max(0, Math.floor(entity.machineCount)) : 0), 0);
   }
-  context.quantumDownloadSlots = [...quantumDownloadByKey.values()];
-  context.quantumUploadSlots = [...quantumUploadByKey.values()];
-  context.quantumTowerStacks = context.quantumStations.reduce((sum, entity) =>
-    sum + Math.max(0, Math.floor(entity.machineCount)), 0);
-  context.quantumCollectorStacks = context.quantumEndpoints.reduce((sum, entity) =>
-    sum + (isQuantumCollector(entity) ? Math.max(0, Math.floor(entity.machineCount)) : 0), 0);
   const add = (key: string, value: IndexedStationSlot) => {
     const existing = context.stationSlotsByKey.get(key);
     if (existing) existing.push(value);
     else context.stationSlotsByKey.set(key, [value]);
   };
-  for (const peer of state.entities) {
+  const needsStationPeerIndex = purpose === "simulation" || powerGridKey === undefined ||
+    (context.entitiesByPlanetGrid.get(powerGridKey) ?? []).some((entity) =>
+      entity.kind === "station" && entity.buildingId && entity.buildingId !== "orbital_collector" &&
+      !isQuantumStation(entity) && !(isElevatorStation(entity) &&
+        state.systemSpaceStations[getPlanet(entity.planetId).systemId]?.status === "operational"));
+  if (purpose === "power" && needsStationPeerIndex && powerController) {
+    context.entityById = new Map(state.entities.map((entity) => [entity.id, entity]));
+  }
+  if (needsStationPeerIndex) for (const peer of context.stations) {
     if (peer.kind !== "station") continue;
     // Mk.II elevator stations use the system hub contract and must never enter
     // the legacy slot/partner index. Transitioning stations keep their legacy
@@ -2430,14 +2465,17 @@ function buildSimulationLookupContext(
       });
       continue;
     }
+    const localEnabled = !isTraditionalStationScopeDisabled(peer, "local");
+    const remoteEnabled = peer.buildingId === "interstellar_logistics_station" && !isTraditionalStationScopeDisabled(peer, "remote");
+    if (!localEnabled && !remoteEnabled) continue;
     const slots = getStationSlots(peer);
     for (let peerSlotIndex = 0; peerSlotIndex < slots.length; peerSlotIndex += 1) {
       const slot = slots[peerSlotIndex];
       if (!slot.itemId) continue;
-      if (!isTraditionalStationScopeDisabled(peer, "local")) {
+      if (localEnabled) {
         add(stationSlotIndexKey("local", peer.planetId, slot.itemId, slot.localMode), { peer, peerSlotIndex, slot });
       }
-      if (peer.buildingId === "interstellar_logistics_station" && !isTraditionalStationScopeDisabled(peer, "remote")) {
+      if (remoteEnabled) {
         add(stationSlotIndexKey("remote", "*", slot.itemId, slot.remoteMode), { peer, peerSlotIndex, slot });
       }
     }
@@ -2446,7 +2484,7 @@ function buildSimulationLookupContext(
     values.sort((left, right) => right.slot.priority - left.slot.priority ||
       left.peer.id.localeCompare(right.peer.id) || left.peerSlotIndex - right.peerSlotIndex);
   }
-  for (const entity of context.logisticsBufferEntities) {
+  if (purpose === "simulation") for (const entity of context.logisticsBufferEntities) {
     const slots = entity.kind === "station" && entity.buildingId !== "orbital_collector"
       ? getStationSlots(entity).filter((slot): slot is StationSlot & { itemId: ItemId } => Boolean(slot.itemId))
       : entity.storedItemId ? [{ ...emptyStationSlot(), itemId: entity.storedItemId }] : [];
@@ -2458,7 +2496,7 @@ function buildSimulationLookupContext(
       });
     }
   }
-  for (const demand of context.stations) {
+  if (purpose === "simulation") for (const demand of context.stations) {
     if (demand.buildingId === "orbital_collector" || isElevatorStation(demand)) continue;
     for (const scope of ["local", "remote"] as const) {
       if (isTraditionalStationScopeDisabled(demand, scope) ||
@@ -8494,10 +8532,10 @@ export function refreshTimeWarpPowerSnapshotInPlace(state: GameState): void {
     state.timeWarp.allocatedPowerKw = 0;
     return;
   }
-  // Electrical allocation needs the machine and station indexes, including
-  // their in-flight cargo, but never settles production belts. Building the
-  // full belt graph here retained a second large route index during startup.
-  const lookup = buildSimulationLookupContext(state, undefined, new Map(), false);
+  // Allocation needs this grid's ordered consumers and global source views.
+  // Legacy station peers are prepared only when this grid can inspect them;
+  // production, quantum settlement and belt runtime plans are not used here.
+  const lookup = buildSimulationLookupContext(state, undefined, new Map(), "power");
   const reception = calculateDysonReception(state);
   calculatePower(state, 1, controller.planetId, getEntityPowerGridId(controller), reception, lookup);
 }

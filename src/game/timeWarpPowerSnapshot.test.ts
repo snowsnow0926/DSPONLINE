@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createPlayerInitialState, refreshTimeWarpPowerSnapshot, refreshTimeWarpPowerSnapshotInPlace } from "./engine";
+import { createPlayerInitialState, createSimulationLookupContext, refreshTimeWarpPowerSnapshot, refreshTimeWarpPowerSnapshotInPlace } from "./engine";
 import type { FactoryEntity, GameState } from "./types";
 
 function poweredState(): GameState {
@@ -24,6 +24,53 @@ function freeze(value: unknown): void {
 }
 
 describe("time-warp power snapshot indexes", () => {
+  it.each(["other-planet", "other-grid"])("does not prepare unrelated production buffers: %s", (location) => {
+    const state = poweredState();
+    state.entities.push({
+      ...structuredClone(state.entities[1]),
+      id: "foreign-smelter",
+      planetId: location === "other-planet" ? "ashen" : "home",
+      powerGridId: location === "other-grid" ? "grid-b" : "grid-a",
+      buildingId: "arc_smelter",
+      recipeId: "iron_ingot",
+      inputs: { iron_ore: 1 },
+      outputs: {},
+    });
+    Object.defineProperty(state.settings, "productionBufferLimit", {
+      get: () => { throw new Error("Power refresh prepared unrelated production buffers"); },
+    });
+    refreshTimeWarpPowerSnapshotInPlace(state);
+    expect(state.timeWarp.effectiveMultiplier).toBe(8);
+    expect(state.entities[2].inputs).toEqual({ iron_ore: 1 });
+    expect(state.entities[2].outputs).toEqual({});
+  });
+
+  it("retains complete production runtimes in the ordinary simulation lookup", () => {
+    const state = poweredState();
+    state.entities.push({ ...structuredClone(state.entities[1]), id: "smelter", planetId: "ashen",
+      buildingId: "arc_smelter", recipeId: "iron_ingot", inputs: { iron_ore: 1 }, outputs: {} });
+    const lookup = createSimulationLookupContext(state);
+    expect(lookup.machineRuntimeById.get("smelter")?.recipe.id).toBe("iron_ingot");
+    expect(lookup.machineRuntimesByPlanet.get("ashen")?.map((runtime) => runtime.entity.id)).toContain("smelter");
+  });
+
+  it("does not prepare unrelated logistics buffers", () => {
+    const state = poweredState();
+    const warehouse: FactoryEntity = {
+      ...structuredClone(state.entities[1]),
+      id: "foreign-warehouse",
+      kind: "storage",
+      buildingId: "storage_mk1",
+      planetId: "ashen",
+    };
+    Object.defineProperty(warehouse, "storedItemId", {
+      get: () => { throw new Error("Power refresh prepared an unrelated logistics buffer"); },
+    });
+    state.entities.push(warehouse);
+    refreshTimeWarpPowerSnapshotInPlace(state);
+    expect(state.timeWarp.effectiveMultiplier).toBe(8);
+  });
+
   it("refreshes electrical allocation without reading the production belt graph", () => {
     const state = poweredState();
     Object.defineProperty(state, "belts", { configurable: true, get: () => { throw new Error("Power refresh traversed belts"); } });

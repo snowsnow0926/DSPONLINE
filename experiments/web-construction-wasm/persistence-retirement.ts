@@ -7,6 +7,8 @@ import type { GameState } from "../../src/game/types";
 import type { WorkerBinaryPayload } from "../../src/game/workerBinaryPayload";
 import { refreshTimeWarpPowerSnapshot, setPaused, setTimeWarpEnabled } from "../../src/game/engine";
 import { beginIdleRun } from "../../src/game/idleSettlement";
+import { createPureIdleRecovery, readPureIdleRecovery, clearPureIdleRecovery } from "../../src/game/pureIdleRecovery";
+import { PureIdleCheckpointOwner } from "../../src/game/pureIdleCheckpointOwnerClient";
 
 const hex = (buffer: ArrayBuffer) => [...new Uint8Array(buffer)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 const hash = async (bytes: Uint8Array) => hex(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>));
@@ -148,3 +150,56 @@ export async function runStartupCheckpointParity() {
 }
 
 Object.assign(globalThis, { runStartupCheckpointParity });
+
+/** Two complete journal + primary writes of an identical private startup state.
+ * This is a full-data equality gate; whole-page timings are measured separately. */
+export async function runStartupSharedOwnerParity() {
+  const initial = await canonicalState();
+  const controller = initial.entities.find(entity => entity.buildingId === "time_warp_device");
+  if (!controller) throw new Error("Missing startup controller");
+  initial.timeWarp.controllerEntityId = controller.id;
+  initial.timeWarp.enabled = false; initial.timeWarp.requestedMultiplier = 8;
+  const state = refreshTimeWarpPowerSnapshot(setTimeWarpEnabled(setPaused(initial, false), true));
+  state.timeWarp = { ...state.timeWarp, pendingSimulationSeconds: 0, pendingWallSeconds: 0 };
+  state.idleSettlement = beginIdleRun(state.idleSettlement, 1_800_000_000_000);
+  const before = await stateHash(state);
+  await initializeLocalSaveStore(); await flushLocalSaveWrites();
+  const writer = getLocalSaveWriterStatus();
+  if (writer.role !== "primary") throw new Error("Isolated writer required");
+  const client = new AuthoritativeSavePersistenceClient();
+  const commits = [];
+  try {
+    for (const path of ["main-journal", "shared-owner"] as const) {
+      const abort = new AbortController();
+      const claim = await createPureIdleRecovery(state, "replication", 1_800_000_000_000, "startup-parity-owner", Date.now(), true,
+        path === "shared-owner" ? (source, ticket) => new PureIdleCheckpointOwner(source, { ...ticket,
+          primaryWriterFence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
+        }, { isCurrent: () => true, signal: abort.signal }).ready : undefined);
+      if (!claim.ok) throw new Error(claim.message);
+      try {
+        const stored = await readPureIdleRecovery();
+        if (!stored || await stateHash(stored.state) !== before) throw new Error("Full recovery checkpoint differs");
+        const serialized = await serializeAuthoritativePrimarySaveInWorker(state, {
+          savedAt: 1_800_000_000_000, frozenStateIsCurrent: () => true,
+        });
+        const input: AuthoritativeSavePayloadCommitInput<WorkerBinaryPayload> = {
+          key: "dsp-idle-network.save.v1", bytes: serialized.bytes, proof: serialized.proof, seed: serialized.catalogSeed,
+          expectedRevision: commits.length, fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken }, preserveBackup: false,
+        };
+        const result = await client.commit(input);
+        if (!result.result.ok) throw new Error(result.result.message);
+        const raw = await readStored(input.key);
+        if (!raw) throw new Error("Independent full primary readback missing");
+        const bytes = new TextEncoder().encode(raw); const sha256 = await hash(bytes);
+        if (sha256 !== serialized.proof.payloadSha256 || bytes.byteLength !== serialized.proof.byteLength ||
+          result.result.proof.backupSaved || result.result.proof.revision !== commits.length + 1 ||
+          await readStored(`${input.key}.backup`) !== null) throw new Error("Primary proof/revision/backup differs");
+        commits.push({ path, sha256, bytes: bytes.byteLength, revision: result.result.proof.revision, backupSaved: false });
+      } finally { abort.abort(); await clearPureIdleRecovery(claim.record.sessionId, claim.record.ownerToken); }
+    }
+    if (commits[0].sha256 !== commits[1].sha256 || await stateHash(state) !== before) throw new Error("Full pipeline parity failed");
+    return { scope: "Complete recovery and primary writes; equality qualification only, not a whole-page performance claim.",
+      stateSha256: before, callerUnchanged: true, entityCount: state.entities.length, beltCount: state.belts.length, commits };
+  } finally { client.terminate(); }
+}
+Object.assign(globalThis, { runStartupSharedOwnerParity });

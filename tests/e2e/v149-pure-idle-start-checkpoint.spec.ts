@@ -45,12 +45,17 @@ async function install(page: Page, injectQuota = false) {
         const request = message as { type?: string; kind?: string };
         const send = () => Array.isArray(options) ? super.postMessage(message, options) : super.postMessage(message, options);
         if (probe.active && this.workerName === "factory-simulation" && request.kind === "checkpoint") probe.checkpoints += 1;
-        if (probe.active && this.workerName === "authoritative-save-serialization") {
+        if (probe.active && ["authoritative-save-serialization", "pure-idle-checkpoint-owner"].includes(this.workerName)) {
           if (request.type === "state-begin") probe.begins += 1;
           if (request.type === "state-complete") probe.completes += 1;
+          if (request.type === "recovery-serialize" && probe.crash) {
+            probe.crash = false; probe.crashes += 1;
+            queueMicrotask(() => this.dispatchEvent(new ErrorEvent("error", { message: "injected startup serialization crash" })));
+            return;
+          }
           if (request.type === "state-records") {
             probe.records += 1;
-            if (probe.crash) {
+            if (probe.crash && this.workerName === "authoritative-save-serialization") {
               probe.crash = false; probe.crashes += 1;
               queueMicrotask(() => this.dispatchEvent(new ErrorEvent("error", { message: "injected startup chunk crash" })));
               return;
@@ -61,7 +66,7 @@ async function install(page: Page, injectQuota = false) {
         send();
       }
       terminate(): void {
-        if (probe.active && this.workerName === "authoritative-save-serialization") probe.terminations += 1;
+        if (probe.active && ["authoritative-save-serialization", "pure-idle-checkpoint-owner"].includes(this.workerName)) probe.terminations += 1;
         super.terminate();
       }
     };

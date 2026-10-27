@@ -24,7 +24,8 @@ const callable = entry === "large-save" ? "runLargeSaveProbe" : entry === "save-
               : entry === "terminal-owner-faults" ? "runTerminalOwnerFaults"
                 : entry === "canonical-owner-parity" ? "runCanonicalOwnerParity"
                   : entry === "startup-idb" ? "runStartupIdbProbe"
-                  : entry === "persistence-retirement" ? options["startup-parity"] === "1" ? "runStartupCheckpointParity" : "runPersistenceRetirement" : "runConstructionWasmProbe";
+                  : entry === "persistence-retirement" ? options["startup-owner-parity"] === "1" ? "runStartupSharedOwnerParity"
+                    : options["startup-parity"] === "1" ? "runStartupCheckpointParity" : "runPersistenceRetirement" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
 const decoderFiles = ["src/game/storage.ts", "src/game/saveTransferDecode.ts"];
 const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["decoder-ref"]}^{commit}`],
@@ -143,6 +144,8 @@ try {
       "src/game/pureIdleMacroClient.ts", "src/App.tsx",
       ...(entry === "persistence-retirement" ? ["src/game/authoritativeSavePersistenceClient.ts", "src/game/authoritativeSavePersistence.worker.ts", "src/game/localSaveStore.ts"] : []),
       ...(entry === "persistence-retirement" && options["startup-parity"] === "1" ? ["src/game/pureIdleRecovery.ts", "src/game/saveStateChunkTransfer.ts"] : []),
+      ...(entry === "persistence-retirement" && options["startup-owner-parity"] === "1" ? ["src/game/pureIdleRecovery.ts", "src/game/saveStateChunkTransfer.ts",
+        "src/game/pureIdleCheckpointOwnerClient.ts", "src/game/pureIdleCheckpointOwner.worker.ts", "src/game/pureIdlePrimaryWriterFence.ts"] : []),
       ...(entry === "terminal-owner" || entry === "canonical-owner-parity" ? ["src/game/canonicalTerminalOwnerClient.ts", "src/game/canonicalTerminalOwnerRegistry.ts",
         "src/game/canonicalTerminalOwnerProtocol.ts", "src/game/canonicalTerminalOwner.worker.ts", "src/game/saveStateChunkTransfer.ts", "src/game/saveTransferDecode.ts"] : []),
     ].map(async (file) => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),

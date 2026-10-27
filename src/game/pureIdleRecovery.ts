@@ -1,11 +1,13 @@
 import type { PureIdleMacroMode, PureIdleMacroPhase, PureIdleMacroSummary } from "./pureIdleMacro";
 import type { GameState } from "./types";
+import { writeBehindPrimaryWriterFence, type PureIdlePrimaryWriterFence } from "./pureIdlePrimaryWriterFence";
 
 const DATABASE_NAME = "dsp-idle-network.pure-idle-recovery";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "records";
 const CHECKPOINT_KEY = "checkpoint";
 const HEARTBEAT_KEY = "heartbeat";
+const TAKEOVER_FENCE_KEY = "takeover-fence";
 const OWNER_SESSION_KEY = "dsp-idle-network.pure-idle-owner.v1";
 const RECOVERY_SCHEMA_VERSION = 2;
 const LEASE_DURATION_MS = 15_000;
@@ -141,6 +143,54 @@ export type PureIdleRecoveryClaim =
   | { ok: true; record: PureIdleRecoveryRecord }
   | { ok: false; reason: "unavailable" | "missing" | "owned" | "invalid"; message: string };
 
+/** Small write authorization. The page keeps its Web Lock; a dedicated Worker
+ * compares both durable guards in the same transaction as the checkpoint. */
+export interface PureIdleRecoveryCheckpointTicket {
+  checkpoint: Omit<PureIdleCheckpointRecord, "state">;
+  heartbeat: PureIdleHeartbeatRecord;
+  expectedHeartbeat: string;
+  expectedTakeoverFence: string;
+  primaryWriterFence?: PureIdlePrimaryWriterFence;
+}
+
+export type PureIdleRecoveryCheckpointWriter = (
+  state: GameState, ticket: PureIdleRecoveryCheckpointTicket,
+) => Promise<void>;
+
+/** Does not acquire/release the page's Web Lock. No change to GameState or the
+ * two existing checkpoint/heartbeat records, including their schema versions. */
+export async function writePureIdleRecoveryCheckpoint(
+  state: GameState, ticket: PureIdleRecoveryCheckpointTicket,
+): Promise<void> {
+  const checkpoint: PureIdleCheckpointRecord = { ...ticket.checkpoint, state };
+  if (!validCheckpoint(checkpoint) || !validHeartbeat(ticket.heartbeat) ||
+    checkpoint.sessionId !== ticket.heartbeat.sessionId ||
+    checkpointFingerprint(state) !== ticket.heartbeat.checkpointHash) {
+    throw new Error("纯挂机后台检查点身份无效");
+  }
+  const db = await openDatabase();
+  const transaction = db.transaction(STORE_NAME, "readwrite");
+  const store = transaction.objectStore(STORE_NAME);
+  const [existing, fence] = await Promise.all([
+    requestResult(store.get(HEARTBEAT_KEY)), requestResult(store.get(TAKEOVER_FENCE_KEY)),
+  ]);
+  if (JSON.stringify(existing ?? null) !== ticket.expectedHeartbeat ||
+    JSON.stringify(fence ?? null) !== ticket.expectedTakeoverFence) {
+    transaction.abort();
+    throw new Error("纯挂机写入权已变化，旧启动检查点未写入");
+  }
+  const write = () => {
+    try { store.put(checkpoint); store.put(ticket.heartbeat); }
+    catch (error) {
+      try { transaction.abort(); } catch { /* already aborted */ }
+      throw error;
+    }
+  };
+  if (ticket.primaryWriterFence) {
+    await Promise.all([writeBehindPrimaryWriterFence(transaction, store, ticket.primaryWriterFence, write), transactionDone(transaction)]);
+  } else { write(); await transactionDone(transaction); }
+}
+
 export type PureIdleRecoveryInspection =
   | { status: "valid"; record: PureIdleRecoveryRecord; message: string }
   | { status: "committed"; record: PureIdleRecoveryRecord; message: string }
@@ -153,6 +203,7 @@ export type PureIdleTakeoverFinalization =
 let databasePromise: Promise<IDBDatabase> | null = null;
 let heldBrowserLease: { ownerToken: string; release: () => void; released: Promise<void> } | null = null;
 let pendingBrowserLeaseRelease: Promise<void> | null = null;
+let currentCreateAttempt: object | null = null;
 
 /**
  * IndexedDB remains the durable source of truth. Web Locks adds a process
@@ -522,7 +573,10 @@ export async function finalizePureIdleRecoveryForLocalTakeover(
       requestResult(store.get(HEARTBEAT_KEY)),
     ]);
     if (checkpointValue === undefined && heartbeatValue === undefined) {
-      transaction.abort();
+      // A startup Worker may be uploading its first checkpoint. Even an empty
+      // journal needs a durable fence so it cannot appear after takeover.
+      store.put({ key: TAKEOVER_FENCE_KEY, token: randomToken("takeover") });
+      await transactionDone(transaction);
       return { ok: true, finalized: false, sessionId: null, abandonedWallSeconds: 0 };
     }
     if (!validCheckpoint(checkpointValue) || !validHeartbeat(heartbeatValue) || checkpointValue.sessionId !== heartbeatValue.sessionId) {
@@ -530,11 +584,13 @@ export async function finalizePureIdleRecoveryForLocalTakeover(
       return { ok: false, message: "纯挂机恢复日志不完整，未修改该日志" };
     }
     if (heartbeatValue.committed === true) {
-      transaction.abort();
+      store.put({ key: TAKEOVER_FENCE_KEY, token: randomToken("takeover") });
+      await transactionDone(transaction);
       return { ok: true, finalized: false, sessionId: heartbeatValue.sessionId, abandonedWallSeconds: heartbeatValue.abandonedWallSeconds ?? 0 };
     }
     const elapsedWallSeconds = Math.max(0, Math.floor((nowMs - checkpointValue.startedAtMs) / 1_000));
     const abandonedWallSeconds = Math.max(0, elapsedWallSeconds - Math.max(0, heartbeatValue.settledWallSeconds));
+    store.put({ key: TAKEOVER_FENCE_KEY, token: randomToken("takeover") });
     store.put({
       ...heartbeatValue,
       schemaVersion: RECOVERY_SCHEMA_VERSION,
@@ -566,6 +622,7 @@ export async function createPureIdleRecovery(
   ownerToken: string,
   nowMs = Date.now(),
   startedPaused = false,
+  writer?: PureIdleRecoveryCheckpointWriter,
 ): Promise<PureIdleRecoveryClaim> {
   if (!canUsePureIdleRecovery()) {
     return { ok: false, reason: "unavailable", message: "当前环境无法建立 IndexedDB 恢复日志，已阻止纯挂机" };
@@ -573,11 +630,16 @@ export async function createPureIdleRecovery(
   if (!await acquireBrowserLease(ownerToken)) {
     return { ok: false, reason: "owned", message: "另一个标签页正在运行纯挂机，请先在原标签页停止" };
   }
+  const attempt = {};
+  currentCreateAttempt = attempt;
   const db = await openDatabase();
   const sessionId = randomToken("idle");
   const transaction = db.transaction(STORE_NAME, "readwrite");
   const store = transaction.objectStore(STORE_NAME);
-  const existing = await requestResult(store.get(HEARTBEAT_KEY));
+  const [existing, takeoverFence] = await Promise.all([
+    requestResult(store.get(HEARTBEAT_KEY)),
+    writer ? requestResult(store.get(TAKEOVER_FENCE_KEY)) : Promise.resolve(undefined),
+  ]);
   if (validHeartbeat(existing) && existing.committed !== true && existing.ownerToken !== ownerToken && existing.leaseExpiresAtMs > nowMs) {
     transaction.abort();
     releaseBrowserLease(ownerToken);
@@ -609,9 +671,34 @@ export async function createPureIdleRecovery(
     committed: false,
     lastTransitionAtMs: nowMs,
   };
-  store.put(checkpoint);
-  store.put(heartbeat);
-  await transactionDone(transaction);
+  if (writer) {
+    // Finish the short guard read before uploading. Holding an IDB transaction
+    // open across Worker messages would either auto-commit or block takeover.
+    await transactionDone(transaction);
+    const { state: _state, ...header } = checkpoint;
+    try {
+      await writer(checkpointState, { checkpoint: header, heartbeat,
+        expectedHeartbeat: JSON.stringify(existing ?? null), expectedTakeoverFence: JSON.stringify(takeoverFence ?? null) });
+    } catch (error) {
+      // The commit might have finished just before a lost ACK/crash. Clear only
+      // this exact session; a replacement owner's checkpoint remains intact.
+      try {
+        const cleanup = (await openDatabase()).transaction(STORE_NAME, "readwrite");
+        const records = cleanup.objectStore(STORE_NAME);
+        const current = await requestResult(records.get(HEARTBEAT_KEY));
+        if (validHeartbeat(current) && current.sessionId === sessionId && current.ownerToken === ownerToken) {
+          records.delete(CHECKPOINT_KEY); records.delete(HEARTBEAT_KEY);
+          await transactionDone(cleanup);
+        } else cleanup.abort();
+      } catch { /* Keep the original failure; durable ownership checks still fence retries. */ }
+      finally { if (currentCreateAttempt === attempt) releaseBrowserLease(ownerToken); }
+      throw error;
+    }
+  } else {
+    store.put(checkpoint);
+    store.put(heartbeat);
+    await transactionDone(transaction);
+  }
   return { ok: true, record: combine(checkpoint, heartbeat)! };
 }
 
@@ -625,6 +712,7 @@ export async function claimPureIdleRecovery(
   if (!await acquireBrowserLease(ownerToken)) {
     return { ok: false, reason: "owned", message: "另一个标签页仍持有纯挂机会话" };
   }
+  currentCreateAttempt = {};
   const db = await openDatabase();
   const transaction = db.transaction(STORE_NAME, "readwrite");
   const store = transaction.objectStore(STORE_NAME);

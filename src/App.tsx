@@ -388,6 +388,7 @@ import {
   type PureIdleRecoveryRecord,
   type PureIdleStopReason,
 } from "./game/pureIdleRecovery";
+import { PureIdleCheckpointOwner } from "./game/pureIdleCheckpointOwnerClient";
 import {
   applySimulationProjectionToState,
   createSimulationProjectionStateIndex,
@@ -1939,7 +1940,7 @@ function finishSimulationCheckpointChunks(accumulator: SimulationCheckpointAccum
 }
 
 type RuntimePersistenceKind = "autosave" | "manual" | "pure-idle-stop" | "return" | "lifecycle" | "other";
-type PureIdleStartupOperation = { cancelled: boolean; saveProgressId: number | null };
+type PureIdleStartupOperation = { cancelled: boolean; saveProgressId: number | null; abort: AbortController };
 type RuntimePersistencePhase = "checkpoint" | "serialize-write-readback" | "complete" | "failed";
 
 const LIFECYCLE_SEALED_SAVE_MESSAGE = "页面正在退出，已保留当前 durable recovery 供下次精确恢复";
@@ -5164,6 +5165,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     pureIdleActiveRef.current = false;
     pureIdleStopCandidateRef.current = null;
     pureIdleStartupCheckpointRef.current = null;
+    pureIdleStartupOperationRef.current?.abort.abort();
     pureIdleStartupOperationRef.current = null;
     pureIdleBackgroundOfflineAbortRef.current?.abort();
     pureIdleBackgroundOfflineAbortRef.current = null;
@@ -8753,7 +8755,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           setNotice("Windows 原生权威状态正在变化，旧纯挂机启动已取消");
           return;
         }
-        const startupOperation: PureIdleStartupOperation = { cancelled: false, saveProgressId: null };
+        const startupOperation: PureIdleStartupOperation = { cancelled: false, saveProgressId: null, abort: new AbortController() };
         pureIdleStartupOperationRef.current = startupOperation;
         const startupIsCurrent = () => pureIdleStartupOperationRef.current === startupOperation &&
           !startupOperation.cancelled && legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease);
@@ -8836,6 +8838,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             pureIdleOwnerTokenRef.current,
             Date.now(),
             startedPaused,
+            isLargeRuntimeState(checkpoint) && getLocalSaveBackend() === "indexeddb" ? (state, ticket) => {
+              const writer = getLocalSaveWriterStatus();
+              if (writer.role !== "primary") throw new Error("主存档写入权已变化，已取消纯挂机启动");
+              return new PureIdleCheckpointOwner(state, { ...ticket,
+                primaryWriterFence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
+              }, { isCurrent: startupIsCurrent, signal: startupOperation.abort.signal }).ready;
+            } : undefined,
           );
           if (!startupIsCurrent()) return;
           if (!claim.ok) {
@@ -8892,6 +8901,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             ? `纯挂机启动失败：${error.message}；主存档未改变，可立即重试`
             : "纯挂机启动失败；主存档未改变，可立即重试");
         }).finally(() => {
+          startupOperation.abort.abort();
           if (pureIdleStartupOperationRef.current !== startupOperation) return;
           pureIdleStartupOperationRef.current = null;
           if (!pureIdleActiveRef.current) {
@@ -12745,6 +12755,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   useEffect(() => () => {
     pureIdleStartupCheckpointRef.current = null;
+    pureIdleStartupOperationRef.current?.abort.abort();
     pureIdleStartupOperationRef.current = null;
     pureIdleMacroClientRef.current?.close();
     const authorityLease = issueLegacyJavaScriptAuthorityLease();
@@ -13078,7 +13089,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       // callback may already be queued behind this synchronous event; it must
       // not enqueue a new primary write after pagehide chose the recovery path.
       lifecycleExitStartedRef.current = true;
-      if (pureIdleStartupOperationRef.current) pureIdleStartupOperationRef.current.cancelled = true;
+      if (pureIdleStartupOperationRef.current) {
+        pureIdleStartupOperationRef.current.cancelled = true;
+        pureIdleStartupOperationRef.current.abort.abort();
+      }
       pureIdleStartupCheckpointRef.current = null;
       if (nativeAuthorityPersistenceProtectedRef.current || readNativeAuthorityPersistenceBoundary().protected) {
         // Synchronous unload cannot wait for a Rust checkpoint. The native

@@ -8,6 +8,8 @@
 
 Worker 每批接收最多 512 个实体或 2,048 条带，检查顺序和总数，在临时数据库调用真实恢复日志 API。它自己持有隔离浏览器的锁，不能直接用于页面已经持锁的正式启动流程。[本轮数字与剩余门槛](../../docs/reviews/2026-10-27-web-startup-idb.md)。
 
+共用后台候选使用 `--entry=persistence-retirement --startup-owner-parity=1` 核对同一完整状态的恢复日志和主存档：前一次主线程写日志，后一次复用后台状态，均实际写入/读回并比较完整 SHA-256 和 revision，检查没有新建备份。它是数据一致性门禁，整页响应和内存须另测。[实现与验收进度](../../docs/reviews/2026-10-27-web-startup-shared-owner.md)。
+
 ## 测量对象
 
 - `src/lib.rs` 直接编译现有 `native/dsp-native-core/src/construction_planner.rs`，不复制修改算法；一个仅含目录的 `CoreState` 外壳代替完整游戏状态。

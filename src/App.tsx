@@ -7735,8 +7735,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           }
           barrierState = preparedTerminal.state;
         } else if (preparedStartup?.operation.normalCheckpoint) {
-          // The startup already completed its ordinary checkpoint before
-          // allocating the extra frozen graph. Reuse only that same barrier.
+          // The startup completed its ordinary checkpoint before allocating
+          // the save Worker's graph. Reuse only that same barrier.
           const prepared = preparedStartup.operation.normalCheckpoint;
           if (prepared.worker !== simulationWorkerRef.current || simulationWorkerDisabledRef.current ||
             prepared.revision !== simulationStateRevisionRef.current ||
@@ -8831,18 +8831,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           const mode: PureIdleMacroMode = requestedMode === "replication"
             ? "replication"
             : endgameExtremeMode ? "extreme" : "stable";
-          let baselineReady = false;
-          if (!durableSimulationRuntimeEnabled && isLargeRuntimeState(gameRef.current) && getLocalSaveBackend() === "indexeddb" &&
+          const checkpoint = refreshTimeWarpPowerSnapshot(
+            setTimeWarpEnabled(setPaused(gameRef.current, false), true),
+          );
+          checkpoint.timeWarp = {
+            ...checkpoint.timeWarp,
+            pendingSimulationSeconds: 0,
+            pendingWallSeconds: 0,
+          };
+          checkpoint.idleSettlement = beginIdleRun(checkpoint.idleSettlement, startedAtMs);
+          // FactoryGame may be mounted directly by desktop/dev/e2e entry
+          // points, so do the same durable T0 bootstrap the menu normally
+          // performs before creating a pure-idle recovery journal.
+          if (!await ensureDurableRecoveryBaseline(gameRef.current)) {
+            if (!startupIsCurrent()) return;
+            pureIdleMacroActiveRef.current = false;
+            setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
+            return;
+          }
+          if (!durableSimulationRuntimeEnabled && isLargeRuntimeState(checkpoint) && getLocalSaveBackend() === "indexeddb" &&
             simulationWorkerRef.current && !simulationWorkerDisabledRef.current && lastSimulationResultRef.current) {
-            // Keep the ordinary T0, but finish it before the private snapshot
-            // and its save Worker overlap with T0's transient encoded copies.
-            if (!await ensureDurableRecoveryBaseline(gameRef.current)) {
-              if (!startupIsCurrent()) return;
-              pureIdleMacroActiveRef.current = false;
-              setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
-              return;
-            }
-            baselineReady = true;
+            // Keep the ordinary T0, but finish it before allocating the save
+            // Worker's full graph. Preserve the original private-copy order.
             if (!startupIsCurrent()) return;
             const ordinaryCheckpoint = await requestAuthoritativeSimulationCheckpoint();
             if (!startupIsCurrent()) return;
@@ -8856,24 +8866,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             if (latestAuthoritativeCheckpointTransferRef.current?.state === ordinaryCheckpoint) {
               latestAuthoritativeCheckpointTransferRef.current = null;
             }
-          }
-          const checkpoint = refreshTimeWarpPowerSnapshot(
-            setTimeWarpEnabled(setPaused(gameRef.current, false), true),
-          );
-          checkpoint.timeWarp = {
-            ...checkpoint.timeWarp,
-            pendingSimulationSeconds: 0,
-            pendingWallSeconds: 0,
-          };
-          checkpoint.idleSettlement = beginIdleRun(checkpoint.idleSettlement, startedAtMs);
-          // FactoryGame may be mounted directly by desktop/dev/e2e entry
-          // points, so do the same durable T0 bootstrap the menu normally
-          // performs before creating a pure-idle recovery journal.
-          if (!baselineReady && !await ensureDurableRecoveryBaseline(gameRef.current)) {
-            if (!startupIsCurrent()) return;
-            pureIdleMacroActiveRef.current = false;
-            setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
-            return;
           }
           setNotice("正在取得纯挂机恢复日志写入权…");
           if (!startupIsCurrent()) return;

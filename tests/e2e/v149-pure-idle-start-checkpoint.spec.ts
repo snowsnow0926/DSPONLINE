@@ -10,7 +10,8 @@ async function install(page: Page, injectQuota = false) {
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     const probe = { active: false, begins: 0, records: 0, completes: 0, checkpoints: 0, checkpointReplies: 0,
-      firstUploadCheckpointReplies: -1, holdCheckpoint: false, checkpointBlocked: false, ready: 0,
+      firstUploadCheckpointReplies: -1, holdCheckpoint: false, checkpointBlocked: false,
+      crashCheckpoint: false, checkpointCrashes: 0, ready: 0,
       crash: false, crashes: 0, terminations: 0, quotaWorkers: 0, hold: false, blocked: false,
       holdRecovery: false, recoveryBlocked: false, recoveryAttempts: 0, elapsed: -1,
       release: null as (() => void) | null, releaseRecovery: null as (() => void) | null,
@@ -49,6 +50,11 @@ async function install(page: Page, injectQuota = false) {
         const send = () => Array.isArray(options) ? super.postMessage(message, options) : super.postMessage(message, options);
         if (probe.active && this.workerName === "factory-simulation" && request.kind === "checkpoint") {
           probe.checkpoints += 1;
+          if (probe.crashCheckpoint) {
+            probe.crashCheckpoint = false; probe.checkpointCrashes += 1;
+            queueMicrotask(() => this.dispatchEvent(new ErrorEvent("error", { message: "injected early checkpoint crash" })));
+            return;
+          }
           if (probe.holdCheckpoint) {
             probe.holdCheckpoint = false; probe.checkpointBlocked = true; probe.releaseCheckpoint = send; return;
           }
@@ -301,4 +307,17 @@ test("pagehide during the early ordinary checkpoint never uploads a late startup
   expect(observed.begins).toBe(0); expect(observed.recoveryAttempts).toBe(0); expect(observed.ready).toBe(0);
   const saved = JSON.parse((await primary(page))!).state;
   expect(saved.timeWarp.enabled).toBe(false); expect(saved.tray.iron_ingot).toBe(123);
+});
+
+test("failure of the early checkpoint preserves the primary and never starts the journal", async ({ page }) => {
+  test.setTimeout(60_000);
+  await install(page); const seeded = await seed(page); await arm(page, { crashCheckpoint: true }); await start(page);
+  await expect(page.getByText(/纯挂机启动失败/).first()).toBeVisible();
+  expect((await probe(page)).checkpointCrashes).toBe(1);
+  expect((await probe(page)).recoveryAttempts).toBe(0);
+  expect((await probe(page)).begins).toBe(0); expect((await probe(page)).ready).toBe(0);
+  expect(await primary(page)).toBe(seeded.raw);
+  await arm(page, { crashCheckpoint: false }); await start(page);
+  await expect.poll(async () => (await probe(page)).ready, { timeout: 20_000 }).toBe(1);
+  expect(JSON.parse((await primary(page))!).state.tray.iron_ingot).toBe(123);
 });

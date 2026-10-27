@@ -13,7 +13,8 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useAccessibleModalSurface } from "./AccessibleDialog";
 import { RecoveryDataExportButton } from "./RecoveryDataExportButton";
 import { PureIdleConstructionStatus } from "./PureIdleConstructionStatus";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
@@ -125,6 +126,16 @@ export function TimeWarpIdleOverlay({
   onRetryRecovery: () => Promise<void>;
   onContinueNormally: () => Promise<void>;
 }) {
+  const boundaryRef = useRef<HTMLDivElement>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  useAccessibleModalSurface({
+    open: true,
+    boundaryRef,
+    surfaceRef,
+    initialFocusRef: surfaceRef,
+    riskPolicy: "explicit",
+    onRequestClose: () => undefined,
+  });
   const [now, setNow] = useState(() => Date.now());
   const [stopping, setStopping] = useState(false);
   useEffect(() => {
@@ -196,8 +207,8 @@ export function TimeWarpIdleOverlay({
     }
   };
   return (
-    <div className="time-warp-idle-overlay" role="dialog" aria-modal="true" aria-label="纯挂机">
-      <div className="time-warp-idle-panel">
+    <div ref={boundaryRef} className="time-warp-idle-overlay" role="dialog" aria-modal="true" aria-label="纯挂机">
+      <div ref={surfaceRef} className="time-warp-idle-panel" tabIndex={-1}>
         <header>
           <div className="time-warp-idle-title"><i><Gauge size={22} /></i><span><small>时间扭曲装置 · {modeLabel}</small><strong>{phaseLabel}</strong></span></div>
           <span className="time-warp-idle-lock"><ShieldCheck size={15} />画布已冻结</span>

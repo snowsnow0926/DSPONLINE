@@ -420,6 +420,31 @@ for (const failures of [1, 2]) {
     await openRecovery(page, seeded);
     const baseline = await readProbe(page);
     const bytesBefore = await page.locator(".game-shell").getAttribute("data-primary-save-bytes");
+    // Background opacity must not leave hidden factory controls reachable.
+    for (let tab = 0; tab < 5; tab += 1) {
+      await page.keyboard.press("Tab");
+      expect(await page.evaluate(() => Boolean(document.activeElement?.closest(".time-warp-idle-overlay")))).toBe(true);
+    }
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "纯挂机", exact: true })).toBeVisible();
+    expect((await readProbe(page)).finalizes).toBe(baseline.finalizes);
+    if (failures === 1) {
+      const initialViewport = page.viewportSize()!;
+      for (const [label, width, height] of [["desktop", 1440, 900], ["portrait", 390, 844], ["landscape", 844, 390]] as const) {
+        await page.setViewportSize({ width, height });
+        const panel = page.locator(".time-warp-idle-panel");
+        await expect(panel).toBeVisible();
+        const bounds = await panel.boundingBox();
+        expect(bounds).not.toBeNull();
+        expect(bounds!.x).toBeGreaterThanOrEqual(0);
+        expect(bounds!.y).toBeGreaterThanOrEqual(0);
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
+        expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(height + 1);
+        await expect(page.locator(".game-shell > .game-header")).toHaveCSS("opacity", "0");
+        await page.screenshot({ path: test.info().outputPath(`pure-idle-${label}.png`) });
+      }
+      await page.setViewportSize(initialViewport);
+    }
     let target: number | undefined;
     for (let index = 0; index < failures; index += 1) {
       await stopWithFailure(page);

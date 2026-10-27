@@ -1,5 +1,7 @@
 .game-shell--pure-idle > *:not(.time-warp-idle-overlay) {
-  visibility: hidden;
+  /* Visibility inherits through the factory and forces a large style rebuild
+     on return. The modal surface owns focus/inert isolation independently. */
+  opacity: 0;
   pointer-events: none;
 }
 

@@ -30,6 +30,46 @@ describe("TimeWarpIdleOverlay", () => {
     host.remove();
   });
 
+  it("isolates background focus, requires an explicit action, and restores existing modal state", () => {
+    const background = document.createElement("button");
+    const preserved = document.createElement("section");
+    preserved.setAttribute("inert", "existing");
+    preserved.setAttribute("aria-hidden", "false");
+    document.body.append(background, preserved);
+    background.focus();
+    const game = createInitialState();
+    const governor = createTimeWarpComputeGovernor(game.settings.simulationSpeed);
+    const stop = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => undefined);
+    try {
+      act(() => root.render(<TimeWarpIdleOverlay
+        game={game} baselineGame={game} startedAt={Date.now()} saveFailure={null} workerActive
+        computeLimits={resolveTimeWarpComputeLimits(governor, 15, 15, 1)} computeState={governor}
+        pendingSimulationSeconds={0} macroSummary={null} recovery={null} recoveryStatus="正在运行"
+        onStop={stop} onCancelSettlement={cancel} continueAvailable={false}
+        onRetryRecovery={async () => undefined} onContinueNormally={async () => undefined}
+      />));
+      const overlay = host.querySelector(".time-warp-idle-overlay")!;
+      expect(overlay.contains(document.activeElement)).toBe(true);
+      expect(background.hasAttribute("inert")).toBe(true);
+      act(() => background.focus());
+      expect(overlay.contains(document.activeElement)).toBe(true);
+      act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+      expect(stop).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(overlay.isConnected).toBe(true);
+      act(() => root.render(null));
+      expect(background.hasAttribute("inert")).toBe(false);
+      expect(document.activeElement).toBe(background);
+      expect(preserved.getAttribute("inert")).toBe("existing");
+      expect(preserved.getAttribute("aria-hidden")).toBe("false");
+    } finally {
+      act(() => root.render(null));
+      background.remove();
+      preserved.remove();
+    }
+  });
+
   it("does not present baseline values as zero output before the first verified macro snapshot", () => {
     const game = createInitialState();
     game.totalProduced.universe_matrix = 52_300_000_000_000;

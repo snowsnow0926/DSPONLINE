@@ -1,5 +1,5 @@
 import { chromium } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -19,6 +19,13 @@ const allProcessMemory = options["all-process-memory"] === "1";
 const workerHeapMemory = options["worker-heaps"] === "1";
 const profilePhase = options["profile-phase"] ?? "all";
 if (!["all", "stopping"].includes(profilePhase)) throw new Error("Invalid profiler phase");
+const timelinePhase = options.timeline ?? null;
+if (timelinePhase !== null && timelinePhase !== "stopping") throw new Error("Only --timeline=stopping is supported");
+if (timelinePhase && options.profile) throw new Error("Capture CPU sampling and browser timeline in separate diagnostic runs");
+const backgroundPresentationExperiment = options["background-experiment"] ?? null;
+if (backgroundPresentationExperiment !== null && backgroundPresentationExperiment !== "opacity-inert") {
+  throw new Error("Unknown isolated background presentation experiment");
+}
 const output = resolve(options.output ?? "artifacts/web-live-runtime");
 const name = options.name ?? `live-${supply}`;
 if (!/^[a-z0-9-]+$/i.test(name)) throw new Error("Invalid evidence name");
@@ -28,6 +35,8 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 900 
 let page;
 let profiler;
 let profilerTimeline;
+let timelineSession, timelineComplete, timelineTiming;
+let primaryFailed = false;
 const errors = [];
 const processSamples = [];
 const heapSamples = [];
@@ -228,6 +237,45 @@ try {
     opened.on("crash", () => { errors.push("isolated renderer crashed"); console.log("Isolated renderer crashed"); });
   });
   page = await context.newPage();
+  if (backgroundPresentationExperiment) await context.addInitScript(() => {
+    // Isolated presentation experiment only. Production assets and state are
+    // untouched. Inert preserves keyboard/assistive-technology exclusion;
+    // opacity alone would leave hidden controls focusable.
+    const install = () => {
+      if (!document.head || !document.body) return;
+      const style = document.createElement("style");
+      style.textContent = ".game-shell--pure-idle > *:not(.time-warp-idle-overlay){visibility:visible!important;opacity:0!important}";
+      document.head.append(style);
+      const discover = new MutationObserver(bind);
+      function bind() {
+        const root = document.querySelector(".game-shell[data-factory-canvas-source]");
+        if (!root) return;
+        discover.disconnect();
+        const retained = new Map();
+        const sync = () => {
+          if (root.classList.contains("game-shell--pure-idle")) {
+            for (const child of root.children) {
+              if (child.classList.contains("time-warp-idle-overlay")) continue;
+              if (!retained.has(child)) retained.set(child, child.getAttribute("inert"));
+              child.setAttribute("inert", "");
+            }
+          } else {
+            for (const [child, previous] of retained) {
+              if (previous === null) child.removeAttribute("inert");
+              else child.setAttribute("inert", previous);
+            }
+            retained.clear();
+          }
+        };
+        new MutationObserver(sync).observe(root, { attributes: true, attributeFilter: ["class"], childList: true });
+        sync();
+      }
+      discover.observe(document.body, { childList: true, subtree: true });
+      bind();
+    };
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install, { once: true });
+    else install();
+  });
   await page.goto(new URL("/icon.svg", base).href);
   console.log("Preparing isolated large-save runtime");
   const seeded = await page.evaluate(async (supply) => {
@@ -345,6 +393,15 @@ try {
     await page.waitForFunction(() => globalThis.__LIVE_RUNTIME_TRACE__.events.some((event) => event.type === "ready"));
   } finally { clearInterval(statusTimer); }
   const startMs = Date.now() - startStartedAt;
+  if (backgroundPresentationExperiment) await page.evaluate(() => {
+    const root = document.querySelector(".game-shell[data-factory-canvas-source]");
+    const overlay = root?.querySelector(".time-warp-idle-overlay");
+    const background = [...(root?.children ?? [])].filter((child) => !child.classList.contains("time-warp-idle-overlay"));
+    if (!overlay || background.length === 0 || overlay.closest("[inert]")) throw Error("Experimental modal is missing or inert");
+    if (background.some((child) => !child.hasAttribute("inert") || getComputedStyle(child).opacity !== "0")) {
+      throw Error("Presentation experiment did not apply to the actual frozen production page");
+    }
+  });
   await sampleProcesses("replication ready");
   await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "running"; });
   console.log(`Observing ${seconds} seconds of active replication`);
@@ -358,6 +415,21 @@ try {
   const beforeStop = await page.evaluate(() => globalThis.__LIVE_RUNTIME_TRACE__);
   await writeFile(resolve(output, `${name}-prestop.json`), JSON.stringify({ browser: await browser.version(), supply, seeded, trace: beforeStop, processSamples }));
   await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "stopping"; });
+  if (timelinePhase) {
+    timelineSession = await browser.newBrowserCDPSession();
+    timelineComplete = new Promise((resolve) => timelineSession.once("Tracing.tracingComplete", resolve));
+    const beforeMs = await page.evaluate(() => performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt);
+    await timelineSession.send("Tracing.start", {
+      transferMode: "ReturnAsStream", streamFormat: "json", streamCompression: "none",
+      traceConfig: { recordMode: "recordUntilFull", traceBufferSizeInKb: 65_536,
+        enableSampling: false, includedCategories: ["devtools.timeline", "blink.user_timing", "v8"] },
+    });
+    const afterMs = await page.evaluate(() => {
+      performance.mark("dsp-stop-trace-begin");
+      return performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt;
+    });
+    timelineTiming = { phase: timelinePhase, startTraceBeforeMs: beforeMs, startTraceAfterMs: afterMs };
+  }
   if (options.profile && profilePhase === "stopping") {
     profiler = await context.newCDPSession(page);
     await profiler.send("Profiler.enable");
@@ -371,10 +443,17 @@ try {
   await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click({ noWaitAfter: true });
   await overlay.waitFor({ state: "hidden" });
   const stopMs = Date.now() - stopStarted;
+  if (backgroundPresentationExperiment) await page.evaluate(() => {
+    const root = document.querySelector(".game-shell[data-factory-canvas-source]");
+    if (!root || [...root.children].some((child) => child.hasAttribute("inert"))) {
+      throw Error("Experimental background focus exclusion was not restored");
+    }
+  });
   if (postStopSeconds > 0) {
     await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "post-stop"; });
     await page.waitForTimeout(postStopSeconds * 1000);
   }
+  if (timelineSession) await page.evaluate(() => performance.mark("dsp-stop-trace-finish"));
   const trace = await page.evaluate(() => { const trace = globalThis.__LIVE_RUNTIME_TRACE__; trace.active = false; return trace; });
   const geometryAfterStop = await page.evaluate(() => {
     const canvas = document.querySelector(".canvas-belt-layer__topology");
@@ -408,7 +487,7 @@ try {
   if (startupWorkerHeaps && heapSamples.filter(sample => sample.stage === "before-macro-initialize").length !== 1) {
     throw Error("Startup Worker diagnostic did not capture its exact boundary");
   }
-  const evidence = { browser: await browser.version(), supply, observationSeconds: seconds, profiled: Boolean(options.profile), profilePhase,
+  const evidence = { browser: await browser.version(), supply, observationSeconds: seconds, profiled: Boolean(options.profile) || Boolean(timelinePhase), profilePhase, timelinePhase, backgroundPresentationExperiment,
     postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
     retainedNormalDebt: Boolean(options["retain-debt"]),
@@ -417,6 +496,7 @@ try {
   console.log(JSON.stringify({ supply, stopMs, events: trace.events.filter((event) => event.summary),
     runningMaxFrameGap: Math.max(0, ...trace.frames.filter((frame) => frame.phase === "running").map((frame) => frame.gap)) }, null, 2));
 } catch (error) {
+  primaryFailed = true;
   let diagnostic;
   try { diagnostic = await bounded(page.evaluate(() => ({ text: document.body.innerText.slice(0, 5000),
     notice: document.querySelector(".game-notice")?.textContent,
@@ -426,9 +506,36 @@ try {
   try { await bounded(page.screenshot({ path: resolve(output, `${name}-failure.png`) })); } catch { /* renderer may be unavailable */ }
   throw error;
 } finally {
+  let timelineFailure;
+  if (timelineSession) {
+    try {
+      await bounded(timelineSession.send("Tracing.end"), 10_000);
+      const complete = await bounded(timelineComplete, 10_000);
+      if (complete.dataLossOccurred || !complete.stream) throw Error("Browser timeline lost events or returned no stream");
+      const path = resolve(output, `${name}-timeline.json`);
+      await writeFile(path, "");
+      let bytes = 0;
+      try {
+        for (;;) {
+          const chunk = await bounded(timelineSession.send("IO.read", { handle: complete.stream, size: 1_048_576 }), 10_000);
+          const data = chunk.base64Encoded ? Buffer.from(chunk.data, "base64") : Buffer.from(chunk.data);
+          bytes += data.length;
+          if (bytes > 128 * 1_048_576) throw Error("Browser timeline exceeded diagnostic size limit");
+          await appendFile(path, data);
+          if (chunk.eof) break;
+        }
+      } finally { await bounded(timelineSession.send("IO.close", { handle: complete.stream })); }
+      await writeFile(resolve(output, `${name}-timeline-metadata.json`), JSON.stringify({ ...timelineTiming, bytes,
+        dataLossOccurred: complete.dataLossOccurred, scope: "Diagnostic timeline only; not unprofiled performance qualification" }, null, 2));
+    } catch (error) {
+      timelineFailure = error;
+      await writeFile(resolve(output, `${name}-timeline-error.json`), JSON.stringify({ error: String(error) }));
+    }
+  }
   if (profiler) {
     try { const capture = await bounded(profiler.send("Profiler.stop")); await writeFile(resolve(output, `${name}.cpuprofile`), JSON.stringify(capture.profile)); } catch { /* keep primary outcome */ }
     if (profilerTimeline) await writeFile(resolve(output, `${name}-profile-timeline.json`), JSON.stringify(profilerTimeline, null, 2));
   }
   await browser.close();
+  if (timelineFailure && !primaryFailed) throw timelineFailure;
 }

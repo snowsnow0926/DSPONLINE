@@ -1940,7 +1940,12 @@ function finishSimulationCheckpointChunks(accumulator: SimulationCheckpointAccum
 }
 
 type RuntimePersistenceKind = "autosave" | "manual" | "pure-idle-stop" | "return" | "lifecycle" | "other";
-type PureIdleStartupOperation = { cancelled: boolean; saveProgressId: number | null; abort: AbortController };
+type PureIdleStartupOperation = {
+  cancelled: boolean;
+  saveProgressId: number | null;
+  abort: AbortController;
+  normalCheckpoint?: { worker: Worker; revision: number; registryFingerprint: string | null };
+};
 type RuntimePersistencePhase = "checkpoint" | "serialize-write-readback" | "complete" | "failed";
 
 const LIFECYCLE_SEALED_SAVE_MESSAGE = "页面正在退出，已保留当前 durable recovery 供下次精确恢复";
@@ -7729,6 +7734,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             throw new Error("纯挂机终态保存前仍有普通模拟操作未完成");
           }
           barrierState = preparedTerminal.state;
+        } else if (preparedStartup?.operation.normalCheckpoint) {
+          // The startup already completed its ordinary checkpoint before
+          // allocating the extra frozen graph. Reuse only that same barrier.
+          const prepared = preparedStartup.operation.normalCheckpoint;
+          if (prepared.worker !== simulationWorkerRef.current || simulationWorkerDisabledRef.current ||
+            prepared.revision !== simulationStateRevisionRef.current ||
+            prepared.registryFingerprint !== simulationWorkerRegistryFingerprintRef.current ||
+            !pureIdleMacroActiveRef.current || simulationSubmissionRef.current || simulationRecoveryRef.current ||
+            simulationCheckpointRequestRef.current || deferredDurableUiSubmissionRef.current || durableRecoveryStageInFlightRef.current) {
+            throw new Error("纯挂机启动检查点已失效，未提交旧快照");
+          }
+          barrierState = preparedStartup.state;
         } else {
           barrierState = useConfirmedAutosaveBoundary
             ? stateWithSimulationDebt(confirmedState)
@@ -8814,6 +8831,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           const mode: PureIdleMacroMode = requestedMode === "replication"
             ? "replication"
             : endgameExtremeMode ? "extreme" : "stable";
+          let baselineReady = false;
+          if (!durableSimulationRuntimeEnabled && isLargeRuntimeState(gameRef.current) && getLocalSaveBackend() === "indexeddb" &&
+            simulationWorkerRef.current && !simulationWorkerDisabledRef.current && lastSimulationResultRef.current) {
+            // Keep the ordinary T0, but finish it before the private snapshot
+            // and its save Worker overlap with T0's transient encoded copies.
+            if (!await ensureDurableRecoveryBaseline(gameRef.current)) {
+              if (!startupIsCurrent()) return;
+              pureIdleMacroActiveRef.current = false;
+              setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
+              return;
+            }
+            baselineReady = true;
+            if (!startupIsCurrent()) return;
+            const ordinaryCheckpoint = await requestAuthoritativeSimulationCheckpoint();
+            if (!startupIsCurrent()) return;
+            const worker = simulationWorkerRef.current;
+            if (!worker || simulationWorkerDisabledRef.current || simulationSubmissionRef.current || simulationRecoveryRef.current ||
+              simulationCheckpointRequestRef.current || deferredDurableUiSubmissionRef.current || durableRecoveryStageInFlightRef.current) {
+              throw new Error("普通模拟检查点尚未稳定，未启动纯挂机");
+            }
+            startupOperation.normalCheckpoint = { worker, revision: simulationStateRevisionRef.current,
+              registryFingerprint: simulationWorkerRegistryFingerprintRef.current };
+            if (latestAuthoritativeCheckpointTransferRef.current?.state === ordinaryCheckpoint) {
+              latestAuthoritativeCheckpointTransferRef.current = null;
+            }
+          }
           const checkpoint = refreshTimeWarpPowerSnapshot(
             setTimeWarpEnabled(setPaused(gameRef.current, false), true),
           );
@@ -8826,7 +8869,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           // FactoryGame may be mounted directly by desktop/dev/e2e entry
           // points, so do the same durable T0 bootstrap the menu normally
           // performs before creating a pure-idle recovery journal.
-          if (!await ensureDurableRecoveryBaseline(gameRef.current)) {
+          if (!baselineReady && !await ensureDurableRecoveryBaseline(gameRef.current)) {
             if (!startupIsCurrent()) return;
             pureIdleMacroActiveRef.current = false;
             setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
@@ -8954,7 +8997,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     simulationPendingWallSecondsRef.current = 0;
     setTimeWarpPendingUi(0);
     setNotice("纯挂机已停止");
-  }, [endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityMacroController, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, requestAuthoritativeDeferredTopLevelProjection, setPureIdleRecoveryContinueState]);
+  }, [durableSimulationRuntimeEnabled, endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityMacroController, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, requestAuthoritativeDeferredTopLevelProjection, requestAuthoritativeSimulationCheckpoint, setPureIdleRecoveryContinueState]);
 
   const abortPureIdleForWorkerFailure = useCallback((message: string) => {
     if (pureIdleMacroActiveRef.current) {

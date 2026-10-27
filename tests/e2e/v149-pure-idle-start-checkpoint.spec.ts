@@ -9,10 +9,12 @@ async function install(page: Page, injectQuota = false) {
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.3");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
-    const probe = { active: false, begins: 0, records: 0, completes: 0, checkpoints: 0, ready: 0,
+    const probe = { active: false, begins: 0, records: 0, completes: 0, checkpoints: 0, checkpointReplies: 0,
+      firstUploadCheckpointReplies: -1, holdCheckpoint: false, checkpointBlocked: false, ready: 0,
       crash: false, crashes: 0, terminations: 0, quotaWorkers: 0, hold: false, blocked: false,
       holdRecovery: false, recoveryBlocked: false, recoveryAttempts: 0, elapsed: -1,
-      release: null as (() => void) | null, releaseRecovery: null as (() => void) | null };
+      release: null as (() => void) | null, releaseRecovery: null as (() => void) | null,
+      releaseCheckpoint: null as (() => void) | null };
     Object.assign(window, { __startupCheckpoint: probe });
     const NativeWorker = window.Worker;
     window.Worker = class extends NativeWorker {
@@ -37,6 +39,7 @@ async function install(page: Page, injectQuota = false) {
           if (event.data.type === "ready") probe.ready += 1;
         });
         if (this.workerName === "factory-simulation") this.addEventListener("message", event => {
+          if (probe.active && event.data.checkpoint) probe.checkpointReplies++;
           const elapsed = event.data.projection?.elapsedSeconds ?? event.data.state?.elapsedSeconds ?? event.data.deferredElapsedSeconds;
           if (typeof elapsed === "number") probe.elapsed = elapsed;
         });
@@ -44,9 +47,17 @@ async function install(page: Page, injectQuota = false) {
       postMessage(message: unknown, options?: Transferable[] | StructuredSerializeOptions): void {
         const request = message as { type?: string; kind?: string };
         const send = () => Array.isArray(options) ? super.postMessage(message, options) : super.postMessage(message, options);
-        if (probe.active && this.workerName === "factory-simulation" && request.kind === "checkpoint") probe.checkpoints += 1;
+        if (probe.active && this.workerName === "factory-simulation" && request.kind === "checkpoint") {
+          probe.checkpoints += 1;
+          if (probe.holdCheckpoint) {
+            probe.holdCheckpoint = false; probe.checkpointBlocked = true; probe.releaseCheckpoint = send; return;
+          }
+        }
         if (probe.active && ["authoritative-save-serialization", "pure-idle-checkpoint-owner"].includes(this.workerName)) {
-          if (request.type === "state-begin") probe.begins += 1;
+          if (request.type === "state-begin") {
+            probe.begins += 1;
+            if (probe.firstUploadCheckpointReplies < 0) probe.firstUploadCheckpointReplies = probe.checkpointReplies;
+          }
           if (request.type === "state-complete") probe.completes += 1;
           if (request.type === "recovery-serialize" && probe.crash) {
             probe.crash = false; probe.crashes += 1;
@@ -141,7 +152,7 @@ async function arm(page: Page, patch: Record<string, unknown> = {}) {
 }
 async function probe(page: Page) {
   return page.evaluate(() => {
-    const { release: _release, releaseRecovery: _recovery, ...value } = (window as unknown as { __startupCheckpoint: { release: unknown; [key: string]: unknown } }).__startupCheckpoint;
+    const { release: _release, releaseRecovery: _recovery, releaseCheckpoint: _checkpoint, ...value } = (window as unknown as { __startupCheckpoint: { release: unknown; [key: string]: unknown } }).__startupCheckpoint;
     return value;
   });
 }
@@ -159,6 +170,7 @@ for (const paused of [true, false]) test(`large startup streams its frozen sourc
   const observed = await probe(page);
   expect(observed.begins).toBe(1); expect(Number(observed.records)).toBeGreaterThan(1);
   expect(observed.completes).toBe(1); expect(observed.checkpoints).toBe(1);
+  expect(observed.checkpointReplies).toBe(1); expect(observed.firstUploadCheckpointReplies).toBe(1);
   const raw = await primary(page); expect(raw).not.toBeNull();
   const state = JSON.parse(raw!).state;
   expect(state.entities).toHaveLength(seeded.entityCount); expect(state.tray.iron_ingot).toBe(123);
@@ -270,4 +282,23 @@ test("a cancelled startup does not leave a macro latch after a cached-page resto
   await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-paused", "false");
   await expect.poll(async () => Number((await probe(page)).elapsed), { timeout: 10_000 }).toBeGreaterThan(before);
   expect((await probe(page)).ready).toBe(0);
+});
+
+test("pagehide during the early ordinary checkpoint never uploads a late startup snapshot", async ({ page }) => {
+  await install(page); await seed(page); await arm(page, { holdCheckpoint: true }); await start(page);
+  await expect.poll(async () => (await probe(page)).checkpointBlocked).toBe(true);
+  expect((await probe(page)).begins).toBe(0);
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    (window as unknown as { __startupCheckpoint: { releaseCheckpoint: () => void } }).__startupCheckpoint.releaseCheckpoint();
+  });
+  await expect.poll(async () => (await probe(page)).checkpointReplies).toBe(1);
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+  const before = Number((await probe(page)).elapsed);
+  await page.getByRole("button", { name: "继续模拟", exact: true }).click();
+  await expect.poll(async () => Number((await probe(page)).elapsed), { timeout: 10_000 }).toBeGreaterThan(before);
+  const observed = await probe(page);
+  expect(observed.begins).toBe(0); expect(observed.recoveryAttempts).toBe(0); expect(observed.ready).toBe(0);
+  const saved = JSON.parse((await primary(page))!).state;
+  expect(saved.timeWarp.enabled).toBe(false); expect(saved.tray.iron_ingot).toBe(123);
 });

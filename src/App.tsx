@@ -361,6 +361,7 @@ import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, Build
 import type { SimulationCheckpointStateChunk, SimulationChunkedSaveWriteAck, SimulationChunkedSaveWriteRequest, SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroFinalEnvelopeResult, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
 import type { AuthoritativeSaveEnvelopeTransfer } from "./game/authoritativeSaveSerializationProtocol";
+import { retireIdleAuthoritativeSavePersistenceWorker } from "./game/authoritativeSavePersistenceClient";
 import type { PureIdleMacroMode, PureIdleMacroSummary } from "./game/pureIdleMacro";
 import { isPureIdleReplicationUnlocked } from "./game/endgame";
 import { getPureIdleReplicationReadiness } from "./game/pureIdleReplication";
@@ -1940,12 +1941,7 @@ function finishSimulationCheckpointChunks(accumulator: SimulationCheckpointAccum
 }
 
 type RuntimePersistenceKind = "autosave" | "manual" | "pure-idle-stop" | "return" | "lifecycle" | "other";
-type PureIdleStartupOperation = {
-  cancelled: boolean;
-  saveProgressId: number | null;
-  abort: AbortController;
-  normalCheckpoint?: { worker: Worker; revision: number; registryFingerprint: string | null };
-};
+type PureIdleStartupOperation = { cancelled: boolean; saveProgressId: number | null; abort: AbortController };
 type RuntimePersistencePhase = "checkpoint" | "serialize-write-readback" | "complete" | "failed";
 
 const LIFECYCLE_SEALED_SAVE_MESSAGE = "页面正在退出，已保留当前 durable recovery 供下次精确恢复";
@@ -7734,18 +7730,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             throw new Error("纯挂机终态保存前仍有普通模拟操作未完成");
           }
           barrierState = preparedTerminal.state;
-        } else if (preparedStartup?.operation.normalCheckpoint) {
-          // The startup completed its ordinary checkpoint before allocating
-          // the save Worker's graph. Reuse only that same barrier.
-          const prepared = preparedStartup.operation.normalCheckpoint;
-          if (prepared.worker !== simulationWorkerRef.current || simulationWorkerDisabledRef.current ||
-            prepared.revision !== simulationStateRevisionRef.current ||
-            prepared.registryFingerprint !== simulationWorkerRegistryFingerprintRef.current ||
-            !pureIdleMacroActiveRef.current || simulationSubmissionRef.current || simulationRecoveryRef.current ||
-            simulationCheckpointRequestRef.current || deferredDurableUiSubmissionRef.current || durableRecoveryStageInFlightRef.current) {
-            throw new Error("纯挂机启动检查点已失效，未提交旧快照");
-          }
-          barrierState = preparedStartup.state;
         } else {
           barrierState = useConfirmedAutosaveBoundary
             ? stateWithSimulationDebt(confirmedState)
@@ -8849,24 +8833,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
             return;
           }
-          if (!durableSimulationRuntimeEnabled && isLargeRuntimeState(checkpoint) && getLocalSaveBackend() === "indexeddb" &&
-            simulationWorkerRef.current && !simulationWorkerDisabledRef.current && lastSimulationResultRef.current) {
-            // Keep the ordinary T0, but finish it before allocating the save
-            // Worker's full graph. Preserve the original private-copy order.
-            if (!startupIsCurrent()) return;
-            const ordinaryCheckpoint = await requestAuthoritativeSimulationCheckpoint();
-            if (!startupIsCurrent()) return;
-            const worker = simulationWorkerRef.current;
-            if (!worker || simulationWorkerDisabledRef.current || simulationSubmissionRef.current || simulationRecoveryRef.current ||
-              simulationCheckpointRequestRef.current || deferredDurableUiSubmissionRef.current || durableRecoveryStageInFlightRef.current) {
-              throw new Error("普通模拟检查点尚未稳定，未启动纯挂机");
-            }
-            startupOperation.normalCheckpoint = { worker, revision: simulationStateRevisionRef.current,
-              registryFingerprint: simulationWorkerRegistryFingerprintRef.current };
-            if (latestAuthoritativeCheckpointTransferRef.current?.state === ordinaryCheckpoint) {
-              latestAuthoritativeCheckpointTransferRef.current = null;
-            }
-          }
           setNotice("正在取得纯挂机恢复日志写入权…");
           if (!startupIsCurrent()) return;
           const claim = await createPureIdleRecovery(
@@ -8911,6 +8877,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             pureIdleMacroActiveRef.current = false;
             setNotice("无法创建纯挂机检查点，主存档未改变");
             return;
+          }
+          if (!durableSimulationRuntimeEnabled && isLargeRuntimeState(checkpoint)) {
+            // The verified startup save is complete. Release its idle Worker
+            // before the macro Worker allocates another full factory graph.
+            retireIdleAuthoritativeSavePersistenceWorker();
           }
           pureIdleRecoveryRef.current = claim.record;
           pureIdleActiveRef.current = true;
@@ -8989,7 +8960,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     simulationPendingWallSecondsRef.current = 0;
     setTimeWarpPendingUi(0);
     setNotice("纯挂机已停止");
-  }, [durableSimulationRuntimeEnabled, endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityMacroController, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, requestAuthoritativeDeferredTopLevelProjection, requestAuthoritativeSimulationCheckpoint, setPureIdleRecoveryContinueState]);
+  }, [durableSimulationRuntimeEnabled, endgameExtremeMode, ensureDurableRecoveryBaseline, initializePureIdleMacroClient, invalidateFactoryAlertProjection, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, nativePlayerAuthorityMacroController, persistPrimarySave, publishTimeWarpComputeState, rejectPlayerStateEditDuringPrimarySave, requestAuthoritativeDeferredTopLevelProjection, setPureIdleRecoveryContinueState]);
 
   const abortPureIdleForWorkerFailure = useCallback((message: string) => {
     if (pureIdleMacroActiveRef.current) {

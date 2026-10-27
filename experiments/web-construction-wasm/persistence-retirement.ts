@@ -188,17 +188,21 @@ export async function runStartupSharedOwnerParity() {
         };
         const result = await client.commit(input);
         if (!result.result.ok) throw new Error(result.result.message);
+        // Retire before the independent read to prove the successful reply
+        // already covers the durable transaction and full verification.
+        if (!client.retireIdleWorker()) throw new Error("Completed large startup save did not retire");
         const raw = await readStored(input.key);
         if (!raw) throw new Error("Independent full primary readback missing");
         const bytes = new TextEncoder().encode(raw); const sha256 = await hash(bytes);
         if (sha256 !== serialized.proof.payloadSha256 || bytes.byteLength !== serialized.proof.byteLength ||
           result.result.proof.backupSaved || result.result.proof.revision !== commits.length + 1 ||
           await readStored(`${input.key}.backup`) !== null) throw new Error("Primary proof/revision/backup differs");
-        commits.push({ path, sha256, bytes: bytes.byteLength, revision: result.result.proof.revision, backupSaved: false });
+        commits.push({ path, sha256, bytes: bytes.byteLength, revision: result.result.proof.revision,
+          backupSaved: false, idleWorkerRetired: true });
       } finally { abort.abort(); await clearPureIdleRecovery(claim.record.sessionId, claim.record.ownerToken); }
     }
     if (commits[0].sha256 !== commits[1].sha256 || await stateHash(state) !== before) throw new Error("Full pipeline parity failed");
-    return { scope: "Complete recovery and primary writes; equality qualification only, not a whole-page performance claim.",
+    return { scope: "Complete recovery and primary writes, with immediate idle Worker retirement before independent readback; equality only, not a performance claim.",
       stateSha256: before, callerUnchanged: true, entityCount: state.entities.length, beltCount: state.belts.length, commits };
   } finally { client.terminate(); }
 }

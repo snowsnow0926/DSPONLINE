@@ -111,6 +111,65 @@ function complete(worker: FakeWorker, ok = true): void {
 afterEach(() => vi.useRealTimers());
 
 describe("AuthoritativeSavePersistenceClient", () => {
+  it("immediate retirement never interrupts inflight or queued writes and returns all buffers first", async () => {
+    vi.useFakeTimers();
+    const worker = new FakeWorker();
+    const client = new AuthoritativeSavePersistenceClient({ workerFactory: () => worker as unknown as Worker, largePayloadThresholdBytes: 2 });
+    expect(client.retireIdleWorker()).toBe(false);
+    const large = await input([1, 2, 3]), small = await input([4]);
+    const first = client.commit(large), second = client.commit(small);
+    expect(client.retireIdleWorker()).toBe(false);
+    complete(worker); await first;
+    expect(client.retireIdleWorker()).toBe(false);
+    expect(worker.terminateCount).toBe(0);
+    complete(worker); await second;
+    expect([...new Uint8Array(large.bytes)]).toEqual([1, 2, 3]);
+    expect([...new Uint8Array(small.bytes)]).toEqual([4]);
+    expect(client.retireIdleWorker()).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(client.retireIdleWorker()).toBe(false);
+    client.terminate();
+    expect(worker.terminateCount).toBe(1);
+  });
+
+  it("immediate retirement preserves a fresh generation against old callbacks and idle deadlines", async () => {
+    vi.useFakeTimers();
+    const workers: FakeWorker[] = [];
+    const client = new AuthoritativeSavePersistenceClient({ largePayloadThresholdBytes: 2,
+      workerFactory: () => { const worker = new FakeWorker(); workers.push(worker); return worker as unknown as Worker; } });
+    const first = await input([1, 2, 3]);
+    const pending = client.commit(first);
+    const oldMessage = workers[0].onmessage, oldError = workers[0].onerror, oldDecodeError = workers[0].onmessageerror;
+    complete(workers[0]); await pending;
+    await vi.advanceTimersByTimeAsync(1_900);
+    expect(client.retireIdleWorker()).toBe(true);
+    const next = client.commit({ ...await input([5, 6]), expectedRevision: 1 });
+    expect(workers).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(200);
+    oldMessage?.({ data: { id: workers[1].requests[0].id, type: "error", message: "late" } } as MessageEvent<AuthoritativeSavePersistenceResponse>);
+    oldError?.({ message: "late", preventDefault: () => undefined } as ErrorEvent);
+    oldDecodeError?.({} as MessageEvent);
+    expect(workers[1].terminateCount).toBe(0);
+    expect(client.retireIdleWorker()).toBe(false);
+    complete(workers[1]);
+    await expect(next).resolves.toMatchObject({ result: { ok: true, proof: { revision: 2 } } });
+    expect(client.retireIdleWorker()).toBe(true);
+    client.terminate();
+  });
+
+  it("immediate retirement keeps a small-save generation warm and a pagehide client closed", async () => {
+    const worker = new FakeWorker();
+    const client = new AuthoritativeSavePersistenceClient({ workerFactory: () => worker as unknown as Worker });
+    const source = await input();
+    const pending = client.commit(source); complete(worker); await pending;
+    expect(client.retireIdleWorker()).toBe(false);
+    expect(worker.terminateCount).toBe(0);
+    client.terminate();
+    expect(client.retireIdleWorker()).toBe(false);
+    await expect(client.commit(source)).rejects.toMatchObject({ code: "terminated", ownershipLost: false });
+    expect(worker.terminateCount).toBe(1);
+  });
+
   it("retires a large immutable Blob after a controlled failure without losing the caller payload", async () => {
     vi.useFakeTimers();
     const worker = new BlobFakeWorker();

@@ -104,16 +104,29 @@ export class AuthoritativeSavePersistenceClient {
     const active = this.worker;
     if (!active || !this.largePayloadSeen || this.closed || this.idleTimer !== null ||
       this.inflightId !== null || this.pending.size || this.queue.length) return;
-    this.idleTimer = globalThis.setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
+      if (this.idleTimer !== timer || this.worker !== active) return;
       this.idleTimer = null;
-      if (this.worker !== active || this.inflightId !== null || this.pending.size || this.queue.length) return;
-      // All results and returned buffers have reached their callers. This
-      // generation owns no pending work; keep the client open for a lazy restart.
-      this.worker = null;
-      this.largePayloadSeen = false;
-      active.onmessage = null; active.onerror = null; active.onmessageerror = null;
-      active.terminate();
+      this.retireIdleWorker();
     }, this.largePayloadIdleTimeoutMs);
+    this.idleTimer = timer;
+  }
+
+  /** Release a drained large-save generation without closing the save queue. */
+  retireIdleWorker(): boolean {
+    const active = this.worker;
+    if (!active || !this.largePayloadSeen || this.closed || this.inflightId !== null ||
+      this.pending.size || this.queue.length) return false;
+    // Every durable result and returned buffer has reached its caller. Never
+    // cancel pending work; the next save can lazily create a fresh generation.
+    this.cancelIdleRetirement();
+    this.worker = null;
+    this.largePayloadSeen = false;
+    active.onmessage = null;
+    active.onerror = null;
+    active.onmessageerror = null;
+    active.terminate();
+    return true;
   }
 
   private ensureWorker(): Worker {
@@ -323,6 +336,10 @@ export function commitAuthoritativeSavePayloadInPersistenceWorker(
 
 export function terminateAuthoritativeSavePersistenceWorker(): void {
   defaultClient.terminate();
+}
+
+export function retireIdleAuthoritativeSavePersistenceWorker(): boolean {
+  return defaultClient.retireIdleWorker();
 }
 
 /** Permanently stop accepting page-lifecycle writes; queued buffers stay owned by the caller. */

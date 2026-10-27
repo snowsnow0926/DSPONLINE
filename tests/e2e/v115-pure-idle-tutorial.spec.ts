@@ -125,7 +125,19 @@ test("time warp starts a blocking pure-idle page and can stop safely", async ({ 
     (window as typeof window & { __pureIdleReuseTracker?: { initializes: number } }).__pureIdleReuseTracker?.initializes ?? 0,
   )).toBe(1);
   await idle.screenshot({ path: "artifacts/qa/v115-pure-idle-desktop.png", animations: "disabled" });
-  await expect(page.locator(".construction-dock")).toBeHidden();
+  // Opacity preserves the dock's layout without the inherited visibility
+  // rebuild; inert and the modal focus guard keep hidden controls unavailable.
+  const backgroundDock = page.locator(".construction-dock");
+  await expect(backgroundDock).toHaveCSS("opacity", "0");
+  await expect(backgroundDock).toHaveAttribute("inert", "");
+  await expect(backgroundDock).toHaveAttribute("aria-hidden", "true");
+  await expect(backgroundDock.getByRole("button")).toHaveCount(0);
+  expect(await backgroundDock.evaluate((dock) => {
+    const button = dock.querySelector("button");
+    if (!button) throw Error("Background dock has no focus target");
+    button.focus();
+    return !dock.contains(document.activeElement);
+  })).toBe(true);
   // The 30-second autosave scheduler must defer to the pure-idle recovery
   // journal instead of saving the dormant normal simulation authority.
   await page.evaluate(() => {

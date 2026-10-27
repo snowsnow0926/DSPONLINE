@@ -54,7 +54,10 @@ describe("factory canvas topology", () => {
     ], false);
     expect(centers.get(belt.id)).toBeLessThan(0);
     const moved = [{ ...source, position: { x: 20, y: 0 } }, target, blocker];
-    expect(reconcileFactoryCanvasTopology(topology, state.activePlanetId, moved, [belt])).not.toBe(topology);
+    const next = reconcileFactoryCanvasTopology(topology, state.activePlanetId, moved, [belt]);
+    expect(next).not.toBe(topology);
+    expect(next.entities.find((entity) => entity.id === source.id)).toMatchObject({ x: 20, y: 0 });
+    expect(topology.entities.find((entity) => entity.id === source.id)).toMatchObject({ x: 0, y: 0 });
   });
 
   it("publishes connection counts immediately from topology before any cargo tick", () => {

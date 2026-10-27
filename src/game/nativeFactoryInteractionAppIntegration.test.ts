@@ -48,8 +48,8 @@ describe("native factory interaction App wiring", () => {
     expect(readStateBlock).toMatch(/const frame = nativeAuthoritativeFactoryCanvasFrameRef\.current/);
     expect(readStateBlock).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?!frame[\s\S]*?!frame\.entityById\.has\(sourceEntityId\)/);
     expect(readStateBlock).toMatch(/selectFactoryConnectionReadState\([\s\S]*?gameRef\.current,[\s\S]*?frame,/);
-    expect(readStateBlock).toMatch(/sessionId: frame\?\.sessionId \?\? nativePlayerAuthorityActiveFrame\?\.sessionId \?\? null/);
-    expect(readStateBlock).toMatch(/revision: frame\?\.revision \?\? factoryThinViewExpectedRevision/);
+    expect(readStateBlock).toMatch(/sessionId: frame\?\.sessionId \?\? null/);
+    expect(readStateBlock).toMatch(/revision: frame\?\.revision \?\? -1/);
     expect(readStateBlock).toMatch(/planetId: frame\?\.planetId \?\? gameRef\.current\.activePlanetId/);
     expect(readStateBlock).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current && frame && result\.entities !== frame\.entities/);
     expect(readStateBlock).toMatch(/const state = getFactoryConnectionReadState\(connection\.source, connection\.target\)/);

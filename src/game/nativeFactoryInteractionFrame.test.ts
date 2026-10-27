@@ -363,6 +363,14 @@ describe("native factory interaction atom", () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
+  it("returns the untouched Web state without consulting identity when no native frame exists", () => {
+    const webState = createInitialState();
+    const unreadableIdentity = new Proxy({ sessionId: null, revision: -1, planetId: "home" as const }, {
+      get() { throw new Error("No frame must not read a renderer identity fallback"); },
+    });
+    expect(selectFactoryConnectionReadState(webState, null, unreadableIdentity, "source", "target")).toBe(webState);
+  });
+
   it("keeps connection reads atomic when the frame identity is stale or cross-session", () => {
     const webState = createInitialState();
     const nativeFrame = frame();

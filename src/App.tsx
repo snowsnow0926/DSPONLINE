@@ -16567,6 +16567,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return next;
     }, { entities: activePlanetEntities.length, belts: activePlanetBelts.length });
   }, [activePlanetBelts, activePlanetEntities, canvasRenderSnapshot.topologyRevision, factoryCanvasPlanetId, factoryCanvasRows.source, topologyCacheFeatureActive]);
+  // Runtime-only entity projections must not recreate the touch cancellation
+  // chain. Positions come from the same immutable geometry used by the canvas.
+  const canvasRestorePositionsById = useMemo(() => new Map(
+    canvasTopology.entities.map((entity) => [entity.id, entity] as const),
+  ), [canvasTopology.entities]);
   const factoryMiniMapUsesNativeTopology = nativeFactoryThinViewActive &&
     factoryViewportProvesWholePlanet(factoryViewportReadModel);
   const factoryMiniMapEntities = factoryMiniMapUsesNativeTopology
@@ -17701,12 +17706,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (nativePlayerAuthorityOwnsRuntimeRef.current &&
       (!frame || !sourceEntityId || !targetEntityId ||
         !frame.entityById.has(sourceEntityId) || !frame.entityById.has(targetEntityId))) return null;
+    // A valid frame carries its complete identity; an absent frame always
+    // returns the Web state unchanged. Renderer clock/session fallbacks add no
+    // validation and would recreate this whole callback chain every tick.
     const result = selectFactoryConnectionReadState(
       gameRef.current,
       frame,
       {
-        sessionId: frame?.sessionId ?? nativePlayerAuthorityActiveFrame?.sessionId ?? null,
-        revision: frame?.revision ?? factoryThinViewExpectedRevision,
+        sessionId: frame?.sessionId ?? null,
+        revision: frame?.revision ?? -1,
         planetId: frame?.planetId ?? gameRef.current.activePlanetId,
       },
       sourceEntityId,
@@ -17716,7 +17724,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     // A native owner may only receive the endpoint-closed Rust frame.
     if (nativePlayerAuthorityOwnsRuntimeRef.current && frame && result.entities !== frame.entities) return null;
     return result;
-  }, [factoryThinViewExpectedRevision, nativePlayerAuthorityActiveFrame?.sessionId]);
+  }, []);
   const isValidConnection = useCallback((connection: Connection | Edge) => {
     const sourceItem = parseHandleItem(connection.sourceHandle);
     const targetItem = parseHandleItem(connection.targetHandle);
@@ -18960,10 +18968,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const restoreCanvasEntityPositions = useCallback(() => {
     setNodes((current) => current.map((node) => {
-      const entity = activeEntityById.get(node.id);
-      return entity ? { ...node, position: { ...entity.position }, dragging: false } : node;
+      const entity = canvasRestorePositionsById.get(node.id);
+      return entity ? { ...node, position: { x: entity.x, y: entity.y }, dragging: false } : node;
     }));
-  }, [activeEntityById, setNodes]);
+  }, [canvasRestorePositionsById, setNodes]);
 
   const cancelPendingTouchAction = useCallback(() => {
     regionSelectionStartRef.current = null;

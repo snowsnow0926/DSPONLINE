@@ -51,6 +51,7 @@ export class BeltFlowSampler {
       const belt = state.belts[index];
       if (options.planetId && belt.planetId !== options.planetId) continue;
       activeIds.add(belt.id);
+      this.projectionIndexes.push(index);
       const totalTransferred = normalizedTotal(belt);
       let history = this.histories.get(belt.id);
       const previous = history?.[history.length - 1];
@@ -80,11 +81,6 @@ export class BeltFlowSampler {
         transferred: Math.round(transferred * 1_000) / 1_000,
         sampling: sampleSeconds + 0.000_001 < BELT_FLOW_WINDOW_SECONDS,
       } satisfies BeltFlowObservation;
-      // Every publication starts from a fresh authoritative snapshot. Even a
-      // stable window must replace that snapshot's instantaneous lastFlow and
-      // missing UI-only fields; comparison with the previous observation would
-      // incorrectly omit these belts after the five-second window fills.
-      if (!matchesObservation(belt, nextObservation)) this.projectionIndexes.push(index);
       this.latest.set(belt.id, nextObservation);
     }
 
@@ -97,7 +93,8 @@ export class BeltFlowSampler {
     return this.latest;
   }
 
-  /** Consume indexes that need projection onto the exact state just sampled. */
+  /** Consume the current planet's sampled indexes. Compare display values only
+   * after the map is complete, preserving legacy duplicate-ID observations. */
   consumeProjectionIndexes(): number[] {
     const indexes = this.projectionIndexes;
     this.projectionIndexes = [];

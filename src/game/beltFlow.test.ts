@@ -39,14 +39,16 @@ describe("BeltFlowSampler", () => {
     }
   });
 
-  it("reports indexes requiring projection onto the sampled state", () => {
+  it("reports sampled indexes and reuses an already projected state", () => {
     const sampler = new BeltFlowSampler();
     const state = stateWithBelt();
     const observations = sampler.sample(state);
     expect(sampler.consumeProjectionIndexes()).toEqual([0]);
     const projected = applyBeltFlowObservations(state, observations);
-    sampler.sample(projected);
-    expect(sampler.consumeProjectionIndexes()).toEqual([]);
+    const sameObservations = sampler.sample(projected);
+    const indexes = sampler.consumeProjectionIndexes();
+    expect(indexes).toEqual([0]);
+    expect(applyBeltFlowObservations(projected, sameObservations, "home", indexes)).toBe(projected);
     state.elapsedSeconds = 1;
     state.belts[0].totalTransferred = 12;
     sampler.sample(state);
@@ -133,6 +135,19 @@ describe("BeltFlowSampler", () => {
     publish(11, [0, 2, 1], "home");
     sampler.reset();
     expect(publish(1, [0, 2, 1], "home").belts[0].recentFlowSampleSeconds).toBe(0);
+  });
+
+  it("preserves full-pass observations when legacy belts share an id", () => {
+    const sampler = new BeltFlowSampler();
+    const state = stateWithBelt();
+    Object.assign(state.belts[0], { recentFlowSampleSeconds: 0, recentFlowTransferred: 0, recentFlowSampling: true });
+    state.belts.push({ ...state.belts[0], totalTransferred: 12, lastFlow: 12 });
+    const untouched = structuredClone(state);
+    const observations = sampler.sample(state, { planetId: "home" });
+    const observed = applyBeltFlowObservations(state, observations, "home", sampler.consumeProjectionIndexes());
+    expect(observed).toEqual(applyBeltFlowObservations(state, observations, "home"));
+    expect(observed.belts.map((belt) => belt.lastFlow)).toEqual([12, 12]);
+    expect(state).toEqual(untouched);
   });
 
   it("interpolates a coarse publish interval without changing the measured rate", () => {

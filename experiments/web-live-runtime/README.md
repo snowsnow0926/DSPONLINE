@@ -6,6 +6,12 @@ It records no keys or values and is disabled by default. These synchronous
 call durations are not the complete asynchronous transaction/read latency.
 See the [startup diagnosis](../../docs/reviews/2026-10-27-web-startup-idb.md).
 
+`--startup-buffer-gc=1` is a separate reachability diagnostic. It holds the
+startup owner's serialize message, requests one page GC, records numeric heap
+usage, then continues the real save. It is disabled by default. Never compare
+its timings or working sets with normal runs; use it only to investigate live
+references. See the [buffer experiment](../../docs/reviews/2026-10-27-web-obsolete-checkpoint-buffer.md).
+
 This opt-in local experiment uses a private prepared save through the existing
 `web-save-checkpoints/vite.config.ts` fixture server. It launches a fresh Chrome
 context with service workers blocked and all `/api/**` requests intercepted.

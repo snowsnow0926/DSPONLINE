@@ -6836,13 +6836,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       message: "Windows 原生权威状态已变化，旧 JavaScript 主档未提交",
       code: "conflict",
     };
-    const checkpoint = latestAuthoritativeCheckpointTransferRef.current;
+    let checkpoint = latestAuthoritativeCheckpointTransferRef.current;
     let result: SaveGameResult;
     if (!checkpoint || checkpoint.state !== state) {
       // A replacement/imported state must not retain the previous authority
       // buffer indefinitely. Identity mismatch already prevents reuse; clear
       // the stale 35+ MiB ownership here as well.
       if (checkpoint) latestAuthoritativeCheckpointTransferRef.current = null;
+      // This async scope survives until the replacement save finishes. Drop
+      // its local reference too; the old buffer cannot be used by this save.
+      checkpoint = null;
       // A large replacement checkpoint has no transferable authority buffer.
       // Keep its envelope/catalog verification in the Workers as well; the
       // legacy string commit scans both 100+ MB payloads on the UI thread.

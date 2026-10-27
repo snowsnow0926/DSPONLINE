@@ -72,4 +72,27 @@ describe("useLongPress", () => {
     act(() => vi.advanceTimersByTime(100));
     expect(onLongPress).toHaveBeenCalledOnce();
   });
+
+  it("keeps the pointer-down callback snapshot across an ordinary render", () => {
+    const completed: number[] = [];
+    function Harness({ revision }: { revision: number }) {
+      const bindings = useLongPress<HTMLDivElement>({
+        delayMs: 100,
+        resetKey: "same-session:home",
+        getTarget: () => "entity",
+        onLongPress: () => { completed.push(revision); },
+      });
+      return <div data-testid="target" {...bindings} />;
+    }
+    act(() => root.render(<Harness revision={1} />));
+    const target = host.querySelector("[data-testid=target]")!;
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 1)));
+    act(() => root.render(<Harness revision={2} />));
+    act(() => vi.advanceTimersByTime(100));
+    expect(completed).toEqual([1]);
+    act(() => target.dispatchEvent(pointerEvent("pointerup", 1)));
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 2)));
+    act(() => vi.advanceTimersByTime(100));
+    expect(completed).toEqual([1, 2]);
+  });
 });

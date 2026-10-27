@@ -24,6 +24,8 @@ const mainHeapAllocations = options["main-heap-allocations"] === "1";
 if (mainHeapAllocations && !workerHeapMemory) throw new Error("--main-heap-allocations requires --worker-heaps; diagnostic only");
 const mainHeapSnapshot = options["main-heap-snapshot"] === "1";
 if (mainHeapSnapshot && (!workerHeapMemory || !workerHeapGc)) throw new Error("--main-heap-snapshot requires --worker-heaps and --worker-heap-gc; private diagnostic only");
+const runtimeRetention = mainHeapSnapshot || options["runtime-retention"] === "1";
+if (runtimeRetention && (!workerHeapMemory || !workerHeapGc)) throw new Error("--runtime-retention requires --worker-heaps and --worker-heap-gc; diagnostic only");
 const profilePhase = options["profile-phase"] ?? "all";
 if (!["all", "stopping"].includes(profilePhase)) throw new Error("Invalid profiler phase");
 const timelinePhase = options.timeline ?? null;
@@ -49,6 +51,7 @@ let primaryFailed = false;
 const errors = [];
 const processSamples = [];
 const heapSamples = [];
+const retentionSamples = [];
 const startupBufferSamples = [];
 const bounded = (promise, ms = 5000) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(Error("diagnostic timeout")), ms))]);
 
@@ -96,6 +99,18 @@ async function sampleHeaps(stage) {
     if (allocationSession) {
       const { profile } = await allocationSession.send("HeapProfiler.getSamplingProfile");
       await writeFile(resolve(output, `${name}-allocations-${stage.replace(/[^a-z0-9]+/gi, "-")}.json`), JSON.stringify(profile));
+    }
+    if (runtimeRetention) {
+      const groups = await page.evaluate(() => Object.fromEntries(Object.entries(globalThis.__DSP_RUNTIME_RETENTION__?.groups ?? {}).map(([label, group]) => {
+        const alive = new Set();
+        for (const entry of group.entries) {
+          const value = entry.reference.deref();
+          if (value) alive.add(value);
+        }
+        return [label, { totalTracked: group.totalTracked, retainedEntries: group.entries.length, uniqueAlive: alive.size }];
+      })));
+      retentionSamples.push({ stage, groups });
+      await writeFile(resolve(output, `${name}-retention.json`), JSON.stringify(retentionSamples, null, 2));
     }
     const { targetInfos } = await session.send("Target.getTargets");
     for (const target of targetInfos.filter((item) => item.type === "worker" && item.url.startsWith(base.origin + "/"))) {
@@ -173,9 +188,9 @@ try {
     } finally { await session.detach(); }
   });
   await context.route("**/api/**", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"isolated runtime test"}' }));
-  await context.addInitScript(({ profileSteps, idbOperations, startupBufferGc, startupWorkerHeaps, mainHeapSnapshot }) => {
+  await context.addInitScript(({ profileSteps, idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention }) => {
     if (location.hostname !== "127.0.0.1") return;
-    if (mainHeapSnapshot) globalThis.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {} };
+    if (runtimeRetention) globalThis.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {} };
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-27-v1.3.2");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
@@ -285,7 +300,7 @@ try {
     new PerformanceObserver((list) => {
       if (trace.active) for (const entry of list.getEntries()) trace.tasks.push({ phase: trace.phase, at: entry.startTime - trace.startedAt, duration: entry.duration });
     }).observe({ type: "longtask" });
-  }, { profileSteps: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupWorkerHeaps, mainHeapSnapshot });
+  }, { profileSteps: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention });
   context.on("page", (opened) => {
     opened.setDefaultTimeout(120_000);
     opened.on("pageerror", (error) => { errors.push(error.message); console.log(`Page error: ${error.message}`); });
@@ -549,10 +564,11 @@ try {
     throw Error("Startup Worker diagnostic did not capture its exact boundary");
   }
   if (mainHeapSnapshot && !mainHeapSnapshotResult?.complete) throw Error("Private main heap snapshot did not complete");
+  if (runtimeRetention && retentionSamples.length !== (startupWorkerHeaps ? 6 : 5)) throw Error("Runtime retention diagnostic stages incomplete");
   const evidence = { browser: await browser.version(), supply, observationSeconds: seconds,
-    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapGc || mainHeapAllocations || mainHeapSnapshot,
+    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention,
     profilePhase, timelinePhase, backgroundPresentationExperiment,
-    postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, heapSamples,
+    postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
     retainedNormalDebt: Boolean(options["retain-debt"]),
     seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };

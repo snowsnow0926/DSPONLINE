@@ -137,11 +137,14 @@ import {
   getQuantumLogisticsMultiplier,
   getQuantumItemCapacity,
   normalizeQuantumInteger,
+  normalizeQuantumItemCapacity,
   setQuantumNetworkItemCapacity,
   settleQuantumAttachments,
   settleQuantumLogisticsNetwork,
   QUANTUM_SETTLEMENT_SECONDS,
   QUANTUM_UNIT_CAP_PER_MINUTE,
+  QUANTUM_ITEM_CAPACITY_DEFAULT,
+  QUANTUM_MAX_INTEGER_DIGITS,
 } from "./quantumLogisticsNetwork";
 import type { QuantumInventoryDepositBatch, QuantumSettlementInput, QuantumSettlementOutput } from "./quantumLogisticsNetwork";
 import { compareQuantumInteger } from "./quantumLogisticsNetwork";
@@ -1683,12 +1686,49 @@ function quantumSupplySlot(station: FactoryEntity, itemId: ItemId): StationSlot 
   return getStationSlots(station).find((slot) => slot.itemId === itemId && slot.remoteMode === "supply");
 }
 
-function quantumInventoryFree(state: GameState, itemId: ItemId): number {
-  if (!state.quantumLogisticsNetwork?.enabled) return 0;
-  const current = BigInt(normalizeQuantumInteger(state.quantumLogisticsNetwork.inventory[itemId]));
-  const capacity = BigInt(getQuantumItemCapacity(state.quantumLogisticsNetwork, itemId));
+interface QuantumFreeCapacityValue {
+  inventory: unknown;
+  configuredCapacity: unknown;
+  free: number;
+}
+
+const quantumFreeCapacityValues = new WeakMap<SimulationLookupContext, Map<ItemId, QuantumFreeCapacityValue>>();
+const QUANTUM_FREE_CAPACITY_MEMO_LIMIT = 512;
+const MAX_SAFE_QUANTUM_FREE = BigInt(Number.MAX_SAFE_INTEGER);
+
+function quantumInventoryFree(state: GameState, itemId: ItemId, lookup?: SimulationLookupContext): number {
+  const network = state.quantumLogisticsNetwork;
+  if (!network?.enabled) return 0;
+  const inventory: unknown = network.inventory[itemId];
+  // Keep the original reader for unindexed and legacy scalar/object inputs.
+  // Normal string records are immutable values, not a promise that inventory
+  // stays unchanged: deposits, withdrawals and capacity edits all change keys.
+  if (!lookup || (inventory !== undefined && typeof inventory !== "string")) {
+    const current = BigInt(normalizeQuantumInteger(inventory));
+    const capacity = BigInt(getQuantumItemCapacity(network, itemId));
+    const free = capacity > current ? capacity - current : 0n;
+    return Number(free > MAX_SAFE_QUANTUM_FREE ? MAX_SAFE_QUANTUM_FREE : free);
+  }
+  const configuredCapacity: unknown = network.itemCapacities[itemId];
+  const memoizable = (inventory === undefined || inventory.length <= QUANTUM_MAX_INTEGER_DIGITS) &&
+    (configuredCapacity === undefined ||
+      typeof configuredCapacity === "string" && configuredCapacity.length <= QUANTUM_MAX_INTEGER_DIGITS);
+  let values = memoizable ? quantumFreeCapacityValues.get(lookup) : undefined;
+  const cached = values?.get(itemId);
+  if (cached && cached.inventory === inventory && cached.configuredCapacity === configuredCapacity) return cached.free;
+  const current = BigInt(normalizeQuantumInteger(inventory));
+  // Read each property once, like getQuantumItemCapacity; do not re-read an
+  // accessor after it has already supplied the value used as the cache key.
+  const capacity = BigInt(configuredCapacity === undefined
+    ? QUANTUM_ITEM_CAPACITY_DEFAULT : normalizeQuantumItemCapacity(configuredCapacity));
   const free = capacity > current ? capacity - current : 0n;
-  return Number(free > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : free);
+  const result = Number(free > MAX_SAFE_QUANTUM_FREE ? MAX_SAFE_QUANTUM_FREE : free);
+  if (memoizable) {
+    if (!values) quantumFreeCapacityValues.set(lookup, values = new Map());
+    if (!values.has(itemId) && values.size >= QUANTUM_FREE_CAPACITY_MEMO_LIMIT) values.clear();
+    values.set(itemId, { inventory, configuredCapacity, free: result });
+  }
+  return result;
 }
 
 function quantumSupplyFreeCapacity(
@@ -1701,8 +1741,7 @@ function quantumSupplyFreeCapacity(
   if (!slot) return 0;
   const localCapacity = getEntityItemInputCapacity(state, station, itemId);
   const localFree = Math.max(0, Math.floor(localCapacity - (station.inputs[itemId] ?? 0)));
-  void lookup;
-  return Math.max(0, quantumInventoryFree(state, itemId) + localFree);
+  return Math.max(0, quantumInventoryFree(state, itemId, lookup) + localFree);
 }
 
 function recordImmediateQuantumUpload(state: GameState, itemId: ItemId, amount: number): void {

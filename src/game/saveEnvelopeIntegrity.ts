@@ -76,29 +76,6 @@ export function measureSaveStateJson(formatVersion: number, stateJson: string): 
   return { stateChecksum: (hash >>> 0).toString(16).padStart(8, "0"), byteLength };
 }
 
-/** Same v2 measurement over ordered JSON fragments, including split pairs. */
-export function measureSaveStateJsonChunks(formatVersion: number, chunks: readonly string[]): { stateChecksum: string; byteLength: number } {
-  const prefix = `{"formatVersion":${JSON.stringify(formatVersion)},"state":`;
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < prefix.length; index += 1) {
-    hash = appendSaveChecksumCodeUnit(hash, prefix.charCodeAt(index));
-  }
-  let byteLength = 0;
-  let previousHighSurrogate = false;
-  for (const chunk of chunks) {
-    for (let index = 0; index < chunk.length; index += 1) {
-      const code = chunk.charCodeAt(index);
-      hash = appendSaveChecksumCodeUnit(hash, code);
-      if (code <= 0x7f) byteLength += 1;
-      else if (code <= 0x7ff) byteLength += 2;
-      else byteLength += previousHighSurrogate && code >= 0xdc00 && code <= 0xdfff ? 1 : 3;
-      previousHighSurrogate = code >= 0xd800 && code <= 0xdbff;
-    }
-  }
-  hash = appendSaveChecksumCodeUnit(hash, 0x7d);
-  return { stateChecksum: (hash >>> 0).toString(16).padStart(8, "0"), byteLength };
-}
-
 export function inspectSaveEnvelopeChecksum(raw: string): SaveEnvelopeChecksumInspection {
   try {
     const parsed = JSON.parse(raw) as unknown;

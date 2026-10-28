@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeSaveStateChecksumFromJson, measureSaveStateJson, measureSaveStateJsonChunks } from "./saveEnvelopeIntegrity";
+import { computeSaveStateChecksumFromJson, measureSaveStateJson } from "./saveEnvelopeIntegrity";
 
 describe("combined save JSON measurement", () => {
   it("matches the v2 checksum and TextEncoder at every UTF-8 boundary", () => {
@@ -15,10 +15,6 @@ describe("combined save JSON measurement", () => {
           stateChecksum: computeSaveStateChecksumFromJson(formatVersion, value),
           byteLength: new TextEncoder().encode(value).byteLength,
         });
-        for (let split = 0; split <= value.length; split++) {
-          expect(measureSaveStateJsonChunks(formatVersion, [value.slice(0, split), "", value.slice(split)]))
-            .toEqual(measureSaveStateJson(formatVersion, value));
-        }
       }
     }
   });

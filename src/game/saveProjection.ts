@@ -199,8 +199,6 @@ export function projectPersistentSaveState(state: GameState, contentPackRegistry
 
 export interface PersistentSaveProjectionParts {
   base: Omit<GameState, "entities" | "belts">;
-  /** Original JSON property order, including the two collection positions. */
-  fieldOrder: string[];
   entityCount: number;
   beltCount: number;
   projectEntityRange: (offset: number, count: number) => GameState["entities"];
@@ -225,7 +223,6 @@ export function createPersistentSaveProjectionParts(
   const { entities: _entities, belts: _belts, ...base } = projectedBase;
   return {
     base,
-    fieldOrder: Object.keys(projectedBase),
     entityCount: state.entities.length,
     beltCount: state.belts.length,
     projectEntityRange: (offset, count) => state.entities.slice(offset, offset + count).map(compactEntity),

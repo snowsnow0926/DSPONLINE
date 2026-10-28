@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createContentPackRegistry } from "./contentPacks";
 import { createInitialState } from "./engine";
-import { serializePersistentSaveEnvelopeToTransfer } from "./persistentSaveTransfer";
+import { serializePersistentSaveEnvelopeToTransfer, serializeSaveStateJsonChunksToTransfer } from "./persistentSaveTransfer";
 import { projectPersistentSaveState } from "./saveProjection";
-import { serializeSaveEnvelopeToTransfer, serializeSaveStateJsonChunksToTransfer } from "./saveTransfer";
+import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
 import type { FactoryEntity, GameState } from "./types";
 
 const registry = createContentPackRegistry();
@@ -76,9 +76,22 @@ describe("bounded read-only persistent envelope serialization", () => {
   it("preserves exact UTF-8 and UTF-16 proofs at every fragment boundary", () => {
     const state = { name: "矿🚀\ud800\udc00\ud800x\udc00", values: [0, -0, 137, null], nested: { kept: true } };
     const text = JSON.stringify(state);
-    const expected = serializeSaveEnvelopeToTransfer(state, options);
-    for (let split = 0; split <= text.length; split++) {
-      expect(serializeSaveStateJsonChunksToTransfer([text.slice(0, split), "", text.slice(split)], options)).toEqual(expected);
+    for (const metadata of [options, { ...options, kind: "slot" as const, mode: "speedrun" as const, slot: 3 as const },
+      { ...options, kind: "snapshot" as const, reason: '矿🚀 "state":{} ,"checksum":"escape"' }]) {
+      const expected = serializeSaveEnvelopeToTransfer(state, metadata);
+      for (let split = 0; split <= text.length; split++) {
+        expect(serializeSaveStateJsonChunksToTransfer([text.slice(0, split), "", text.slice(split)], metadata)).toEqual(expected);
+      }
     }
+  });
+
+  it("keeps the standard projection fallback for inherited collection fields", () => {
+    const state = fixture();
+    const inherited = Object.assign(Object.create({ entities: state.entities, belts: state.belts }), state) as GameState;
+    Reflect.deleteProperty(inherited, "entities"); Reflect.deleteProperty(inherited, "belts");
+    expect(serializePersistentSaveEnvelopeToTransfer(inherited, registry, options))
+      .toEqual(serializeSaveEnvelopeToTransfer(projectPersistentSaveState(inherited, registry), options));
+    expect(inherited.entities).toBe(state.entities);
+    expect(inherited.belts).toBe(state.belts);
   });
 });

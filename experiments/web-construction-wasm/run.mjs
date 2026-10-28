@@ -59,8 +59,8 @@ const fileHash = async (path) => {
 const inputHash = fixtureMode ? await fileHash(options.prepared) : null;
 const wasmPath = options.wasm ?? resolve(output, "target/wasm32-unknown-unknown/release/dsp_web_construction_probe.wasm");
 await mkdir(output, { recursive: true });
-const bundle = await build({ root, configFile: false, publicDir: false, logLevel: "error",
-  plugins: decoderReference || runtimeReference || macroWorkerReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
+const referenceSourceLoads = [];
+const frozenRuntimePlugins = () => decoderReference || runtimeReference || macroWorkerReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
     const relative = id.replaceAll("\\", "/").replace(`${sourceRoot.replaceAll("\\", "/")}/`, "").split("?")[0];
     const reference = relative === "src/game/pureIdleMacro.worker.ts" && macroWorkerReference ? macroWorkerReference
       : runtimeFiles.includes(relative) ? runtimeReference : decoderFiles.includes(relative) ? decoderReference : null;
@@ -69,6 +69,7 @@ const bundle = await build({ root, configFile: false, publicDir: false, logLevel
     if (!reference && !(migrationPhases && relative === "src/game/storage.ts") && !profileFunctions && !overridePhaseCache) return;
     let code = reference ? execFileSync("git", ["show", `${reference}:${relative}`],
       { cwd: sourceRoot, encoding: "utf8" }) : await readFile(resolve(sourceRoot, relative), "utf8");
+    if (reference) referenceSourceLoads.push({ file: relative, reference, sha256: createHash("sha256").update(code).digest("hex") });
     if (overridePhaseCache) {
       const anchor = "const alternatives = previous.filter((plan) => plan !== selected).slice(0, 3);";
       if (code.split(anchor).length !== 2) throw new Error("Construction phase cache anchor changed");
@@ -106,7 +107,9 @@ const bundle = await build({ root, configFile: false, publicDir: false, logLevel
       }\n`;
     }
     return code;
-  } }] : [],
+  } }] : [];
+const bundle = await build({ root, configFile: false, publicDir: false, logLevel: "error",
+  plugins: frozenRuntimePlugins(), worker: { plugins: frozenRuntimePlugins },
   resolve: { alias: [{ find: /^\.\.\/\.\.\/src\/game\//, replacement: `${sourceRoot.replaceAll("\\", "/")}/src/game/` }] },
   define: { "process.env.NODE_ENV": '"production"',
     ...(["persistence-retirement", "startup-idb", "macro-finalization"].includes(entry) ? { __APP_PLATFORM__: '"web"' } : {}),
@@ -116,6 +119,12 @@ const bundle = await build({ root, configFile: false, publicDir: false, logLevel
 const code = (Array.isArray(bundle) ? bundle : [bundle]).flatMap((entry) => entry.output)
   .find((entry) => entry.type === "chunk" && entry.isEntry)?.code;
 if (!code) throw new Error("Missing browser probe bundle");
+if (macroWorkerReference && !referenceSourceLoads.some((row) => row.file === "src/game/pureIdleMacro.worker.ts" && row.reference === macroWorkerReference)) {
+  throw new Error("Requested macro Worker source reference was not actually loaded by the Worker compiler");
+}
+const workerAssetHashes = Object.fromEntries((Array.isArray(bundle) ? bundle : [bundle]).flatMap((entry) => entry.output)
+  .filter((entry) => entry.fileName.includes(".worker-") && entry.fileName.endsWith(".js"))
+  .map((entry) => [entry.fileName, createHash("sha256").update(entry.type === "asset" ? entry.source : entry.code).digest("hex")]));
 const assets = new Map((Array.isArray(bundle) ? bundle : [bundle]).flatMap((entry) => entry.output)
   .map((entry) => [`/${entry.fileName}`, entry.type === "asset" ? entry.source : entry.code]));
 const wasm = fixtureMode ? null : await readFile(wasmPath);
@@ -180,7 +189,7 @@ try {
       ? createHash("sha256").update(execFileSync("git", ["show", `${runtimeReference}:${file}`], { cwd: sourceRoot })).digest("hex")
       : await fileHash(resolve(sourceRoot, file))]))) } : {}),
     sourceDirty: Boolean(execFileSync("git", ["status", "--porcelain"], { cwd: sourceRoot, encoding: "utf8" }).trim()),
-    bundleSha256: createHash("sha256").update(code).digest("hex"),
+    bundleSha256: createHash("sha256").update(code).digest("hex"), referenceSourceLoads, workerAssetHashes,
     ...(rendererMemory ? { rendererMemory } : {}),
     ...(decoderReference ? { decoderReference, decoderFiles } : {}),
     ...(entry === "macro-finalization" ? { macroWorkerReference, macroSourceHashes: Object.fromEntries(await Promise.all([

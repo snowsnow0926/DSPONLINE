@@ -1,0 +1,560 @@
+{
+  "scope": "Bounded synthetic Node owned-simulation process CPU; at most 162 entities and no belts. Excludes UI, import, runtime creation, warm-up and final JSON/hash.",
+  "baseline": {
+    "commit": "13e80829361afe0c5a7b30b2aff14819dd19ec3e",
+    "files": {
+      "src/game/engine.ts": "D:\\GameDev\\DSPidle2\\artifacts\\web-small-cpu-comparison-20261028\\baseline\\engine.ts",
+      "src/game/recursiveCrafting.ts": "D:\\GameDev\\DSPidle2\\artifacts\\web-small-cpu-comparison-20261028\\baseline\\recursiveCrafting.ts"
+    },
+    "sourceHashes": {
+      "src/game/engine.ts": "55316447b90a48440733a99d33e06c0c444e900854e6a9fc4db648932acf6c91",
+      "src/game/recursiveCrafting.ts": "b377c80a558c676b1e87dd7d803c461b5f9acffeb1e59288bc7a0274fd2e3adb"
+    }
+  },
+  "candidate": {
+    "commit": "f50c60e02b62989b388195c30b112ab39499991a",
+    "files": {
+      "src/game/engine.ts": "D:\\GameDev\\DSPidle2\\artifacts\\web-small-cpu-comparison-20261028\\candidate\\engine.ts",
+      "src/game/recursiveCrafting.ts": "D:\\GameDev\\DSPidle2\\artifacts\\web-small-cpu-comparison-20261028\\candidate\\recursiveCrafting.ts"
+    },
+    "sourceHashes": {
+      "src/game/engine.ts": "bcc158607af5582d4ad6f35953cba8bcbeb341b9d5b01ef0e1cbe362a78eaee3",
+      "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb"
+    }
+  },
+  "phases": {
+    "initial": {
+      "steps": 120,
+      "manifestSha256": "ecaab3437dcb14a0dfba10be14941c6ffd88dac76e5f02efc4391d9e04148fd6",
+      "summary": {
+        "idle": {
+          "baselineCpuMs": [
+            78,
+            79
+          ],
+          "candidateCpuMs": [
+            78,
+            78
+          ],
+          "baselineMedianCpuMs": 78.5,
+          "candidateMedianCpuMs": 78.0,
+          "medianChangePercent": -0.64
+        },
+        "stocked": {
+          "baselineCpuMs": [
+            204,
+            202
+          ],
+          "candidateCpuMs": [
+            156,
+            187
+          ],
+          "baselineMedianCpuMs": 203.0,
+          "candidateMedianCpuMs": 171.5,
+          "medianChangePercent": -15.52
+        },
+        "recursive": {
+          "baselineCpuMs": [
+            62,
+            78
+          ],
+          "candidateCpuMs": [
+            63,
+            79
+          ],
+          "baselineMedianCpuMs": 70.0,
+          "candidateMedianCpuMs": 71.0,
+          "medianChangePercent": 1.43
+        },
+        "quantum": {
+          "baselineCpuMs": [
+            296,
+            298
+          ],
+          "candidateCpuMs": [
+            250,
+            250
+          ],
+          "baselineMedianCpuMs": 297.0,
+          "candidateMedianCpuMs": 250.0,
+          "medianChangePercent": -15.82
+        }
+      },
+      "trialLogSha256": [
+        "fe29c1955e85efb143e45cbbadd50471358968a08e40f10eb9e5f94bf5980a0c",
+        "51a6e70d603e96a967e2fff40fa1626696c10a3daed410f0d40c269e63d999a9",
+        "12a4ec5d54ac20f6d4ae53b07873582aa24f01e87bb1095e075af224f3098312",
+        "45506c49ee61cfe87798f2f3014c10f2103af7948b6839b95a295335980825e6"
+      ]
+    },
+    "longer": {
+      "steps": 960,
+      "manifestSha256": "3ae9409fe707bde67cd8516db23daf221cd60fe76eae4edf14770e3df948a08b",
+      "summary": {
+        "idle": {
+          "baselineCpuMs": [
+            374,
+            375
+          ],
+          "candidateCpuMs": [
+            390,
+            374
+          ],
+          "baselineMedianCpuMs": 374.5,
+          "candidateMedianCpuMs": 382.0,
+          "medianChangePercent": 2.0
+        },
+        "stocked": {
+          "baselineCpuMs": [
+            1203,
+            1188
+          ],
+          "candidateCpuMs": [
+            1015,
+            984
+          ],
+          "baselineMedianCpuMs": 1195.5,
+          "candidateMedianCpuMs": 999.5,
+          "medianChangePercent": -16.39
+        },
+        "recursive": {
+          "baselineCpuMs": [
+            453,
+            438
+          ],
+          "candidateCpuMs": [
+            421,
+            422
+          ],
+          "baselineMedianCpuMs": 445.5,
+          "candidateMedianCpuMs": 421.5,
+          "medianChangePercent": -5.39
+        },
+        "quantum": {
+          "baselineCpuMs": [
+            1671,
+            1641
+          ],
+          "candidateCpuMs": [
+            1328,
+            1312
+          ],
+          "baselineMedianCpuMs": 1656.0,
+          "candidateMedianCpuMs": 1320.0,
+          "medianChangePercent": -20.29
+        }
+      },
+      "trialLogSha256": [
+        "6514f7cf496ee222327fee26181c3b6cc38e189f7e35315034640b416ebf65fb",
+        "8d7ac62dcfafb8d621e96cae354bf2e85fa9f2c45285c85af2996a5bf3147fbe",
+        "ebe80e73fe862a0b9851cdd8094ca0f0a587792814146f5010fd8abb09eab46d",
+        "cee9d50de2aa2a5d65cdaf96d6c10cc7bbab261293a3aa9988814ffaddd09d8f"
+      ]
+    },
+    "idle-followup": {
+      "steps": 7680,
+      "manifestSha256": "237343a0f063906893bb8a70d041440c50243dc72989da599ff6187e65de46f0",
+      "summary": {
+        "idle": {
+          "baselineCpuMs": [
+            1453,
+            1469
+          ],
+          "candidateCpuMs": [
+            1422,
+            1407
+          ],
+          "baselineMedianCpuMs": 1461.0,
+          "candidateMedianCpuMs": 1414.5,
+          "medianChangePercent": -3.18
+        }
+      },
+      "trialLogSha256": [
+        "3e6612aed52954df975607c2bd11e72a62a8497d2dfbbfeadb4033f6fb099b36",
+        "6ca7f7fa9a4d642b4844f2855043b967e5360299af8ffaed45fa6f637073c18f",
+        "e7d219ec6184aae509ee6dcda334ee094c23ee0d07b30f1fad3f82dafa203e1e",
+        "0cdd10bcc4cf4c8d87fcf30701ec136c445b334e7e58c922383d585d658a79d5"
+      ]
+    }
+  },
+  "fullStateAndInputParity": {
+    "idle": {
+      "inputs": "ed590747824f0a8341b38324cead2ce966d2414a1f28b1d648eba85d424d8f9c",
+      "warm40": "499794ef98a6302310ce6829a73eb6f189b7077846e2a7ce4644cc3bdc4126bb",
+      "final120": "d579d00e98807b8dec4f9fd3a65fb0e3122c463c4384f6d0fb8baa269d8d5753",
+      "final960": "b09fdda9414aec689d16ce8ef55393f68832f6fc2fab9f26a5b1c3a8ecd35a1d",
+      "final7680": "8023d980e1097109efbb6f95d3dd4b65d1043b8fcf26b862551de16953b04b2c"
+    },
+    "stocked": {
+      "inputs": "ef429c7894a622988bf5caf45fc143ac89f56d8b27b3f6458c2c575023f5477b",
+      "warm40": "eba707f527808ea3c20b77327a905446312198e54dbb9733b862e3a728918f06",
+      "final120": "580ec35c6f313399feb0d05af5303872727843f01c55190a73754401793f4bd7",
+      "final960": "1b5244df910dba61570e34f80b0423df0b7f66e2212f42c4c3ed9a3951e79f65"
+    },
+    "recursive": {
+      "inputs": "4664dca3ae968adaf54d332bdeda0e911bad7aaccd7abe756efe6b46856955f0",
+      "warm40": "0414fac187e4a6461091a9e4a8d184aefbbd2e6e02a05608d1837171b01a228e",
+      "final120": "5f57d2c50c5c07c21ede23fe08fd1cfa739b43cb8d12d6308754f8c0a465b3c3",
+      "final960": "9a6eb4420e7c2ac2105ff6e0ba9c52d0b2e2e5097c8e3bbfce1c4f119287ce0b"
+    },
+    "quantum": {
+      "inputs": "3d79924e96762fbe65c718e51157a99461686313a7225adc6d601624209cf9b4",
+      "warm40": "f46504fc1bff9c2f2141ecb2c4c455532f6fa28234f48f16851135cf6e17d96e",
+      "final120": "e83edfc4af65eddd45a9a772ef75e7854a9bf7b18e01dd688c122dbfc7165b58",
+      "final960": "643bd21e73d4bbf60240b40afe5e4f9fa00d4794c6da8594e73b4b1328f3a753"
+    }
+  },
+  "cpuRecords": [
+    {
+      "phase": "initial",
+      "trial": 1,
+      "variant": "baseline",
+      "scenario": "idle",
+      "cpuMs": 78,
+      "wallMs": 87.80869999999993,
+      "recordSha256": "49c777479709b5016f23c9e64815a8d6fa5cd472c8603b28ea7a9a8904ea03d2"
+    },
+    {
+      "phase": "initial",
+      "trial": 1,
+      "variant": "baseline",
+      "scenario": "stocked",
+      "cpuMs": 204,
+      "wallMs": 204.87069999999994,
+      "recordSha256": "313e434cb175ee793f0251a29c24844c43910ae5ea5e098bc72783737982f6d6"
+    },
+    {
+      "phase": "initial",
+      "trial": 1,
+      "variant": "baseline",
+      "scenario": "recursive",
+      "cpuMs": 62,
+      "wallMs": 126.00350000000003,
+      "recordSha256": "f6aa04a70a39c3e9b2829244edcf41ed727034a92e189e39e32ff392c2896fa7"
+    },
+    {
+      "phase": "initial",
+      "trial": 1,
+      "variant": "baseline",
+      "scenario": "quantum",
+      "cpuMs": 296,
+      "wallMs": 306.76520000000005,
+      "recordSha256": "95b7024d3b2ca6c6fd8b6c1ddf225a0a40587b4125c3faf8d55af4c3860615a2"
+    },
+    {
+      "phase": "initial",
+      "trial": 2,
+      "variant": "candidate",
+      "scenario": "idle",
+      "cpuMs": 78,
+      "wallMs": 80.13700000000017,
+      "recordSha256": "ddf60f4a53e1c8fd83ba64b1b6d9cadf9b42322674e8e7fb5e8cde1b3885bc85"
+    },
+    {
+      "phase": "initial",
+      "trial": 2,
+      "variant": "candidate",
+      "scenario": "stocked",
+      "cpuMs": 156,
+      "wallMs": 217.33289999999988,
+      "recordSha256": "8745e0c78d140cba9b4cd305727089dfbf0243e69cdba38cae34d09ea9b823f7"
+    },
+    {
+      "phase": "initial",
+      "trial": 2,
+      "variant": "candidate",
+      "scenario": "recursive",
+      "cpuMs": 63,
+      "wallMs": 83.50049999999987,
+      "recordSha256": "2a59375f64c43f3a822f8c8eb2991bce68c621a856d8e699769b9bdc0228dcb7"
+    },
+    {
+      "phase": "initial",
+      "trial": 2,
+      "variant": "candidate",
+      "scenario": "quantum",
+      "cpuMs": 250,
+      "wallMs": 250.05259999999998,
+      "recordSha256": "f29b9f120048e068b67ca932a8bf6a08b9fd8b1c2724d8ff1f67c0f9c32d3132"
+    },
+    {
+      "phase": "initial",
+      "trial": 3,
+      "variant": "candidate",
+      "scenario": "idle",
+      "cpuMs": 78,
+      "wallMs": 78.69099999999992,
+      "recordSha256": "270db73876dcc046aca8547e43ee5a7d4121a4ed2364d04e0b04c7ea10317e3f"
+    },
+    {
+      "phase": "initial",
+      "trial": 3,
+      "variant": "candidate",
+      "scenario": "stocked",
+      "cpuMs": 187,
+      "wallMs": 184.29309999999998,
+      "recordSha256": "42223bea4405e030ff6c78ff513029cd134d7cc2b259c801e70d9c72a4a07dd2"
+    },
+    {
+      "phase": "initial",
+      "trial": 3,
+      "variant": "candidate",
+      "scenario": "recursive",
+      "cpuMs": 79,
+      "wallMs": 76.2826,
+      "recordSha256": "54281b2206b5dcfec7d0e331546025441e917bee46864d6cfd31f97313a58c9f"
+    },
+    {
+      "phase": "initial",
+      "trial": 3,
+      "variant": "candidate",
+      "scenario": "quantum",
+      "cpuMs": 250,
+      "wallMs": 250.1316999999999,
+      "recordSha256": "1a76c1549d74d4d18f25cfc0bc28536cdd8d58c13ea2d99c4f92f69a5a585e81"
+    },
+    {
+      "phase": "initial",
+      "trial": 4,
+      "variant": "baseline",
+      "scenario": "idle",
+      "cpuMs": 79,
+      "wallMs": 79.07140000000004,
+      "recordSha256": "a43239633a2669cce9d10063e34ea9f97c2eef3eef05b17803f8fc55934ef3e7"
+    },
+    {
+      "phase": "initial",
+      "trial": 4,
+      "variant": "baseline",
+      "scenario": "stocked",
+      "cpuMs": 202,
+      "wallMs": 207.18909999999983,
+      "recordSha256": "68f6834b471df46f80f81991b48eba8f57bb46d4eb2e77c8ce43212cb4e243cc"
+    },
+    {
+      "phase": "initial",
+      "trial": 4,
+      "variant": "baseline",
+      "scenario": "recursive",
+      "cpuMs": 78,
+      "wallMs": 79.32850000000008,
+      "recordSha256": "0a88e374118e5a425c84e1b5003196063b7c732ccd2469fd22cd5f3292ffec75"
+    },
+    {
+      "phase": "initial",
+      "trial": 4,
+      "variant": "baseline",
+      "scenario": "quantum",
+      "cpuMs": 298,
+      "wallMs": 301.73,
+      "recordSha256": "9d75981a6dfec53e6b4c4ab0bfde201f57998117cb41c91bb9b6fd8b3f05c68a"
+    },
+    {
+      "phase": "longer",
+      "trial": 1,
+      "variant": "baseline",
+      "scenario": "idle",
+      "cpuMs": 374,
+      "wallMs": 430.0790999999999,
+      "recordSha256": "002fd1fd93669738bc358fcfe9157d6beaff9735d2e9528e87c2aeda2368c109"
+    },
+    {
+      "phase": "longer",
+      "trial": 1,
+      "variant": "baseline",
+      "scenario": "stocked",
+      "cpuMs": 1203,
+      "wallMs": 1204.8987000000002,
+      "recordSha256": "c4456913829ecc73313bd4519a444d414e9cbc58edfad260caceefc1d8ccff24"
+    },
+    {
+      "phase": "longer",
+      "trial": 1,
+      "variant": "baseline",
+      "scenario": "recursive",
+      "cpuMs": 453,
+      "wallMs": 444.4593,
+      "recordSha256": "9f977d4a1ac256b24c68c407b12d9cfe9cd50e58a00f20fde34870bc31a5ed90"
+    },
+    {
+      "phase": "longer",
+      "trial": 1,
+      "variant": "baseline",
+      "scenario": "quantum",
+      "cpuMs": 1671,
+      "wallMs": 1670.9539,
+      "recordSha256": "13e7003a462382f4de35b16c132e79d4334ee55a9c7fedde03696a92445160d9"
+    },
+    {
+      "phase": "longer",
+      "trial": 2,
+      "variant": "candidate",
+      "scenario": "idle",
+      "cpuMs": 390,
+      "wallMs": 411.48210000000006,
+      "recordSha256": "1e4dd7bfa2facf4dd5f7f13ce563adce320a299445c8d7125956518b7f3a461e"
+    },
+    {
+      "phase": "longer",
+      "trial": 2,
+      "variant": "candidate",
+      "scenario": "stocked",
+      "cpuMs": 1015,
+      "wallMs": 1012.1956000000002,
+      "recordSha256": "48197588a70075ef34ac985d3e98868cc2a6b1531b19cc8482abd95adfdf5522"
+    },
+    {
+      "phase": "longer",
+      "trial": 2,
+      "variant": "candidate",
+      "scenario": "recursive",
+      "cpuMs": 421,
+      "wallMs": 438.4978000000001,
+      "recordSha256": "ccda56a02c3454dcbf1fe14412c4dcddd877171790718e233202fa85e289ff60"
+    },
+    {
+      "phase": "longer",
+      "trial": 2,
+      "variant": "candidate",
+      "scenario": "quantum",
+      "cpuMs": 1328,
+      "wallMs": 1312.9990000000003,
+      "recordSha256": "2d248eaf63039de21cd6d51a94ebd77324136342ca40fc095de90d6d8503baa3"
+    },
+    {
+      "phase": "longer",
+      "trial": 3,
+      "variant": "candidate",
+      "scenario": "idle",
+      "cpuMs": 374,
+      "wallMs": 380.3428000000001,
+      "recordSha256": "4cc9d731f953e93ecef009b629a411c13a1cacf564d87743028cfa194ef3b6f5"
+    },
+    {
+      "phase": "longer",
+      "trial": 3,
+      "variant": "candidate",
+      "scenario": "stocked",
+      "cpuMs": 984,
+      "wallMs": 1021.0179,
+      "recordSha256": "ce32e6c0cfe5f177fa244ebd77f76e99bd0ce8c820993eab41c66370694564dc"
+    },
+    {
+      "phase": "longer",
+      "trial": 3,
+      "variant": "candidate",
+      "scenario": "recursive",
+      "cpuMs": 422,
+      "wallMs": 428.21169999999984,
+      "recordSha256": "db6fe2843c6651dfdc8d2ed2f66cba0051303631604eacd84f00cebc7d542d60"
+    },
+    {
+      "phase": "longer",
+      "trial": 3,
+      "variant": "candidate",
+      "scenario": "quantum",
+      "cpuMs": 1312,
+      "wallMs": 1328.7826000000005,
+      "recordSha256": "fac2fdc9e2aa490a37e71453ce6fe40baa8c5d6c208d5489f7a6f1a9f0c48c27"
+    },
+    {
+      "phase": "longer",
+      "trial": 4,
+      "variant": "baseline",
+      "scenario": "idle",
+      "cpuMs": 375,
+      "wallMs": 380.8380000000001,
+      "recordSha256": "ea19355499f2fbb98c9447ae62fe821413fba7d5c352a50f0fbd0903838e83c6"
+    },
+    {
+      "phase": "longer",
+      "trial": 4,
+      "variant": "baseline",
+      "scenario": "stocked",
+      "cpuMs": 1188,
+      "wallMs": 1197.1723,
+      "recordSha256": "73d4ccc54443a0906ff00fcb6c65356fa2ad847daeb894546047b2b32b2f8d77"
+    },
+    {
+      "phase": "longer",
+      "trial": 4,
+      "variant": "baseline",
+      "scenario": "recursive",
+      "cpuMs": 438,
+      "wallMs": 437.30610000000024,
+      "recordSha256": "db182f466efcccb9f7206f2731315e2965ede7b5c81e84719cdf546878c5d47e"
+    },
+    {
+      "phase": "longer",
+      "trial": 4,
+      "variant": "baseline",
+      "scenario": "quantum",
+      "cpuMs": 1641,
+      "wallMs": 1643.931,
+      "recordSha256": "ec1d99e7023b18b6c075ccab9791282912d4d033cf6e0296d9619f755a47b418"
+    },
+    {
+      "phase": "idle-followup",
+      "trial": 1,
+      "variant": "baseline",
+      "scenario": "idle",
+      "cpuMs": 1453,
+      "wallMs": 1479.4993,
+      "recordSha256": "374014660067f5e8960b46dc2f20f84be6fed58c3c7fea20da98f155b7f52b71"
+    },
+    {
+      "phase": "idle-followup",
+      "trial": 2,
+      "variant": "candidate",
+      "scenario": "idle",
+      "cpuMs": 1422,
+      "wallMs": 1437.4422,
+      "recordSha256": "d2864878441f7df7eb93bd13f85b8e5cc372bc81afd90c37ffaa16b31834556f"
+    },
+    {
+      "phase": "idle-followup",
+      "trial": 3,
+      "variant": "candidate",
+      "scenario": "idle",
+      "cpuMs": 1407,
+      "wallMs": 1410.2476000000001,
+      "recordSha256": "c088467f264ccad0cd9364fd440067b92cbc6e2697d0faa42609399786f1677d"
+    },
+    {
+      "phase": "idle-followup",
+      "trial": 4,
+      "variant": "baseline",
+      "scenario": "idle",
+      "cpuMs": 1469,
+      "wallMs": 1463.1575000000003,
+      "recordSha256": "460da6f93cc079c274a4bae8157782f166328f273e6e9fefe0beba87dcfbab29"
+    }
+  ],
+  "recordCount": 36,
+  "freshComparisonProcesses": 12,
+  "allInputsAndCompleteStatesEqual": true,
+  "smokeExtraRecordExcludedFromPerformanceSummary": true,
+  "harnessHashes": {
+    "experiments\\low-impact-engine-cpu\\config.mjs": "15e713e81d45467d7c4799aa5180f9e9d47081270599811b2d29d038205ab2b9",
+    "experiments\\low-impact-engine-cpu\\prepare.mjs": "a493e634c8b5508451d8ff0a7a6b0df986c39a050301d579d528fe43518e843e",
+    "experiments\\low-impact-engine-cpu\\probe.ts": "4ded85fef4a278de24df73f864ee7107830ebcf6af4b87d427d6b792e6033a26",
+    "experiments\\low-impact-engine-cpu\\README.md": "b2c9e69f3053d5f0b06a4544a96e1ddbe9e2a9b411007f79f7d29516dc9158a5",
+    "experiments\\low-impact-engine-cpu\\run.ps1": "02cb013a13a080ab39a8eb7822733aa7c1eae13dd7f1ddec639a29add15697f8"
+  },
+  "initialProbeHash": "92c14a498e925d71ca4d980f1881adfe35d5cbb3ebc5d63b34c36b3f1e9104af",
+  "longProbeHash": "f4b81a4bfb0e6f645d0785525d6d563092645099af5e97b658ef992317b37081",
+  "resourcePolicyDuringTheseRuns": {
+    "priority": "Idle",
+    "logicalProcessors": 1,
+    "workers": 1,
+    "serial": true,
+    "minimumAvailableGiB": 8
+  },
+  "formalLargeSaveWebQualification": false,
+  "memoryGainClaimed": false,
+  "published": false,
+  "acceptedDevelopmentRuntimeChanged": false,
+  "runtimeCodeChangedThisRound": false,
+  "newUserAuthorization": "User now confirms machine is free; full testing/development window may proceed. Does not authorize release.",
+  "rawEvidenceDirectory": "D:\\GameDev\\DSPidle2\\artifacts\\web-small-cpu-comparison-20261028"
+}

@@ -13279,13 +13279,16 @@ function tryRunConstructionAutomationBatch(
   const current = constructionAutomationCurrentStock(state, definition.id) + constructionAutomationPending(state, definition.id, context);
   const jobsForTarget = Math.ceil(Math.max(0, target - current) / definition.outputAmount);
   const jobsForWork = Math.floor((Math.max(0, remainingWork) + EPSILON) / repeatable.workSeconds);
-  if (jobsForTarget < 1 || jobsForWork < 1 || !constructionAutomationBatchInputsAvailable(state, entity.planetId, repeatable, 1, directEntityId)) return null;
+  if (jobsForTarget < 1 || jobsForWork < 1) return null;
   const cyclesForStock = constructionAutomationBatchMaximumCyclesForStock(
     state,
     entity.planetId,
     repeatable,
     directEntityId,
   );
+  // No stock changes between the one-cycle gate and this limit. Keep the
+  // same >= 1 gate (including invalid limits) while evaluating it only once.
+  if (!(cyclesForStock >= 1)) return null;
   // The caller just read eligibility, and the checks above do not spend stock
   // or finish jobs. Reuse that exact list only within this batch attempt.
   const singleTarget = activeTargets.length === 1 && activeTargets[0].id === definition.id &&

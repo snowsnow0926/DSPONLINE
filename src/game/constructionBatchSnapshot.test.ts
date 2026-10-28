@@ -35,6 +35,14 @@ const golden: Record<Scenario, { hashes: string[]; targetReads: number[] }> = {
   ], targetReads: [8, 7, 12] },
 };
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+// Captured separately from 9619d67d before eliminating the second stock scan.
+const stockReadBaseline: Record<Scenario, number[]> = {
+  "single-small": [29, 21, 28],
+  "single-large": [26, 21, 28],
+  "multi-small": [253, 245, 98],
+  "multi-large": [54, 21, 28],
+  "existing-job": [26, 21, 28],
+};
 
 function fixture(name: Scenario): GameState {
   const state = createInitialState(20_261_028, false);
@@ -61,25 +69,39 @@ function fixture(name: Scenario): GameState {
   return state;
 }
 
-function step(source: GameState) {
-  const session = createSimulationAdvanceSession(source, 1);
-  const targets = session.state.constructionAutomation.targetStock;
-  const values = { ...targets };
-  const keys = Object.keys(targets) as Array<keyof typeof targets>;
+function traceReads(record: Partial<Record<string, number>>) {
+  const values = { ...record };
+  const keys = Object.keys(record);
   let reads = 0;
-  for (const key of keys) Object.defineProperty(targets, key, {
+  for (const key of keys) Object.defineProperty(record, key, {
     configurable: true, enumerable: true,
     get: () => { reads++; return values[key]; },
     set: (value: number) => { values[key] = value; },
   });
+  return {
+    get reads() { return reads; },
+    restore() {
+      for (const key of keys) if (Object.hasOwn(record, key)) Object.defineProperty(record, key, {
+        value: values[key], writable: true, enumerable: true, configurable: true,
+      });
+    },
+  };
+}
+
+function step(source: GameState) {
+  const session = createSimulationAdvanceSession(source, 1);
+  // The active tray is the construction source; the saved planet copy can
+  // have a separate identity until the session synchronizes it.
+  expect(session.state.activePlanetId).toBe("home");
+  const targets = traceReads(session.state.constructionAutomation.targetStock);
+  const stock = traceReads(session.state.tray);
   try {
     advanceSimulationSession(session, Number.MAX_SAFE_INTEGER);
     const state = completeSimulationAdvanceSession(session);
-    return { state, get reads() { return reads; } };
+    return { state, get reads() { return targets.reads; }, get stockReads() { return stock.reads; } };
   } finally {
-    for (const key of keys) if (Object.hasOwn(targets, key)) Object.defineProperty(targets, key, {
-      value: values[key], writable: true, enumerable: true, configurable: true,
-    });
+    targets.restore();
+    stock.restore();
   }
 }
 
@@ -89,7 +111,7 @@ describe("one construction batch attempt reuses live target eligibility", () => 
 
   it.each(scenarios)("preserves complete state and fresh goals for %s", (name) => {
     let state = fixture(name);
-    const row = { hashes: [] as string[], targetReads: [] as number[] };
+    const row = { hashes: [] as string[], targetReads: [] as number[], stockReads: [] as number[] };
     for (let second = 1; second <= 3; second++) {
       if (second === 2) state.constructionAutomation.targetStock.wind_turbine = (state.construction.wind_turbine ?? 0) + 7;
       if (second === 3) state.constructionAutomation.targetStock.arc_smelter = (state.construction.arc_smelter ?? 0) + 4;
@@ -97,13 +119,15 @@ describe("one construction batch attempt reuses live target eligibility", () => 
       state = next.state;
       row.hashes.push(hash(JSON.stringify(state)));
       row.targetReads.push(next.reads);
+      row.stockReads.push(next.stockReads);
     }
     expect(state.constructionAutomation.totalCrafted).toBeGreaterThan(0);
     if (name === "existing-job") expect(state.constructionAutomation.jobs["parked-center"]).toBeDefined();
     expect(row.hashes).toEqual(golden[name].hashes);
     row.targetReads.forEach((count, index) => expect(count).toBeLessThan(golden[name].targetReads[index]));
+    row.stockReads.forEach((count, index) => expect(count).toBeLessThan(stockReadBaseline[name][index]));
     if (process.env.DSP_BATCH_TARGET_READS === "1") {
-      console.info(JSON.stringify({ scenario: name, targetReads: row.targetReads }));
+      console.info(JSON.stringify({ scenario: name, targetReads: row.targetReads, stockReads: row.stockReads }));
     }
   });
 });

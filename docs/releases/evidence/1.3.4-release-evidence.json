@@ -1,0 +1,329 @@
+{
+  "scope": "Hong Kong static Web only",
+  "observedAt": "2026-10-28 13:36:12 +08:00",
+  "freeze": {
+    "runtimeSha": "61fb10311cb958fa081f948d2e60c4fc75626779",
+    "releaseId": "1.3.4-61fb10311cb9",
+    "buildId": "1.3.4+61fb10311cb9",
+    "fileCount": 198,
+    "workerCount": 16,
+    "workersEqualVerifiedOptimizationBuild": true,
+    "qualifiedSourceCount": 33,
+    "qualifiedSourceHashesMatch": true,
+    "aggregateSha256": "ff360789c6d908750c98eddfc576833f940425e018896b20e0027d67616e131e",
+    "manifestSha256": "53322c5cf542317b774cce268020c903d9a031d5800ee8a3b5b9da568835a99c",
+    "archive": "web-1.3.4-61fb10311cb9.tar.gz",
+    "archiveBytes": 2353822,
+    "archiveSha256": "60e9812899da419034bc7c445b70f3eece37e8e1ae68451a3fa8d547f65527d7",
+    "archiveMembersVerified": true
+  },
+  "testHarnessSha": "d5c721bab8c75444f21d1dd1e7a8dda5d766a028",
+  "runtimeSourcesUnchangedSinceFreeze": true,
+  "unit": {
+    "pass": 3732,
+    "skip": 38,
+    "fail": 0
+  },
+  "browserChecks": {
+    "e2e-final": {
+      "startTime": "2026-10-28T05:22:45.333Z",
+      "duration": 484036.713,
+      "expected": 524,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "pwa-qualified": {
+      "startTime": "2026-10-28T05:30:50.836Z",
+      "duration": 8143.281,
+      "expected": 1,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durable-qualified": {
+      "startTime": "2026-10-28T05:30:59.535Z",
+      "duration": 48342.002,
+      "expected": 21,
+      "skipped": 22,
+      "unexpected": 0,
+      "flaky": 0
+    }
+  },
+  "server": {
+    "pass": 411,
+    "skip": 2,
+    "stationPass": 4
+  },
+  "ops": {
+    "pass": 60,
+    "skip": 6
+  },
+  "nativeTools": {
+    "pass": 634,
+    "skip": 2
+  },
+  "upgradePreservation": {
+    "oldBuild": "1.3.3+a0fd77efc399",
+    "newBuild": "1.3.4+61fb10311cb9",
+    "fixture": "public synthetic paused v47, autosave disabled",
+    "bytes": 119402,
+    "sha256": "09a98c1c7e04326bea76abccd0c94fb37ae80a407dc36299377ed7ab5c293148",
+    "oldPrimaryByteIdentical": true,
+    "newPrimaryByteIdentical": true,
+    "offlinePrimaryByteIdentical": true,
+    "offlineReopen": true,
+    "productionApiCalled": false
+  },
+  "stage": {
+    "staged": true,
+    "filesVerified": 198,
+    "release": "1.3.4-61fb10311cb9",
+    "currentUnchanged": true,
+    "configurationBackupVerified": true,
+    "databaseCopied": false
+  },
+  "publish": {
+    "published": true,
+    "web": "1.3.4-61fb10311cb9",
+    "rollback": "1.3.3-a0fd77efc399",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "apiProcessUnchanged": true,
+    "proxyProcessUnchanged": true,
+    "databaseIdentityPreserved": true,
+    "backupState": "disabled",
+    "generation": 58,
+    "buildId": "1.3.4+61fb10311cb9",
+    "ready": true
+  },
+  "observation": {
+    "samples": 12,
+    "windowSeconds": 55,
+    "allHealthy": true,
+    "backupDisabled": true,
+    "sameApiProcess": true,
+    "sameProxyProcess": true,
+    "web": "1.3.4-61fb10311cb9",
+    "diskAvailableRatio": 0.2081020683909062
+  },
+  "fallback": {
+    "published": true,
+    "previousWeb": "1.3.3-a0fd77efc399",
+    "rootWeb": "1.3.4-61fb10311cb9",
+    "nginxSha256": "143372138894e0668169036f2329281a223c37111028d5558ff1027d44b84340",
+    "previousHtmlByteExact": true,
+    "oldWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "backup": "/var/backups/dsp-idle/1.3.4-61fb10311cb9/fallback/original-app.conf"
+  },
+  "public": {
+    "publicWeb": "1.3.4-61fb10311cb9",
+    "filesVerified": 198,
+    "allSizesAndSha256Match": true,
+    "cacheHeadersVerified": true,
+    "wwwCanonicalRedirect": true,
+    "publicHealth": true,
+    "publicReadyWritable": true,
+    "backupState": "disabled",
+    "previous": "1.3.3-a0fd77efc399",
+    "previousFilesVerified": 197,
+    "previousHtmlByteExact": true,
+    "previousWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "currentCacheBeforeAfterSha256": "3d64a8579df59e5c38add9466ad5cc8557d80bb08b22c2387f23ad2ff4d2d031",
+    "fallbackCacheIsolation": true,
+    "offlineCurrentReopen": true,
+    "browserProductionApiBlocked": true,
+    "blockedApiRequests": 7,
+    "productionPlayerWrites": false
+  },
+  "postflight": {
+    "postflight": true,
+    "checkedAt": "2026-10-28T05:36:12.162270+00:00",
+    "web": "1.3.4-61fb10311cb9",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "webVersion": "1.3.4",
+    "webBuildId": "1.3.4+61fb10311cb9",
+    "stateCurrent": {
+      "webReleaseId": "1.3.4-61fb10311cb9",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "statePrevious": {
+      "webReleaseId": "1.3.3-a0fd77efc399",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "generation": 58,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "healthOk": true,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "readyWritable": true,
+    "currentMainPayloadCounts": {
+      "available": true,
+      "checkedAt": 1793165734852,
+      "checked": 1692,
+      "resolvable": 1690,
+      "unresolvable": 2,
+      "invalidMetadata": 0,
+      "orphanedMetadata": 0,
+      "missingPayloadRows": 2,
+      "invalidPayloadRows": 0,
+      "metadataMismatches": 0,
+      "missingBlobs": 0,
+      "blobMetadataMismatches": 0,
+      "legacyDirectRows": 0
+    },
+    "apiService": {
+      "MainPID": "3517864",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "proxyService": {
+      "MainPID": "3465101",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "nginxValid": true,
+    "nginxSha256": "143372138894e0668169036f2329281a223c37111028d5558ff1027d44b84340",
+    "fallbackRoutes": [
+      "/canary/1.0.37-853ecdb12795/",
+      "/canary/1.0.43-fceca3eda51c/",
+      "/canary/1.0.46-d5b60dc3b7d6/",
+      "/canary/1.0.47-aab581cf0c78/",
+      "/canary/1.1.1-da53958b860c/",
+      "/canary/1.1.3-f35d60a22223/",
+      "/canary/1.1.4-7dbc149a016c/",
+      "/canary/1.1.5-a92c0d3157f3/",
+      "/canary/1.1.6-4f6d24f8c709/",
+      "/canary/1.1.8-c53497b050c4/",
+      "/canary/1.1.9-c3f4eff6cb5a/",
+      "/canary/1.2.2-8b9c93e13270/",
+      "/canary/1.2.3-25aeeb34e501/",
+      "/canary/1.2.4-3154f8cf4479/",
+      "/canary/1.2.5-0a1c6629ced1/",
+      "/canary/1.2.6-df828869e276/",
+      "/canary/1.2.7-dab2ff5066b7/",
+      "/canary/1.2.7-fccaa35e6b41/",
+      "/canary/1.2.9-0521eb63f179/",
+      "/canary/1.3.0-e8c44f8d7160/",
+      "/canary/1.3.1-9af159f1b38e/",
+      "/canary/1.3.2-34f3dd45e467/",
+      "/canary/1.3.3-a0fd77efc399/"
+    ],
+    "diskAvailableBytes": 15368237056,
+    "diskAvailableRatio": 0.20807528265879502,
+    "databaseDevice": 64770,
+    "databaseInode": 663062,
+    "databaseBytes": 6682116096,
+    "serverDataWritten": false
+  },
+  "preflight": {
+    "preflight": true,
+    "checkedAt": "2026-10-28T05:30:56.536473+00:00",
+    "web": "1.3.3-a0fd77efc399",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "webVersion": "1.3.3",
+    "webBuildId": "1.3.3+a0fd77efc399",
+    "stateCurrent": {
+      "webReleaseId": "1.3.3-a0fd77efc399",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "statePrevious": {
+      "webReleaseId": "1.3.2-34f3dd45e467",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "generation": 57,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "healthOk": true,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "readyWritable": true,
+    "currentMainPayloadCounts": {
+      "available": true,
+      "checkedAt": 1793165397503,
+      "checked": 1692,
+      "resolvable": 1690,
+      "unresolvable": 2,
+      "invalidMetadata": 0,
+      "orphanedMetadata": 0,
+      "missingPayloadRows": 2,
+      "invalidPayloadRows": 0,
+      "metadataMismatches": 0,
+      "missingBlobs": 0,
+      "blobMetadataMismatches": 0,
+      "legacyDirectRows": 0
+    },
+    "apiService": {
+      "MainPID": "3517864",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "proxyService": {
+      "MainPID": "3465101",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "nginxValid": true,
+    "nginxSha256": "bf1921582d5c6dd4516eaf3d75b0690d76cf09599529eadc42debc9295578621",
+    "fallbackRoutes": [
+      "/canary/1.0.37-853ecdb12795/",
+      "/canary/1.0.43-fceca3eda51c/",
+      "/canary/1.0.46-d5b60dc3b7d6/",
+      "/canary/1.0.47-aab581cf0c78/",
+      "/canary/1.1.1-da53958b860c/",
+      "/canary/1.1.3-f35d60a22223/",
+      "/canary/1.1.4-7dbc149a016c/",
+      "/canary/1.1.5-a92c0d3157f3/",
+      "/canary/1.1.6-4f6d24f8c709/",
+      "/canary/1.1.8-c53497b050c4/",
+      "/canary/1.1.9-c3f4eff6cb5a/",
+      "/canary/1.2.2-8b9c93e13270/",
+      "/canary/1.2.3-25aeeb34e501/",
+      "/canary/1.2.4-3154f8cf4479/",
+      "/canary/1.2.5-0a1c6629ced1/",
+      "/canary/1.2.6-df828869e276/",
+      "/canary/1.2.7-dab2ff5066b7/",
+      "/canary/1.2.7-fccaa35e6b41/",
+      "/canary/1.2.9-0521eb63f179/",
+      "/canary/1.3.0-e8c44f8d7160/",
+      "/canary/1.3.1-9af159f1b38e/",
+      "/canary/1.3.2-34f3dd45e467/"
+    ],
+    "diskAvailableBytes": 15394254848,
+    "diskAvailableRatio": 0.2084275455374083,
+    "databaseDevice": 64770,
+    "databaseInode": 663062,
+    "databaseBytes": 6682116096,
+    "serverDataWritten": false
+  },
+  "skippedOrUnverified": [
+    "No native installer, physical-device or full Rust gate for a Web-only release",
+    "Extreme-save peak memory, low-memory devices, conservation mode and long-term qualification remain unfinished"
+  ],
+  "apiCompatibility": {
+    "currentApiRuntime": "api-1.3.0-4c8d0c13a714",
+    "serverRuntimeBlobsMatch": true,
+    "blueprintEntitiesServerLimit": 100000,
+    "blueprintBeltsServerLimit": 250000,
+    "newExchangeEntities": 4096,
+    "newExchangeBelts": 8192,
+    "webAndPreviousV47Compatible": true,
+    "blobs": {
+      "server/index.mjs": "27b168a9e157e31b74897998b3951d24b1818704",
+      "server/save-field-contract.mjs": "019124108c4712609b847bfe94e90ff26d795258"
+    },
+    "productionWrites": false
+  }
+}

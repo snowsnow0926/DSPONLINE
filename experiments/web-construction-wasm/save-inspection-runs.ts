@@ -36,7 +36,6 @@ function publicDifferential() {
 }
 
 async function runSaveInspectionRuns() {
-  const differential = publicDifferential();
   const { raw, bytes } = await (async () => {
     const state = (await (await fetch("/prepared.json")).json()).state as GameState;
     const frame = serializeSaveEnvelopeToTransfer(projectPersistentSaveState(state, createContentPackRegistry()), { ...metadata, mode: state.mode });
@@ -55,8 +54,10 @@ async function runSaveInspectionRuns() {
   }
   const payloadSha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw)))]
     .map((value) => value.toString(16).padStart(2, "0")).join("");
-  return { scope: "Only canonical structure scan plus unchanged full UTF-16 checksum, in-memory; public differential precedes timing; no persistence/UI qualification",
-    bytes, payloadSha256, differential, samples, inspection: JSON.parse(expected), forcedGc: false };
+  // Keep malformed-case exceptions out of the timing call sites' JIT profile.
+  const differential = publicDifferential();
+  return { scope: "Only canonical structure scan plus unchanged full UTF-16 checksum, in-memory; public differential after timing; no persistence/UI qualification",
+    bytes, payloadSha256, differential, publicDifferentialAfterTiming: true, samples, inspection: JSON.parse(expected), forcedGc: false };
 }
 
 Object.assign(globalThis, { runSaveInspectionRuns });

@@ -4574,6 +4574,45 @@ function runPowerFacilities(
   }
 }
 
+interface GridPowerInventorySnapshot {
+  electricEnergyMj: number;
+  ratedGeneratorKw: number;
+  stored: number;
+  capacity: number;
+}
+
+function collectGridPowerInventory(
+  planetId: PlanetId,
+  entities: readonly FactoryEntity[],
+): Partial<Record<PowerGridId, GridPowerInventorySnapshot>> {
+  const totals: Partial<Record<PowerGridId, GridPowerInventorySnapshot>> = Object.create(null);
+  for (const entity of entities) {
+    if (entity.planetId !== planetId) continue;
+    const fuelGenerator = isFuelGenerator(entity);
+    const storage = entity.buildingId === "accumulator" || entity.buildingId === "energy_exchanger";
+    if (!fuelGenerator && !storage) continue;
+    const gridId = getEntityPowerGridId(entity);
+    if (!POWER_GRID_IDS.includes(gridId)) continue;
+    const total = totals[gridId] ??= { electricEnergyMj: 0, ratedGeneratorKw: 0, stored: 0, capacity: 0 };
+    // Preserve each grid's original entity order and addition expressions.
+    // Kind is intentionally not required by the legacy inventory readers.
+    if (fuelGenerator && entity.buildingId) {
+      total.electricEnergyMj += fuelEnergyAvailable(entity) * getFuelEfficiency(entity.buildingId);
+      total.ratedGeneratorKw += (getBuilding(entity.buildingId).powerGenerationKw ?? 0) * entity.machineCount;
+    }
+    if (storage) {
+      total.stored += storedEnergy(entity);
+      total.capacity += energyCapacity(entity);
+    }
+  }
+  return totals;
+}
+
+function gridFuelReserveSeconds(total: GridPowerInventorySnapshot | undefined): number {
+  return total && total.ratedGeneratorKw > EPSILON
+    ? round(total.electricEnergyMj * 1000 / total.ratedGeneratorKw, 1) : 0;
+}
+
 function fuelReserveSeconds(state: GameState, planetId: PlanetId, gridId?: PowerGridId, lookup?: SimulationLookupContext): number {
   let electricEnergyMj = 0;
   let ratedGeneratorKw = 0;
@@ -7301,6 +7340,11 @@ export function runPlanetSimulationPhase(
     }
   }
   const power = combinePowerPlans(gridPlans);
+  // Grid inventory is reported before facilities run. A tap may mutate the
+  // state between grids, so keep its live readers and the independent oracle.
+  const gridInventory = batchPowerStorage && !contractExperiment?.onPowerPlan
+    ? collectGridPowerInventory(planetId, phaseLookup.entitiesByPlanet.get(planetId) ?? [])
+    : undefined;
   for (const gridPlan of gridPlans) {
     const gridId = gridPlan.gridId!;
     const isolatedConstructionPower = isolatedConstructionPowerByGrid.get(gridId) ??
@@ -7322,7 +7366,9 @@ export function runPlanetSimulationPhase(
       storageDischargeKw: gridPlan.storageDischargeKw,
       storageChargeKw: gridPlan.storageChargeKw,
     });
-    const storage = gridStoredEnergy(state, planetId, gridId, phaseLookup);
+    const storage = gridInventory
+      ? gridInventory[gridId] ?? { stored: 0, capacity: 0 }
+      : gridStoredEnergy(state, planetId, gridId, phaseLookup);
     state.powerGridMetrics[planetId][gridId] = {
       gridId,
       generationKw: round(gridPlan.generationKw, 2),
@@ -7339,7 +7385,9 @@ export function runPlanetSimulationPhase(
       storageChargeKw: round(gridPlan.storageChargeKw, 2),
       storedEnergyMj: round(storage.stored, 3),
       storageCapacityMj: round(storage.capacity, 3),
-      fuelReserveSeconds: fuelReserveSeconds(state, planetId, gridId, phaseLookup),
+      fuelReserveSeconds: gridInventory
+        ? gridFuelReserveSeconds(gridInventory[gridId])
+        : fuelReserveSeconds(state, planetId, gridId, phaseLookup),
       totalItemsPerMinute: 0,
       connectedEntities: gridPlan.connectedEntities,
       disconnectedEntities: gridPlan.disconnectedEntities,

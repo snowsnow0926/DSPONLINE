@@ -126,7 +126,9 @@ describe("ray receiver candidate views", () => {
     if (name === "cross-system") expect(state.entities.find((entity) => entity.id === "ray-frost")!.outputs.critical_photon ?? 0).toBe(0);
     for (const scan of scans) {
       const visits = scan.planet + scan.rays;
-      if (name === "dense" || name === "reference" || name === "hook") expect(visits).toBe(visitBaseline[name]);
+      if (name === "reference") expect(visits).toBe(visitBaseline[name]);
+      // These counters include shared power passes, which may also improve.
+      else if (name === "dense" || name === "hook") expect(visits).toBeLessThanOrEqual(visitBaseline[name]);
       else expect(visits).toBeLessThan(visitBaseline[name]);
     }
     if (process.env.DSP_RAY_LOOKUP_DIAGNOSTICS === "1") console.info(JSON.stringify({ scenario: name, hashes, scans }));

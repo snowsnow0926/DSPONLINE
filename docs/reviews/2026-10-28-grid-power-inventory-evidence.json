@@ -1,0 +1,380 @@
+{
+  "scope": "Shared per-planet view iterator yields in thirteen tiny Node fixtures; excludes reduce callbacks, elapsed time, FPS and memory.",
+  "sourceCommitAtChecks": "ec6061069b042e8fd3416c5ae77e85bc62449dc6",
+  "sourceDirtyAtChecks": true,
+  "sourceHashes": {
+    "src/game/constructionCenterLookup.test.ts": "608906d15cdf4f5b9c622ce6d02a8eea5ba0e1c71270fde4edd7219b0f144b6d",
+    "src/game/gridFuelReserve.test.ts": "5bea7c22a8c962d53fa5dc01341980b862a7bda9c73ceb3ff292aa61cf97d7f9",
+    "src/game/engine.ts": "bcc158607af5582d4ad6f35953cba8bcbeb341b9d5b01ef0e1cbe362a78eaee3",
+    "src/game/constructionBatchSnapshot.test.ts": "37532dc6ac54c98ac0127553d4389cf5a7b51590d21ec22ab896d0817f75894f",
+    "src/game/rayReceiverLookup.test.ts": "4122d9858c90d920060681059bb60afa4de9d38bde2602fac81b29f7292ea993",
+    "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb"
+  },
+  "baselineCommit": "ec6061069b042e8fd3416c5ae77e85bc62449dc6",
+  "baselineEngineSha256": "9f32f723276ad7ee8e43b95ccb85b3e770c156ea634095de4ec9a230e29a592e",
+  "baselineCaptureTestSha256": "ea332481b74c6e7d4f1b48c24a4456ba5055d81adc7fe512ac388d957ee721a8",
+  "baselineRecordSha256": "70f25f949c81369483c78337c01687240849abf22a698a1e0247165c88fdc8a7",
+  "baselineCapturedBeforeEngineChange": true,
+  "focusedChecks": {
+    "grid-inventory": {
+      "passed": 13,
+      "failed": 0,
+      "log": "candidate-02.log",
+      "availableMemoryGiBAtStart": 14.87,
+      "logSha256": "5088eb2076596348be050b4a58a4c1709b2563b03e60cdd6ee864ce29484006d"
+    },
+    "rays": {
+      "passed": 9,
+      "failed": 0,
+      "log": "light-rays-01.log",
+      "availableMemoryGiBAtStart": 12.64,
+      "logSha256": "02636ce4c6bd8e0265a4a5e86d0d5c0c05feda8abfd279eff15a8e1f961d8fc9"
+    },
+    "center-lookup": {
+      "passed": 7,
+      "failed": 0,
+      "log": "light-center-lookup-01.log",
+      "availableMemoryGiBAtStart": 12.29,
+      "logSha256": "65c9ef670511280761b797050cdb49803d724d23ec81b19b5cd97a5b0ee8d225"
+    },
+    "snapshot": {
+      "passed": 5,
+      "failed": 0,
+      "log": "light-snapshot-01.log",
+      "availableMemoryGiBAtStart": 12.07,
+      "logSha256": "1d1143eba71b11f6d90216df73b1ff6504622779c7e50e8991b46b8618999db2"
+    },
+    "quantum": {
+      "passed": 23,
+      "failed": 0,
+      "log": "light-quantum-01.log",
+      "availableMemoryGiBAtStart": 11.83,
+      "logSha256": "e18c772ecd8c0fa6bc4d6d8f98d708c599673da8dbe6821eaa16018ce03cafcb"
+    },
+    "context": {
+      "passed": 5,
+      "failed": 0,
+      "log": "light-context-01.log",
+      "availableMemoryGiBAtStart": 11.44,
+      "logSha256": "0e997faf7f91c67f6b46ef68b12253aae04092a78aa24dd972d7e29f93410cd9"
+    },
+    "offline-domain": {
+      "passed": 14,
+      "failed": 0,
+      "log": "light-offline-domain-01.log",
+      "availableMemoryGiBAtStart": 11.19,
+      "logSha256": "c7c50bebf446d3ab0cc2397f11fca9fafdb5f5f0624285d80da30fb154cc2488"
+    },
+    "batching": {
+      "passed": 20,
+      "failed": 0,
+      "log": "light-batching-01.log",
+      "availableMemoryGiBAtStart": 10.82,
+      "logSha256": "7416d7f0a2742f710019a619f119bc5fe894e93ca15b448bd75fd4422a818b8c"
+    },
+    "construction-guard": {
+      "passed": 14,
+      "failed": 0,
+      "log": "light-construction-guard-01.log",
+      "availableMemoryGiBAtStart": 10.13,
+      "logSha256": "e1568dff67cf55f8cd87f44211711284b25fc1728e195690ab185f9179ce2c76"
+    },
+    "lookup-refresh": {
+      "passed": 2,
+      "failed": 0,
+      "log": "light-lookup-refresh-01.log",
+      "availableMemoryGiBAtStart": 10.05,
+      "logSha256": "208d7ede0155ba72485188c7ff7ed05b5e67bb0413d2823adf2e2dfcc0db4a95"
+    },
+    "persistent-index": {
+      "passed": 2,
+      "failed": 0,
+      "log": "light-persistent-index-01.log",
+      "availableMemoryGiBAtStart": 10.05,
+      "logSha256": "9f4da81bdc398a04fe1d1bee03f768d8714a3c5315f829dff5b37beaac06003c"
+    },
+    "reference-path": {
+      "passed": 1,
+      "failed": 0,
+      "log": "light-reference-path-01.log",
+      "availableMemoryGiBAtStart": 10.05,
+      "logSha256": "861e75ccbf0dcae2d2816ae21eefa9154c66bc40a4b6e38741168e4e0c0e8793"
+    },
+    "time-warp-power": {
+      "passed": 21,
+      "failed": 0,
+      "log": "light-time-warp-power-01.log",
+      "availableMemoryGiBAtStart": 10.05,
+      "logSha256": "2976c852019b36646c5f77b12315f3ea08ae4993d6bbcd01b85783fed4e67b1c"
+    }
+  },
+  "focusedPassed": 136,
+  "focusedFailed": 0,
+  "applicationTypes": "passed",
+  "applicationTypesLogSha256": "c9f6a5a39f91b2f457fd58c6bde21c66e74dbbc94a788436d4f059076fdff1c5",
+  "completeNewStateCheckpointsEqualToPreChangeBaseline": 39,
+  "candidateMatchesOriginalReadersWithSameFuelBurningMode": true,
+  "inputUnchanged": true,
+  "preFacilityGridAndPostFacilityPlanetSnapshotsKeptSeparate": true,
+  "viewIterationSamples": {
+    "no-fuel": {
+      "beforePlanetViewIteratorYields": [
+        260,
+        260,
+        260
+      ],
+      "afterPlanetViewIteratorYields": [
+        156,
+        156,
+        156
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "1787017472da9b35d75cede2a8348c45f085450d543c03f2686ad301167847ac",
+        "e539c95d39798fa5eb77b74e49ea4c494e54a1c734f5894494c5747fd0fc94e7",
+        "02ba32030232a1d258f35564b0af881271757d1cfea49c7b6302ee8e0075d4dc"
+      ]
+    },
+    "thermal": {
+      "beforePlanetViewIteratorYields": [
+        260,
+        260,
+        260
+      ],
+      "afterPlanetViewIteratorYields": [
+        156,
+        156,
+        156
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "1f3169bafcf7d345f71ad6cd1aaf72ed97cf79c32913169b5c826204caaaf344",
+        "01783afa7d301cacfdaa6b0cacab4c8c1cd0e406c2aa1bb00165b3ff2da50884",
+        "46e84e38d2b97c81e267bf522310984a77c11211875e4c0411f19b0abe6508a7"
+      ]
+    },
+    "mixed": {
+      "beforePlanetViewIteratorYields": [
+        260,
+        260,
+        260
+      ],
+      "afterPlanetViewIteratorYields": [
+        156,
+        156,
+        156
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "70107d34970eb37a78006621c8e787455ceb1a227322ea471e60cd9ed8dfcd9b",
+        "e5f2a1a27e5c45ff85c5c9db9c9e94cd3dcb152cebabbe7fdf58e99f36f5443a",
+        "73e4f49194733c4d084f0f8ca5f61847595e9d36159a67f2e179b6f8f2da737f"
+      ]
+    },
+    "depleted": {
+      "beforePlanetViewIteratorYields": [
+        260,
+        260,
+        260
+      ],
+      "afterPlanetViewIteratorYields": [
+        156,
+        156,
+        156
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "861ab1505ce94c6152651225b02883c8d22eaf117220f730a5a2572ead7bc39b",
+        "ea0444e69ee3788789a4a673c384c79a4a1bfb876c9c59ee631e7c88d80b7423",
+        "17931bd0ed0d2fb7564190797c8f93239f137a7a52a6c6878a79996640feadae"
+      ]
+    },
+    "residual": {
+      "beforePlanetViewIteratorYields": [
+        260,
+        260,
+        260
+      ],
+      "afterPlanetViewIteratorYields": [
+        156,
+        156,
+        156
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "a3e0c6427a5385c99ae8c7cebb8f0b5237b40372d9c03d2e34da057287db58f1",
+        "7d651648e370d684c45643fcc61fd9fcda9f68b7e2b4d70bd94bbd81e1a94d56",
+        "dcfcd6ef2c0de255f3bd2b65dc9d7cce7989ab245b05f06112cba84e97497d1b"
+      ]
+    },
+    "zero-stack": {
+      "beforePlanetViewIteratorYields": [
+        260,
+        260,
+        260
+      ],
+      "afterPlanetViewIteratorYields": [
+        156,
+        156,
+        156
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "ad75012eb5c6e239c79be4382c31f5a7f71818ec7c35c098d48404b0a762ecd9",
+        "4f0ffd3609fc34b36b3c938e940e34a1918815ad7484eb4803ed3fc0ccdd58df",
+        "fec59cf3b9ed067296c4ff7b16c8be5f7583c296592d76a5ee8c60ef92745ea2"
+      ]
+    },
+    "machine-kind": {
+      "beforePlanetViewIteratorYields": [
+        260,
+        260,
+        260
+      ],
+      "afterPlanetViewIteratorYields": [
+        156,
+        156,
+        156
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "d7f09bc48bd43203fbd1b4bf7bac4ed62d473750579eb52e816d688714def6c7",
+        "a8785aca3cd8d11574689726741e1d4c951a02d6dab62245790ed9a047fdf872",
+        "d5f87710fd613fd89efd9659ebd155ead7ba431b92e9dcb4b12c708a6e7f9d88"
+      ]
+    },
+    "production-hook": {
+      "beforePlanetViewIteratorYields": [
+        312,
+        312,
+        312
+      ],
+      "afterPlanetViewIteratorYields": [
+        208,
+        208,
+        208
+      ],
+      "reductionPercent": 33.33,
+      "completeStateSha256At1s2s3s": [
+        "29945d135502b00f39d6fd1aa49276cdd9f21ea966cacef4580ea21805c263a3",
+        "eefde13e78a42a2b7145e4a223258841273b24bc92490a6ae3a2b05fe08c2bbe",
+        "dc575e22a2acd27eee788fc6eb0261ad202756a0226d2e47e79ad464874e1784"
+      ]
+    },
+    "power-tap": {
+      "beforePlanetViewIteratorYields": [
+        384,
+        384,
+        384
+      ],
+      "afterPlanetViewIteratorYields": [
+        384,
+        384,
+        384
+      ],
+      "reductionPercent": 0.0,
+      "completeStateSha256At1s2s3s": [
+        "9a079d22ae91fd1ad8e927720434ee51ae59c6f0805d297f2c96651df37ef920",
+        "58037d7a9ee5cbe28a99aba822287ef190962b91e9e9c503433b6e756dcb8a67",
+        "35f97b4ba053b0bf4674bc85af92799ef5bccf5dbb30d67d14e4266e7b4959fa"
+      ]
+    },
+    "reference": {
+      "beforePlanetViewIteratorYields": [
+        312,
+        312,
+        312
+      ],
+      "afterPlanetViewIteratorYields": [
+        312,
+        312,
+        312
+      ],
+      "reductionPercent": 0.0,
+      "completeStateSha256At1s2s3s": [
+        "1f3169bafcf7d345f71ad6cd1aaf72ed97cf79c32913169b5c826204caaaf344",
+        "01783afa7d301cacfdaa6b0cacab4c8c1cd0e406c2aa1bb00165b3ff2da50884",
+        "46e84e38d2b97c81e267bf522310984a77c11211875e4c0411f19b0abe6508a7"
+      ]
+    },
+    "floating": {
+      "beforePlanetViewIteratorYields": [
+        350,
+        350,
+        350
+      ],
+      "afterPlanetViewIteratorYields": [
+        210,
+        210,
+        210
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "e719d268629d6b9cb5d8680f0285a16e6bffb4f977032906cf7e30dd5a4eec32",
+        "cdfa419bfe1b0828ffd44744d5443e9dc5daf597617ae27716084235d7a64c82",
+        "b76161f23fb797c94484109afc47d6c173daec5037e092cb0a959bdd64e228ef"
+      ]
+    },
+    "storage-charge": {
+      "beforePlanetViewIteratorYields": [
+        350,
+        350,
+        350
+      ],
+      "afterPlanetViewIteratorYields": [
+        210,
+        210,
+        210
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "32968ae18b4b44a66fe3332fd38fbb2c24a172c424f0a4582f9a8fb21bdceb1a",
+        "8ad5369539418399f63230e23448c6132380a1891477a51dd1b2c8c333ca7fbf",
+        "13a82eb00cb367e196797258da2d6e7813caedb90dfa97cfc8fc9330a823b85f"
+      ]
+    },
+    "storage-discharge": {
+      "beforePlanetViewIteratorYields": [
+        320,
+        320,
+        320
+      ],
+      "afterPlanetViewIteratorYields": [
+        192,
+        192,
+        192
+      ],
+      "reductionPercent": 40.0,
+      "completeStateSha256At1s2s3s": [
+        "7139dc1fddb109bf6cb42ed9b282b7467046b1f6bd69d869cb92d65e03993af3",
+        "4a273e2705157560abd116ff91691c31f14da06d4b5586a972616a4fa3ffe2c9",
+        "1526a3184527d37ad6e680c7b089b89a95ecadfdd6c1e8064b0e8df0752e2548"
+      ]
+    }
+  },
+  "initialProbeIssue": {
+    "log": "baseline-01.log",
+    "failed": 2,
+    "reason": "Hooks run on empty planets as well. Limited probe mutation to fixture generators before engine changes; original state assertions retained."
+  },
+  "rayTestCounterChange": "Dense and production-hook shared-view counters retain original upper bounds rather than requiring unchanged totals; frozen state expectations were not changed.",
+  "resourcePolicy": {
+    "priority": "Idle",
+    "logicalProcessors": 1,
+    "workers": 1,
+    "serialTests": true,
+    "minimumAvailableMemoryGiB": 8,
+    "memoryHardLimit": false,
+    "otherProcessesModified": false
+  },
+  "fullRegression": false,
+  "formalBenchmark": false,
+  "largeSaveLoaded": false,
+  "webBuild": false,
+  "acceptedPerformanceResult": false,
+  "published": false,
+  "productionAccess": false,
+  "saveSchemaChanged": false,
+  "backupSettingsChanged": false,
+  "rawEvidenceDirectory": "D:\\GameDev\\DSPidle2\\artifacts\\web-grid-fuel-reserve-20261028"
+}

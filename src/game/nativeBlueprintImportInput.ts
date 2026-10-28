@@ -35,6 +35,14 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
 
 /** Validates paste input without parsing or normalizing the exchange JSON. */
 export function validateNativeBlueprintImportRaw(raw: unknown): NativeBlueprintImportInputResult {
+  return validateBlueprintImportRawWithinLimit(raw, NATIVE_BLUEPRINT_IMPORT_RAW_BYTES);
+}
+
+/** Shared strict text admission; callers supply their own transport budget. */
+export function validateBlueprintImportRawWithinLimit(raw: unknown, maximumBytes: number): NativeBlueprintImportInputResult {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
+    return Object.freeze({ ok: false as const, reason: "too-large" as const });
+  }
   if (typeof raw !== "string" || raw.trim().length === 0) {
     return Object.freeze({ ok: false as const, reason: "empty" as const });
   }
@@ -42,7 +50,7 @@ export function validateNativeBlueprintImportRaw(raw: unknown): NativeBlueprintI
     return Object.freeze({ ok: false as const, reason: "invalid-unicode" as const });
   }
   const rawBytes = UTF8_ENCODER.encode(raw).byteLength;
-  if (rawBytes > NATIVE_BLUEPRINT_IMPORT_RAW_BYTES) {
+  if (rawBytes > maximumBytes) {
     return Object.freeze({ ok: false as const, reason: "too-large" as const });
   }
   return Object.freeze({ ok: true as const, raw, rawBytes });
@@ -55,10 +63,21 @@ export function validateNativeBlueprintImportRaw(raw: unknown): NativeBlueprintI
 export async function readNativeBlueprintImportFile(
   file: Pick<File, "size" | "arrayBuffer">,
 ): Promise<NativeBlueprintImportInputResult> {
+  return readBlueprintImportFileWithinLimit(file, NATIVE_BLUEPRINT_IMPORT_RAW_BYTES);
+}
+
+/** The Web file picker uses the same byte checks with its exchange budget. */
+export async function readBlueprintImportFileWithinLimit(
+  file: Pick<File, "size" | "arrayBuffer">,
+  maximumBytes: number,
+): Promise<NativeBlueprintImportInputResult> {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
+    return Object.freeze({ ok: false as const, reason: "too-large" as const });
+  }
   if (!Number.isSafeInteger(file.size) || file.size < 1) {
     return Object.freeze({ ok: false as const, reason: "empty" as const });
   }
-  if (file.size > NATIVE_BLUEPRINT_IMPORT_RAW_BYTES) {
+  if (file.size > maximumBytes) {
     return Object.freeze({ ok: false as const, reason: "too-large" as const });
   }
   let bytes: Uint8Array;
@@ -67,7 +86,7 @@ export async function readNativeBlueprintImportFile(
   } catch {
     return Object.freeze({ ok: false as const, reason: "read-failed" as const });
   }
-  if (bytes.byteLength !== file.size || bytes.byteLength > NATIVE_BLUEPRINT_IMPORT_RAW_BYTES) {
+  if (bytes.byteLength !== file.size || bytes.byteLength > maximumBytes) {
     return Object.freeze({ ok: false as const, reason: "too-large" as const });
   }
   let raw: string;
@@ -83,7 +102,7 @@ export async function readNativeBlueprintImportFile(
   if (!sameBytes(encoded, bytes)) {
     return Object.freeze({ ok: false as const, reason: "invalid-utf8" as const });
   }
-  const validated = validateNativeBlueprintImportRaw(raw);
+  const validated = validateBlueprintImportRawWithinLimit(raw, maximumBytes);
   return validated.ok
     ? Object.freeze({ ...validated, rawBytes: bytes.byteLength })
     : validated;

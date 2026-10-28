@@ -3,6 +3,7 @@ import { getConstructionDefinition, getItem, getPlanet, getRecipe, getRecipesFor
 import { canPlaceBlueprint, canQueueBlueprint, getBlueprintFleetLoadPreview, getBlueprintRequirements, getConstructionQueueDetails, isTechnologyCompleted, transformBlueprintOffset } from "../game/engine";
 import type { FactoryConstructionHeadlineReadModel, FactoryConstructionWorkspaceReadModel, FactorySelectionToolbarReadModel } from "../game/factoryReadModels";
 import { blueprintExchangeFileFailureMessage, dispatchBlueprintExchangeFile } from "../game/blueprintExchangeFile";
+import { BLUEPRINT_EXCHANGE_MAX_ENTITIES, BLUEPRINT_EXCHANGE_MAX_BELTS, BLUEPRINT_EXCHANGE_SIZE_LABEL } from "../game/blueprintExchangeLimits";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { BlueprintDefinition, BlueprintMirror, BlueprintRotation, CanvasRegion, CanvasViewport, GameState, PlanetId, RecipeId } from "../game/types";
 import { Fragment, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
@@ -569,7 +570,7 @@ export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, const
       </div> : null}
       <div className="blueprint-library-shell">
       {importOpen ? <section className="blueprint-import-panel" aria-label="蓝图导入">
-        <header><div><Upload size={15} /><span><strong>导入蓝图</strong><small>交换文件会校验当前内容目录中的设备、物品和配方。</small></span></div><button type="button" onClick={() => fileInputRef.current?.click()}><Upload size={13} />选择文件</button></header>
+        <header><div><Upload size={15} /><span><strong>导入蓝图</strong><small>最多 {BLUEPRINT_EXCHANGE_MAX_ENTITIES.toLocaleString("zh-CN")} 个设备、{BLUEPRINT_EXCHANGE_MAX_BELTS.toLocaleString("zh-CN")} 条线路，文件不超过 {BLUEPRINT_EXCHANGE_SIZE_LABEL}。设备、物品与配方会完整校验。</small></span></div><button type="button" onClick={() => fileInputRef.current?.click()}><Upload size={13} />选择文件</button></header>
         <StableTextArea draftId="blueprint-import-json" value={importText} onValueChange={setImportText} placeholder="粘贴蓝图交换 JSON" aria-label="粘贴蓝图交换 JSON" />
         <footer><span className={importMessage?.startsWith("已导入") ? "ready" : ""}>{importMessage ?? "导出的蓝图可以直接在此粘贴。"}</span><button type="button" disabled={!importText.trim()} onClick={() => importRaw(importText)}><Check size={13} />导入到蓝图库</button></footer>
       </section> : null}

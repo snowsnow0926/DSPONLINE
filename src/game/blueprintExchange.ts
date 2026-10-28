@@ -1,5 +1,20 @@
 import { BUILDINGS, ITEMS, RECIPES, getExtractorBuildingId } from "./content";
 import { MAX_BELT_LANES, MAX_BUILDING_STACK_COUNT } from "./engine";
+import {
+  BLUEPRINT_EXCHANGE_MAX_BYTES,
+  BLUEPRINT_EXCHANGE_MAX_ENTITIES,
+  BLUEPRINT_EXCHANGE_MAX_BELTS,
+  BLUEPRINT_EXCHANGE_MAX_EXTERNAL_PORTS,
+  BLUEPRINT_EXCHANGE_MAX_RESOURCE_ANCHORS,
+  BLUEPRINT_LIBRARY_MAX_ROWS,
+  BLUEPRINT_EXCHANGE_SIZE_LABEL,
+} from "./blueprintExchangeLimits";
+export {
+  BLUEPRINT_EXCHANGE_MAX_BYTES,
+  BLUEPRINT_EXCHANGE_MAX_ENTITIES,
+  BLUEPRINT_EXCHANGE_MAX_BELTS,
+  BLUEPRINT_LIBRARY_MAX_ROWS,
+} from "./blueprintExchangeLimits";
 import type {
   BlueprintDefinition,
   BlueprintExternalPort,
@@ -15,13 +30,13 @@ import type {
 } from "./types";
 
 export const BLUEPRINT_EXCHANGE_FORMAT_VERSION = 2;
-export const BLUEPRINT_EXCHANGE_MAX_BYTES = 1_048_576;
-export const BLUEPRINT_EXCHANGE_MAX_ENTITIES = 512;
-export const BLUEPRINT_EXCHANGE_MAX_BELTS = 1_024;
-export const BLUEPRINT_LIBRARY_MAX_ROWS = 64;
 
 const UTF8_ENCODER = new TextEncoder();
-const BLUEPRINT_EXCHANGE_MAX_GRAPH_NODES = 20_000;
+// Include nested station slots, routing fields and ports at the full row
+// boundary. The old 20k-value budget rejected otherwise legal large exports.
+const BLUEPRINT_EXCHANGE_MAX_GRAPH_NODES = 2_000_000;
+const BLUEPRINT_EXCHANGE_MAX_JSON_DEPTH = 12;
+const BLUEPRINT_EXCHANGE_MAX_JSON_CONTAINERS = 200_000;
 
 export interface BlueprintExchangeEnvelope {
   type: "dsp-idle-blueprint";
@@ -83,10 +98,17 @@ function isExactIsoTimestamp(value: unknown): value is string {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
-function findDuplicateJsonKey(raw: string): boolean {
+function findBlueprintJsonStructureIssue(raw: string): string | null {
   const stack: Array<Set<string> | null> = [];
+  let containers = 0;
   for (let index = 0; index < raw.length; index += 1) {
     const character = raw[index];
+    if (character === "{" || character === "[") {
+      containers += 1;
+      if (stack.length >= BLUEPRINT_EXCHANGE_MAX_JSON_DEPTH || containers > BLUEPRINT_EXCHANGE_MAX_JSON_CONTAINERS) {
+        return "蓝图 JSON 结构超过嵌套层级或对象数量上限";
+      }
+    }
     if (character === "{") {
       stack.push(new Set());
       continue;
@@ -108,7 +130,7 @@ function findDuplicateJsonKey(raw: string): boolean {
       }
       if (raw[index] === "\"") break;
     }
-    if (index >= raw.length) return false;
+    if (index >= raw.length) return null;
     let cursor = index + 1;
     while (/\s/.test(raw[cursor] ?? "")) cursor += 1;
     if (raw[cursor] !== ":" || !(stack.at(-1) instanceof Set)) continue;
@@ -116,13 +138,13 @@ function findDuplicateJsonKey(raw: string): boolean {
     try {
       key = JSON.parse(raw.slice(start, index + 1)) as string;
     } catch {
-      return false;
+      return null;
     }
     const keys = stack.at(-1) as Set<string>;
-    if (keys.has(key)) return true;
+    if (keys.has(key)) return "蓝图文件包含重复的 JSON 字段";
     keys.add(key);
   }
-  return false;
+  return null;
 }
 
 function jsonStringByteLength(value: string): number {
@@ -185,11 +207,11 @@ function preflightBlueprintSerialization(blueprint: BlueprintDefinition): void {
     throw new RangeError("蓝图设备或线路数量超过交换上限");
   }
   if (blueprint.resourceAnchors !== undefined &&
-      (!Array.isArray(blueprint.resourceAnchors) || blueprint.resourceAnchors.length > 256)) {
+      (!Array.isArray(blueprint.resourceAnchors) || blueprint.resourceAnchors.length > BLUEPRINT_EXCHANGE_MAX_RESOURCE_ANCHORS)) {
     throw new RangeError("蓝图资源锚点数量超过交换上限");
   }
   if (blueprint.externalPorts !== undefined &&
-      (!Array.isArray(blueprint.externalPorts) || blueprint.externalPorts.length > 128)) {
+      (!Array.isArray(blueprint.externalPorts) || blueprint.externalPorts.length > BLUEPRINT_EXCHANGE_MAX_EXTERNAL_PORTS)) {
     throw new RangeError("蓝图外部接口数量超过交换上限");
   }
   if (blueprint.recipeOverrides !== undefined && !isRecord(blueprint.recipeOverrides)) {
@@ -236,8 +258,8 @@ function cloneBlueprint(blueprint: BlueprintDefinition): BlueprintDefinition {
 
 function parseResourceAnchors(value: unknown, issues: string[]): BlueprintResourceAnchor[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 256) {
-    issues.push("资源锚点必须是最多 256 项的数组");
+  if (!Array.isArray(value) || value.length > BLUEPRINT_EXCHANGE_MAX_RESOURCE_ANCHORS) {
+    issues.push(`资源锚点必须是最多 ${BLUEPRINT_EXCHANGE_MAX_RESOURCE_ANCHORS} 项的数组`);
     return [];
   }
   const anchors: BlueprintResourceAnchor[] = [];
@@ -429,8 +451,8 @@ function parseBelt(value: unknown, index: number, entityKeys: Set<string>, issue
 
 function parseExternalPorts(value: unknown, entityKeys: Set<string>, issues: string[]): BlueprintExternalPort[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > 128) {
-    issues.push("外部接口必须是最多 128 项的数组");
+  if (!Array.isArray(value) || value.length > BLUEPRINT_EXCHANGE_MAX_EXTERNAL_PORTS) {
+    issues.push(`外部接口必须是最多 ${BLUEPRINT_EXCHANGE_MAX_EXTERNAL_PORTS} 项的数组`);
     return undefined;
   }
   const ports: BlueprintExternalPort[] = [];
@@ -465,7 +487,7 @@ export function validateBlueprintExchange(value: unknown): BlueprintExchangeResu
       source.name.trim().length > 48 || !Array.isArray(source.entities) ||
       source.entities.length > BLUEPRINT_EXCHANGE_MAX_ENTITIES || !Array.isArray(source.belts) ||
       source.belts.length > BLUEPRINT_EXCHANGE_MAX_BELTS) {
-    return { valid: false, blueprint: null, issues: ["蓝图名称、设备数量或线路数量不合法"] };
+    return { valid: false, blueprint: null, issues: [`蓝图名称无效或设备/线路数量超过上限（${BLUEPRINT_EXCHANGE_MAX_ENTITIES} 个设备、${BLUEPRINT_EXCHANGE_MAX_BELTS} 条线路）`] };
   }
   if (value.formatVersion === 1 && Array.isArray(source.resourceAnchors) && source.resourceAnchors.length > 0) {
     return { valid: false, blueprint: null, issues: ["v1 蓝图不能包含资源锚点"] };
@@ -531,11 +553,12 @@ export function parseBlueprintExchange(raw: string): BlueprintExchangeResult {
   if (!hasWellFormedUnicode(raw)) {
     return { valid: false, blueprint: null, issues: ["蓝图文件包含无效 Unicode 字符"] };
   }
-  if (UTF8_ENCODER.encode(raw).byteLength > BLUEPRINT_EXCHANGE_MAX_BYTES) {
-    return { valid: false, blueprint: null, issues: ["蓝图文件超过 1 MiB 安全上限"] };
+  if (raw.length > BLUEPRINT_EXCHANGE_MAX_BYTES || UTF8_ENCODER.encode(raw).byteLength > BLUEPRINT_EXCHANGE_MAX_BYTES) {
+    return { valid: false, blueprint: null, issues: [`蓝图文件超过 ${BLUEPRINT_EXCHANGE_SIZE_LABEL} 安全上限`] };
   }
-  if (findDuplicateJsonKey(raw)) {
-    return { valid: false, blueprint: null, issues: ["蓝图文件包含重复的 JSON 字段"] };
+  const structureIssue = findBlueprintJsonStructureIssue(raw);
+  if (structureIssue) {
+    return { valid: false, blueprint: null, issues: [structureIssue] };
   }
   try {
     return validateBlueprintExchange(JSON.parse(raw));
@@ -568,7 +591,7 @@ export function serializeBlueprintExchange(blueprint: BlueprintDefinition): stri
   };
   const measuredBytes = measureJsonUtf8Bytes(envelope);
   if (measuredBytes === null || measuredBytes > BLUEPRINT_EXCHANGE_MAX_BYTES) {
-    throw new RangeError("蓝图交换文件超过 1 MiB 安全上限或包含无效 Unicode 字符");
+    throw new RangeError(`蓝图交换文件超过 ${BLUEPRINT_EXCHANGE_SIZE_LABEL} 安全上限或包含无效 Unicode 字符`);
   }
   const raw = JSON.stringify(envelope);
   if (UTF8_ENCODER.encode(raw).byteLength !== measuredBytes || !parseBlueprintExchange(raw).valid) {

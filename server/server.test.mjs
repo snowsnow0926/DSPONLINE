@@ -2192,6 +2192,24 @@ test("validates v34 time warp and accepts Android v35 through v46 saves", async 
   assert.equal(acceptedHistoricalOversizedStacks.response.status, 200, JSON.stringify(acceptedHistoricalOversizedStacks.body));
   const exactOverlapQueueIntent = v46PayloadFor((state) => {
     state.constructionQueue[0].allowExactOverlap = true;
+    // The 1.3.4 Web exchange scale fits the existing cloud schema, including
+    // a complete immutable queued definition. No server limit needs widening.
+    const definition = state.blueprints[0];
+    definition.entities = Array.from({ length: 4_096 }, (_, index) => ({
+      key: `node_${index + 1}`, buildingId: "storage_mk1",
+      offset: { x: index % 64 * 200, y: Math.floor(index / 64) * 180 }, machineCount: 1,
+    }));
+    definition.belts = Array.from({ length: 8_192 }, (_, index) => ({
+      key: `line_${index + 1}`, sourceKey: `node_${index % 4_096 + 1}`,
+      targetKey: `node_${(index + 1 + Math.floor(index / 4_096)) % 4_096 + 1}`,
+      itemId: "iron_ingot", lanes: 1, tier: 1, priority: 0,
+    }));
+    definition.externalPorts = Array.from({ length: 1_024 }, (_, index) => ({
+      key: `port_${index + 1}`, entityKey: "node_1", direction: "input",
+      itemId: "iron_ingot", offset: { x: index, y: 0 },
+    }));
+    state.blueprintVersions[0].definition = structuredClone(definition);
+    state.constructionQueue[0].reservedConstruction.storage_mk1 = 1_000;
   });
   const acceptedExactOverlapQueueIntent = await request("/api/cloud-save?slot=3", {
     method: "PUT",
@@ -2199,6 +2217,9 @@ test("validates v34 time warp and accepts Android v35 through v46 saves", async 
     body: JSON.stringify({ payload: exactOverlapQueueIntent, expectedRevision: 17 }),
   });
   assert.equal(acceptedExactOverlapQueueIntent.response.status, 200, JSON.stringify(acceptedExactOverlapQueueIntent.body));
+  const largeBlueprintReadback = await request("/api/cloud-save?slot=3", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(largeBlueprintReadback.response.status, 200);
+  assert.equal(largeBlueprintReadback.body.cloudSave.payload, exactOverlapQueueIntent);
   for (const invalid of [
     v46PayloadFor((state) => { state.entities[2].machineCount = Number.MAX_SAFE_INTEGER + 1; }),
     v46PayloadFor((state) => { state.blueprints[0].entities[0].machineCount = Number.MAX_SAFE_INTEGER + 1; }),

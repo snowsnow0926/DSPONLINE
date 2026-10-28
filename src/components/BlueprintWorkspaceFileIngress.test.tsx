@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createInitialState } from "../game/engine";
-import { NATIVE_BLUEPRINT_IMPORT_RAW_BYTES } from "../game/nativeBlueprintImportInput";
+import { BLUEPRINT_EXCHANGE_MAX_BYTES } from "../game/blueprintExchangeLimits";
 import {
   createWebFactoryConstructionHeadlineReadModel,
   createWebFactoryConstructionWorkspaceReadModel,
@@ -72,7 +72,7 @@ describe("BlueprintWorkspace Web file ingress", () => {
     /></GameDialogProvider>));
 
     const input = host.querySelector("[aria-label='选择要导入的蓝图文件']") as HTMLInputElement;
-    const metadataOversized = fakeFile(new Uint8Array([0x7b, 0x7d]), NATIVE_BLUEPRINT_IMPORT_RAW_BYTES + 1);
+    const metadataOversized = fakeFile(new Uint8Array([0x7b, 0x7d]), BLUEPRINT_EXCHANGE_MAX_BYTES + 1);
     await chooseFile(input, metadataOversized);
     expect(metadataOversized.arrayBuffer).not.toHaveBeenCalled();
     expect(onImport).not.toHaveBeenCalled();

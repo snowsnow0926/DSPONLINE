@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { NATIVE_BLUEPRINT_IMPORT_RAW_BYTES } from "./nativeBlueprintImportInput";
+import { BLUEPRINT_EXCHANGE_MAX_BYTES } from "./blueprintExchangeLimits";
+import { NATIVE_BLUEPRINT_IMPORT_RAW_BYTES, readNativeBlueprintImportFile } from "./nativeBlueprintImportInput";
 import { dispatchBlueprintExchangeFile, readBlueprintExchangeFile } from "./blueprintExchangeFile";
 
 function file(bytes: Uint8Array, reportedSize = bytes.byteLength) {
@@ -14,8 +15,8 @@ function file(bytes: Uint8Array, reportedSize = bytes.byteLength) {
 }
 
 describe("Web blueprint exchange file ingress", () => {
-  it("rejects metadata above one MiB without reading the file", async () => {
-    const source = file(new Uint8Array([0x7b, 0x7d]), NATIVE_BLUEPRINT_IMPORT_RAW_BYTES + 1);
+  it("rejects metadata above eight MiB without reading the file", async () => {
+    const source = file(new Uint8Array([0x7b, 0x7d]), BLUEPRINT_EXCHANGE_MAX_BYTES + 1);
     await expect(readBlueprintExchangeFile(source)).resolves.toEqual({ ok: false, reason: "too-large" });
     expect(source.arrayBuffer).not.toHaveBeenCalled();
   });
@@ -25,21 +26,23 @@ describe("Web blueprint exchange file ingress", () => {
     await expect(readBlueprintExchangeFile(source)).resolves.toEqual({ ok: false, reason: "too-large" });
     expect(source.arrayBuffer).toHaveBeenCalledOnce();
 
-    const grown = file(new Uint8Array(NATIVE_BLUEPRINT_IMPORT_RAW_BYTES + 1), NATIVE_BLUEPRINT_IMPORT_RAW_BYTES);
+    const grown = file(new Uint8Array(BLUEPRINT_EXCHANGE_MAX_BYTES + 1), BLUEPRINT_EXCHANGE_MAX_BYTES);
     await expect(readBlueprintExchangeFile(grown)).resolves.toEqual({ ok: false, reason: "too-large" });
     expect(grown.arrayBuffer).toHaveBeenCalledOnce();
   });
 
-  it("accepts exactly one MiB and dispatches the byte-identical text once", async () => {
-    const bytes = new Uint8Array(NATIVE_BLUEPRINT_IMPORT_RAW_BYTES).fill(0x20);
+  it("accepts exactly eight MiB and dispatches the byte-identical text once", async () => {
+    const bytes = new Uint8Array(BLUEPRINT_EXCHANGE_MAX_BYTES).fill(0x20);
     bytes[0] = 0x7b;
     bytes[1] = 0x7d;
     const onImport = vi.fn();
     const result = await dispatchBlueprintExchangeFile(file(bytes), onImport);
     expect(result.ok).toBe(true);
-    expect(result.ok ? result.rawBytes : -1).toBe(NATIVE_BLUEPRINT_IMPORT_RAW_BYTES);
+    expect(result.ok ? result.rawBytes : -1).toBe(BLUEPRINT_EXCHANGE_MAX_BYTES);
     expect(onImport).toHaveBeenCalledOnce();
-    expect(new TextEncoder().encode(onImport.mock.calls[0][0])).toEqual(bytes);
+    const roundTrip = new TextEncoder().encode(onImport.mock.calls[0][0]);
+    expect(roundTrip.byteLength).toBe(bytes.byteLength);
+    expect(roundTrip.every((byte, index) => byte === bytes[index])).toBe(true);
   });
 
   it("uses fatal UTF-8 and preserves exact bytes through decoding", async () => {
@@ -54,5 +57,15 @@ describe("Web blueprint exchange file ingress", () => {
     expect(new TextEncoder().encode(result.ok ? result.raw : "")).toEqual(bytes);
     expect(onImport).toHaveBeenCalledOnce();
     expect(onImport).toHaveBeenCalledWith("{\"name\":\"蓝图\"}");
+  });
+
+  it("admits a larger Web file while preserving the independent native one-MiB budget", async () => {
+    const bytes = new Uint8Array(NATIVE_BLUEPRINT_IMPORT_RAW_BYTES + 1).fill(0x20);
+    bytes[0] = 0x7b;
+    bytes[1] = 0x7d;
+    await expect(readNativeBlueprintImportFile(file(bytes))).resolves.toEqual({ ok: false, reason: "too-large" });
+    const result = await readBlueprintExchangeFile(file(bytes));
+    expect(result.ok).toBe(true);
+    expect(result.ok ? result.rawBytes : 0).toBe(bytes.byteLength);
   });
 });

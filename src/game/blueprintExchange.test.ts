@@ -12,6 +12,15 @@ import {
 import type { BlueprintDefinition, GameState } from "./types";
 
 describe("blueprint exchange", () => {
+  it("rejects deeply nested or excessive unused containers before allocating a parsed graph", () => {
+    const blueprint = { name: "结构边界", entities: [{ key: "node_1", buildingId: "storage_mk1", offset: { x: 0, y: 0 }, machineCount: 1 }], belts: [] };
+    const base = JSON.stringify({ type: "dsp-idle-blueprint", formatVersion: 2, blueprint });
+    const deep = base.slice(0, -1) + ',"extra":' + "[".repeat(20) + "0" + "]".repeat(20) + "}";
+    expect(parseBlueprintExchange(deep).issues).toEqual(["蓝图 JSON 结构超过嵌套层级或对象数量上限"]);
+    const many = JSON.stringify({ type: "dsp-idle-blueprint", formatVersion: 2, blueprint, extra: Array(200_001).fill({}) });
+    expect(parseBlueprintExchange(many).issues).toEqual(["蓝图 JSON 结构超过嵌套层级或对象数量上限"]);
+  });
+
   it("round-trips a valid blueprint and assigns a safe local id on import", () => {
     let state = createInitialState();
     state = placeBuilding(state, "arc_smelter", { x: 120, y: 80 });
@@ -257,7 +266,7 @@ describe("blueprint exchange", () => {
     })).issues).toEqual(["v1 蓝图不能包含资源锚点"]);
   });
 
-  it("accepts the shared 512 entity and 1024 belt boundary and rejects the next row", () => {
+  it("accepts the Web 4096 entity and 8192 belt boundary and rejects the next row", () => {
     const entities = Array.from({ length: BLUEPRINT_EXCHANGE_MAX_ENTITIES }, (_, index) => ({
       key: `node_${index + 1}`,
       buildingId: "storage_mk1",
@@ -334,7 +343,7 @@ describe("blueprint exchange", () => {
     expect(() => serializeBlueprintExchange({ ...blueprint, name: "bad\ud800" })).toThrow(/Unicode/);
   });
 
-  it("enforces the one MiB UTF-8 boundary and rejects lone UTF-16 surrogates", () => {
+  it("enforces the eight MiB UTF-8 boundary and rejects lone UTF-16 surrogates", () => {
     const compact = JSON.stringify({
       type: "dsp-idle-blueprint",
       formatVersion: 2,
@@ -349,7 +358,7 @@ describe("blueprint exchange", () => {
     )}`;
     expect(new TextEncoder().encode(exact)).toHaveLength(BLUEPRINT_EXCHANGE_MAX_BYTES);
     expect(parseBlueprintExchange(exact).valid).toBe(true);
-    expect(parseBlueprintExchange(`${exact} `).issues).toEqual(["蓝图文件超过 1 MiB 安全上限"]);
+    expect(parseBlueprintExchange(`${exact} `).issues).toEqual(["蓝图文件超过 8 MiB 安全上限"]);
     expect(parseBlueprintExchange(`${compact}\ud800`).issues).toEqual(["蓝图文件包含无效 Unicode 字符"]);
     expect(parseBlueprintExchange(JSON.stringify({
       type: "dsp-idle-blueprint",

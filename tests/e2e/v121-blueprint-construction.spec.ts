@@ -1,5 +1,23 @@
 import { expect, test } from "@playwright/test";
 
+function scaleBlueprintEnvelope(belts = 8_192) {
+  return {
+    type: "dsp-idle-blueprint", formatVersion: 2,
+    blueprint: {
+      id: "scale_blueprint", name: "规模蓝图", revision: 1,
+      entities: Array.from({ length: 4_096 }, (_, index) => ({
+        key: `node_${index + 1}`, buildingId: "storage_mk1",
+        offset: { x: index % 64 * 200, y: Math.floor(index / 64) * 180 }, machineCount: 1,
+      })),
+      belts: Array.from({ length: belts }, (_, index) => ({
+        key: `line_${index + 1}`, sourceKey: `node_${index % 4_096 + 1}`,
+        targetKey: `node_${(index + 1 + Math.floor(index / 4_096)) % 4_096 + 1}`,
+        itemId: "iron_ingot", lanes: 1, tier: 1, priority: 0,
+      })),
+    },
+  };
+}
+
 function seedPendingBlueprintFixture() {
   return () => {
     const blueprint = {
@@ -76,6 +94,78 @@ test("bounded factory headline preserves visible blueprint queue and planet summ
     .toHaveAttribute("data-factory-read-model-source", "web-game-state");
   await expect(headline.locator("[data-factory-read-model-revision]"))
     .toHaveAttribute("data-factory-read-model-revision", "web");
+});
+
+test("v134 Web imports and exports the complete 4096-node 8192-line file", async ({ page }) => {
+  await page.addInitScript(seedPendingBlueprintFixture());
+  await page.goto("/");
+  await page.getByRole("button", { name: "打开蓝图库" }).click();
+  const workspace = page.getByRole("dialog", { name: "蓝图与待建施工" });
+  const input = scaleBlueprintEnvelope();
+  const buffer = Buffer.from(JSON.stringify(input));
+  expect(buffer.byteLength).toBeGreaterThan(1_048_576);
+  await workspace.locator("input[type=file]").setInputFiles({ name: "large-blueprint.json", mimeType: "application/json", buffer });
+  const card = workspace.locator(".blueprint-card").filter({ has: page.getByRole("textbox", { name: "规模蓝图名称", exact: true }) });
+  await expect(card.locator("header em")).toContainText("4096 设备");
+  await expect(card.locator("header em")).toContainText("8192 线路");
+  const downloadEvent = page.waitForEvent("download");
+  await card.getByRole("button", { name: "导出", exact: true }).click();
+  const stream = await (await downloadEvent).createReadStream();
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const exported = JSON.parse(Buffer.concat(chunks).toString("utf8")).blueprint;
+  expect(exported.entities.map((row: { key: string; buildingId: string; offset: unknown; machineCount: number }) => [row.key, row.buildingId, row.offset, row.machineCount]))
+    .toEqual(input.blueprint.entities.map((row) => [row.key, row.buildingId, row.offset, row.machineCount]));
+  expect(exported.belts.map((row: { key: string; sourceKey: string; targetKey: string; itemId: string; lanes: number }) => [row.key, row.sourceKey, row.targetKey, row.itemId, row.lanes]))
+    .toEqual(input.blueprint.belts.map((row) => [row.key, row.sourceKey, row.targetKey, row.itemId, row.lanes]));
+});
+
+test("v134 Web rejects an oversized file and the next line without adding a blueprint", async ({ page }) => {
+  await page.addInitScript(seedPendingBlueprintFixture());
+  await page.goto("/");
+  await page.getByRole("button", { name: "打开蓝图库" }).click();
+  const workspace = page.getByRole("dialog", { name: "蓝图与待建施工" });
+  const pickerEvent = page.waitForEvent("filechooser");
+  await workspace.getByRole("button", { name: "导入蓝图", exact: true }).click();
+  await (await pickerEvent).setFiles({ name: "oversized.json", mimeType: "application/json", buffer: Buffer.alloc(8 * 1_048_576 + 1, 0x20) });
+  const panel = workspace.getByRole("region", { name: "蓝图导入" });
+  await expect(panel).toContainText("8 MiB");
+  await expect(panel).toContainText("超过");
+  await expect(workspace.locator(".blueprint-card")).toHaveCount(1);
+  await workspace.locator("input[type=file]").setInputFiles({ name: "too-many-lines.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(scaleBlueprintEnvelope(8_193))) });
+  await expect(panel).toContainText("超过上限");
+  await expect(workspace.locator(".blueprint-card")).toHaveCount(1);
+});
+
+test("v134 import capacity stays readable at 150 percent in desktop and mobile orientations", async ({ page }, testInfo) => {
+  await page.addInitScript(seedPendingBlueprintFixture());
+  await page.addInitScript(() => {
+    const key = "dsp-idle-network.save.v1";
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return;
+    const envelope = JSON.parse(raw);
+    envelope.state.settings.fontScale = 1.5;
+    window.localStorage.setItem(key, JSON.stringify(envelope));
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "打开蓝图库" }).click();
+  const workspace = page.getByRole("dialog", { name: "蓝图与待建施工" });
+  const picker = page.waitForEvent("filechooser");
+  await workspace.getByRole("button", { name: "导入蓝图", exact: true }).click();
+  await (await picker).setFiles([]);
+  const panel = workspace.getByRole("region", { name: "蓝图导入" });
+  for (const [name, width, height] of [["desktop", 1440, 900], ["portrait", 390, 844], ["landscape", 844, 390]] as const) {
+    await page.setViewportSize({ width, height });
+    await expect(panel).toContainText("4,096");
+    await expect(panel).toContainText("8,192");
+    await expect(panel).toContainText("8 MiB");
+    await expect.poll(() => panel.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`blueprint-capacity-${name}.png`) });
+    const confirm = panel.getByRole("button", { name: "导入到蓝图库", exact: true });
+    await confirm.scrollIntoViewIfNeeded();
+    await expect(confirm).toBeInViewport();
+    if (name === "landscape") await page.screenshot({ path: testInfo.outputPath("blueprint-capacity-landscape-actions.png") });
+  }
 });
 
 test("v45 queued blueprints render a viewport ghost and deploy atomically after funding", async ({ page }) => {

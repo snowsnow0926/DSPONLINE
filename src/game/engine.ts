@@ -9119,13 +9119,19 @@ export function getBlueprintEligibleEntityIds(state: GameState, entityIds: strin
 export function createBlueprint(state: GameState, entityIds: string[], name?: string): GameState {
   const eligibleIds = getBlueprintEligibleEntityIds(state, entityIds);
   if (eligibleIds.length === 0) return state;
-  const selected = state.entities.filter((entity) => eligibleIds.includes(entity.id));
+  const eligibleIdSet = new Set(eligibleIds);
+  const selected = state.entities.filter((entity) => eligibleIdSet.has(entity.id));
+  const selectedById = new Map(selected.map((entity) => [entity.id, entity]));
   if (selected.some((entity) => {
     const count = entity.kind === "vein" ? entity.minerCount : entity.machineCount;
     return !Number.isSafeInteger(count) || count < 1 || count > MAX_BUILDING_STACK_COUNT;
   })) return state;
-  const originX = Math.min(...selected.map((entity) => entity.position.x));
-  const originY = Math.min(...selected.map((entity) => entity.position.y));
+  let originX = Infinity;
+  let originY = Infinity;
+  for (const entity of selected) {
+    originX = Math.min(originX, entity.position.x);
+    originY = Math.min(originY, entity.position.y);
+  }
   const keyById = new Map(selected.map((entity, index) => [entity.id, `node_${index + 1}`]));
   const selectedBuildings = selected.filter((entity) => entity.kind !== "vein" && entity.buildingId);
   const selectedResources = selected.filter((entity) => entity.kind === "vein" && entity.resourceId && entity.minerCount > 0);
@@ -9189,7 +9195,7 @@ export function createBlueprint(state: GameState, entityIds: string[], name?: st
     belts: state.belts
       .filter((belt) => keyById.has(belt.source) && keyById.has(belt.target))
       .map((belt, index) => {
-        const sourceEntity = selected.find((entity) => entity.id === belt.source);
+        const sourceEntity = selectedById.get(belt.source);
         const inferredElevatorIndex = sourceEntity && isElevatorStation(sourceEntity)
           ? sourceEntity.elevatorOutputItems?.findIndex((itemId) => itemId === belt.itemId)
           : -1;
@@ -9215,7 +9221,7 @@ export function createBlueprint(state: GameState, entityIds: string[], name?: st
       .map((belt, index) => {
         const selectedSource = keyById.has(belt.source);
         const entityId = selectedSource ? belt.source : belt.target;
-        const portEntity = selected.find((entity) => entity.id === entityId)!;
+        const portEntity = selectedById.get(entityId)!;
         return {
           key: `port_${index + 1}`,
           entityKey: keyById.get(entityId)!,
@@ -10023,9 +10029,13 @@ function installedFleetForEntry(
 ): { drones: number; vessels: number } {
   let drones = 0;
   let vessels = 0;
+  let entityById: Map<string, FactoryEntity> | undefined;
   for (const template of blueprint.entities) {
+    if (template.buildingId !== "planetary_logistics_station" && template.buildingId !== "interstellar_logistics_station") continue;
     const entityId = entry.placedEntityIdsByKey?.[template.key];
-    const entity = entityId ? state.entities.find((candidate) => candidate.id === entityId) : undefined;
+    if (!entityId) continue;
+    entityById ??= new Map(state.entities.map((entity) => [entity.id, entity]));
+    const entity = entityById.get(entityId);
     if (!entity) continue;
     const droneTarget = template.buildingId === "planetary_logistics_station" || template.buildingId === "interstellar_logistics_station"
       ? Math.min(getStationDroneCapacity(entity), Math.max(0, Math.floor(template.stationDroneTarget ?? 0)))

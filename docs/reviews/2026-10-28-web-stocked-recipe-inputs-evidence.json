@@ -1,0 +1,491 @@
+{
+  "decision": "retain-stocked-input-recursive-planning-after-complete-regression-and-six-frozen-page-runs",
+  "runtimeCommit": "13e80829361afe0c5a7b30b2aff14819dd19ec3e",
+  "productionPublished": false,
+  "unit": {
+    "passed": 3739,
+    "skipped": 38,
+    "failed": 0
+  },
+  "browser": {
+    "chromium-full-01": {
+      "startTime": "2026-10-28T06:09:05.736Z",
+      "duration": 473079.194,
+      "expected": 524,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "pwa-preview-01": {
+      "startTime": "2026-10-28T06:16:59.535Z",
+      "duration": 7947.831,
+      "expected": 1,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durable-01": {
+      "startTime": "2026-10-28T06:17:08.010Z",
+      "duration": 46638.09,
+      "expected": 21,
+      "skipped": 22,
+      "unexpected": 0,
+      "flaky": 0
+    }
+  },
+  "micro": {
+    "stock": {
+      "rows": [
+        {
+          "variant": "baseline-01",
+          "advanceMs": 3893.7999999523163,
+          "fullPayloadSha256": "dee046c56e040f8eff13a273368e15cc99c2a6282410060ca84ca08695a87b97"
+        },
+        {
+          "variant": "candidate-01",
+          "advanceMs": 3468.2000000476837,
+          "fullPayloadSha256": "dee046c56e040f8eff13a273368e15cc99c2a6282410060ca84ca08695a87b97"
+        },
+        {
+          "variant": "candidate-02",
+          "advanceMs": 3467.5999999046326,
+          "fullPayloadSha256": "dee046c56e040f8eff13a273368e15cc99c2a6282410060ca84ca08695a87b97"
+        },
+        {
+          "variant": "baseline-02",
+          "advanceMs": 3893.600000143051,
+          "fullPayloadSha256": "dee046c56e040f8eff13a273368e15cc99c2a6282410060ca84ca08695a87b97"
+        }
+      ],
+      "baselineMedian": 3893.7000000476837,
+      "candidateMedian": 3467.899999976158,
+      "changePercent": -10.935613942170974,
+      "fullPayloadsEqual": true
+    },
+    "tray": {
+      "rows": [
+        {
+          "variant": "baseline-01",
+          "advanceMs": 1554.4000000953674,
+          "fullPayloadSha256": "32b5867164fc892bc4f39385313b6735800f72d79e48202ff42f0710592830bb"
+        },
+        {
+          "variant": "candidate-01",
+          "advanceMs": 1464.6000001430511,
+          "fullPayloadSha256": "32b5867164fc892bc4f39385313b6735800f72d79e48202ff42f0710592830bb"
+        },
+        {
+          "variant": "candidate-02",
+          "advanceMs": 1472.9000000953674,
+          "fullPayloadSha256": "32b5867164fc892bc4f39385313b6735800f72d79e48202ff42f0710592830bb"
+        },
+        {
+          "variant": "baseline-02",
+          "advanceMs": 1569.9000000953674,
+          "fullPayloadSha256": "32b5867164fc892bc4f39385313b6735800f72d79e48202ff42f0710592830bb"
+        }
+      ],
+      "baselineMedian": 1562.1500000953674,
+      "candidateMedian": 1468.7500001192093,
+      "changePercent": -5.978939280508033,
+      "fullPayloadsEqual": true
+    },
+    "quantum": {
+      "rows": [
+        {
+          "variant": "baseline-01",
+          "advanceMs": 732.9000000953674,
+          "fullPayloadSha256": "f9b61c57b55f1d5ba1c3af8d7594a3fd00c0a6f177e862e79d7658d3b0013e83"
+        },
+        {
+          "variant": "candidate-01",
+          "advanceMs": 651.7999999523163,
+          "fullPayloadSha256": "f9b61c57b55f1d5ba1c3af8d7594a3fd00c0a6f177e862e79d7658d3b0013e83"
+        },
+        {
+          "variant": "candidate-02",
+          "advanceMs": 645.1999998092651,
+          "fullPayloadSha256": "f9b61c57b55f1d5ba1c3af8d7594a3fd00c0a6f177e862e79d7658d3b0013e83"
+        },
+        {
+          "variant": "baseline-02",
+          "advanceMs": 735.8999998569489,
+          "fullPayloadSha256": "f9b61c57b55f1d5ba1c3af8d7594a3fd00c0a6f177e862e79d7658d3b0013e83"
+        }
+      ],
+      "baselineMedian": 734.3999999761581,
+      "candidateMedian": 648.4999998807907,
+      "changePercent": -11.6966231070474,
+      "fullPayloadsEqual": true
+    }
+  },
+  "macroFullParity": {
+    "sourcePayloadSha256": "44aba0f47342827a7291757f39f3673cb25588241a2c5eeac0f75745b5dd17ee",
+    "canonicalStateSha256": "d1e04d3cafb67654589b40daaa4761a9cb6c8d5e4e39c5624725124eaaef5260",
+    "payloadSha256": "c118f6b3c79f38869164c90bf212437b6d5c641e90f676e8af706f7eef16d047",
+    "sourcePayloadBytes": 110851943,
+    "payloadBytes": 110735835
+  },
+  "normalFullParity": {
+    "fullStateSha256": "932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae3720a5",
+    "quantumSha256": "f497973e3429e51dbb8a56185fe0233b2b5e3e581157cfdf0e37f12de63212d5",
+    "entities": 110042,
+    "belts": 233300
+  },
+  "pageComparison": {
+    "order": [
+      "web-stocked-baseline-01",
+      "web-stocked-candidate-01",
+      "web-stocked-candidate-02",
+      "web-stocked-baseline-02",
+      "web-stocked-baseline-03",
+      "web-stocked-candidate-03"
+    ],
+    "checks": {
+      "web-stocked-baseline-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "77b537aeddbc5dc54b0fc17ae9853826344f31ed49d0758fcc6d9d2a0a1c6f73"
+      },
+      "web-stocked-candidate-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "daf3025d3641bc2960bbff81a169b04ea98aeed265cc7748714fd4692563070d"
+      },
+      "web-stocked-candidate-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "95bc0c52ca2bc3ed24e7c73075c692f602b0fd989b7979ac2d4fff3c73772b36"
+      },
+      "web-stocked-baseline-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "ae3954616c3dbc476258ef3df2237bc60252eb15f57f619ab7273db9eca4f3e9"
+      },
+      "web-stocked-baseline-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "b8967a34f00ff10f66513bb9d93cb98d6c7e33bd4d86f4648f8ad53b880377af"
+      },
+      "web-stocked-candidate-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "f668b47f08228030a8636163186b434f62fedf3a30cc5203f3cf8d6219f4df88"
+      }
+    },
+    "metrics": {
+      "startMs": {
+        "baseline": [
+          8779,
+          8789,
+          8778
+        ],
+        "candidate": [
+          8829,
+          8703,
+          8874
+        ],
+        "baselineMedian": 8779,
+        "candidateMedian": 8829,
+        "baselineRange": [
+          8778,
+          8789
+        ],
+        "candidateRange": [
+          8703,
+          8874
+        ],
+        "changePercent": 0.5695409499943072
+      },
+      "stopMs": {
+        "baseline": [
+          11070,
+          10744,
+          10656
+        ],
+        "candidate": [
+          10589,
+          10540,
+          10607
+        ],
+        "baselineMedian": 10744,
+        "candidateMedian": 10589,
+        "baselineRange": [
+          10656,
+          11070
+        ],
+        "candidateRange": [
+          10540,
+          10607
+        ],
+        "changePercent": -1.442665673864485
+      },
+      "startMaxFrameMs": {
+        "baseline": [
+          126.29999995231628,
+          117.39999985694885,
+          123.5
+        ],
+        "candidate": [
+          124.39999985694885,
+          122.89999985694885,
+          130.10000014305115
+        ],
+        "baselineMedian": 123.5,
+        "candidateMedian": 124.39999985694885,
+        "baselineRange": [
+          117.39999985694885,
+          126.29999995231628
+        ],
+        "candidateRange": [
+          122.89999985694885,
+          130.10000014305115
+        ],
+        "changePercent": 0.7287448234403637
+      },
+      "stopMaxFrameMs": {
+        "baseline": [
+          125.90000009536743,
+          125.5,
+          122.20000004768372
+        ],
+        "candidate": [
+          124.5,
+          97.79999995231628,
+          94.09999990463257
+        ],
+        "baselineMedian": 125.5,
+        "candidateMedian": 97.79999995231628,
+        "baselineRange": [
+          122.20000004768372,
+          125.90000009536743
+        ],
+        "candidateRange": [
+          94.09999990463257,
+          124.5
+        ],
+        "changePercent": -22.07171318540535
+      },
+      "startLongTaskMs": {
+        "baseline": [
+          184,
+          168,
+          170
+        ],
+        "candidate": [
+          174,
+          171,
+          179
+        ],
+        "baselineMedian": 170,
+        "candidateMedian": 174,
+        "baselineRange": [
+          168,
+          184
+        ],
+        "candidateRange": [
+          171,
+          179
+        ],
+        "changePercent": 2.35294117647058
+      },
+      "stopLongTaskMs": {
+        "baseline": [
+          142,
+          141,
+          140
+        ],
+        "candidate": [
+          140,
+          137,
+          133
+        ],
+        "baselineMedian": 141,
+        "candidateMedian": 137,
+        "baselineRange": [
+          140,
+          142
+        ],
+        "candidateRange": [
+          133,
+          140
+        ],
+        "changePercent": -2.8368794326241176
+      },
+      "rendererWarmWorkingSetBytes": {
+        "baseline": [
+          2844057600,
+          2914033664,
+          2916970496
+        ],
+        "candidate": [
+          2763345920,
+          2715574272,
+          2758815744
+        ],
+        "baselineMedian": 2914033664,
+        "candidateMedian": 2758815744,
+        "baselineRange": [
+          2844057600,
+          2916970496
+        ],
+        "candidateRange": [
+          2715574272,
+          2763345920
+        ],
+        "changePercent": -5.326565781224968
+      },
+      "rendererStoppedWorkingSetBytes": {
+        "baseline": [
+          1372143616,
+          1348608000,
+          1373593600
+        ],
+        "candidate": [
+          1366839296,
+          1378508800,
+          1919090688
+        ],
+        "baselineMedian": 1372143616,
+        "candidateMedian": 1378508800,
+        "baselineRange": [
+          1348608000,
+          1373593600
+        ],
+        "candidateRange": [
+          1366839296,
+          1919090688
+        ],
+        "changePercent": 0.4638861359538726
+      },
+      "rendererPeakBytes": {
+        "baseline": [
+          4094181376,
+          4168003584,
+          4175515648
+        ],
+        "candidate": [
+          4020842496,
+          3902148608,
+          4025421824
+        ],
+        "baselineMedian": 4168003584,
+        "candidateMedian": 4020842496,
+        "baselineRange": [
+          4094181376,
+          4175515648
+        ],
+        "candidateRange": [
+          3902148608,
+          4025421824
+        ],
+        "changePercent": -3.5307332403675784
+      },
+      "browserFivePointMaxWorkingSetBytes": {
+        "baseline": [
+          3422175232,
+          3431149568,
+          3579596800
+        ],
+        "candidate": [
+          3416072192,
+          3432882176,
+          3572191232
+        ],
+        "baselineMedian": 3431149568,
+        "candidateMedian": 3432882176,
+        "baselineRange": [
+          3422175232,
+          3579596800
+        ],
+        "candidateRange": [
+          3416072192,
+          3572191232
+        ],
+        "changePercent": 0.05049642884003003
+      }
+    },
+    "scope": "Six fresh Chrome processes; diagnostic options disabled. Lifetime OS renderer peak and discrete five-point browser working set are separate metrics.",
+    "backupScope": "The fixture has no GameState backup preference keys. Production and server backup settings were not accessed or changed."
+  },
+  "inputFixtureUnchanged": true,
+  "artifact": {
+    "buildId": "1.3.4+13e80829361a",
+    "fileCount": 198,
+    "workerCount": 16,
+    "manifestSha256": "a1bf51069b84b6e15d798dae21f0ef075582c57d282a65ec038ed843b5c3331f",
+    "aggregateSha256": "380aa04df7c18092192006bfdfebe1cf77aa723128e915b4997823f1ec587a36",
+    "archive": "candidate-web-13e80829361a.tar.gz",
+    "archiveSha256": "2d4613704638743169a6ae9bb7c686b6cf531da53a1dfedd2e2b4cffdd2a6fd2",
+    "changedWorkers": [
+      "multicoreSimulation",
+      "offlineSimulation",
+      "pureIdleMacro",
+      "simulation",
+      "statistics"
+    ],
+    "sourceHashes": {
+      "native/native-coverage-manifest.json": "3ddff06f173967a28d8eac69645def38556394f866e6e4ebfd3fcd3f23db2657",
+      "src/App.tsx": "4ddab435610c8803bee77faccc50698941297bebc11fedecb17fc984aaa2f43d",
+      "src/components/AccessibleDialog.tsx": "f749ff22448453fa065a5605a1fd0e8550e2b82458899033ad950e6b31c2ff49",
+      "src/components/BlueprintWorkspace.tsx": "63e36803c09c682d36fa655f953cf14a940863e2793b9b7276dd649ebae36812",
+      "src/components/TimeWarpIdleOverlay.tsx": "ba4c3237910eb8fd6000c61ef369e5414dab2a84433386cb27b5f25287dcaa4d",
+      "src/game/authoritativeSavePersistence.worker.ts": "cbe421da6daa1c5dddf80a748bcd13dab2ffda2b80e561b698350e13a36c934b",
+      "src/game/authoritativeSavePersistenceClient.ts": "6d00bb29914b8f684077c726ebcdbf6662648a4e90c0568bad24ff34839b1d33",
+      "src/game/beltFlow.ts": "b80f99d8428337c328aa0029448a9fedefdc6d4f177fcb7193ac5e025bbcf78e",
+      "src/game/blueprintExchange.ts": "5efc142f1c12a0ad0c7c888d67ea6082895bd3a2c8c15164b9ef483b712fd701",
+      "src/game/blueprintExchangeFile.ts": "d367fd04a0cce8b11d427a2e2923b9ea1fc59c88de4b766ae01c42dd0bd237c0",
+      "src/game/blueprintExchangeLimits.ts": "814b17ea46438bf1f0178e1a7f159914c3d11d55349706edbfe9cfeddcfbe80a",
+      "src/game/canonicalSaveEnvelopeInspection.ts": "fa86ca733abe4e3d0bf46b5a11ff8575895b529c4e8d0e22c0ae74fbcad4de75",
+      "src/game/canonicalTerminalOwner.worker.ts": "0ceeb80d51e0c1aba294963b0932d36c32ed1a05cd36abfc65963705c221900a",
+      "src/game/canonicalTerminalOwnerClient.ts": "d35451af32da5ab5077498d266887152ce6b939cd4ad1f9086e52c14232bc186",
+      "src/game/chunkedSaveJournal.ts": "e3ef1b98502ef92375bcccfe7bd1ef0980166ad9999102d7a76a1c5771e8f74a",
+      "src/game/contentPacks.ts": "8a6518eb5dec3b2b95990cf0ecfe5ae901c18b147887e4871e72f3aa2770dee6",
+      "src/game/engine.ts": "55316447b90a48440733a99d33e06c0c444e900854e6a9fc4db648932acf6c91",
+      "src/game/nativeBlueprintImportInput.ts": "fdcead58f36762d51acb070016ddc8c555f4b2e671084783a4d37af52c211eb2",
+      "src/game/payloadTextChecksum.ts": "d5ec856e3fedd62e1cb14d84ee5dd7775b2933107c772bd49fc521de78791891",
+      "src/game/pureIdleCheckpointOwnerClient.ts": "b88061a1c83b575c219849d5e96d43fc0e7c6c3715bbdd8d58ad5e3e8645448a",
+      "src/game/pureIdleMacro.ts": "4acafb9f17b07b7d6907e0dfb8dcba29dcb79d85c8183f9cd9e949feec7bfbd4",
+      "src/game/pureIdleMacro.worker.ts": "1da6696457673abc6d14fcbc930cdd5ea06c988ba29458bf0070404f5858ce02",
+      "src/game/pureIdleMacroValidation.ts": "e071bfadd9453c244c8b0cec4f3772c358c9b9e7de67d6c55ab07dbbc73d9c1e",
+      "src/game/pureIdleRecovery.ts": "64c1632132600b1765b4281a552fbf8e2d0d0d14e1da1b6a882f99ab2a2c51e9",
+      "src/game/pureIdleReplication.ts": "391a12eb4594a5b412dd37fd65e8eba600ad499908b1c1ce3118fd0789589901",
+      "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+      "src/game/saveEnvelopeIntegrity.ts": "f565a06497bbc254e2277b3c5fda38c02deb05543f1489effe900c08c91ac6cb",
+      "src/game/saveFieldContract.ts": "e3d6a34ec01bea4d1c16d194ca8e67b0db78860c9147be00d35ae3ff54199918",
+      "src/game/saveProjection.ts": "7d62c35d7665960f04930dcf552ce432d07d3ca4beac7bb859b85b42af8e5077",
+      "src/game/saveTransfer.ts": "f844fa15734902546aef43a22e82fc6c9e698a8a7af3ed0c4c2f7c2a8a11dbb7",
+      "src/game/saveTransferDecode.ts": "ba79bb4c94d33fd4ea7fa6a51497db2c4c44e296ce52b5e8a5beaa64d9badc09",
+      "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+      "src/game/types.ts": "713e623c9a602feecba953c079b0c83bb758a81fb738e45d9390224d714a7d78",
+      "src/game/recursiveCrafting.ts": "b377c80a558c676b1e87dd7d803c461b5f9acffeb1e59288bc7a0274fd2e3adb"
+    }
+  },
+  "productionAccessed": false,
+  "backupScope": "Fixture has no backup preference fields. Production saves and backup settings were not accessed or changed.",
+  "frozenPagePreflightUnchanged": true
+}

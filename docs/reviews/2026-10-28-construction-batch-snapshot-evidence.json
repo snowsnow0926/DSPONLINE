@@ -1,0 +1,188 @@
+{
+  "scope": "Small synthetic Node checks; configured targetStock property-read counts, not elapsed-time or whole-game performance.",
+  "sourceCommitAtChecks": "669cc5885aefc5d4480e471cfe1512490155f7ac",
+  "sourceDirtyAtChecks": true,
+  "sourceHashes": {
+    "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+    "src/game/constructionQuantumPlanningContext.test.ts": "87c526ffc68a7f32ab96e06c2b1ade7d43e609fc5779a20ebadf48798d7f3f37",
+    "src/game/constructionBatchSnapshot.test.ts": "8c0ac44919221be586e898394540abb714b22789610d33e369b6567f21bc0378",
+    "src/game/engine.ts": "7418a75403976dc5b9d7b1edf0861d7aaf318e9da1b21da26efa69b6fb637296"
+  },
+  "baselineCommit": "669cc5885aefc5d4480e471cfe1512490155f7ac",
+  "baselineEngineSha256": "c94148c4048fc6c6c2170df8f12af26f78e083d61da8a68e1fd525bcc0cfea39",
+  "baselineCaptureSha256": "1e970280baeb5f25238436d045e1608afc7a4e5b94e0b46c1515001190e8379b",
+  "baselineCaptureTestSha256": "152b180debc6299a25b94811702f4938b01b5380b92a2151001c2e0a99109f1a",
+  "focusedChecks": {
+    "snapshot": {
+      "passed": 5,
+      "failed": 0,
+      "log": "target-read-diagnostic-01.log",
+      "logSha256": "72a91d76acbdda08dd137124850572ef0876ebb66bff55b19184c9d336f2256c",
+      "availableMemoryGiBAtStart": 8.22
+    },
+    "quantum": {
+      "passed": 23,
+      "failed": 0,
+      "log": "light-quantum-23-01.log",
+      "logSha256": "46ab2075318c2be3e1c76c3964f338af4b72a209bbb7260c52dc5b3252538228",
+      "availableMemoryGiBAtStart": 14.4
+    },
+    "context": {
+      "passed": 5,
+      "failed": 0,
+      "log": "light-context-5-01.log",
+      "logSha256": "fb8f7399018787ef38da327aeb2392fabc010ad6c6bad9a9badc2a21542b673a",
+      "availableMemoryGiBAtStart": 14.39
+    },
+    "offline-domain": {
+      "passed": 14,
+      "failed": 0,
+      "log": "light-offline-domain-14-01.log",
+      "logSha256": "ddb4a1a23a3b263e817aba17049478fd0980b6ca17260597ba45776938c91183",
+      "availableMemoryGiBAtStart": 14.38
+    },
+    "batching": {
+      "passed": 20,
+      "failed": 0,
+      "log": "light-batching-20-01.log",
+      "logSha256": "011e4cd7cb074d69528b4e0a6a5f62bde4c5acb82f65887b94a3c723a01b886e",
+      "availableMemoryGiBAtStart": 14.42
+    },
+    "construction-guard": {
+      "passed": 14,
+      "failed": 0,
+      "log": "light-construction-guard-01.log",
+      "logSha256": "5580aea00a75a311b026d1fd4f3a4c930b3f5630e612c82a59a46af79578397b",
+      "availableMemoryGiBAtStart": 14.55
+    }
+  },
+  "focusedPassed": 81,
+  "focusedFailed": 0,
+  "applicationTypes": "passed",
+  "applicationTypesLogSha256": "f8c4ca63afbde284b5995fc9fe4c2f786fdd6ce66b1f0ebb22f6a168c4a93597",
+  "snapshotExecutedOnce": "5 tests already passed before the four other files and types; unchanged source, not rerun.",
+  "completeSnapshotCheckpoints": 15,
+  "completeStateHashesEqualToPreChange": true,
+  "configuredTargetReadSamples": {
+    "single-small": {
+      "before": [
+        8,
+        8,
+        13
+      ],
+      "after": [
+        7,
+        7,
+        11
+      ],
+      "beforeTotal": 29,
+      "afterTotal": 25,
+      "reductionPercent": 13.79,
+      "completeStateSha256At1s2s3s": [
+        "d6a69a85ecea7ea0cc91083d6e34ab6a25e3755769f702740e6f36bc7a437158",
+        "1100114c91df1b915b23e90e0e77ae8edcb46e199253f136fc31d89029e05774",
+        "46c6ee8d638b15350756ca383e00ef275957743735138a8073539a173ce4e080"
+      ]
+    },
+    "single-large": {
+      "before": [
+        9,
+        8,
+        13
+      ],
+      "after": [
+        8,
+        7,
+        11
+      ],
+      "beforeTotal": 30,
+      "afterTotal": 26,
+      "reductionPercent": 13.33,
+      "completeStateSha256At1s2s3s": [
+        "59d57db1ff8841070ef4e5a9e6189890273868e1156ee3d73c5b814e0771fe4e",
+        "bfaaa02155aa59c5d6fef2fc22a1ede238400c373852878d888b119b91364c65",
+        "f5295fc497c8458759bea1c86f33e968fac4216d8b63012d375be7c2842cbf75"
+      ]
+    },
+    "multi-small": {
+      "before": [
+        65,
+        63,
+        31
+      ],
+      "after": [
+        45,
+        43,
+        23
+      ],
+      "beforeTotal": 159,
+      "afterTotal": 111,
+      "reductionPercent": 30.19,
+      "completeStateSha256At1s2s3s": [
+        "31f556252da284ed4053aef4c4e17dcfc46ff55a76d0d339c5977e062192ced4",
+        "ea5cf2a4616e1a3162fcb68f860f234e3ccb655ce78a895693b4dc89af09a717",
+        "79a6e920d96b7cca66929f8f9816527de4a877a71e9a4b8d97f25f973d5275a2"
+      ]
+    },
+    "multi-large": {
+      "before": [
+        21,
+        13,
+        13
+      ],
+      "after": [
+        17,
+        11,
+        11
+      ],
+      "beforeTotal": 47,
+      "afterTotal": 39,
+      "reductionPercent": 17.02,
+      "completeStateSha256At1s2s3s": [
+        "448b889e576ed1a729bec2f86d20d5d30d07a9b947a794167193b490eb8fd2ab",
+        "0a50d87ac64af0a3eedc6836bf39b638f989f418bc9abed9f5a09c519edf319e",
+        "ec347a7c41ac57ae0b69eee72828c3129a8024ad0eff99e753e65f329a92479a"
+      ]
+    },
+    "existing-job": {
+      "before": [
+        8,
+        7,
+        12
+      ],
+      "after": [
+        7,
+        6,
+        10
+      ],
+      "beforeTotal": 27,
+      "afterTotal": 23,
+      "reductionPercent": 14.81,
+      "completeStateSha256At1s2s3s": [
+        "15bc1b8fbcfc8e85f8675c8298f0914c7a886e4aa58e9f37a5b737be5975c936",
+        "76ed6addddf165823fc16817a3e101391c99c59d59fcedc990c015262a9536fb",
+        "643d6cb5b9b8f1102fd2d87f500074b64aa245adda9567dde18f50b932744e2b"
+      ]
+    }
+  },
+  "priorQuantumCheckpointsStillEqual": 15,
+  "priorUnchangedPurePlannerTestsNotRerun": 293,
+  "resourcePolicy": {
+    "priority": "Idle",
+    "logicalProcessors": 1,
+    "workers": 1,
+    "serialTests": true,
+    "minimumAvailableMemoryGiB": 8,
+    "memoryHardLimit": false
+  },
+  "formalBenchmark": false,
+  "fullRegression": false,
+  "largeSaveLoaded": false,
+  "webBuild": false,
+  "acceptedPerformanceResult": false,
+  "published": false,
+  "productionAccess": false,
+  "saveSchemaChanged": false,
+  "backupSettingsChanged": false,
+  "rawEvidenceDirectory": "D:\\GameDev\\DSPidle2\\artifacts\\web-construction-batch-snapshot-20261028"
+}

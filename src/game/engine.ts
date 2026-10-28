@@ -13266,7 +13266,7 @@ function tryRunConstructionAutomationBatch(
   definition: ConstructionAutomationTargetDefinition,
   repeatable: RepeatableConstructionAutomationBatch,
   remainingWork: number,
-  activeTargetCount: number,
+  activeTargets: readonly ConstructionAutomationTargetDefinition[],
   highLoadProtection: boolean,
   maxFairBatchJobs: number,
   context?: ConstructionPlanningContext,
@@ -13286,13 +13286,17 @@ function tryRunConstructionAutomationBatch(
     repeatable,
     directEntityId,
   );
-  const canRepeat = hasSingleConstructionAutomationTarget(state, definition.id, context) &&
-    Object.keys(state.constructionAutomation.jobs).length === 0 &&
+  // The caller just read eligibility, and the checks above do not spend stock
+  // or finish jobs. Reuse that exact list only within this batch attempt.
+  const singleTarget = activeTargets.length === 1 && activeTargets[0].id === definition.id &&
+    Object.keys(state.constructionAutomation.jobs).length === 0;
+  const repeatableNow = (singleTarget || highLoadProtection) &&
     constructionAutomationBatchCanRepeat(state, entity.planetId, repeatable);
-  const canFairBatch = highLoadProtection && constructionAutomationBatchCanRepeat(state, entity.planetId, repeatable);
+  const canRepeat = singleTarget && repeatableNow;
+  const canFairBatch = highLoadProtection && repeatableNow;
   const fairShare = Math.max(1, Math.min(
     maxFairBatchJobs,
-    Math.ceil(jobsForWork / Math.max(1, activeTargetCount)),
+    Math.ceil(jobsForWork / Math.max(1, activeTargets.length)),
   ));
   const jobsPerCycle = Math.max(1, Math.floor(repeatable.jobsPerCycle));
   if (jobsPerCycle > 1 && !constructionAutomationCycleStateMatches(state, entity.planetId, repeatable)) return null;
@@ -13515,7 +13519,7 @@ function runConstructionCenters(
           state.constructionAutomation.cursor = (target.index + 1) % targetCount;
           continue;
         }
-        const activeTargetCount = Math.max(1, getActiveConstructionAutomationTargets(state, schedulingContext).length);
+        const activeTargets = getActiveConstructionAutomationTargets(state, schedulingContext);
         const highLoadProtection = entity.machineCount >= CONSTRUCTION_AUTOMATION_PROTECTION_STACK_THRESHOLD ||
           remainingWork > CONSTRUCTION_AUTOMATION_MAX_ITERATIONS_PER_SIMULATION_SECOND;
         const batched = batchConstructionAutomation && resolved.batch
@@ -13526,7 +13530,7 @@ function runConstructionCenters(
             target.definition,
             resolved.batch,
             remainingWork,
-            activeTargetCount,
+            activeTargets,
             highLoadProtection,
             maxFairBatchJobs,
             schedulingContext,

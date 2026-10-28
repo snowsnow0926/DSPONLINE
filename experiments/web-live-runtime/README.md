@@ -107,8 +107,9 @@ sanitized aggregates belong in review documentation.
 
 输出为名字后缀 -macro-worker.cpuprofile 和 -macro-worker-cpu.json。
 后者记录采样边界、所有权、完整性与错误；只有与实际采样 Worker 字节一致的
-源码映射才可用于函数归因。22 项无浏览器协议/命令行测试已通过，真实浏览器
-端口采样仍需独立验证；所有带采样耗时都不能当作性能提升。
+源码映射才可用于函数归因。22 项无浏览器协议/命令行测试已通过；一次真实
+冻结宏 Worker 采样取得 18,131 点，所有权、完整性、保存目录和字节一致映射已验证。
+所有带采样耗时都不能当作性能提升。
 
 ```powershell
 node --test --test-concurrency=1 experiments/web-live-runtime/macro-worker-cpu.test.mjs

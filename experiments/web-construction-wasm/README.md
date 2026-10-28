@@ -122,6 +122,24 @@ node experiments/web-construction-wasm/run.mjs --entry=large-save --prepared=D:/
 
 ## 普通运行与量子入库对照
 
+### 守恒模式单影子校准
+
+`--entry=conservative-calibration --runtime-ref=<commit>` 使用原库存、8 倍倍率与独占的
+浏览器内副本，调用实际异步守恒校准并消费其已提交的 30 模拟秒前缀，再推进到
+5、10、30 个墙钟秒并最终结算。记录初始化、推进、终结的独立耗时，完整运行态及
+持久正文 SHA-256、校准进度与证书状态。无需量子/托盘补料，不写数据库或真实存档。
+这不是整页等待、真实 Worker 或内存资格；冻结来源必须实际加载引擎、量子、递归、
+纯挂机宏及离线近似五份源码，否则失败。校准沿用 90 秒截止，浏览器有 180 秒上限。
+
+```powershell
+node experiments/web-construction-wasm/run.mjs --entry=conservative-calibration --runtime-ref=8c54cd02fd93 --prepared=D:/private/prepared.json --output=D:/private/probe --name=conservative-old-01
+```
+
+仅诊断时显式加 `--calibration-profile=1`，按同步函数外层统计嵌套调用次数与耗时；
+这些数字不能相加成总耗时，插桩记录不能混入正式性能比较。正常记录关闭插桩。
+两种记录都保留输入前后校验及完整结果；不因尾段安全冻结就假称持续生产成功，
+需检查初始化证书、有效合同与结算字段。
+
 `--entry=belt-flow` 是 UI 流量投影的独立正确性探针。在只读大档的真实拓扑上构造
 0、1、5、6、9、12 秒的恒定速率新快照，检查填满五秒窗口后观察值不变时仍能正确
 投影。每一步对索引路径、全量路径和原输入的完整 GameState JSON 求 SHA-256，

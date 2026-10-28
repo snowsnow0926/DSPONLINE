@@ -12,7 +12,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "payload-checksum", "large-save", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "save-inspection-runs", "save-inspection-stack", "save-inspection-local-hash", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy", "blueprint-scale", "save-state-measure"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "payload-checksum", "large-save", "conservative-calibration", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "save-inspection-runs", "save-inspection-stack", "save-inspection-local-hash", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy", "blueprint-scale", "save-state-measure"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
 const contractDirect = options["contract-omit-direct"] === "1";
 const macroStages = options["macro-stages"] === "1";
@@ -21,7 +21,7 @@ if (macroStages && entry !== "macro-finalization") throw new Error("Macro stage 
 if (contractDirect && entry !== "save-profile") throw new Error("Contract descriptor experiment requires save-profile");
 
 const needsWasm = entry === "probe" || entry === "payload-checksum";
-const callable = entry === "save-state-measure" ? "runSaveStateMeasure" : entry === "blueprint-scale" ? "runBlueprintScale" : entry === "save-inspection-local-hash" ? "runSaveInspectionLocalHash" : entry === "save-inspection-stack" ? "runSaveInspectionStack" : entry === "save-inspection-runs" ? "runSaveInspectionRuns" : entry === "payload-checksum" ? "runPayloadChecksum" : entry === "macro-finalization" ? "runMacroFinalization" : entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
+const callable = entry === "conservative-calibration" ? "runConservativeCalibration" : entry === "save-state-measure" ? "runSaveStateMeasure" : entry === "blueprint-scale" ? "runBlueprintScale" : entry === "save-inspection-local-hash" ? "runSaveInspectionLocalHash" : entry === "save-inspection-stack" ? "runSaveInspectionStack" : entry === "save-inspection-runs" ? "runSaveInspectionRuns" : entry === "payload-checksum" ? "runPayloadChecksum" : entry === "macro-finalization" ? "runMacroFinalization" : entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
       : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
@@ -52,6 +52,8 @@ const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-pars
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
 const migrationPhases = entry === "terminal-decode" && options["migration-phases"] === "1";
 const macroProfile = entry === "large-save" && options["macro-profile"] === "1";
+const calibrationProfile = entry === "conservative-calibration" && options["calibration-profile"] === "1";
+if (options["calibration-profile"] && entry !== "conservative-calibration") throw new Error("Calibration profiling requires conservative-calibration");
 const constructionPhaseCacheLimit = Number(options["construction-phases"] ?? 4);
 if (![4, 8, 16, 32].includes(constructionPhaseCacheLimit)) throw new Error("Invalid construction phase cache limit");
 if (constructionPhaseCacheLimit !== 4 && entry !== "large-save") throw new Error("Construction phase experiment requires large-save");
@@ -61,11 +63,17 @@ const macroProfileFunctions = {
   "src/game/offlineApproximation.ts": ["advancePureIdleConstructionDomainInPlace", "captureConstructionRecipeStageSnapshot", "createConstructionRecipeReceipt", "createConstructionPowerAllocation"],
   "src/game/pureIdleReplication.ts": ["advancePureIdleReplicationInPlace"],
 };
+const calibrationProfileFunctions = {
+  "src/game/engine.ts": ["createSimulationAdvanceSession", "advanceSimulationSession", "completeSimulationAdvanceSession", "refreshTimeWarpPowerSnapshotInPlace", "fuelReserveSeconds", "gridStoredEnergy", "collectGridPowerInventory"],
+  "src/game/offlineApproximation.ts": ["capturePureIdleLightweightSnapshot", "capturePureIdleFlowSnapshot", "captureAggregateConservationBaseline", "validateAggregateConservation", "capturePureIdleCombinedConservationCheckpoint", "validatePureIdleCombinedSettlementConservation", "createFastAffineContractFromSnapshots", "captureTimeWarpExhaustiblePowerResources"],
+};
 const runtimeFiles = entry === "belt-flow" ? ["src/game/beltFlow.ts"] : entry === "read-models"
   ? ["src/game/nativeFactoryInteractionFrame.ts", "src/game/webFactoryReadModelAdapter.ts"]
+  : entry === "conservative-calibration" ? ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts", "src/game/recursiveCrafting.ts", "src/game/pureIdleMacro.ts", "src/game/offlineApproximation.ts"]
   : ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts", "src/game/recursiveCrafting.ts"];
 const runtimeReference = options["runtime-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["runtime-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
+if (entry === "conservative-calibration" && !runtimeReference) throw new Error("Conservative calibration requires a frozen --runtime-ref");
 const label = options.name ?? (fixtureMode ? `browser-${entry}` : "browser-wasm-probe");
 if (!/^[a-z0-9-]+$/i.test(label)) throw new Error("Invalid artifact name");
 const fileHash = async (path) => {
@@ -80,12 +88,12 @@ const inputHash = fixtureMode ? await fileHash(options.prepared) : null;
 const wasmPath = options.wasm ?? resolve(output, "target/wasm32-unknown-unknown/release/dsp_web_construction_probe.wasm");
 await mkdir(output, { recursive: true });
 const referenceSourceLoads = [];
-const frozenRuntimePlugins = () => macroStages || contractDirect || measurementReference || decoderReference || runtimeReference || macroWorkerReference || inspectionReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
+const frozenRuntimePlugins = () => macroStages || contractDirect || measurementReference || decoderReference || runtimeReference || macroWorkerReference || inspectionReference || migrationPhases || macroProfile || calibrationProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
     const relative = id.replaceAll("\\", "/").replace(`${sourceRoot.replaceAll("\\", "/")}/`, "").split("?")[0];
     const reference = relative === measurementFile && measurementReference ? measurementReference : relative === inspectionFile && inspectionReference ? inspectionReference
       : relative === "src/game/pureIdleMacro.worker.ts" && macroWorkerReference ? macroWorkerReference
       : runtimeFiles.includes(relative) ? runtimeReference : decoderFiles.includes(relative) ? decoderReference : null;
-    const profileFunctions = macroProfile ? macroProfileFunctions[relative] : undefined;
+    const profileFunctions = calibrationProfile ? calibrationProfileFunctions[relative] : macroProfile ? macroProfileFunctions[relative] : undefined;
     if (macroStages && relative === "src/game/pureIdleMacro.worker.ts") {
       let code = reference ? execFileSync("git", ["show", reference + ":" + relative], { cwd: sourceRoot, encoding: "utf8" })
         : await readFile(id.split("?")[0], "utf8");
@@ -188,6 +196,10 @@ if (runtimeReference && ["large-save", "macro-finalization"].includes(entry) &&
 if (contractDirect && !referenceSourceLoads.some(row => row.file === "save-field-contract.mjs" && row.experimental)) {
   throw new Error("Contract descriptor replacement was not loaded");
 }
+if (entry === "conservative-calibration" && runtimeFiles.some(file =>
+  !referenceSourceLoads.some(row => row.file === file && row.reference === runtimeReference))) {
+  throw new Error("Requested conservative runtime reference was not actually compiled");
+}
 if (macroStages && !referenceSourceLoads.some(row => row.experimental === "macro-finalize-stages")) {
   throw new Error("Macro stage diagnostics were not compiled");
 }
@@ -212,10 +224,15 @@ const server = createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 let browser;
+let conservativeWatchdog;
 try {
   browser = await chromium.launch({ headless: true, channel: options.channel ?? "chrome",
     args: options.memory ? ["--enable-precise-memory-info"] : [] });
   const page = await browser.newPage();
+  if (entry === "conservative-calibration") conservativeWatchdog = setTimeout(() => {
+    console.error("Conservative probe exceeded its 180-second browser budget");
+    void browser.close().catch(() => {});
+  }, 180_000);
   if (options.memory) await page.addInitScript(() => { globalThis.recordHeapMeasurements = true; });
   if (options["persisted-proof"]) await page.addInitScript(() => { globalThis.recordTerminalPersistedProof = true; });
   if (options["collect-memory"]) {
@@ -224,6 +241,9 @@ try {
   }
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  if (entry === "conservative-calibration") page.on("console", message => {
+    if (message.text().startsWith("[conservative-calibration]")) console.log(message.text());
+  });
   if (entry === "save-responsiveness" || entry.startsWith("terminal-decode") || entry === "save-state-chunks" || entry === "terminal-owner") await page.exposeFunction("requestSaveInputProbe", () => page.mouse.click(20, 20));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction((name) => typeof globalThis[name] === "function", callable);
@@ -258,6 +278,9 @@ try {
       ? createHash("sha256").update(execFileSync("git", ["show", `${runtimeReference}:${file}`], { cwd: sourceRoot })).digest("hex")
       : await fileHash(resolve(sourceRoot, file))]))) } : {}),
     sourceDirty: Boolean(execFileSync("git", ["status", "--porcelain"], { cwd: sourceRoot, encoding: "utf8" }).trim()),
+    ...(entry === "conservative-calibration" ? { calibrationProfile, browserBudgetMs: 180_000,
+      probeSourceSha256: await fileHash(resolve(root, "experiments/web-construction-wasm/conservative-calibration.ts")),
+      runnerSourceSha256: await fileHash(resolve(root, "experiments/web-construction-wasm/run.mjs")) } : {}),
     bundleSha256: createHash("sha256").update(code).digest("hex"), referenceSourceLoads, workerAssetHashes,
     ...(entry.startsWith("save-inspection") ? { inspectionReference } : {}),
     ...(entry === "macro-finalization" ? { macroStages } : {}),
@@ -330,6 +353,7 @@ try {
   if (!fixtureMode && evidence.reports.some((report) => report.mismatches.length)) process.exitCode = 1;
   if (entry === "belt-flow" && !evidence.passed) process.exitCode = 1;
 } finally {
+  clearTimeout(conservativeWatchdog);
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));
 }

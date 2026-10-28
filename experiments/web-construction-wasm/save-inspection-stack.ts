@@ -6,7 +6,7 @@ import { inspectCanonicalSaveEnvelope as candidate } from "../web-save-checkpoin
 import type { GameState } from "../../src/game/types";
 
 const metadata = { formatVersion: 2, savedAt: 1_800_000_000_000, kind: "primary" as const, mode: "normal" as const, slot: "main" as const };
-function differential() {
+function differential(candidate: typeof baseline) {
   let checked = 0;
   let rejected = 0;
   const compare = (raw: string) => {
@@ -30,7 +30,7 @@ function differential() {
   return { checked, rejected };
 }
 
-async function runSaveInspectionStack() {
+export async function runInspectionComparison(candidate: typeof baseline, strategy: string) {
   const { raw, bytes } = await (async () => {
     const state = (await (await fetch("/prepared.json")).json()).state as GameState;
     const frame = serializeSaveEnvelopeToTransfer(projectPersistentSaveState(state, createContentPackRegistry()), { ...metadata, mode: state.mode });
@@ -50,8 +50,9 @@ async function runSaveInspectionStack() {
   const payloadSha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw)))]
     .map((value) => value.toString(16).padStart(2, "0")).join("");
   return { scope: "Canonical structure scan plus unchanged full UTF-16 checksum only; no storage/UI/whole-handoff qualification",
-    bytes, payloadSha256, samples, differential: differential(), publicDifferentialAfterTiming: true,
+    strategy, bytes, payloadSha256, samples, differential: differential(candidate), publicDifferentialAfterTiming: true,
     inspection: JSON.parse(expected), forcedGc: false };
 }
 
+const runSaveInspectionStack = () => runInspectionComparison(candidate, "array-local-stack");
 Object.assign(globalThis, { runSaveInspectionStack });

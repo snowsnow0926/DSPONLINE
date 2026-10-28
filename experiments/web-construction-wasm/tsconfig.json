@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.app.json",
-  "files": ["save-inspection-runs.ts", "save-inspection-stack.ts"],
+  "files": ["save-inspection-runs.ts", "save-inspection-stack.ts", "save-inspection-local-hash.ts"],
   "compilerOptions": {
     "tsBuildInfoFile": "../../node_modules/.tmp/web-construction-wasm.tsbuildinfo"
   },

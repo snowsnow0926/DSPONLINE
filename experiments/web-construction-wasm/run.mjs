@@ -12,9 +12,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "payload-checksum", "large-save", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
-const callable = entry === "macro-finalization" ? "runMacroFinalization" : entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
+const needsWasm = entry === "probe" || entry === "payload-checksum";
+const callable = entry === "payload-checksum" ? "runPayloadChecksum" : entry === "macro-finalization" ? "runMacroFinalization" : entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
       : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
@@ -127,7 +128,7 @@ const workerAssetHashes = Object.fromEntries((Array.isArray(bundle) ? bundle : [
   .map((entry) => [entry.fileName, createHash("sha256").update(entry.type === "asset" ? entry.source : entry.code).digest("hex")]));
 const assets = new Map((Array.isArray(bundle) ? bundle : [bundle]).flatMap((entry) => entry.output)
   .map((entry) => [`/${entry.fileName}`, entry.type === "asset" ? entry.source : entry.code]));
-const wasm = fixtureMode ? null : await readFile(wasmPath);
+const wasm = needsWasm ? await readFile(wasmPath) : null;
 const server = createServer((request, response) => {
   if (fixtureMode && request.url === "/prepared.json") {
     response.writeHead(200, { "Content-Type": "application/json" });
@@ -223,13 +224,18 @@ try {
       "src/game/persistentSaveTransfer.ts", "src/game/saveProjection.ts", "src/game/saveTransfer.ts", "src/game/saveEnvelopeIntegrity.ts",
       "experiments/web-construction-wasm/save-projection-chunks.ts",
     ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
+    ...(entry === "payload-checksum" ? { checksumSourceHashes: Object.fromEntries(await Promise.all([
+      "experiments/web-construction-wasm/src/lib.rs", "experiments/web-construction-wasm/payload-checksum.ts",
+      "native/dsp-native-core/src/canonical.rs", "src/game/saveTransfer.ts", "src/game/saveProjection.ts",
+    ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(runtimeReference || ["quantum-runtime", "power-snapshot", "power-matrix", "read-models", "belt-flow", "power-copy"].includes(entry) ? { runtimeReference, runtimeFiles,
       runtimeSourceHashes: Object.fromEntries(await Promise.all(runtimeFiles.map(async (file) => [file,
         runtimeReference
           ? createHash("sha256").update(execFileSync("git", ["show", `${runtimeReference}:${file}`], { cwd: sourceRoot })).digest("hex")
           : await fileHash(resolve(sourceRoot, file)),
       ]))) } : {}),
-    ...(fixtureMode ? { inputHash } : { wasmBytes: wasm.length, wasmSha256: createHash("sha256").update(wasm).digest("hex") }), ...result };
+    ...(fixtureMode ? { inputHash } : {}),
+    ...(wasm ? { wasmBytes: wasm.length, wasmSha256: createHash("sha256").update(wasm).digest("hex") } : {}), ...result };
   await writeFile(resolve(output, `${label}.json`), `${JSON.stringify(evidence, null, 2)}\n`);
   console.log(JSON.stringify(fixtureMode ? evidence : { browser: evidence.browser, wasmBytes: evidence.wasmBytes,
     results: evidence.reports.map(({ name, fixtures, mismatches, benchmarks }) => ({

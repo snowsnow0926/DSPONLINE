@@ -1,4 +1,5 @@
-//! Measurement adapter for the UNMODIFIED native planner, never a save owner.
+//! Measurement adapters for the UNMODIFIED native planner and byte checksum,
+//! never a save owner.
 //! The small state shell exposes only the catalog used by that source file.
 //! JSON encoding, WASM calls and decoding are included by the browser harness.
 
@@ -35,6 +36,7 @@ struct Session {
 thread_local! {
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static CHECKSUM_INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
 }
 
@@ -66,6 +68,26 @@ pub extern "C" fn reserve_input(length: u32) -> *mut u8 {
         input.resize(length as usize, 0);
         input.as_mut_ptr()
     })
+}
+
+// Separate measured byte boundary; keep the construction adapter's 8 MiB cap.
+#[unsafe(no_mangle)]
+pub extern "C" fn reserve_checksum_input(length: u32) -> *mut u8 {
+    CHECKSUM_INPUT.with(|input| {
+        let mut input = input.borrow_mut();
+        if length > 128 * 1024 * 1024 {
+            input.clear();
+            return std::ptr::null_mut();
+        }
+        input.resize(length as usize, 0);
+        input.as_mut_ptr()
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn checksum_payload() -> u32 {
+    let checksum = CHECKSUM_INPUT.with(|input| dsp_native_core::canonical::fnv1a_utf8(&input.borrow()));
+    output(Ok(json!({ "checksum": checksum })))
 }
 
 #[unsafe(no_mangle)]

@@ -1,0 +1,878 @@
+{
+  "decision": "retain-combined-construction-and-power-computation-optimizations-no-new-web-handoff-or-memory-gain-claim",
+  "runtimeCommit": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+  "runtimeSourcesLastChangedCommit": "f50c60e02b62989b388195c30b112ab39499991a",
+  "baselineCommit": "13e80829361afe0c5a7b30b2aff14819dd19ec3e",
+  "productionPublished": false,
+  "productionAccessed": false,
+  "unit": {
+    "passed": 3795,
+    "skipped": 38,
+    "failed": 0,
+    "passedFiles": 424,
+    "skippedFiles": 16,
+    "rawLogSha256": "529aa29d3d1ce8482b5ea7afb898921bac7fd9dc3fcf6dc293d058ffd9b921bb"
+  },
+  "browser": {
+    "chromium-full-01": {
+      "startTime": "2026-10-28T16:02:39.071Z",
+      "duration": 515820.45900000003,
+      "expected": 524,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0,
+      "rawSha256": "7b6dc8011d0329a9c33c4e0154f104f702bff46f181743b2bd722c7a8b37ae53"
+    },
+    "pwa-preview-01": {
+      "startTime": "2026-10-28T16:11:41.706Z",
+      "duration": 7869.197999999999,
+      "expected": 1,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0,
+      "rawSha256": "8f069bebb3ca7961e9603150034386282b5605de8bee6c1900d8994ffcdd3414"
+    },
+    "durable-01": {
+      "startTime": "2026-10-28T16:11:50.151Z",
+      "duration": 50370.159999999996,
+      "expected": 21,
+      "skipped": 22,
+      "unexpected": 0,
+      "flaky": 0,
+      "rawSha256": "91ea32670509d2fbba9bb328b06638ab3086f51bfeab4b254e695ecd7fce4889"
+    }
+  },
+  "gates": {
+    "full-unit-01": {
+      "exitCode": 0,
+      "workers": 4,
+      "endUtc": "2026-10-28T15:58:11.9543745Z",
+      "startUtc": "2026-10-28T15:56:54.0448166Z",
+      "priority": "Normal",
+      "commit": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+      "exitRecordSha256": "6bd9ded9f963973e8713150adaf4bcb116b4f3c429e6f5d23ef2ce12abc1c58c"
+    },
+    "build-web-01": {
+      "endUtc": "2026-10-28T15:59:35.0757423Z",
+      "exitCode": 0,
+      "startUtc": "2026-10-28T15:59:00.3776111Z",
+      "commit": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+      "exitRecordSha256": "738c2a2c5da375dc0ea86757fcf5dc024fcf41b6320fe8fc5bff60b23f0a2647"
+    },
+    "licenses-01": {
+      "endUtc": "2026-10-28T16:03:32.5386359Z",
+      "exitCode": 0,
+      "startUtc": "2026-10-28T16:03:32.0979878Z",
+      "exitRecordSha256": "dc88a841d12f2a67eabde28fc4c9049a5c322dedfe92fa0b8548240b4dda56eb"
+    },
+    "chromium-full-01": {
+      "exitCode": 0,
+      "endUtc": "2026-10-28T16:11:15.2174653Z",
+      "startUtc": "2026-10-28T16:02:38.5402983Z",
+      "commit": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+      "exitRecordSha256": "a1ab3e45b811df6c59fdc19b2c09631d8e3650884fa0ed1c5b43cc80d91ff04b"
+    },
+    "pwa-preview-01": {
+      "startUtc": "2026-10-28T16:11:41.1805720Z",
+      "endUtc": "2026-10-28T16:11:49.6227279Z",
+      "exitCode": 0,
+      "commit": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+      "exitRecordSha256": "3257bc61e1d87bff119c624ce2a40f951a6d5a5dff5bd705dfa3e1630ca4624a"
+    },
+    "durable-01": {
+      "startUtc": "2026-10-28T16:11:49.6387339Z",
+      "endUtc": "2026-10-28T16:12:40.5791049Z",
+      "exitCode": 0,
+      "commit": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+      "exitRecordSha256": "90db96e1b0af36c3ad27f99c3586b8324f10bb23a8dff80a8ca2190acb3805eb"
+    },
+    "real-parity-series-01": {
+      "exitCode": 0,
+      "startUtc": "2026-10-28T16:13:56.0991831Z",
+      "endUtc": "2026-10-28T16:18:03.3417532Z",
+      "exitRecordSha256": "d7ccc150b4d282e8088c8f6e0738d10ac0313f29de90b69ccf4287837b73f54a"
+    },
+    "page-series-01": {
+      "endUtc": "2026-10-28T16:33:24.3991255Z",
+      "startUtc": "2026-10-28T16:19:13.3209686Z",
+      "exitCode": 0,
+      "exitRecordSha256": "22368990257ee088b61e89706cc16631e46cdfa21a92e8f59235a12f6f5e0ac8"
+    }
+  },
+  "build": {
+    "appVersion": "1.3.4",
+    "saveVersion": 47,
+    "startupGzipBytes": 182077,
+    "fileCount": 198,
+    "workerCount": 16,
+    "manifestSha256": "d8a026857b5aec8990ee5f5e8e14d2d26c327f375f0ce915af296d4a16f008b5",
+    "aggregateSha256": "bb600da02381240b73c70aa9dfa256ed30f9f7615a89f226349cb8c2921b29c5",
+    "archiveSha256": "29635876d45407ce01eabeb5aed9e2a64a20c579d1a3869dad1b758b8d422ada",
+    "changedWorkers": [
+      "multicoreSimulation",
+      "offlineSimulation",
+      "pureIdleMacro",
+      "simulation",
+      "statistics"
+    ],
+    "sourceHashes": {
+      "native/native-coverage-manifest.json": "3ddff06f173967a28d8eac69645def38556394f866e6e4ebfd3fcd3f23db2657",
+      "src/App.tsx": "4ddab435610c8803bee77faccc50698941297bebc11fedecb17fc984aaa2f43d",
+      "src/components/AccessibleDialog.tsx": "f749ff22448453fa065a5605a1fd0e8550e2b82458899033ad950e6b31c2ff49",
+      "src/components/BlueprintWorkspace.tsx": "63e36803c09c682d36fa655f953cf14a940863e2793b9b7276dd649ebae36812",
+      "src/components/TimeWarpIdleOverlay.tsx": "ba4c3237910eb8fd6000c61ef369e5414dab2a84433386cb27b5f25287dcaa4d",
+      "src/game/authoritativeSavePersistence.worker.ts": "cbe421da6daa1c5dddf80a748bcd13dab2ffda2b80e561b698350e13a36c934b",
+      "src/game/authoritativeSavePersistenceClient.ts": "6d00bb29914b8f684077c726ebcdbf6662648a4e90c0568bad24ff34839b1d33",
+      "src/game/beltFlow.ts": "b80f99d8428337c328aa0029448a9fedefdc6d4f177fcb7193ac5e025bbcf78e",
+      "src/game/blueprintExchange.ts": "5efc142f1c12a0ad0c7c888d67ea6082895bd3a2c8c15164b9ef483b712fd701",
+      "src/game/blueprintExchangeFile.ts": "d367fd04a0cce8b11d427a2e2923b9ea1fc59c88de4b766ae01c42dd0bd237c0",
+      "src/game/blueprintExchangeLimits.ts": "814b17ea46438bf1f0178e1a7f159914c3d11d55349706edbfe9cfeddcfbe80a",
+      "src/game/canonicalSaveEnvelopeInspection.ts": "fa86ca733abe4e3d0bf46b5a11ff8575895b529c4e8d0e22c0ae74fbcad4de75",
+      "src/game/canonicalTerminalOwner.worker.ts": "0ceeb80d51e0c1aba294963b0932d36c32ed1a05cd36abfc65963705c221900a",
+      "src/game/canonicalTerminalOwnerClient.ts": "d35451af32da5ab5077498d266887152ce6b939cd4ad1f9086e52c14232bc186",
+      "src/game/chunkedSaveJournal.ts": "e3ef1b98502ef92375bcccfe7bd1ef0980166ad9999102d7a76a1c5771e8f74a",
+      "src/game/contentPacks.ts": "8a6518eb5dec3b2b95990cf0ecfe5ae901c18b147887e4871e72f3aa2770dee6",
+      "src/game/engine.ts": "bcc158607af5582d4ad6f35953cba8bcbeb341b9d5b01ef0e1cbe362a78eaee3",
+      "src/game/nativeBlueprintImportInput.ts": "fdcead58f36762d51acb070016ddc8c555f4b2e671084783a4d37af52c211eb2",
+      "src/game/payloadTextChecksum.ts": "d5ec856e3fedd62e1cb14d84ee5dd7775b2933107c772bd49fc521de78791891",
+      "src/game/pureIdleCheckpointOwnerClient.ts": "b88061a1c83b575c219849d5e96d43fc0e7c6c3715bbdd8d58ad5e3e8645448a",
+      "src/game/pureIdleMacro.ts": "4acafb9f17b07b7d6907e0dfb8dcba29dcb79d85c8183f9cd9e949feec7bfbd4",
+      "src/game/pureIdleMacro.worker.ts": "1da6696457673abc6d14fcbc930cdd5ea06c988ba29458bf0070404f5858ce02",
+      "src/game/pureIdleMacroValidation.ts": "e071bfadd9453c244c8b0cec4f3772c358c9b9e7de67d6c55ab07dbbc73d9c1e",
+      "src/game/pureIdleRecovery.ts": "64c1632132600b1765b4281a552fbf8e2d0d0d14e1da1b6a882f99ab2a2c51e9",
+      "src/game/pureIdleReplication.ts": "391a12eb4594a5b412dd37fd65e8eba600ad499908b1c1ce3118fd0789589901",
+      "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+      "src/game/saveEnvelopeIntegrity.ts": "f565a06497bbc254e2277b3c5fda38c02deb05543f1489effe900c08c91ac6cb",
+      "src/game/saveFieldContract.ts": "e3d6a34ec01bea4d1c16d194ca8e67b0db78860c9147be00d35ae3ff54199918",
+      "src/game/saveProjection.ts": "7d62c35d7665960f04930dcf552ce432d07d3ca4beac7bb859b85b42af8e5077",
+      "src/game/saveTransfer.ts": "f844fa15734902546aef43a22e82fc6c9e698a8a7af3ed0c4c2f7c2a8a11dbb7",
+      "src/game/saveTransferDecode.ts": "ba79bb4c94d33fd4ea7fa6a51497db2c4c44e296ce52b5e8a5beaa64d9badc09",
+      "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+      "src/game/types.ts": "713e623c9a602feecba953c079b0c83bb758a81fb738e45d9390224d714a7d78",
+      "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb"
+    },
+    "bothFrozenFileSetsReverified": true
+  },
+  "realParity": {
+    "decision": "real-state-and-worker-parity-passed-frozen-pages-still-required",
+    "refs": {
+      "baseline": "13e80829361afe0c5a7b30b2aff14819dd19ec3e",
+      "candidate": "8c54cd02fd93b397a6d72d30208a9881191059f1"
+    },
+    "inputSha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "inputBytes": 205464026,
+    "independentFrozenSourceHashes": {
+      "baseline": {
+        "src/game/recursiveCrafting.ts": "b377c80a558c676b1e87dd7d803c461b5f9acffeb1e59288bc7a0274fd2e3adb",
+        "src/game/quantumLogisticsNetwork.ts": "5b65aaa4b542b7229178da6e2c68c51a82cc54d54d522aee588ebd1c350c91c5",
+        "src/game/engine.ts": "55316447b90a48440733a99d33e06c0c444e900854e6a9fc4db648932acf6c91"
+      },
+      "candidate": {
+        "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+        "src/game/quantumLogisticsNetwork.ts": "5b65aaa4b542b7229178da6e2c68c51a82cc54d54d522aee588ebd1c350c91c5",
+        "src/game/engine.ts": "bcc158607af5582d4ad6f35953cba8bcbeb341b9d5b01ef0e1cbe362a78eaee3"
+      }
+    },
+    "inputScope": "Expanded laboratory copy of the original 105 MiB-class save; read only.",
+    "serialRuns": 17,
+    "sourceLoadsVerified": true,
+    "allRunsExitZero": true,
+    "large": {
+      "stock": {
+        "fullEnvelopeSha256": "dee046c56e040f8eff13a273368e15cc99c2a6282410060ca84ca08695a87b97",
+        "fullEnvelopeBytes": 110851416,
+        "completeResultsEqual": true,
+        "wallSeconds": 30,
+        "simulationSeconds": 240,
+        "metrics": {
+          "setupMs": {
+            "baseline": [
+              3463,
+              3446.800000190735
+            ],
+            "candidate": [
+              3436.7000000476837,
+              3460.899999856949
+            ],
+            "baselineMedian": 3454.9000000953674,
+            "candidateMedian": 3448.7999999523163,
+            "baselineRange": [
+              3446.800000190735,
+              3463
+            ],
+            "candidateRange": [
+              3436.7000000476837,
+              3460.899999856949
+            ],
+            "changePercent": -0.17656083078765317
+          },
+          "startupMs": {
+            "baseline": [
+              4.799999952316284,
+              4.799999952316284
+            ],
+            "candidate": [
+              4.700000047683716,
+              4.6000001430511475
+            ],
+            "baselineMedian": 4.799999952316284,
+            "candidateMedian": 4.650000095367432,
+            "baselineRange": [
+              4.799999952316284,
+              4.799999952316284
+            ],
+            "candidateRange": [
+              4.6000001430511475,
+              4.700000047683716
+            ],
+            "changePercent": -3.1249970508118174
+          },
+          "advanceMs": {
+            "baseline": [
+              3443.7000000476837,
+              3450.7999997138977
+            ],
+            "candidate": [
+              3127.399999856949,
+              3161.7000000476837
+            ],
+            "baselineMedian": 3447.2499998807907,
+            "candidateMedian": 3144.5499999523163,
+            "baselineRange": [
+              3443.7000000476837,
+              3450.7999997138977
+            ],
+            "candidateRange": [
+              3127.399999856949,
+              3161.7000000476837
+            ],
+            "changePercent": -8.780912319644418
+          },
+          "serializationMs": {
+            "baseline": [
+              2624.7000000476837,
+              2560.7000000476837
+            ],
+            "candidate": [
+              2378.800000190735,
+              2376.7999999523163
+            ],
+            "baselineMedian": 2592.7000000476837,
+            "candidateMedian": 2377.8000000715256,
+            "baselineRange": [
+              2560.7000000476837,
+              2624.7000000476837
+            ],
+            "candidateRange": [
+              2376.7999999523163,
+              2378.800000190735
+            ],
+            "changePercent": -8.288656611725454
+          }
+        }
+      },
+      "tray": {
+        "fullEnvelopeSha256": "32b5867164fc892bc4f39385313b6735800f72d79e48202ff42f0710592830bb",
+        "fullEnvelopeBytes": 110869315,
+        "completeResultsEqual": true,
+        "wallSeconds": 30,
+        "simulationSeconds": 240,
+        "metrics": {
+          "setupMs": {
+            "baseline": [
+              3439.800000190735,
+              3437.2999999523163
+            ],
+            "candidate": [
+              3446.5999999046326,
+              3424.7000000476837
+            ],
+            "baselineMedian": 3438.5500000715256,
+            "candidateMedian": 3435.649999976158,
+            "baselineRange": [
+              3437.2999999523163,
+              3439.800000190735
+            ],
+            "candidateRange": [
+              3424.7000000476837,
+              3446.5999999046326
+            ],
+            "changePercent": -0.08433787774809742
+          },
+          "startupMs": {
+            "baseline": [
+              5.400000095367432,
+              4.900000095367432
+            ],
+            "candidate": [
+              4.6000001430511475,
+              4.6000001430511475
+            ],
+            "baselineMedian": 5.150000095367432,
+            "candidateMedian": 4.6000001430511475,
+            "baselineRange": [
+              4.900000095367432,
+              5.400000095367432
+            ],
+            "candidateRange": [
+              4.6000001430511475,
+              4.6000001430511475
+            ],
+            "changePercent": -10.679610526823568
+          },
+          "advanceMs": {
+            "baseline": [
+              1448.2999999523163,
+              1445.1999998092651
+            ],
+            "candidate": [
+              1235.0999999046326,
+              1243.5999999046326
+            ],
+            "baselineMedian": 1446.7499998807907,
+            "candidateMedian": 1239.3499999046326,
+            "baselineRange": [
+              1445.1999998092651,
+              1448.2999999523163
+            ],
+            "candidateRange": [
+              1235.0999999046326,
+              1243.5999999046326
+            ],
+            "changePercent": -14.335579747243642
+          },
+          "serializationMs": {
+            "baseline": [
+              1901.4000000953674,
+              1897.2000000476837
+            ],
+            "candidate": [
+              1864.3999998569489,
+              1917.5
+            ],
+            "baselineMedian": 1899.3000000715256,
+            "candidateMedian": 1890.9499999284744,
+            "baselineRange": [
+              1897.2000000476837,
+              1901.4000000953674
+            ],
+            "candidateRange": [
+              1864.3999998569489,
+              1917.5
+            ],
+            "changePercent": -0.43963566275663224
+          }
+        }
+      },
+      "quantum": {
+        "fullEnvelopeSha256": "f9b61c57b55f1d5ba1c3af8d7594a3fd00c0a6f177e862e79d7658d3b0013e83",
+        "fullEnvelopeBytes": 110714584,
+        "completeResultsEqual": true,
+        "wallSeconds": 30,
+        "simulationSeconds": 240,
+        "metrics": {
+          "setupMs": {
+            "baseline": [
+              3675.2999999523163,
+              3692.800000190735
+            ],
+            "candidate": [
+              3681,
+              3713.5999999046326
+            ],
+            "baselineMedian": 3684.0500000715256,
+            "candidateMedian": 3697.2999999523163,
+            "baselineRange": [
+              3675.2999999523163,
+              3692.800000190735
+            ],
+            "candidateRange": [
+              3681,
+              3713.5999999046326
+            ],
+            "changePercent": 0.3596585247359174
+          },
+          "startupMs": {
+            "baseline": [
+              38.700000047683716,
+              38.299999952316284
+            ],
+            "candidate": [
+              38.39999985694885,
+              37.90000009536743
+            ],
+            "baselineMedian": 38.5,
+            "candidateMedian": 38.14999997615814,
+            "baselineRange": [
+              38.299999952316284,
+              38.700000047683716
+            ],
+            "candidateRange": [
+              37.90000009536743,
+              38.39999985694885
+            ],
+            "changePercent": -0.9090909710178119
+          },
+          "advanceMs": {
+            "baseline": [
+              642.7000000476837,
+              648.2000000476837
+            ],
+            "candidate": [
+              623.3000001907349,
+              624.0999999046326
+            ],
+            "baselineMedian": 645.4500000476837,
+            "candidateMedian": 623.7000000476837,
+            "baselineRange": [
+              642.7000000476837,
+              648.2000000476837
+            ],
+            "candidateRange": [
+              623.3000001907349,
+              624.0999999046326
+            ],
+            "changePercent": -3.369742040187962
+          },
+          "serializationMs": {
+            "baseline": [
+              1840.6999998092651,
+              1832.0999999046326
+            ],
+            "candidate": [
+              1942.2000000476837,
+              1808
+            ],
+            "baselineMedian": 1836.3999998569489,
+            "candidateMedian": 1875.1000000238419,
+            "baselineRange": [
+              1832.0999999046326,
+              1840.6999998092651
+            ],
+            "candidateRange": [
+              1808,
+              1942.2000000476837
+            ],
+            "changePercent": 2.1073840214499873
+          }
+        }
+      }
+    },
+    "ordinary": {
+      "fullStateSha256": "932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae3720a5",
+      "quantumSha256": "f497973e3429e51dbb8a56185fe0233b2b5e3e581157cfdf0e37f12de63212d5",
+      "fullStateJsonLength": 205529767,
+      "entities": 110042,
+      "belts": 233300,
+      "completeResultsEqual": true,
+      "simulationCheckpoints": [
+        1,
+        10,
+        30
+      ],
+      "timingEligible": false,
+      "timingExclusion": "existing ordinary probe enables engine profiling"
+    },
+    "macroWorker": {
+      "sourcePayloadSha256": "44aba0f47342827a7291757f39f3673cb25588241a2c5eeac0f75745b5dd17ee",
+      "sourcePayloadBytes": 110851943,
+      "canonicalStateSha256": "d1e04d3cafb67654589b40daaa4761a9cb6c8d5e4e39c5624725124eaaef5260",
+      "payloadSha256": "c118f6b3c79f38869164c90bf212437b6d5c641e90f676e8af706f7eef16d047",
+      "payloadBytes": 110735835,
+      "completeResultsEqual": true,
+      "callerStateUnchanged": true,
+      "runs": 3,
+      "actualSaveWorkerPayloadVerified": true,
+      "timingEligible": false
+    },
+    "rawRecords": {
+      "large-stock-baseline-01": {
+        "rawSha256": "041efbcd017767f9ae61b2419dcb2a32469f7cdfa15b32b7b4e81b3085ce78ef",
+        "sourceLoadsVerified": 7
+      },
+      "large-stock-candidate-01": {
+        "rawSha256": "ee8af625f579f1884105975240052aedda91577189c92bb93595df3745924a04",
+        "sourceLoadsVerified": 7
+      },
+      "large-stock-candidate-02": {
+        "rawSha256": "05be682f312398c779e390eff2bedd4fcb7e9a286137cfd6aa1de3ba03461432",
+        "sourceLoadsVerified": 7
+      },
+      "large-stock-baseline-02": {
+        "rawSha256": "dc53c4db834fb0fcd3e61e6b1a2f1eee4ad433a72c2eb87f2ac56497f1b7a569",
+        "sourceLoadsVerified": 7
+      },
+      "large-tray-baseline-01": {
+        "rawSha256": "13d1460b73bca5ea35472202be18cdedf672471a6baf23d6e7d1664350443124",
+        "sourceLoadsVerified": 7
+      },
+      "large-tray-candidate-01": {
+        "rawSha256": "29756201717f1447c74a18933545843bece0bb93c429a0b1ea60691a85861371",
+        "sourceLoadsVerified": 7
+      },
+      "large-tray-candidate-02": {
+        "rawSha256": "1f7826d8408fbd0c76c5364a083dfbe1db0fe9c9e6996de4e09ae0abfb88b031",
+        "sourceLoadsVerified": 7
+      },
+      "large-tray-baseline-02": {
+        "rawSha256": "03d754a5f347c5ca653595f716599e88df05e005e011404bba987e3731f28db3",
+        "sourceLoadsVerified": 7
+      },
+      "large-quantum-baseline-01": {
+        "rawSha256": "fe920448f929969339f60acd38f55371c3e7b3aa6fdcee614e283cfac7abd07a",
+        "sourceLoadsVerified": 7
+      },
+      "large-quantum-candidate-01": {
+        "rawSha256": "b8950d64a9cbdc103e0ed6b278464c7eba112d041d16ca675b99ae9b16fcef12",
+        "sourceLoadsVerified": 7
+      },
+      "large-quantum-candidate-02": {
+        "rawSha256": "4cc2c4580d3f520b63dcee2b013837c80abd2aa4ea15e41d461413604e41a214",
+        "sourceLoadsVerified": 7
+      },
+      "large-quantum-baseline-02": {
+        "rawSha256": "3cc402e4f9d77c1375c37d8be9ba0501ed277ecea069e2badef2ed6ee8663564",
+        "sourceLoadsVerified": 7
+      },
+      "ordinary-baseline-01": {
+        "rawSha256": "55a2bddc08ad2db18632cdbfcba12aa08fc6c16f5be6d0e835c670b97922a42e",
+        "sourceLoadsVerified": 3
+      },
+      "ordinary-candidate-01": {
+        "rawSha256": "63ab559f8db1f76877e99a00e65c650b092d10a8d8d2413df5afa9f00de8b773",
+        "sourceLoadsVerified": 3
+      },
+      "macro-worker-baseline-01": {
+        "rawSha256": "8c3a8540f4456e203ffc7d7570aa2b196e6def6a8a0b51ab4acab33e1ddbbe99",
+        "sourceLoadsVerified": 20
+      },
+      "macro-worker-candidate-01": {
+        "rawSha256": "e54c16e3af1a9267399bda20bc9c3ea9e82064726b07022325510b580ec61f44",
+        "sourceLoadsVerified": 20
+      },
+      "macro-worker-candidate-02": {
+        "rawSha256": "ab287780d4def80f7adc80fa59a40d2c692734af4cccccffd15ea146e2979dee",
+        "sourceLoadsVerified": 20
+      }
+    },
+    "productionPublished": false
+  },
+  "pageComparison": {
+    "order": [
+      "web-combined-baseline-01",
+      "web-combined-candidate-01",
+      "web-combined-candidate-02",
+      "web-combined-baseline-02",
+      "web-combined-baseline-03",
+      "web-combined-candidate-03"
+    ],
+    "checks": {
+      "web-combined-baseline-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "11b546a87c1423b6748e90f95c54eba2f5c662e47d11ebbe33986e72bef07eb2"
+      },
+      "web-combined-candidate-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "e080e781584822bb94efc2e35bdd91af942c7101f84c618555b3212b1b6ac809"
+      },
+      "web-combined-candidate-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "92b376521b359b8d8779d12210e578b3c80046a3457561444a3f268407b392b8"
+      },
+      "web-combined-baseline-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "57980c53353f46cda155bd19f35ff32e9b99b73bc2b8ddb96f6ccda3d674707d"
+      },
+      "web-combined-baseline-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "3194ef4f8cdce289b27409eb3d34277260762addc93bedda83a51274bae59a22"
+      },
+      "web-combined-candidate-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "4a4168d37219289d344cb52662a06a33c5657bd3ad040f471c0d26dedc5ef9f4"
+      }
+    },
+    "metrics": {
+      "startMs": {
+        "baseline": [
+          14623,
+          14658,
+          8841
+        ],
+        "candidate": [
+          14643,
+          14676,
+          8865
+        ],
+        "baselineMedian": 14623,
+        "candidateMedian": 14643,
+        "baselineRange": [
+          8841,
+          14658
+        ],
+        "candidateRange": [
+          8865,
+          14676
+        ],
+        "changePercent": 0.13677084045682353
+      },
+      "stopMs": {
+        "baseline": [
+          18014,
+          17945,
+          10565
+        ],
+        "candidate": [
+          17559,
+          17739,
+          10547
+        ],
+        "baselineMedian": 17945,
+        "candidateMedian": 17559,
+        "baselineRange": [
+          10565,
+          18014
+        ],
+        "candidateRange": [
+          10547,
+          17739
+        ],
+        "changePercent": -2.151016996377819
+      },
+      "startMaxFrameMs": {
+        "baseline": [
+          232.70000004768372,
+          231,
+          120.20000004768372
+        ],
+        "candidate": [
+          206.90000009536743,
+          210.10000014305115,
+          125.60000014305115
+        ],
+        "baselineMedian": 231,
+        "candidateMedian": 206.90000009536743,
+        "baselineRange": [
+          120.20000004768372,
+          232.70000004768372
+        ],
+        "candidateRange": [
+          125.60000014305115,
+          210.10000014305115
+        ],
+        "changePercent": -10.43290039161583
+      },
+      "stopMaxFrameMs": {
+        "baseline": [
+          221.59999990463257,
+          225,
+          95.29999995231628
+        ],
+        "candidate": [
+          169.39999985694885,
+          228.40000009536743,
+          99.5
+        ],
+        "baselineMedian": 221.59999990463257,
+        "candidateMedian": 169.39999985694885,
+        "baselineRange": [
+          95.29999995231628,
+          225
+        ],
+        "candidateRange": [
+          99.5,
+          228.40000009536743
+        ],
+        "changePercent": -23.555956710355787
+      },
+      "startLongTaskMs": {
+        "baseline": [
+          370,
+          371,
+          173
+        ],
+        "candidate": [
+          345,
+          344,
+          228
+        ],
+        "baselineMedian": 370,
+        "candidateMedian": 344,
+        "baselineRange": [
+          173,
+          371
+        ],
+        "candidateRange": [
+          228,
+          345
+        ],
+        "changePercent": -7.027027027027022
+      },
+      "stopLongTaskMs": {
+        "baseline": [
+          440,
+          442,
+          141
+        ],
+        "candidate": [
+          456,
+          451,
+          202
+        ],
+        "baselineMedian": 440,
+        "candidateMedian": 451,
+        "baselineRange": [
+          141,
+          442
+        ],
+        "candidateRange": [
+          202,
+          456
+        ],
+        "changePercent": 2.499999999999991
+      },
+      "rendererWarmWorkingSetBytes": {
+        "baseline": [
+          2782867456,
+          2719272960,
+          2761707520
+        ],
+        "candidate": [
+          2747310080,
+          2796888064,
+          2787987456
+        ],
+        "baselineMedian": 2761707520,
+        "candidateMedian": 2787987456,
+        "baselineRange": [
+          2719272960,
+          2782867456
+        ],
+        "candidateRange": [
+          2747310080,
+          2796888064
+        ],
+        "changePercent": 0.9515828815934935
+      },
+      "rendererStoppedWorkingSetBytes": {
+        "baseline": [
+          1936551936,
+          1923522560,
+          1982337024
+        ],
+        "candidate": [
+          1911750656,
+          1922367488,
+          1355657216
+        ],
+        "baselineMedian": 1936551936,
+        "candidateMedian": 1911750656,
+        "baselineRange": [
+          1923522560,
+          1982337024
+        ],
+        "candidateRange": [
+          1355657216,
+          1922367488
+        ],
+        "changePercent": -1.2806927373829047
+      },
+      "rendererPeakBytes": {
+        "baseline": [
+          4120674304,
+          4538548224,
+          4809879552
+        ],
+        "candidate": [
+          4532760576,
+          4581552128,
+          4048080896
+        ],
+        "baselineMedian": 4538548224,
+        "candidateMedian": 4532760576,
+        "baselineRange": [
+          4120674304,
+          4809879552
+        ],
+        "candidateRange": [
+          4048080896,
+          4581552128
+        ],
+        "changePercent": -0.12752201176126077
+      },
+      "browserFivePointMaxWorkingSetBytes": {
+        "baseline": [
+          3226976256,
+          3165769728,
+          4351950848
+        ],
+        "candidate": [
+          3194712064,
+          3242418176,
+          3414822912
+        ],
+        "baselineMedian": 3226976256,
+        "candidateMedian": 3242418176,
+        "baselineRange": [
+          3165769728,
+          4351950848
+        ],
+        "candidateRange": [
+          3194712064,
+          3414822912
+        ],
+        "changePercent": 0.47852598764210885
+      }
+    },
+    "scope": "Six fresh Chrome processes; diagnostic options disabled. Lifetime OS renderer peak and discrete five-point browser working set are separate metrics.",
+    "backupScope": "The fixture has no GameState backup preference keys. Production and server backup settings were not accessed or changed."
+  },
+  "frozenPagePreflightUnchanged": true,
+  "inputFixtureUnchanged": true,
+  "ownedPageServersClosed": true,
+  "backupScope": "Fixture has no backup preference keys. Production saves, server and backup configuration were not accessed or changed.",
+  "resourceScope": "User reopened full local testing. Four unit/E2E workers; real-save and page runs serial. Normal-priority driver/servers, 28 available logical processors observed.",
+  "interpretation": "Keep all six page samples. Both versions have slow/fast phases; page medians and overlapping ranges do not establish a stable UI or memory gain. Do not combine with earlier cohorts.",
+  "toolingCorrections": [
+    "First report audit stopped on an absent unchanged-quantum source key in the older provenance; added independent frozen-Git hashes for all three loaded files. Original script and failure note retained.",
+    "Server finally guard compared different DateTime kinds. Separate cleanup verified PID, port, command and UTC creation time, then closed exactly the two owned servers. Original and initial cleanup scripts retained."
+  ],
+  "unverified": [
+    "same-size conservative-mode page performance",
+    "all acceleration multipliers and long offline intervals",
+    "low-memory/physical devices/long-duration qualification",
+    "new server/ops/full Rust/native packaging matrix",
+    "any production rollout"
+  ],
+  "goalStatus": "active"
+}

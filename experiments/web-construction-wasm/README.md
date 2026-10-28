@@ -20,6 +20,12 @@
 `sourceProjectionDifferences` 只输出变化字段和数量，不输出正文或实体身份。
 相同摘要不足以证明可跳过规范化，发现正文差异必须保留原流程。
 
+`--entry=macro-finalization` 运行真实宏观 Worker，在固定时钟下推进 30 秒墙钟、
+8 倍复制，分别对完整源 envelope、规范化状态和真实保存 Worker 的正文求 SHA-256。
+可用 `--macro-worker-ref=<commit>` 只替换宏观 Worker 入口为指定 Git 源码，
+其它源码仍来自当前检出，逐文件摘要随结果保存。它核对序列化方式的完整数据，
+不代表完整旧版本网页或数据库/响应/内存对照；不访问生产和原浏览器存档。
+
 使用 `--entry=startup-idb --prepared=<只读 prepared.json 的绝对路径>`，通过 `--transport-mode=main`、`worker-chunks`、`worker-ack` 比较主线程写入、分批后台写入和按确认逐批发送。沿用 `--output`、`--name` 保存证据。准备和哈希在计时窗口外；计时包含交接和事务完成，随后独立读回完整状态并校验调用方未变化。此实验不是整页、内存或发布资格验证。
 
 Worker 每批接收最多 512 个实体或 2,048 条带，检查顺序和总数，在临时数据库调用真实恢复日志 API。它自己持有隔离浏览器的锁，不能直接用于页面已经持锁的正式启动流程。[本轮数字与剩余门槛](../../docs/reviews/2026-10-27-web-startup-idb.md)。

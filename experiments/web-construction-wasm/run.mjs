@@ -12,9 +12,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-projection-chunks", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
-const callable = entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
+const callable = entry === "macro-finalization" ? "runMacroFinalization" : entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
       : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
@@ -27,6 +27,9 @@ const callable = entry === "save-projection-chunks" ? "runSaveProjectionChunks" 
                   : entry === "persistence-retirement" ? options["startup-owner-parity"] === "1" ? "runStartupSharedOwnerParity"
                     : options["startup-parity"] === "1" ? "runStartupCheckpointParity" : "runPersistenceRetirement" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
+const macroWorkerReference = options["macro-worker-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["macro-worker-ref"]}^{commit}`],
+  { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
+if (macroWorkerReference && entry !== "macro-finalization") throw new Error("Macro Worker reference requires macro-finalization");
 const decoderFiles = ["src/game/storage.ts", "src/game/saveTransferDecode.ts"];
 const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["decoder-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
@@ -57,9 +60,10 @@ const inputHash = fixtureMode ? await fileHash(options.prepared) : null;
 const wasmPath = options.wasm ?? resolve(output, "target/wasm32-unknown-unknown/release/dsp_web_construction_probe.wasm");
 await mkdir(output, { recursive: true });
 const bundle = await build({ root, configFile: false, publicDir: false, logLevel: "error",
-  plugins: decoderReference || runtimeReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
+  plugins: decoderReference || runtimeReference || macroWorkerReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
     const relative = id.replaceAll("\\", "/").replace(`${sourceRoot.replaceAll("\\", "/")}/`, "").split("?")[0];
-    const reference = runtimeFiles.includes(relative) ? runtimeReference : decoderFiles.includes(relative) ? decoderReference : null;
+    const reference = relative === "src/game/pureIdleMacro.worker.ts" && macroWorkerReference ? macroWorkerReference
+      : runtimeFiles.includes(relative) ? runtimeReference : decoderFiles.includes(relative) ? decoderReference : null;
     const profileFunctions = macroProfile ? macroProfileFunctions[relative] : undefined;
     const overridePhaseCache = constructionPhaseCacheLimit !== 4 && relative === "src/game/engine.ts";
     if (!reference && !(migrationPhases && relative === "src/game/storage.ts") && !profileFunctions && !overridePhaseCache) return;
@@ -105,7 +109,7 @@ const bundle = await build({ root, configFile: false, publicDir: false, logLevel
   } }] : [],
   resolve: { alias: [{ find: /^\.\.\/\.\.\/src\/game\//, replacement: `${sourceRoot.replaceAll("\\", "/")}/src/game/` }] },
   define: { "process.env.NODE_ENV": '"production"',
-    ...(["persistence-retirement", "startup-idb"].includes(entry) ? { __APP_PLATFORM__: '"web"' } : {}),
+    ...(["persistence-retirement", "startup-idb", "macro-finalization"].includes(entry) ? { __APP_PLATFORM__: '"web"' } : {}),
   },
   build: { write: false, emptyOutDir: false, target: "chrome120", minify: false,
     lib: { entry: resolve(root, `experiments/web-construction-wasm/${entry}.ts`), name: "dspConstructionProbe", formats: ["es"] } } });
@@ -179,6 +183,13 @@ try {
     bundleSha256: createHash("sha256").update(code).digest("hex"),
     ...(rendererMemory ? { rendererMemory } : {}),
     ...(decoderReference ? { decoderReference, decoderFiles } : {}),
+    ...(entry === "macro-finalization" ? { macroWorkerReference, macroSourceHashes: Object.fromEntries(await Promise.all([
+      "src/game/pureIdleMacro.worker.ts", "src/game/pureIdleMacro.ts", "src/game/pureIdleMacroClient.ts", "src/game/persistentSaveTransfer.ts",
+      "src/game/saveTransfer.ts", "src/game/saveProjection.ts", "src/game/storage.ts", "src/game/save.worker.ts", "src/game/engine.ts",
+      "experiments/web-construction-wasm/macro-finalization.ts", "experiments/web-construction-wasm/macro-finalization-clock.worker.ts",
+    ].map(async file => [file, macroWorkerReference && file === "src/game/pureIdleMacro.worker.ts"
+      ? createHash("sha256").update(execFileSync("git", ["show", `${macroWorkerReference}:${file}`], { cwd: sourceRoot })).digest("hex")
+      : await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(entry.startsWith("terminal-decode") ? { migrationPhases, decoderSourceHashes: Object.fromEntries(await Promise.all(decoderFiles.map(async (file) => [file,
       decoderReference ? createHash("sha256").update(execFileSync("git", ["show", `${decoderReference}:${file}`], { cwd: sourceRoot })).digest("hex")
         : await fileHash(resolve(sourceRoot, file)),

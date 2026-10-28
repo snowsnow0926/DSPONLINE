@@ -1,0 +1,2006 @@
+{
+  "decision": "withhold",
+  "optimizationAccepted": false,
+  "lastAcceptedRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+  "performanceAdjudication": {
+    "decision": "withhold",
+    "runtimeCommit": "5730f267759e7788916a8d762a1c28067ced0838",
+    "lastAcceptedRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+    "interpretation": "CPU-only conservative calibration is 9.48% faster in its own ABBA cohort. Independent frozen-page cohorts show 5.15% and 7.02% shorter conservative entry medians, with no material total-stop gain. All original samples retained. Original conservative memory comparison is ineligible because one stopped sample is absent; the complete six-run supplement shows stopped renderer working-set median +27.53% (+551059456 bytes), and entry longest-frame median +10.46%. Initial replication stopped working set is bimodal and its median is also higher. Four separate heap/forced-GC diagnostic runs show post-GC main live heap approximately equal (-0.19%) and worker heap equal; those inspected/forced runs cannot establish natural memory recovery. Do not promote or publish this candidate until ordinary exit-memory behavior is resolved.",
+    "optimizationAccepted": false,
+    "functionalAndFullPayloadParityPassed": true,
+    "allOriginalTimingSamplesPreserved": 12,
+    "independentSupplementRuns": 6,
+    "heapDiagnosticRuns": 4,
+    "mixTimingCohorts": false,
+    "productionPublished": false,
+    "goalStatus": "active",
+    "nextPriorities": [
+      "Unprofiled OS-only natural memory tail at stop/+10/+30/+60 seconds, with no heap inspection or forced GC.",
+      "Locate retained/transient owners and bisect capacity memo vs slot-read changes if the gap persists.",
+      "Repair and repeat full-state plus balanced page regression before promotion; continue the original broader performance scope."
+    ]
+  },
+  "heapDiagnostics": {
+    "scope": "Four serial ABBA diagnostic-only replication pages, same raw-stock fixture. Heap inspection throughout; one forced main/worker GC after the natural +10s sample. The +30s sample is after forced GC and cannot prove natural memory recovery. Diagnostic times are ineligible for performance claims.",
+    "runs": 4,
+    "allGameFlowsAndCatalogsPassed": true,
+    "noHeapDiagnosticErrors": true,
+    "noSourceOrBackupChanges": true,
+    "rows": {
+      "heap-tail-replication-baseline-01": {
+        "stages": {
+          "replication stopped": {
+            "mainUsedBytes": 744199028,
+            "mainTotalBytes": 814624768,
+            "mainBackingBytes": 15773728,
+            "workerUsedBytes": 186594748,
+            "workerBackingBytes": 2904420
+          },
+          "replication stopped +10s": {
+            "mainUsedBytes": 749754732,
+            "mainTotalBytes": 815149056,
+            "mainBackingBytes": 15773902,
+            "workerUsedBytes": 186594748,
+            "workerBackingBytes": 2904420
+          },
+          "replication stopped diagnostic GC": {
+            "mainUsedBytes": 705894292,
+            "mainTotalBytes": 731488256,
+            "mainBackingBytes": 9957384,
+            "workerUsedBytes": 186261964,
+            "workerBackingBytes": 2884016
+          },
+          "replication stopped +30s": {
+            "mainUsedBytes": 709678176,
+            "mainTotalBytes": 732274688,
+            "mainBackingBytes": 9957539,
+            "workerUsedBytes": 186261964,
+            "workerBackingBytes": 2884016
+          }
+        },
+        "rawSha256": "1a57db31ddecd373484ceecb2e8ac4316add89b3e7dfde397c3155264ba03817",
+        "samplingErrors": []
+      },
+      "heap-tail-replication-candidate-01": {
+        "stages": {
+          "replication stopped": {
+            "mainUsedBytes": 743245544,
+            "mainTotalBytes": 808124416,
+            "mainBackingBytes": 15795277,
+            "workerUsedBytes": 186610556,
+            "workerBackingBytes": 2905580
+          },
+          "replication stopped +10s": {
+            "mainUsedBytes": 724501308,
+            "mainTotalBytes": 811270144,
+            "mainBackingBytes": 15775190,
+            "workerUsedBytes": 186610556,
+            "workerBackingBytes": 2905580
+          },
+          "replication stopped diagnostic GC": {
+            "mainUsedBytes": 703879772,
+            "mainTotalBytes": 724672512,
+            "mainBackingBytes": 9958627,
+            "workerUsedBytes": 186269564,
+            "workerBackingBytes": 2885176
+          },
+          "replication stopped +30s": {
+            "mainUsedBytes": 708060648,
+            "mainTotalBytes": 730177536,
+            "mainBackingBytes": 9958936,
+            "workerUsedBytes": 186269564,
+            "workerBackingBytes": 2885176
+          }
+        },
+        "rawSha256": "5726d62ddee12ca4f17c4d14dfeefc02fc1273bf4e02e2fcc8395d759e7b8898",
+        "samplingErrors": []
+      },
+      "heap-tail-replication-candidate-02": {
+        "stages": {
+          "replication stopped": {
+            "mainUsedBytes": 742195144,
+            "mainTotalBytes": 808595456,
+            "mainBackingBytes": 15794955,
+            "workerUsedBytes": 186504380,
+            "workerBackingBytes": 2905580
+          },
+          "replication stopped +10s": {
+            "mainUsedBytes": 748393900,
+            "mainTotalBytes": 809381888,
+            "mainBackingBytes": 15774868,
+            "workerUsedBytes": 186504380,
+            "workerBackingBytes": 2905580
+          },
+          "replication stopped diagnostic GC": {
+            "mainUsedBytes": 704796468,
+            "mainTotalBytes": 730439680,
+            "mainBackingBytes": 9958554,
+            "workerUsedBytes": 186163376,
+            "workerBackingBytes": 2885176
+          },
+          "replication stopped +30s": {
+            "mainUsedBytes": 709129952,
+            "mainTotalBytes": 730963968,
+            "mainBackingBytes": 9958936,
+            "workerUsedBytes": 186163376,
+            "workerBackingBytes": 2885176
+          }
+        },
+        "rawSha256": "ea2ef992126439fbc580c66a83c1fc2e04e56a7e3228724bdc2ec32231f9b3e9",
+        "samplingErrors": []
+      },
+      "heap-tail-replication-baseline-02": {
+        "stages": {
+          "replication stopped": {
+            "mainUsedBytes": 743206284,
+            "mainTotalBytes": 812363776,
+            "mainBackingBytes": 15774481,
+            "workerUsedBytes": 186514536,
+            "workerBackingBytes": 2904420
+          },
+          "replication stopped +10s": {
+            "mainUsedBytes": 748751928,
+            "mainTotalBytes": 813150208,
+            "mainBackingBytes": 15774655,
+            "workerUsedBytes": 186514536,
+            "workerBackingBytes": 2904420
+          },
+          "replication stopped diagnostic GC": {
+            "mainUsedBytes": 705485644,
+            "mainTotalBytes": 731488256,
+            "mainBackingBytes": 9957384,
+            "workerUsedBytes": 186173532,
+            "workerBackingBytes": 2884016
+          },
+          "replication stopped +30s": {
+            "mainUsedBytes": 709213092,
+            "mainTotalBytes": 731226112,
+            "mainBackingBytes": 9957539,
+            "workerUsedBytes": 186173532,
+            "workerBackingBytes": 2884016
+          }
+        },
+        "rawSha256": "9ea938be9f0ad6f4a04aeee6d658117ec3e88a3360029667cd1f6dc4c150c935",
+        "samplingErrors": []
+      }
+    },
+    "metrics": {
+      "replication stopped": {
+        "mainUsedBytes": {
+          "baseline": [
+            744199028,
+            743206284
+          ],
+          "candidate": [
+            743245544,
+            742195144
+          ],
+          "baselineMedian": 743702656.0,
+          "candidateMedian": 742720344.0,
+          "changePercent": -0.1320839709358257
+        },
+        "mainTotalBytes": {
+          "baseline": [
+            814624768,
+            812363776
+          ],
+          "candidate": [
+            808124416,
+            808595456
+          ],
+          "baselineMedian": 813494272.0,
+          "candidateMedian": 808359936.0,
+          "changePercent": -0.6311459314122914
+        },
+        "mainBackingBytes": {
+          "baseline": [
+            15773728,
+            15774481
+          ],
+          "candidate": [
+            15795277,
+            15794955
+          ],
+          "baselineMedian": 15774104.5,
+          "candidateMedian": 15795116.0,
+          "changePercent": 0.1332024901952389
+        },
+        "workerUsedBytes": {
+          "baseline": [
+            186594748,
+            186514536
+          ],
+          "candidate": [
+            186610556,
+            186504380
+          ],
+          "baselineMedian": 186554642.0,
+          "candidateMedian": 186557468.0,
+          "changePercent": 0.0015148376742102343
+        },
+        "workerBackingBytes": {
+          "baseline": [
+            2904420,
+            2904420
+          ],
+          "candidate": [
+            2905580,
+            2905580
+          ],
+          "baselineMedian": 2904420.0,
+          "candidateMedian": 2905580.0,
+          "changePercent": 0.039939127261212626
+        }
+      },
+      "replication stopped +10s": {
+        "mainUsedBytes": {
+          "baseline": [
+            749754732,
+            748751928
+          ],
+          "candidate": [
+            724501308,
+            748393900
+          ],
+          "baselineMedian": 749253330.0,
+          "candidateMedian": 736447604.0,
+          "changePercent": -1.7091316764651587
+        },
+        "mainTotalBytes": {
+          "baseline": [
+            815149056,
+            813150208
+          ],
+          "candidate": [
+            811270144,
+            809381888
+          ],
+          "baselineMedian": 814149632.0,
+          "candidateMedian": 810326016.0,
+          "changePercent": -0.46964536366700393
+        },
+        "mainBackingBytes": {
+          "baseline": [
+            15773902,
+            15774655
+          ],
+          "candidate": [
+            15775190,
+            15774868
+          ],
+          "baselineMedian": 15774278.5,
+          "candidateMedian": 15775029.0,
+          "changePercent": 0.004757745338390684
+        },
+        "workerUsedBytes": {
+          "baseline": [
+            186594748,
+            186514536
+          ],
+          "candidate": [
+            186610556,
+            186504380
+          ],
+          "baselineMedian": 186554642.0,
+          "candidateMedian": 186557468.0,
+          "changePercent": 0.0015148376742102343
+        },
+        "workerBackingBytes": {
+          "baseline": [
+            2904420,
+            2904420
+          ],
+          "candidate": [
+            2905580,
+            2905580
+          ],
+          "baselineMedian": 2904420.0,
+          "candidateMedian": 2905580.0,
+          "changePercent": 0.039939127261212626
+        }
+      },
+      "replication stopped diagnostic GC": {
+        "mainUsedBytes": {
+          "baseline": [
+            705894292,
+            705485644
+          ],
+          "candidate": [
+            703879772,
+            704796468
+          ],
+          "baselineMedian": 705689968.0,
+          "candidateMedian": 704338120.0,
+          "changePercent": -0.19156400987692113
+        },
+        "mainTotalBytes": {
+          "baseline": [
+            731488256,
+            731488256
+          ],
+          "candidate": [
+            724672512,
+            730439680
+          ],
+          "baselineMedian": 731488256.0,
+          "candidateMedian": 727556096.0,
+          "changePercent": -0.5375561354193481
+        },
+        "mainBackingBytes": {
+          "baseline": [
+            9957384,
+            9957384
+          ],
+          "candidate": [
+            9958627,
+            9958554
+          ],
+          "baselineMedian": 9957384.0,
+          "candidateMedian": 9958590.5,
+          "changePercent": 0.012116636257064606
+        },
+        "workerUsedBytes": {
+          "baseline": [
+            186261964,
+            186173532
+          ],
+          "candidate": [
+            186269564,
+            186163376
+          ],
+          "baselineMedian": 186217748.0,
+          "candidateMedian": 186216470.0,
+          "changePercent": -0.0006862933387030701
+        },
+        "workerBackingBytes": {
+          "baseline": [
+            2884016,
+            2884016
+          ],
+          "candidate": [
+            2885176,
+            2885176
+          ],
+          "baselineMedian": 2884016.0,
+          "candidateMedian": 2885176.0,
+          "changePercent": 0.040221690864394866
+        }
+      },
+      "replication stopped +30s": {
+        "mainUsedBytes": {
+          "baseline": [
+            709678176,
+            709213092
+          ],
+          "candidate": [
+            708060648,
+            709129952
+          ],
+          "baselineMedian": 709445634.0,
+          "candidateMedian": 708595300.0,
+          "changePercent": -0.1198589376335546
+        },
+        "mainTotalBytes": {
+          "baseline": [
+            732274688,
+            731226112
+          ],
+          "candidate": [
+            730177536,
+            730963968
+          ],
+          "baselineMedian": 731750400.0,
+          "candidateMedian": 730570752.0,
+          "changePercent": -0.16120906801007084
+        },
+        "mainBackingBytes": {
+          "baseline": [
+            9957539,
+            9957539
+          ],
+          "candidate": [
+            9958936,
+            9958936
+          ],
+          "baselineMedian": 9957539.0,
+          "candidateMedian": 9958936.0,
+          "changePercent": 0.01402957096126034
+        },
+        "workerUsedBytes": {
+          "baseline": [
+            186261964,
+            186173532
+          ],
+          "candidate": [
+            186269564,
+            186163376
+          ],
+          "baselineMedian": 186217748.0,
+          "candidateMedian": 186216470.0,
+          "changePercent": -0.0006862933387030701
+        },
+        "workerBackingBytes": {
+          "baseline": [
+            2884016,
+            2884016
+          ],
+          "candidate": [
+            2885176,
+            2885176
+          ],
+          "baselineMedian": 2884016.0,
+          "candidateMedian": 2885176.0,
+          "changePercent": 0.040221690864394866
+        }
+      }
+    },
+    "naturalStoppedMemoryAcceptance": "unresolved",
+    "optimizationAccepted": false,
+    "productionPublished": false,
+    "goalStatus": "active"
+  },
+  "conservativeCalibration": {
+    "scope": "Four serial ABBA fresh browsers; owned async conservative calibration only, no UI/database qualification; raw stock and all diagnostics disabled. Only this timing cohort compared.",
+    "refs": {
+      "baseline": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+      "candidate": "a68540c5efabc3df518ee5703181de02a0f83b6d"
+    },
+    "equivalentFrozenRuntime": "5730f267759e7788916a8d762a1c28067ced0838",
+    "fiveRuntimeSourceHashesEqual": true,
+    "metrics": {
+      "setupMs": {
+        "baseline": [
+          3635.4000000953674,
+          3602.2999999523163
+        ],
+        "candidate": [
+          3575.7000000476837,
+          3559.7000000476837
+        ],
+        "baselineMedian": 3618.850000023842,
+        "candidateMedian": 3567.7000000476837,
+        "changePercent": -1.4134324433403234
+      },
+      "initializationMs": {
+        "baseline": [
+          21995.300000190735,
+          21854.300000190735
+        ],
+        "candidate": [
+          19862.700000047684,
+          19829.099999904633
+        ],
+        "baselineMedian": 21924.800000190735,
+        "candidateMedian": 19845.899999976158,
+        "changePercent": -9.481956506770828
+      },
+      "finalizeMs": {
+        "baseline": [
+          129.20000004768372,
+          132
+        ],
+        "candidate": [
+          130.80000019073486,
+          129
+        ],
+        "baselineMedian": 130.60000002384186,
+        "candidateMedian": 129.90000009536743,
+        "changePercent": -0.5359876939867059
+      },
+      "advanceMs": {
+        "baseline": [
+          4910.799999952316,
+          4899.799999952316
+        ],
+        "candidate": [
+          4846.799999713898,
+          4844.600000143051
+        ],
+        "baselineMedian": 4905.299999952316,
+        "candidateMedian": 4845.699999928474,
+        "changePercent": -1.2150123340962105
+      },
+      "initializeAdvanceFinalizeMs": {
+        "baseline": [
+          27035.300000190735,
+          26886.10000014305
+        ],
+        "candidate": [
+          24840.299999952316,
+          24802.700000047684
+        ],
+        "baselineMedian": 26960.700000166893,
+        "candidateMedian": 24821.5,
+        "changePercent": -7.934512086680434
+      }
+    },
+    "completeStateAndEnvelopeEqual": true,
+    "completeInitializationStatusEqual": true,
+    "fullStateSha256": "d13879dfa59340067b2bfcf1ec1f697d67b69c8bfd749ee6227e309e61e5bed2",
+    "fullEnvelopeSha256": "b4efebee0e5fb84dee9881d2bf0bdbb4aac84e582088ebeb9949c23797ce4def",
+    "order": [
+      "slots-abba-baseline-01",
+      "slots-abba-candidate-01",
+      "slots-abba-candidate-02",
+      "slots-abba-baseline-02"
+    ],
+    "rawSha256": {
+      "slots-abba-baseline-01": "b3b1eba62f00c56d9371ae3038004a3049671980a94dc381fa39cdd2cbd63de6",
+      "slots-abba-candidate-01": "d8db2d61743f1d4d3db2ca8c644cdeeffb332ad9db2b5efb06b2b1e14caa0020",
+      "slots-abba-candidate-02": "b629efd2b642727b0ecc1ab363902dd9fbe81d2756c709a0224cf2527ca4c9b4",
+      "slots-abba-baseline-02": "9ae81830bff04a1fca25dd3b706296f05f814c91675c47f9566c610ae1ad91b7"
+    },
+    "productionPublished": false
+  },
+  "runtimeCommit": "5730f267759e7788916a8d762a1c28067ced0838",
+  "validationToolingCommit": "143bb6fb62f4f6407010b8d9a7210e8665c82892",
+  "runtimeSourcesLastChangedCommit": "a68540c5efabc3df518ee5703181de02a0f83b6d",
+  "baselineCommit": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+  "productionPublished": false,
+  "productionAccessed": false,
+  "unit": {
+    "passed": 3844,
+    "skipped": 38,
+    "failed": 0,
+    "passedFiles": 426,
+    "skippedFiles": 16,
+    "rawLogSha256": "3f7e07d857652e71474cef7ff564004b4516ce1fdf0b1334cf9c2e37343f5a80"
+  },
+  "browser": {
+    "chromium-full-01": {
+      "startTime": "2026-10-28T18:35:01.276Z",
+      "duration": 503820.066,
+      "expected": 524,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0,
+      "rawSha256": "33eb1a0293fefa5618354b524e7b4af9cce1ead931752ce5dc0b8c5f84216381"
+    },
+    "pwa-preview-01": {
+      "startTime": "2026-10-28T18:43:32.091Z",
+      "duration": 8283.085000000001,
+      "expected": 1,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0,
+      "rawSha256": "9152fc0eb82b355ee86194d2b80a13ba99bdf47dae6be82bbd2926ee43c20b53"
+    },
+    "durable-01": {
+      "startTime": "2026-10-28T18:43:41.070Z",
+      "duration": 56952.642,
+      "expected": 21,
+      "skipped": 22,
+      "unexpected": 0,
+      "flaky": 0,
+      "rawSha256": "a60b146e5e534a94ff0dabd133bf3a944d68baa18b84d34de851499be4843476"
+    }
+  },
+  "gates": {
+    "full-unit-01": {
+      "endUtc": "2026-10-28T18:28:39.7814442Z",
+      "exitCode": 0,
+      "workers": 4,
+      "startUtc": "2026-10-28T18:27:31.4487754Z",
+      "commit": "5730f267759e7788916a8d762a1c28067ced0838",
+      "exitRecordSha256": "75efa7599db6db4f7f407bd58f3121d32c339621e829d52a3a1d40cc106e0b17"
+    },
+    "build-web-01": {
+      "commit": "5730f267759e7788916a8d762a1c28067ced0838",
+      "startUtc": "2026-10-28T18:32:57.1568892Z",
+      "exitCode": 0,
+      "endUtc": "2026-10-28T18:33:22.2293851Z",
+      "exitRecordSha256": "7bdee98f2092a93f00395152976ae04f959a08eb001b8a53200ce73b1d605a93"
+    },
+    "licenses-01": {
+      "commit": "5730f267759e7788916a8d762a1c28067ced0838",
+      "exitCode": 0,
+      "exitRecordSha256": "a5c4b7f089ec59c6a32a86ecca8d8181be9d88977eba2a783c93f5b4d908ef98"
+    },
+    "chromium-full-01": {
+      "exitCode": 0,
+      "commit": "5730f267759e7788916a8d762a1c28067ced0838",
+      "endUtc": "2026-10-28T18:43:25.3087851Z",
+      "startUtc": "2026-10-28T18:35:00.6951064Z",
+      "exitRecordSha256": "cb6b136e7d45920d86d45d54f49106b2b91333a835127c8c360b688aafc026d3"
+    },
+    "pwa-preview-01": {
+      "startUtc": "2026-10-28T18:43:31.5233058Z",
+      "endUtc": "2026-10-28T18:43:40.4204381Z",
+      "exitCode": 0,
+      "commit": "5730f267759e7788916a8d762a1c28067ced0838",
+      "exitRecordSha256": "eaed912b05422b9a1d6f281bc7bcd28125b92f5d7537aeb05543d7ebc148f4dc"
+    },
+    "durable-01": {
+      "startUtc": "2026-10-28T18:43:40.4326553Z",
+      "endUtc": "2026-10-28T18:44:38.0780464Z",
+      "exitCode": 0,
+      "commit": "5730f267759e7788916a8d762a1c28067ced0838",
+      "exitRecordSha256": "141a3f6e6e60704674b9ee1379cf47942a454d2a950f12deb8ffff70fb9b6cb1"
+    },
+    "real-parity-series-01": {
+      "endUtc": "2026-10-28T18:51:37.2148224Z",
+      "startUtc": "2026-10-28T18:46:07.1184820Z",
+      "exitCode": 0,
+      "exitRecordSha256": "1c51b93f5dd5a53c9a525795f7e8def738eb80ffbdb60766268534a28c7eed6a"
+    },
+    "page-series-01": {
+      "endUtc": "2026-10-28T19:14:44.5439610Z",
+      "startUtc": "2026-10-28T18:52:13.4109639Z",
+      "exitCode": 0,
+      "exitRecordSha256": "ca922a429a74daabbff81d80c77b09863e7915c9d8964d830535fbda48a795a5"
+    },
+    "stable-supplement-series-01": {
+      "exitCode": 0,
+      "startUtc": "2026-10-28T19:22:32.3779397Z",
+      "endUtc": "2026-10-28T19:34:58.6738170Z",
+      "exitRecordSha256": "1bf4c1dff6046f6427acc4d4f2cb094da45a4d5139df141d410cb5b14b0f8d67"
+    },
+    "heap-tail-series-01": {
+      "availableGiBBefore": 13.383956909179688,
+      "exitCode": 0,
+      "endUtc": "2026-10-28T19:47:31.6909078Z",
+      "startUtc": "2026-10-28T19:38:50.7406296Z",
+      "exitRecordSha256": "9e90e9a6fd40d86f31a325314548fc049f7e8cb8ec5864a842bf9a7fd5cbf3ea"
+    }
+  },
+  "build": {
+    "appVersion": "1.3.4",
+    "saveVersion": 47,
+    "startupGzipBytes": 182078,
+    "fileCount": 198,
+    "workerCount": 16,
+    "manifestSha256": "e2d6ecaf14b144343ad0db0ee8495c9eb729499bfe94d13e088996cff55162ec",
+    "aggregateSha256": "52defb2f783b5ae36cd7ea02157eb55a126af76f8cf7e28bc838074a3c885ac8",
+    "archiveSha256": "ebc5b8ab04076881849b44817f378a474f918c176fa1f6f95bcc0849d595aee1",
+    "changedWorkers": [
+      "canonicalTerminalOwner",
+      "multicoreSimulation",
+      "offlineSimulation",
+      "pureIdleMacro",
+      "saveInspection",
+      "saveSummary",
+      "simulation",
+      "statistics"
+    ],
+    "sourceHashes": {
+      "native/native-coverage-manifest.json": "3ddff06f173967a28d8eac69645def38556394f866e6e4ebfd3fcd3f23db2657",
+      "src/App.tsx": "4ddab435610c8803bee77faccc50698941297bebc11fedecb17fc984aaa2f43d",
+      "src/components/AccessibleDialog.tsx": "f749ff22448453fa065a5605a1fd0e8550e2b82458899033ad950e6b31c2ff49",
+      "src/components/BlueprintWorkspace.tsx": "63e36803c09c682d36fa655f953cf14a940863e2793b9b7276dd649ebae36812",
+      "src/components/TimeWarpIdleOverlay.tsx": "ba4c3237910eb8fd6000c61ef369e5414dab2a84433386cb27b5f25287dcaa4d",
+      "src/game/authoritativeSavePersistence.worker.ts": "cbe421da6daa1c5dddf80a748bcd13dab2ffda2b80e561b698350e13a36c934b",
+      "src/game/authoritativeSavePersistenceClient.ts": "6d00bb29914b8f684077c726ebcdbf6662648a4e90c0568bad24ff34839b1d33",
+      "src/game/beltFlow.ts": "b80f99d8428337c328aa0029448a9fedefdc6d4f177fcb7193ac5e025bbcf78e",
+      "src/game/blueprintExchange.ts": "5efc142f1c12a0ad0c7c888d67ea6082895bd3a2c8c15164b9ef483b712fd701",
+      "src/game/blueprintExchangeFile.ts": "d367fd04a0cce8b11d427a2e2923b9ea1fc59c88de4b766ae01c42dd0bd237c0",
+      "src/game/blueprintExchangeLimits.ts": "814b17ea46438bf1f0178e1a7f159914c3d11d55349706edbfe9cfeddcfbe80a",
+      "src/game/canonicalSaveEnvelopeInspection.ts": "fa86ca733abe4e3d0bf46b5a11ff8575895b529c4e8d0e22c0ae74fbcad4de75",
+      "src/game/canonicalTerminalOwner.worker.ts": "0ceeb80d51e0c1aba294963b0932d36c32ed1a05cd36abfc65963705c221900a",
+      "src/game/canonicalTerminalOwnerClient.ts": "d35451af32da5ab5077498d266887152ce6b939cd4ad1f9086e52c14232bc186",
+      "src/game/chunkedSaveJournal.ts": "e3ef1b98502ef92375bcccfe7bd1ef0980166ad9999102d7a76a1c5771e8f74a",
+      "src/game/contentPacks.ts": "8a6518eb5dec3b2b95990cf0ecfe5ae901c18b147887e4871e72f3aa2770dee6",
+      "src/game/engine.ts": "62d66dcffa75812847c0a6b980456131807b52a423add30044fc7b007d228a20",
+      "src/game/nativeBlueprintImportInput.ts": "fdcead58f36762d51acb070016ddc8c555f4b2e671084783a4d37af52c211eb2",
+      "src/game/payloadTextChecksum.ts": "d5ec856e3fedd62e1cb14d84ee5dd7775b2933107c772bd49fc521de78791891",
+      "src/game/pureIdleCheckpointOwnerClient.ts": "b88061a1c83b575c219849d5e96d43fc0e7c6c3715bbdd8d58ad5e3e8645448a",
+      "src/game/pureIdleMacro.ts": "4acafb9f17b07b7d6907e0dfb8dcba29dcb79d85c8183f9cd9e949feec7bfbd4",
+      "src/game/pureIdleMacro.worker.ts": "1da6696457673abc6d14fcbc930cdd5ea06c988ba29458bf0070404f5858ce02",
+      "src/game/pureIdleMacroValidation.ts": "e071bfadd9453c244c8b0cec4f3772c358c9b9e7de67d6c55ab07dbbc73d9c1e",
+      "src/game/pureIdleRecovery.ts": "64c1632132600b1765b4281a552fbf8e2d0d0d14e1da1b6a882f99ab2a2c51e9",
+      "src/game/pureIdleReplication.ts": "391a12eb4594a5b412dd37fd65e8eba600ad499908b1c1ce3118fd0789589901",
+      "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+      "src/game/saveEnvelopeIntegrity.ts": "f565a06497bbc254e2277b3c5fda38c02deb05543f1489effe900c08c91ac6cb",
+      "src/game/saveFieldContract.ts": "e3d6a34ec01bea4d1c16d194ca8e67b0db78860c9147be00d35ae3ff54199918",
+      "src/game/saveProjection.ts": "7d62c35d7665960f04930dcf552ce432d07d3ca4beac7bb859b85b42af8e5077",
+      "src/game/saveTransfer.ts": "f844fa15734902546aef43a22e82fc6c9e698a8a7af3ed0c4c2f7c2a8a11dbb7",
+      "src/game/saveTransferDecode.ts": "ba79bb4c94d33fd4ea7fa6a51497db2c4c44e296ce52b5e8a5beaa64d9badc09",
+      "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+      "src/game/types.ts": "713e623c9a602feecba953c079b0c83bb758a81fb738e45d9390224d714a7d78",
+      "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+      "src/game/offlineApproximation.ts": "de7f65b3f55fcc825d3008c0068dd7da0714b4d55efa79d6b60db75b03f0c5f9"
+    },
+    "bothFrozenFileSetsReverified": true
+  },
+  "realParity": {
+    "decision": "real-state-and-worker-parity-passed-frozen-pages-still-required",
+    "refs": {
+      "baseline": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+      "candidate": "5730f267759e7788916a8d762a1c28067ced0838"
+    },
+    "inputSha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+    "inputBytes": 205464026,
+    "independentFrozenSourceHashes": {
+      "baseline": {
+        "src/game/engine.ts": "bcc158607af5582d4ad6f35953cba8bcbeb341b9d5b01ef0e1cbe362a78eaee3",
+        "src/game/pureIdleMacro.ts": "4acafb9f17b07b7d6907e0dfb8dcba29dcb79d85c8183f9cd9e949feec7bfbd4",
+        "src/game/quantumLogisticsNetwork.ts": "5b65aaa4b542b7229178da6e2c68c51a82cc54d54d522aee588ebd1c350c91c5",
+        "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+        "src/game/offlineApproximation.ts": "fd3ae75fdd8bd9920bcb3adfc98ff607f64bcd5ef899156953f06bf28138f73d"
+      },
+      "candidate": {
+        "src/game/engine.ts": "62d66dcffa75812847c0a6b980456131807b52a423add30044fc7b007d228a20",
+        "src/game/pureIdleMacro.ts": "4acafb9f17b07b7d6907e0dfb8dcba29dcb79d85c8183f9cd9e949feec7bfbd4",
+        "src/game/quantumLogisticsNetwork.ts": "5b65aaa4b542b7229178da6e2c68c51a82cc54d54d522aee588ebd1c350c91c5",
+        "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+        "src/game/offlineApproximation.ts": "de7f65b3f55fcc825d3008c0068dd7da0714b4d55efa79d6b60db75b03f0c5f9"
+      }
+    },
+    "inputScope": "Expanded laboratory copy of the original 105 MiB-class save; read only.",
+    "serialRuns": 20,
+    "sourceLoadsVerified": true,
+    "allRunsExitZero": true,
+    "large": {
+      "stock": {
+        "fullEnvelopeSha256": "dee046c56e040f8eff13a273368e15cc99c2a6282410060ca84ca08695a87b97",
+        "fullEnvelopeBytes": 110851416,
+        "completeResultsEqual": true,
+        "wallSeconds": 30,
+        "simulationSeconds": 240,
+        "metrics": {
+          "setupMs": {
+            "baseline": [
+              3472,
+              3463.7999999523163
+            ],
+            "candidate": [
+              3430.399999856949,
+              3394.2999999523163
+            ],
+            "baselineMedian": 3467.899999976158,
+            "candidateMedian": 3412.3499999046326,
+            "baselineRange": [
+              3463.7999999523163,
+              3472
+            ],
+            "candidateRange": [
+              3394.2999999523163,
+              3430.399999856949
+            ],
+            "changePercent": -1.601833964990551
+          },
+          "startupMs": {
+            "baseline": [
+              5,
+              4.900000095367432
+            ],
+            "candidate": [
+              4.6000001430511475,
+              4.799999952316284
+            ],
+            "baselineMedian": 4.950000047683716,
+            "candidateMedian": 4.700000047683716,
+            "baselineRange": [
+              4.900000095367432,
+              5
+            ],
+            "candidateRange": [
+              4.6000001430511475,
+              4.799999952316284
+            ],
+            "changePercent": -5.050505001853168
+          },
+          "advanceMs": {
+            "baseline": [
+              3225.0999999046326,
+              3173.5
+            ],
+            "candidate": [
+              3176.100000143051,
+              3215.0
+            ],
+            "baselineMedian": 3199.2999999523163,
+            "candidateMedian": 3195.5500000715256,
+            "baselineRange": [
+              3173.5,
+              3225.0999999046326
+            ],
+            "candidateRange": [
+              3176.100000143051,
+              3215.0
+            ],
+            "changePercent": -0.11721313665009614
+          },
+          "serializationMs": {
+            "baseline": [
+              2120,
+              2007.7999999523163
+            ],
+            "candidate": [
+              2020.7000000476837,
+              2005.2000000476837
+            ],
+            "baselineMedian": 2063.899999976158,
+            "candidateMedian": 2012.9500000476837,
+            "baselineRange": [
+              2007.7999999523163,
+              2120
+            ],
+            "candidateRange": [
+              2005.2000000476837,
+              2020.7000000476837
+            ],
+            "changePercent": -2.4686273525395097
+          }
+        }
+      },
+      "tray": {
+        "fullEnvelopeSha256": "32b5867164fc892bc4f39385313b6735800f72d79e48202ff42f0710592830bb",
+        "fullEnvelopeBytes": 110869315,
+        "completeResultsEqual": true,
+        "wallSeconds": 30,
+        "simulationSeconds": 240,
+        "metrics": {
+          "setupMs": {
+            "baseline": [
+              3432.9000000953674,
+              3476.5999999046326
+            ],
+            "candidate": [
+              3441.300000190735,
+              3439.2999999523163
+            ],
+            "baselineMedian": 3454.75,
+            "candidateMedian": 3440.3000000715256,
+            "baselineRange": [
+              3432.9000000953674,
+              3476.5999999046326
+            ],
+            "candidateRange": [
+              3439.2999999523163,
+              3441.300000190735
+            ],
+            "changePercent": -0.41826470594035214
+          },
+          "startupMs": {
+            "baseline": [
+              4.599999904632568,
+              5.5
+            ],
+            "candidate": [
+              4.699999809265137,
+              5
+            ],
+            "baselineMedian": 5.049999952316284,
+            "candidateMedian": 4.849999904632568,
+            "baselineRange": [
+              4.599999904632568,
+              5.5
+            ],
+            "candidateRange": [
+              4.699999809265137,
+              5
+            ],
+            "changePercent": -3.960397021231288
+          },
+          "advanceMs": {
+            "baseline": [
+              1253.0999999046326,
+              1257.8000001907349
+            ],
+            "candidate": [
+              1252.7000000476837,
+              1263.9000000953674
+            ],
+            "baselineMedian": 1255.4500000476837,
+            "candidateMedian": 1258.3000000715256,
+            "baselineRange": [
+              1253.0999999046326,
+              1257.8000001907349
+            ],
+            "candidateRange": [
+              1252.7000000476837,
+              1263.9000000953674
+            ],
+            "changePercent": 0.22701023726421354
+          },
+          "serializationMs": {
+            "baseline": [
+              1896.7999999523163,
+              1856.6000001430511
+            ],
+            "candidate": [
+              1908.5999999046326,
+              1818.2999999523163
+            ],
+            "baselineMedian": 1876.7000000476837,
+            "candidateMedian": 1863.4499999284744,
+            "baselineRange": [
+              1856.6000001430511,
+              1896.7999999523163
+            ],
+            "candidateRange": [
+              1818.2999999523163,
+              1908.5999999046326
+            ],
+            "changePercent": -0.7060265422748735
+          }
+        }
+      },
+      "quantum": {
+        "fullEnvelopeSha256": "f9b61c57b55f1d5ba1c3af8d7594a3fd00c0a6f177e862e79d7658d3b0013e83",
+        "fullEnvelopeBytes": 110714584,
+        "completeResultsEqual": true,
+        "wallSeconds": 30,
+        "simulationSeconds": 240,
+        "metrics": {
+          "setupMs": {
+            "baseline": [
+              3771.699999809265,
+              3747
+            ],
+            "candidate": [
+              3675.5999999046326,
+              3722.100000143051
+            ],
+            "baselineMedian": 3759.3499999046326,
+            "candidateMedian": 3698.850000023842,
+            "baselineRange": [
+              3747,
+              3771.699999809265
+            ],
+            "candidateRange": [
+              3675.5999999046326,
+              3722.100000143051
+            ],
+            "changePercent": -1.609320757107624
+          },
+          "startupMs": {
+            "baseline": [
+              38.10000014305115,
+              41.30000019073486
+            ],
+            "candidate": [
+              38.39999985694885,
+              38.799999952316284
+            ],
+            "baselineMedian": 39.700000166893005,
+            "candidateMedian": 38.59999990463257,
+            "baselineRange": [
+              38.10000014305115,
+              41.30000019073486
+            ],
+            "candidateRange": [
+              38.39999985694885,
+              38.799999952316284
+            ],
+            "changePercent": -2.770781505380848
+          },
+          "advanceMs": {
+            "baseline": [
+              623.7999999523163,
+              630.8999998569489
+            ],
+            "candidate": [
+              629.7000000476837,
+              629.9000000953674
+            ],
+            "baselineMedian": 627.3499999046326,
+            "candidateMedian": 629.8000000715256,
+            "baselineRange": [
+              623.7999999523163,
+              630.8999998569489
+            ],
+            "candidateRange": [
+              629.7000000476837,
+              629.9000000953674
+            ],
+            "changePercent": 0.39053162784179474
+          },
+          "serializationMs": {
+            "baseline": [
+              1834.9000000953674,
+              1852.6999998092651
+            ],
+            "candidate": [
+              1916.1999998092651,
+              1912.7999999523163
+            ],
+            "baselineMedian": 1843.7999999523163,
+            "candidateMedian": 1914.4999998807907,
+            "baselineRange": [
+              1834.9000000953674,
+              1852.6999998092651
+            ],
+            "candidateRange": [
+              1912.7999999523163,
+              1916.1999998092651
+            ],
+            "changePercent": 3.8344722817172494
+          }
+        }
+      }
+    },
+    "ordinary": {
+      "fullStateSha256": "932decef7a8a201cfd01ea46cdb96118360f4ce917523283930a892bae3720a5",
+      "quantumSha256": "f497973e3429e51dbb8a56185fe0233b2b5e3e581157cfdf0e37f12de63212d5",
+      "fullStateJsonLength": 205529767,
+      "entities": 110042,
+      "belts": 233300,
+      "completeResultsEqual": true,
+      "simulationCheckpoints": [
+        1,
+        10,
+        30
+      ],
+      "timingEligible": false,
+      "timingExclusion": "existing ordinary probe enables engine profiling"
+    },
+    "macroWorker": {
+      "stable": {
+        "sourcePayloadSha256": "3e6bbaefbbc9f67866c546f91200ff3099f5500472dcab793f3f7c8b7031639c",
+        "sourcePayloadBytes": 110812230,
+        "canonicalStateSha256": "8ee851896990e4afb5733b689b3d31ebe4bb7d54d3f5384f48150003d17c7488",
+        "payloadSha256": "67a2732acde1b59ace67c5bc0215e3ef36489e5c4e0d616cc0f2669fbcbe19e8",
+        "payloadBytes": 110696122,
+        "completeResultsEqual": true,
+        "callerStateUnchanged": true,
+        "runs": 3,
+        "actualSaveWorkerPayloadVerified": true,
+        "timingEligible": false
+      },
+      "replication": {
+        "sourcePayloadSha256": "44aba0f47342827a7291757f39f3673cb25588241a2c5eeac0f75745b5dd17ee",
+        "sourcePayloadBytes": 110851943,
+        "canonicalStateSha256": "d1e04d3cafb67654589b40daaa4761a9cb6c8d5e4e39c5624725124eaaef5260",
+        "payloadSha256": "c118f6b3c79f38869164c90bf212437b6d5c641e90f676e8af706f7eef16d047",
+        "payloadBytes": 110735835,
+        "completeResultsEqual": true,
+        "callerStateUnchanged": true,
+        "runs": 3,
+        "actualSaveWorkerPayloadVerified": true,
+        "timingEligible": false
+      }
+    },
+    "rawRecords": {
+      "large-stock-baseline-01": {
+        "rawSha256": "9eaad27c96a33a126494957f066749483fd75a58aef8959ce39fd398ef21c914",
+        "sourceLoadsVerified": 9
+      },
+      "large-stock-candidate-01": {
+        "rawSha256": "be29429ab04095bfbb36520c190fb6410de98a767bd67b59b80d4e4bf8b9c157",
+        "sourceLoadsVerified": 9
+      },
+      "large-stock-candidate-02": {
+        "rawSha256": "9f4609f37173be21a542ec19b9228300a96fcf2e6e3b7f2dea3bb04c04a9dca1",
+        "sourceLoadsVerified": 9
+      },
+      "large-stock-baseline-02": {
+        "rawSha256": "e429f642dd3cd712c341f72641739bba09d279d3495459238c8a35a629812138",
+        "sourceLoadsVerified": 9
+      },
+      "large-tray-baseline-01": {
+        "rawSha256": "fd39fd900a0972185a1aa78197089ffe3a2de63d23e46aea9f92aefbee7c8570",
+        "sourceLoadsVerified": 9
+      },
+      "large-tray-candidate-01": {
+        "rawSha256": "118b6265f727c6c3a3106537eea6b61e0e76885388b96f021ba2cfcd13d44cf8",
+        "sourceLoadsVerified": 9
+      },
+      "large-tray-candidate-02": {
+        "rawSha256": "994a07f22df7aa63a1a5758bda7daf8a7ebc1346fa578ddc45617dbecf592ea3",
+        "sourceLoadsVerified": 9
+      },
+      "large-tray-baseline-02": {
+        "rawSha256": "aeba0c7cd7ea0851829f5490c275601029f0f7ebe23c019a4c2288f63a34f9d1",
+        "sourceLoadsVerified": 9
+      },
+      "large-quantum-baseline-01": {
+        "rawSha256": "34997eb8e0e761b2b848c348c086d34ff21d6411732f53e67c9d44bdf24c59bd",
+        "sourceLoadsVerified": 9
+      },
+      "large-quantum-candidate-01": {
+        "rawSha256": "e5fd673a652a78e1dac390ad975c204b231f7a4355404e6eafdfb6ac94b51379",
+        "sourceLoadsVerified": 9
+      },
+      "large-quantum-candidate-02": {
+        "rawSha256": "584a7e8b3253fa8ae795913a505d0da55fd62281b43836b14d1bf798e5591a84",
+        "sourceLoadsVerified": 9
+      },
+      "large-quantum-baseline-02": {
+        "rawSha256": "dd074de2e6f7d21346ff86dc5e5eb6092606e57b54e02f92b79751c3cf6dd171",
+        "sourceLoadsVerified": 9
+      },
+      "ordinary-baseline-01": {
+        "rawSha256": "730dd72fb924f5d534abb256b2494d0d8222737f6120be1d08d6adf9f26a697c",
+        "sourceLoadsVerified": 3
+      },
+      "ordinary-candidate-01": {
+        "rawSha256": "0e4d243f6eaf386b2b8773b9e9206e5299a7860a01cbcdde6ffea52c686b8867",
+        "sourceLoadsVerified": 3
+      },
+      "macro-worker-stable-baseline-01": {
+        "rawSha256": "b28ea04cbc13ace18b0c1e6a2e488ff5e42eb3e8da616c508af0fd9f1474ce0d",
+        "sourceLoadsVerified": 26
+      },
+      "macro-worker-stable-candidate-01": {
+        "rawSha256": "f1b587623d0204249e3ef15eb3eb71c44b5af09edb459fcb04f358668ed70e0a",
+        "sourceLoadsVerified": 26
+      },
+      "macro-worker-stable-candidate-02": {
+        "rawSha256": "fe453dbc8ca0c1cd59bfbff069ef40feffe212d5dee037e4c5fbfc5c81e4d425",
+        "sourceLoadsVerified": 26
+      },
+      "macro-worker-replication-baseline-01": {
+        "rawSha256": "a8b42a5237931052ab750ae9368c984f64a8fd6dbc179a019cced0a2f31f961a",
+        "sourceLoadsVerified": 26
+      },
+      "macro-worker-replication-candidate-01": {
+        "rawSha256": "9a1b08772bec41f239f9c8673adafc3d9f58931927cfe089e2e5608c691d8c38",
+        "sourceLoadsVerified": 26
+      },
+      "macro-worker-replication-candidate-02": {
+        "rawSha256": "313d931aed2bcb6654173d28330155a7feefa662d6be1701fd0d19d7c40e265f",
+        "sourceLoadsVerified": 26
+      }
+    },
+    "productionPublished": false
+  },
+  "pageComparison": {
+    "browserVersion": "147.0.7727.138",
+    "order": [
+      "web-stable-baseline-01",
+      "web-stable-candidate-01",
+      "web-stable-candidate-02",
+      "web-stable-baseline-02",
+      "web-stable-baseline-03",
+      "web-stable-candidate-03",
+      "web-replication-baseline-01",
+      "web-replication-candidate-01",
+      "web-replication-candidate-02",
+      "web-replication-baseline-02",
+      "web-replication-baseline-03",
+      "web-replication-candidate-03"
+    ],
+    "checks": {
+      "web-stable-baseline-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "9e8947f5c357130523e361129fa3d654ba89bf6ae2c8a073a842f07ea968588c"
+      },
+      "web-stable-candidate-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "d8af88b8182e56bc372851cc94aeef2d108e42c34992bdd2498e4cfebee92142"
+      },
+      "web-stable-candidate-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "3740c21c83cdcd8f60e757f4c0ce46a43138047c72df3f8f39ae1886cd8678b4"
+      },
+      "web-stable-baseline-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 4,
+        "sha256": "2b222a82f0b38f1c2341a22b979b0e116189710085deee6c61f35c908e19fd9e"
+      },
+      "web-stable-baseline-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "1ca2ccf41bfb28633842d83e8350b9e208932b7893e88cd71659b24b148baea0"
+      },
+      "web-stable-candidate-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "409bf976f012514a178911ae48306f05b56e16860b984d159d3fe34b0bb6bc45"
+      },
+      "web-replication-baseline-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "06bc4844bf1e498d99f83de18bb1f8498325a6d61e92fe0a35a8de80c2cc8918"
+      },
+      "web-replication-candidate-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "3aaa0a966b362b985be81a712cae38fe6b505adc9d84b5bfbaefe1e329f8dc79"
+      },
+      "web-replication-candidate-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "a401f1fee842564fff8dc2c20b6d20f9041fb534ab35225c90c568c182b202bc"
+      },
+      "web-replication-baseline-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "700042acdbf82104ea2c509628660c606ddd2378bab0f20d9bebe01591b19b88"
+      },
+      "web-replication-baseline-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "58a9da17720af198450331f5911daa66ce4c7d7f98a36e27240d6555289a7526"
+      },
+      "web-replication-candidate-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "memorySampleCount": 5,
+        "sha256": "2088fa098324bdf6c715805c8509365738b0c2b0191674338344e738d3ccb5f7"
+      }
+    },
+    "metrics": {
+      "stable": {
+        "startMs": {
+          "baseline": [
+            30190,
+            31932,
+            31302
+          ],
+          "candidate": [
+            28267,
+            30198,
+            29690
+          ],
+          "baselineMedian": 31302,
+          "candidateMedian": 29690,
+          "baselineRange": [
+            30190,
+            31932
+          ],
+          "candidateRange": [
+            28267,
+            30198
+          ],
+          "changePercent": -5.149830681745571
+        },
+        "stopMs": {
+          "baseline": [
+            10031,
+            10616,
+            10650
+          ],
+          "candidate": [
+            10080,
+            10556,
+            10547
+          ],
+          "baselineMedian": 10616,
+          "candidateMedian": 10547,
+          "baselineRange": [
+            10031,
+            10650
+          ],
+          "candidateRange": [
+            10080,
+            10556
+          ],
+          "changePercent": -0.6499623210248662
+        },
+        "startMaxFrameMs": {
+          "baseline": [
+            184.89999985694885,
+            172.59999990463257,
+            182.40000009536743
+          ],
+          "candidate": [
+            187.89999985694885,
+            223.20000004768372,
+            187.10000014305115
+          ],
+          "baselineMedian": 182.40000009536743,
+          "candidateMedian": 187.89999985694885,
+          "baselineRange": [
+            172.59999990463257,
+            184.89999985694885
+          ],
+          "candidateRange": [
+            187.10000014305115,
+            223.20000004768372
+          ],
+          "changePercent": 3.015350744904466
+        },
+        "stopMaxFrameMs": {
+          "baseline": [
+            128.29999995231628,
+            164.10000014305115,
+            139
+          ],
+          "candidate": [
+            130.89999985694885,
+            141,
+            132
+          ],
+          "baselineMedian": 139,
+          "candidateMedian": 132,
+          "baselineRange": [
+            128.29999995231628,
+            164.10000014305115
+          ],
+          "candidateRange": [
+            130.89999985694885,
+            141
+          ],
+          "changePercent": -5.035971223021585
+        },
+        "startLongTaskMs": {
+          "baseline": [
+            235,
+            223,
+            231
+          ],
+          "candidate": [
+            181,
+            272,
+            178
+          ],
+          "baselineMedian": 231,
+          "candidateMedian": 181,
+          "baselineRange": [
+            223,
+            235
+          ],
+          "candidateRange": [
+            178,
+            272
+          ],
+          "changePercent": -21.645021645021643
+        },
+        "stopLongTaskMs": {
+          "baseline": [
+            88,
+            185,
+            97
+          ],
+          "candidate": [
+            140,
+            147,
+            143
+          ],
+          "baselineMedian": 97,
+          "candidateMedian": 143,
+          "baselineRange": [
+            88,
+            185
+          ],
+          "candidateRange": [
+            140,
+            147
+          ],
+          "changePercent": 47.42268041237114
+        }
+      },
+      "replication": {
+        "startMs": {
+          "baseline": [
+            9199,
+            9326,
+            9112
+          ],
+          "candidate": [
+            9180,
+            9075,
+            8957
+          ],
+          "baselineMedian": 9199,
+          "candidateMedian": 9075,
+          "baselineRange": [
+            9112,
+            9326
+          ],
+          "candidateRange": [
+            8957,
+            9180
+          ],
+          "changePercent": -1.3479726057180175
+        },
+        "stopMs": {
+          "baseline": [
+            10650,
+            10708,
+            11054
+          ],
+          "candidate": [
+            10641,
+            10644,
+            10553
+          ],
+          "baselineMedian": 10708,
+          "candidateMedian": 10641,
+          "baselineRange": [
+            10650,
+            11054
+          ],
+          "candidateRange": [
+            10553,
+            10644
+          ],
+          "changePercent": -0.6257004109077369
+        },
+        "startMaxFrameMs": {
+          "baseline": [
+            128.70000004768372,
+            127.10000014305115,
+            131.30000019073486
+          ],
+          "candidate": [
+            155.5,
+            121.20000004768372,
+            119.90000009536743
+          ],
+          "baselineMedian": 128.70000004768372,
+          "candidateMedian": 121.20000004768372,
+          "baselineRange": [
+            127.10000014305115,
+            131.30000019073486
+          ],
+          "candidateRange": [
+            119.90000009536743,
+            155.5
+          ],
+          "changePercent": -5.827505825346724
+        },
+        "stopMaxFrameMs": {
+          "baseline": [
+            129.39999985694885,
+            144.30000019073486,
+            141.60000014305115
+          ],
+          "candidate": [
+            130.5,
+            128.40000009536743,
+            98.59999990463257
+          ],
+          "baselineMedian": 141.60000014305115,
+          "candidateMedian": 128.40000009536743,
+          "baselineRange": [
+            129.39999985694885,
+            144.30000019073486
+          ],
+          "candidateRange": [
+            98.59999990463257,
+            130.5
+          ],
+          "changePercent": -9.322033922562456
+        },
+        "startLongTaskMs": {
+          "baseline": [
+            179,
+            179,
+            181
+          ],
+          "candidate": [
+            190,
+            170,
+            168
+          ],
+          "baselineMedian": 179,
+          "candidateMedian": 170,
+          "baselineRange": [
+            179,
+            181
+          ],
+          "candidateRange": [
+            168,
+            190
+          ],
+          "changePercent": -5.027932960893855
+        },
+        "stopLongTaskMs": {
+          "baseline": [
+            143,
+            160,
+            160
+          ],
+          "candidate": [
+            144,
+            142,
+            139
+          ],
+          "baselineMedian": 160,
+          "candidateMedian": 142,
+          "baselineRange": [
+            143,
+            160
+          ],
+          "candidateRange": [
+            139,
+            144
+          ],
+          "changePercent": -11.250000000000004
+        },
+        "rendererWarmWorkingSetBytes": {
+          "baseline": [
+            2780762112,
+            2767982592,
+            2766782464
+          ],
+          "candidate": [
+            2819039232,
+            2842681344,
+            2769661952
+          ],
+          "baselineMedian": 2767982592,
+          "candidateMedian": 2819039232,
+          "baselineRange": [
+            2766782464,
+            2780762112
+          ],
+          "candidateRange": [
+            2769661952,
+            2842681344
+          ],
+          "changePercent": 1.8445433922728904
+        },
+        "rendererStoppedWorkingSetBytes": {
+          "baseline": [
+            1907970048,
+            1357742080,
+            1363857408
+          ],
+          "candidate": [
+            1360916480,
+            1863528448,
+            1889882112
+          ],
+          "baselineMedian": 1363857408,
+          "candidateMedian": 1863528448,
+          "baselineRange": [
+            1357742080,
+            1907970048
+          ],
+          "candidateRange": [
+            1360916480,
+            1889882112
+          ],
+          "changePercent": 36.63660416910681
+        },
+        "rendererPeakBytes": {
+          "baseline": [
+            4035272704,
+            4022296576,
+            4029317120
+          ],
+          "candidate": [
+            4090736640,
+            4089061376,
+            3870220288
+          ],
+          "baselineMedian": 4029317120,
+          "candidateMedian": 4089061376,
+          "baselineRange": [
+            4022296576,
+            4035272704
+          ],
+          "candidateRange": [
+            3870220288,
+            4090736640
+          ],
+          "changePercent": 1.4827389907697386
+        },
+        "browserFivePointMaxWorkingSetBytes": {
+          "baseline": [
+            3611508736,
+            3621711872,
+            3480109056
+          ],
+          "candidate": [
+            3275120640,
+            3484962816,
+            3548631040
+          ],
+          "baselineMedian": 3611508736,
+          "candidateMedian": 3484962816,
+          "baselineRange": [
+            3480109056,
+            3621711872
+          ],
+          "candidateRange": [
+            3275120640,
+            3548631040
+          ],
+          "changePercent": -3.503962727227361
+        }
+      }
+    },
+    "memoryEligibility": {
+      "stable": {
+        "eligible": false,
+        "reason": "Original baseline-02 lacks stopped sample; all six timing results retained; no comparative memory claims for this mode."
+      },
+      "replication": {
+        "eligible": true,
+        "completeSamples": 6
+      }
+    },
+    "scope": "Twelve initial fresh Chrome processes; all timing samples retained, one missing conservative stopped-memory sample excluded from comparative memory metrics; diagnostic options disabled. Lifetime OS renderer peak and discrete five-point browser working set are separate metrics.",
+    "backupScope": "The fixture has no GameState backup preference keys. Production and server backup settings were not accessed or changed."
+  },
+  "conservativeMemorySupplement": {
+    "browserVersion": "147.0.7727.138",
+    "order": [
+      "web-stable-supplement-baseline-01",
+      "web-stable-supplement-candidate-01",
+      "web-stable-supplement-candidate-02",
+      "web-stable-supplement-baseline-02",
+      "web-stable-supplement-baseline-03",
+      "web-stable-supplement-candidate-03"
+    ],
+    "checks": {
+      "web-stable-supplement-baseline-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "ee66f920e1efa1fd0ffde461337de8580aaf861c1e18645efdb29abd4d6363a5"
+      },
+      "web-stable-supplement-candidate-01": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "f85fe6ae2cf28d4ea966765823fa371e8bf6a9b9b5f66f816029eaa911804d72"
+      },
+      "web-stable-supplement-candidate-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "28660c68ce3bdc415951a36c0c667f424e4278199389be4ae3006efee686d7c0"
+      },
+      "web-stable-supplement-baseline-02": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "79116a67650fef97948101e3d203e56ef8b66512740240f6bdded31a2c36af53"
+      },
+      "web-stable-supplement-baseline-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "fa0b79112171d75adb34ce92271adb69d7db9683fd7af60e45cf878fdac1e2a0"
+      },
+      "web-stable-supplement-candidate-03": {
+        "t0": 1,
+        "validCatalog": true,
+        "paused": true,
+        "autosaveIntervalSeconds": 0,
+        "geometryBuildsUnchanged": true,
+        "seededBackupSettingCount": 0,
+        "sha256": "617424cf9ba796a4fdca4deae9013e1ea094d2f05b015802d7e06f56ff5d67af"
+      }
+    },
+    "metrics": {
+      "stable": {
+        "startMs": {
+          "baseline": [
+            30830,
+            31828,
+            32591
+          ],
+          "candidate": [
+            29619,
+            29593,
+            29144
+          ],
+          "baselineMedian": 31828,
+          "candidateMedian": 29593,
+          "baselineRange": [
+            30830,
+            32591
+          ],
+          "candidateRange": [
+            29144,
+            29619
+          ],
+          "changePercent": -7.022118889028528
+        },
+        "stopMs": {
+          "baseline": [
+            10535,
+            10522,
+            10536
+          ],
+          "candidate": [
+            10496,
+            10515,
+            10519
+          ],
+          "baselineMedian": 10535,
+          "candidateMedian": 10515,
+          "baselineRange": [
+            10522,
+            10536
+          ],
+          "candidateRange": [
+            10496,
+            10519
+          ],
+          "changePercent": -0.18984337921215122
+        },
+        "startMaxFrameMs": {
+          "baseline": [
+            181.40000009536743,
+            181.60000014305115,
+            182.60000014305115
+          ],
+          "candidate": [
+            184,
+            211.39999985694885,
+            200.60000014305115
+          ],
+          "baselineMedian": 181.60000014305115,
+          "candidateMedian": 200.60000014305115,
+          "baselineRange": [
+            181.40000009536743,
+            182.60000014305115
+          ],
+          "candidateRange": [
+            184,
+            211.39999985694885
+          ],
+          "changePercent": 10.462555057837664
+        },
+        "stopMaxFrameMs": {
+          "baseline": [
+            135.59999990463257,
+            103.39999985694885,
+            138.29999995231628
+          ],
+          "candidate": [
+            107.20000004768372,
+            98.90000009536743,
+            132.59999990463257
+          ],
+          "baselineMedian": 135.59999990463257,
+          "candidateMedian": 107.20000004768372,
+          "baselineRange": [
+            103.39999985694885,
+            138.29999995231628
+          ],
+          "candidateRange": [
+            98.90000009536743,
+            132.59999990463257
+          ],
+          "changePercent": -20.943952711594815
+        },
+        "startLongTaskMs": {
+          "baseline": [
+            245,
+            231,
+            232
+          ],
+          "candidate": [
+            180,
+            208,
+            245
+          ],
+          "baselineMedian": 232,
+          "candidateMedian": 208,
+          "baselineRange": [
+            231,
+            245
+          ],
+          "candidateRange": [
+            180,
+            245
+          ],
+          "changePercent": -10.344827586206895
+        },
+        "stopLongTaskMs": {
+          "baseline": [
+            94,
+            144,
+            97
+          ],
+          "candidate": [
+            158,
+            144,
+            142
+          ],
+          "baselineMedian": 97,
+          "candidateMedian": 144,
+          "baselineRange": [
+            94,
+            144
+          ],
+          "candidateRange": [
+            142,
+            158
+          ],
+          "changePercent": 48.453608247422686
+        },
+        "rendererWarmWorkingSetBytes": {
+          "baseline": [
+            2791792640,
+            2514632704,
+            2756784128
+          ],
+          "candidate": [
+            2567294976,
+            2746470400,
+            2740789248
+          ],
+          "baselineMedian": 2756784128,
+          "candidateMedian": 2740789248,
+          "baselineRange": [
+            2514632704,
+            2791792640
+          ],
+          "candidateRange": [
+            2567294976,
+            2746470400
+          ],
+          "changePercent": -0.580200670685227
+        },
+        "rendererStoppedWorkingSetBytes": {
+          "baseline": [
+            2045837312,
+            1965056000,
+            2001358848
+          ],
+          "candidate": [
+            2552418304,
+            2554687488,
+            2549207040
+          ],
+          "baselineMedian": 2001358848,
+          "candidateMedian": 2552418304,
+          "baselineRange": [
+            1965056000,
+            2045837312
+          ],
+          "candidateRange": [
+            2549207040,
+            2554687488
+          ],
+          "changePercent": 27.534265359292533
+        },
+        "rendererPeakBytes": {
+          "baseline": [
+            4054765568,
+            4328394752,
+            4310867968
+          ],
+          "candidate": [
+            4305707008,
+            4192350208,
+            4155625472
+          ],
+          "baselineMedian": 4310867968,
+          "candidateMedian": 4192350208,
+          "baselineRange": [
+            4054765568,
+            4328394752
+          ],
+          "candidateRange": [
+            4155625472,
+            4305707008
+          ],
+          "changePercent": -2.749278356000906
+        },
+        "browserFivePointMaxWorkingSetBytes": {
+          "baseline": [
+            3239702528,
+            3185811456,
+            3202695168
+          ],
+          "candidate": [
+            3237847040,
+            3239575552,
+            3233341440
+          ],
+          "baselineMedian": 3202695168,
+          "candidateMedian": 3237847040,
+          "baselineRange": [
+            3185811456,
+            3239702528
+          ],
+          "candidateRange": [
+            3233341440,
+            3239575552
+          ],
+          "changePercent": 1.097571581311363
+        }
+      }
+    },
+    "scope": "Six fresh Chrome processes; conservative-mode supplement, serial ABBAAB; diagnostic options disabled. Lifetime OS renderer peak and discrete five-point browser working set are separate metrics.",
+    "backupScope": "The fixture has no GameState backup preference keys. Production and server backup settings were not accessed or changed."
+  },
+  "toolingEquivalence": {
+    "qualifiedRuntime": "5730f267759e7788916a8d762a1c28067ced0838",
+    "toolingCommit": "143bb6fb62f4f6407010b8d9a7210e8665c82892",
+    "changedFiles": [
+      "docs/TESTING_RELEASE.md",
+      "experiments/web-live-runtime/README.md",
+      "experiments/web-live-runtime/run.mjs"
+    ],
+    "guardedRuntimeSourceCount": 35,
+    "allGuardedRuntimeSourcesUnchanged": true,
+    "originalSamplingGap": {
+      "case": "web-stable-baseline-02",
+      "missingStage": "conservative stopped",
+      "originalUnderlyingErrorRecorded": false
+    },
+    "supplementOrder": "ABBAAB",
+    "originalSamplesPreserved": 12,
+    "productionAccessed": false
+  },
+  "frozenPagePreflightUnchanged": true,
+  "inputFixtureUnchanged": true,
+  "ownedPageServersClosed": true,
+  "publicBackupAndSaveFormatsUnchanged": true,
+  "backupScope": "Fixture has no backup preference keys. Production saves, server and backup configuration were not accessed or changed.",
+  "resourceScope": "User reopened full local testing. Four unit/E2E workers; 20 real-state/Worker and 18 frozen-page runs across two separate cohorts serial, with no build/regression overlap. Normal-priority driver/servers, 28 available logical processors observed.",
+  "interpretation": "CPU-only conservative calibration is 9.48% faster in its own ABBA cohort. Independent frozen-page cohorts show 5.15% and 7.02% shorter conservative entry medians, with no material total-stop gain. All original samples retained. Original conservative memory comparison is ineligible because one stopped sample is absent; the complete six-run supplement shows stopped renderer working-set median +27.53% (+551059456 bytes), and entry longest-frame median +10.46%. Initial replication stopped working set is bimodal and its median is also higher. Four separate heap/forced-GC diagnostic runs show post-GC main live heap approximately equal (-0.19%) and worker heap equal; those inspected/forced runs cannot establish natural memory recovery. Do not promote or publish this candidate until ordinary exit-memory behavior is resolved.",
+  "toolingCorrections": [
+    "Page-server UTC identity and cleanup records corrected before the series started.",
+    "Initial strict collector correctly rejected one absent stopped-memory sample in baseline conservative run 02. All 12 original timings and outputs retained; no original conservative memory comparison accepted. Tool-only sampler fix records errors, retries at most three times and rejects missing stages; independently predeclared six-run conservative ABBAAB supplement supplies complete memory qualification."
+  ],
+  "unverified": [
+    "natural stopped-memory regression cause and remediation",
+    "longer two-mode page sessions",
+    "all acceleration multipliers and long offline intervals",
+    "low-memory/physical devices/long-duration qualification",
+    "new server/ops/full Rust/native packaging matrix",
+    "any production rollout"
+  ],
+  "goalStatus": "active"
+}

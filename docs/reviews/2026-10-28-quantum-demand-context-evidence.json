@@ -1,0 +1,159 @@
+{
+  "scope": "Fixed synthetic Node fixtures; instrumented catalog enumeration counts, not wall-time or memory benchmark.",
+  "baselineCommit": "fcf7250d6b79f24c9b42f275c0fb8f044bffeceb",
+  "baselineEngineSha256": "3ff5703d0c371033e231b7bd502b302b002e04ee4ec5b06e674dd7be3a4ecd6e",
+  "candidateSourceCommitAtChecks": "fcf7250d6b79f24c9b42f275c0fb8f044bffeceb",
+  "candidateSourceDirtyAtChecks": true,
+  "candidateSourceHashes": {
+    "src/game/constructionQuantumRecovery.test.ts": "f7aa280212df099b0319e0620b90a16c313a0cc95fc1af3da297b63614c71cb1",
+    "src/game/constructionQuantumPlanningContext.test.ts": "87c526ffc68a7f32ab96e06c2b1ade7d43e609fc5779a20ebadf48798d7f3f37",
+    "src/game/engine.ts": "c94148c4048fc6c6c2170df8f12af26f78e083d61da8a68e1fd525bcc0cfea39"
+  },
+  "focusedTests": {
+    "context-5": 5,
+    "quantum-23": 23,
+    "offline-domain-14": 14,
+    "batching-20": 20
+  },
+  "focusedPassed": 62,
+  "focusedFailed": 0,
+  "applicationTypes": "passed",
+  "goldens": 15,
+  "scenarios": {
+    "scarce-centers": {
+      "simulationSeconds": [
+        5,
+        10,
+        30
+      ],
+      "stateJsonSha256": [
+        "583c1dab73af845e1073837c86960315a6c594f7bffc09c421c5c0002732eb13",
+        "9a988dbd0d1ab4f8d800fd24e2b8c7911bce9ba6e9376688850e1134924a52eb",
+        "ed5e33dd7d308bcc941a873c2863691ee415bff18d29ab5b08b0d850c0f01d0c"
+      ],
+      "allStateJsonHashesEqual": true,
+      "baselineCatalogReads": [
+        23,
+        52,
+        156
+      ],
+      "candidateCatalogReads": [
+        9,
+        18,
+        48
+      ],
+      "lastChangePercent": -69.23076923076923
+    },
+    "later-target": {
+      "simulationSeconds": [
+        5,
+        10,
+        30
+      ],
+      "stateJsonSha256": [
+        "da318e3a4e6930433ac098d6e683718a7c608adb68b717fee6ab51893dfee14b",
+        "dc48218967300fe7d753d8cb202f4862e6fd9f81afc99767eb2b8630906cd79e",
+        "ac6ead1c07859dae01f01ba7249abc8568462ffb0049ba88246ebe25e434187b"
+      ],
+      "allStateJsonHashesEqual": true,
+      "baselineCatalogReads": [
+        8,
+        21,
+        71
+      ],
+      "candidateCatalogReads": [
+        7,
+        14,
+        40
+      ],
+      "lastChangePercent": -43.66197183098591
+    },
+    "late-advanced": {
+      "simulationSeconds": [
+        5,
+        10,
+        30
+      ],
+      "stateJsonSha256": [
+        "037812437ddd07115483efcbe9dd15e338459faaf030090bc84f7013769deb07",
+        "e6875bf4f70b91a8b1a602fe9fec014538bd6010b647603e2a27eea0c0bb65f6",
+        "ed43d2c8aff2b6fb707394ec61712dc7da4299705524d42aa8842a1f2564505b"
+      ],
+      "allStateJsonHashesEqual": true,
+      "baselineCatalogReads": [
+        5,
+        12,
+        32
+      ],
+      "candidateCatalogReads": [
+        5,
+        12,
+        32
+      ],
+      "lastChangePercent": 0.0
+    },
+    "stopped": {
+      "simulationSeconds": [
+        5,
+        10,
+        30
+      ],
+      "stateJsonSha256": [
+        "192dc120cbc47de4f5e832435d95ec934a64d7d97efd7edd66055f78449b5159",
+        "8698aa1f18e4c35c2746120c6849293215e1ab0f454b80463c50d3764c3c1659",
+        "5eaf5cc9547d0a00c88aa965ce0b3e39c5d318dfa1a1ddfc9bde2d037a0eed02"
+      ],
+      "allStateJsonHashesEqual": true,
+      "baselineCatalogReads": [
+        0,
+        0,
+        0
+      ],
+      "candidateCatalogReads": [
+        0,
+        0,
+        0
+      ],
+      "lastChangePercent": 0
+    },
+    "legacy-suffix": {
+      "simulationSeconds": [
+        5,
+        10,
+        30
+      ],
+      "stateJsonSha256": [
+        "0e7ff6a7888818f80f034933c6e3cda057316bfa201aec58a26cf4f373a77752",
+        "4d9ac132a68620c305c473524f9648e0d42d25eb4923fa48367d6f3a31a008c4",
+        "d03f2609c4c67c99aa6c3082ef318a035a24ca6260fa2fc43ac1f7517f428400"
+      ],
+      "allStateJsonHashesEqual": true,
+      "baselineCatalogReads": [
+        6,
+        11,
+        31
+      ],
+      "candidateCatalogReads": [
+        6,
+        11,
+        31
+      ],
+      "lastChangePercent": 0.0
+    }
+  },
+  "resourcePolicy": {
+    "priority": "Idle",
+    "logicalProcessors": 1,
+    "workers": 1,
+    "minimumAvailableMemoryGiB": 8
+  },
+  "fullRegression": false,
+  "largeSave": false,
+  "browser": false,
+  "build": false,
+  "performanceQualified": false,
+  "published": false,
+  "baselineCaptureSha256": "66735e8c7f2ee946ac6ca8c9f482c2e0ec95cee24dda95fab1c002a82b7c0536",
+  "diagnosticSha256": "cba44eb748287368dacccecb85c5b77485c30a3378dcc2a21067fab3c778e48e",
+  "gateEvidenceSha256": "5896caf2d93499ae587d217be0ae2f92222e4e48bb69861134df6c6ea37bb18b"
+}

@@ -6719,6 +6719,7 @@ function constructionQuantumMissingForBatch(
 function constructionQuantumMissingMaterials(
   state: GameState,
   center: FactoryEntity,
+  getPlanningContext: () => ConstructionPlanningContext,
   prefetchSeconds = QUANTUM_SETTLEMENT_SECONDS,
   powerFactorOverride?: number,
   warehouse: Partial<Record<ItemId, number>> = constructionQuantumWarehouseInventory(state),
@@ -6743,7 +6744,7 @@ function constructionQuantumMissingMaterials(
     };
     if (definition && !constructionAutomationInputsAvailable(state, center.planetId, job, step, center.id)) {
       const available = constructionQuantumPlanningInventory([quantumBuffer, warehouse, job.inventory]);
-      const repaired = buildConstructionAutomationPlan(state, definition, center.planetId, available);
+      const repaired = buildConstructionAutomationPlan(state, definition, center.planetId, available, getPlanningContext());
       if (!repaired.blocker) remainingPlan = repaired;
     }
     const batchMissing = definition
@@ -6776,14 +6777,14 @@ function constructionQuantumMissingMaterials(
     return missingMaterials;
   }
   const virtualInventory = constructionQuantumPlanningInventory([quantumBuffer, warehouse]);
-  const selected = constructionQuantumTarget(state, center, virtualInventory);
+  const selected = constructionQuantumTarget(state, center, virtualInventory, getPlanningContext);
   if (!selected) return [];
   const { target } = selected;
   const seedMissingByItem = new Map<ItemId, number>();
   let completePlan: ConstructionAutomationPlan | undefined;
   for (let probe = 0; probe < 128; probe += 1) {
     const plan = probe === 0 ? selected.plan
-      : buildConstructionAutomationPlan(state, target.definition, center.planetId, virtualInventory);
+      : buildConstructionAutomationPlan(state, target.definition, center.planetId, virtualInventory, getPlanningContext());
     // Actual warehouse intermediates participate in recipe selection, but all
     // withdrawals still pass through shared bandwidth and per-center ownership.
     // Probing missing raw material only discovers future demand; it grants no stock.
@@ -6850,14 +6851,21 @@ function constructionQuantumPlanningInventory(
 }
 
 /** Probe a bounded target prefix without changing the scheduler or owning stock. */
-function constructionQuantumTarget(state: GameState, center: FactoryEntity, inventory: Partial<Record<ItemId, number>>) {
+function constructionQuantumTarget(
+  state: GameState,
+  center: FactoryEntity,
+  inventory: Partial<Record<ItemId, number>>,
+  getPlanningContext: () => ConstructionPlanningContext,
+) {
   const skipped = new Set<ConstructionAutomationTargetId>();
   let cursor = state.constructionAutomation.cursor;
   let first: { target: NonNullable<ReturnType<typeof constructionAutomationTarget>>; plan: ConstructionAutomationPlan } | null = null;
+  let planningContext: ConstructionPlanningContext | undefined;
   for (let probe = 0; probe < 64; probe += 1) {
-    const target = constructionAutomationTarget(state, cursor, skipped);
+    const target = constructionAutomationTarget(state, cursor, skipped, planningContext);
     if (!target) break;
-    const plan = buildConstructionAutomationPlan(state, target.definition, center.planetId, inventory);
+    planningContext ??= getPlanningContext();
+    const plan = buildConstructionAutomationPlan(state, target.definition, center.planetId, inventory, planningContext);
     const candidate = { target, plan };
     first ??= candidate;
     if (!plan.blocker) return candidate;
@@ -6906,10 +6914,16 @@ function collectConstructionQuantumDemands(
   // Otherwise successive bandwidth-limited boundaries can strand half of the
   // only available batch in each center even though total stock was sufficient.
   ordered.sort((left, right) => Number(hasReservation(right)) - Number(hasReservation(left)));
+  // Catalog and technology are stable during this synchronous prediction.
+  // Share only their context; each probe still reads its current virtual stock.
+  // Keep it lazy for stopped/unpowered centers and already-complete jobs.
+  let planningContext: ConstructionPlanningContext | undefined;
+  const getPlanningContext = () => planningContext ??= createConstructionPlanningContext(state);
   for (const center of ordered) {
     for (const missing of constructionQuantumMissingMaterials(
       state,
       center,
+      getPlanningContext,
       prefetchSeconds,
       powerFactorByCenterId?.get(center.id),
       warehouse,

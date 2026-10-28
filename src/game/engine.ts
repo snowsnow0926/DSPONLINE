@@ -1837,9 +1837,9 @@ export interface SimulationProfiler {
 }
 
 /**
- * Local benchmark hook for proving deterministic simulation contracts. The
- * production runtime never supplies this object; it deliberately stays out of
- * GameState and save data.
+ * Local regression hooks and bounded offline power audits. This deliberately
+ * stays out of GameState and save data. Ordinary hooks may change the state;
+ * configurations created by createSimulationPowerAudit only observe it.
  */
 export interface SimulationContractExperiment {
   /** Test oracle: preserve the former per-lab full-factory progress reset. */
@@ -1879,6 +1879,24 @@ export interface SimulationPowerAuditSample {
   artificialStarGenerationKw: number;
   storageDischargeKw: number;
   storageChargeKw: number;
+}
+
+const simulationPowerAudits = new WeakSet<SimulationContractExperiment>();
+
+/** The observer may update its own ledger, but must not mutate the simulation.
+ * Freeze the entire configuration so state-mutating hooks cannot be added to
+ * a registered audit. Unregistered regression hooks retain their live views. */
+export function createSimulationPowerAudit(
+  onPowerPlan: (sample: SimulationPowerAuditSample) => void,
+  isolateConstructionAutomation: boolean,
+): SimulationContractExperiment {
+  const audit: SimulationContractExperiment = Object.assign(Object.create(null), {
+    onPowerPlan,
+    isolateConstructionAutomation,
+  });
+  Object.freeze(audit);
+  simulationPowerAudits.add(audit);
+  return audit;
 }
 
 interface IndexedStationSlot {
@@ -7326,6 +7344,7 @@ export function runPlanetSimulationPhase(
   contractExperiment?: SimulationContractExperiment,
 ): SimulationPlanetPhaseResult {
   const phaseLookup = lookup ?? createSimulationLookupContext(state, profiler);
+  const readOnlyPowerAudit = Boolean(contractExperiment && simulationPowerAudits.has(contractExperiment));
   if (!lookup) ensureDynamicRouteLookup(state, phaseLookup);
   const baselineProduced = { ...state.totalProduced };
   let subsystemStartedAt = profiler ? profileNow() : 0;
@@ -7340,9 +7359,9 @@ export function runPlanetSimulationPhase(
     }
   }
   const power = combinePowerPlans(gridPlans);
-  // Grid inventory is reported before facilities run. A tap may mutate the
-  // state between grids, so keep its live readers and the independent oracle.
-  const gridInventory = batchPowerStorage && !contractExperiment?.onPowerPlan
+  // Ordinary taps may mutate state between grids. The bounded calibration
+  // observer only records samples, so it can share the original-order totals.
+  const gridInventory = batchPowerStorage && (!contractExperiment?.onPowerPlan || readOnlyPowerAudit)
     ? collectGridPowerInventory(planetId, phaseLookup.entitiesByPlanet.get(planetId) ?? [])
     : undefined;
   for (const gridPlan of gridPlans) {
@@ -7416,7 +7435,7 @@ export function runPlanetSimulationPhase(
   if (!contractExperiment?.isolateConstructionAutomation) {
     // Keep full-list selection for the independent oracle and mutable hooks.
     // Ordinary simulation already owns this ordered topology view.
-    const centers = batchConstructionAutomation && !contractExperiment
+    const centers = batchConstructionAutomation && (!contractExperiment || readOnlyPowerAudit)
       ? phaseLookup.constructionCentersByPlanet.get(planetId)
       : (phaseLookup.entitiesByPlanet.get(planetId) ?? []).filter((entity) =>
         entity.planetId === planetId && entity.buildingId === "construction_center");
@@ -7439,7 +7458,7 @@ export function runPlanetSimulationPhase(
   // A sparse global view is cheaper than checking every local machine. Cap
   // that tradeoff at the original list size, and retain the full-list oracle
   // and hook path so they can observe changes made inside the current phase.
-  const rayCandidates = batchPowerStorage && !contractExperiment &&
+  const rayCandidates = batchPowerStorage && (!contractExperiment || readOnlyPowerAudit) &&
     phaseLookup.rayReceivers.length < planetEntitiesForRays.length
     ? phaseLookup.rayReceivers : planetEntitiesForRays;
   runRayReceivers(state, seconds, reception, planetId, beltStepReservation.outputCredits, rayCandidates);

@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TECHNOLOGIES } from "./content";
 import { advanceSimulationSession, completeSimulationAdvanceSession, createInitialState,
-  createSimulationAdvanceSession, POWER_GRID_IDS } from "./engine";
+  createSimulationAdvanceSession, createSimulationPowerAudit, POWER_GRID_IDS,
+  type SimulationAdvanceSession, type SimulationPowerAuditSample } from "./engine";
 import type { FactoryEntity, GameState, PlanetId } from "./types";
 
 const scenarios = ["no-fuel", "thermal", "mixed", "depleted", "residual", "zero-stack", "machine-kind",
@@ -22,15 +23,16 @@ const fuels = [
   { buildingId: "artificial_star", fuelItemId: "antimatter_fuel_rod" },
 ] as const;
 
+const entity = (id: string, planetId: PlanetId): FactoryEntity => ({ id, planetId, kind: "machine",
+  buildingId: "arc_smelter", recipeId: "iron_ingot", position: { x: 0, y: 0 }, interactionLocked: false,
+  inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0, routingCursor: 0, machineCount: 0, minerCount: 0 });
+
 function fixture(name: Scenario): GameState {
   const state = createInitialState(20_261_031, false);
   state.research.completedTechIds = Object.keys(TECHNOLOGIES) as GameState["research"]["completedTechIds"];
   state.exploration.colonizedPlanetIds = ["home", "ashen"];
   state.constructionAutomation.enabled = false;
   const planets: readonly PlanetId[] = ["home", "ashen"];
-  const entity = (id: string, planetId: PlanetId): FactoryEntity => ({ id, planetId, kind: "machine",
-    buildingId: "arc_smelter", recipeId: "iron_ingot", position: { x: 0, y: 0 }, interactionLocked: false,
-    inputs: {}, outputs: {}, progress: 0, utilization: 0, productionRate: 0, routingCursor: 0, machineCount: 0, minerCount: 0 });
   state.entities = [];
   for (let index = 0; index < 20; index++) for (const planetId of planets) state.entities.push(entity(`background-${planetId}-${index}`, planetId));
   for (const planetId of planets) for (const [gridIndex, powerGridId] of POWER_GRID_IDS.entries()) {
@@ -138,5 +140,119 @@ describe("grid fuel reserve snapshots", () => {
       expect(value ?? 0).toBeGreaterThanOrEqual(0);
     }
     if (process.env.DSP_GRID_FUEL_DIAGNOSTICS === "1") console.info(JSON.stringify({ scenario: name, hashes, scans }));
+  });
+});
+
+function auditedFixture(name: Scenario): GameState {
+  const state = fixture(name);
+  const planets = new Set(state.entities.map((value) => value.planetId));
+  for (const planetId of planets) {
+    state.planetTrays[planetId] = { iron_ingot: 1_000_000, gear: 1_000_000, magnetic_coil: 1_000_000 };
+    for (const powerGridId of POWER_GRID_IDS) {
+      state.entities.push({ ...entity(`center-${planetId}-${powerGridId}`, planetId), powerGridId,
+        kind: "machine", buildingId: "construction_center", recipeId: undefined, machineCount: 2, inputs: {} });
+      state.entities.push({ ...entity(`receiver-${planetId}-${powerGridId}`, planetId), powerGridId,
+        kind: "machine", buildingId: "ray_receiver", recipeId: undefined, machineCount: 1, inputs: {} });
+    }
+  }
+  state.tray = state.planetTrays.home;
+  state.construction.wind_turbine = 0;
+  state.constructionAutomation = { enabled: true, targetStock: { wind_turbine: 20 }, jobs: {}, cursor: 0,
+    totalCrafted: 0, lastCraftedId: null, destroyedByproducts: {} };
+  return state;
+}
+
+function observedStep(source: GameState, mode: "audit" | "legacy" | "copied-mutation" | "legacy-mutation",
+  isolate: boolean, batchPowerStorage = true) {
+  const original = JSON.stringify(source);
+  const samples: SimulationPowerAuditSample[] = [];
+  const observe = (sample: SimulationPowerAuditSample) => { samples.push(structuredClone(sample)); };
+  let session: SimulationAdvanceSession;
+  const mutate = (sample: SimulationPowerAuditSample) => {
+    if (sample.gridId === "grid-a") {
+      const generator = session.state.entities.find((value) => value.id === `fuel-${sample.planetId}-grid-b-0`)!;
+      if (generator) generator.inputs.coal = (generator.inputs.coal ?? 0) + 3;
+      const battery = session.state.entities.find((value) => value.id === `battery-${sample.planetId}-grid-b`);
+      if (battery) battery.storedEnergyMj = (battery.storedEnergyMj ?? 0) + 0.375;
+    }
+    observe(sample);
+  };
+  const audit = createSimulationPowerAudit(observe, isolate);
+  const contractExperiment = mode === "audit" ? audit
+    : mode === "copied-mutation" ? { ...audit, onPowerPlan: mutate }
+    : { onPowerPlan: mode === "legacy-mutation" ? mutate : observe, isolateConstructionAutomation: isolate };
+  session = createSimulationAdvanceSession(source, 1, { contractExperiment, batchPowerStorage });
+  let visits = 0;
+  const restores: Array<() => void> = [];
+  for (const list of session.lookup!.entitiesByPlanet.values()) {
+    const originalIterator = list[Symbol.iterator];
+    const spy = vi.spyOn(list, Symbol.iterator);
+    spy.mockImplementation(() => {
+      const iterator = originalIterator.call(list);
+      const next = iterator.next.bind(iterator);
+      iterator.next = (...args) => {
+        const value = next(...args);
+        if (!value.done) visits++;
+        return value;
+      };
+      return iterator;
+    });
+    restores.push(() => spy.mockRestore());
+  }
+  try {
+    advanceSimulationSession(session, Number.MAX_SAFE_INTEGER);
+    return { state: completeSimulationAdvanceSession(session), samples, visits };
+  } finally {
+    restores.forEach((restore) => restore());
+    expect(JSON.stringify(source)).toBe(original);
+  }
+}
+
+describe("owned power audits", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_800_000_000_000); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  for (const isolate of [false, true]) {
+    it.each(["thermal", "floating", "machine-kind", "depleted", "storage-charge", "storage-discharge"] as const)(
+      `preserves all state and ordered audit samples for %s, isolated=${isolate}`, (name) => {
+        let state = auditedFixture(name);
+        for (let second = 0; second < 3; second++) {
+          const actual = observedStep(state, "audit", isolate);
+          const reference = observedStep(state, "legacy", isolate);
+          expect(JSON.stringify(actual.state)).toBe(JSON.stringify(reference.state));
+          expect(actual.samples).toStrictEqual(reference.samples);
+          expect(actual.visits).toBeLessThan(reference.visits);
+          state = actual.state;
+        }
+        if (isolate) expect(state.constructionAutomation.totalCrafted).toBe(0);
+        else if (name === "storage-charge") expect(state.constructionAutomation.totalCrafted).toBeGreaterThan(0);
+      });
+  }
+
+  it("does not carry audit eligibility into a copied configuration with a mutating tap", () => {
+    const state = auditedFixture("power-tap");
+    const actual = observedStep(state, "copied-mutation", false);
+    const reference = observedStep(state, "legacy-mutation", false);
+    expect(JSON.stringify(actual.state)).toBe(JSON.stringify(reference.state));
+    expect(actual.samples).toStrictEqual(reference.samples);
+    expect(actual.visits).toBe(reference.visits);
+  });
+
+  it("keeps the non-batched reference path for a registered audit", () => {
+    const state = auditedFixture("floating");
+    const actual = observedStep(state, "audit", true, false);
+    const reference = observedStep(state, "legacy", true, false);
+    expect(JSON.stringify(actual.state)).toBe(JSON.stringify(reference.state));
+    expect(actual.samples).toStrictEqual(reference.samples);
+    expect(actual.visits).toBe(reference.visits);
+  });
+
+  it("prevents adding or replacing hooks on an audit configuration", () => {
+    const audit = createSimulationPowerAudit(() => undefined, true);
+    expect(Object.isFrozen(audit)).toBe(true);
+    expect(Object.getPrototypeOf(audit)).toBeNull();
+    expect(Reflect.set(audit, "beforePlanetProduction", () => undefined)).toBe(false);
+    expect(Reflect.set(audit, "onPowerPlan", () => undefined)).toBe(false);
+    expect(audit.beforePlanetProduction).toBeUndefined();
   });
 });

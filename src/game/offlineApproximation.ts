@@ -18,6 +18,7 @@ import {
   advanceSimulationSession,
   completeSimulationAdvanceSession,
   createSimulationAdvanceSession,
+  createSimulationPowerAudit,
   getConstructionAutomationMacroCenters,
   resetConstructionAutomationMacroGuard,
   getEntityInputCapacity,
@@ -35,6 +36,7 @@ import {
   PORTABLE_FLEET_ITEM_IDS,
   type SimulationPowerAuditSample,
   type SimulationAdvanceSession,
+  type SimulationContractExperiment,
   type SimulationProfiler,
   type SimulationLookupContext,
   type ConstructionAutomationMacroRuntime,
@@ -801,7 +803,7 @@ function runExactCalibrationWindows(
   windowWallSeconds: number,
   windowCount: number,
   onWindowCompleted: (state: GameState, windowIndex: number) => void,
-  onPowerPlan?: (sample: SimulationPowerAuditSample) => void,
+  powerAudit?: ConstructionPowerAuditAccumulator,
   isolateConstructionAutomation = false,
 ): GameState {
   let state = source;
@@ -813,11 +815,9 @@ function runExactCalibrationWindows(
       mutateState: true,
       wallSeconds: windowWallSeconds,
       lookup,
-      ...(onPowerPlan || isolateConstructionAutomation ? {
-        contractExperiment: {
-          ...(onPowerPlan ? { onPowerPlan } : {}),
-          ...(isolateConstructionAutomation ? { isolateConstructionAutomation: true } : {}),
-        },
+      ...(powerAudit || isolateConstructionAutomation ? {
+        contractExperiment: powerAudit?.experiment(isolateConstructionAutomation) ??
+          { isolateConstructionAutomation: true },
       } : {}),
     });
     while (session.remainingSeconds > EPSILON || session.remainingWallSeconds > EPSILON) {
@@ -1977,6 +1977,7 @@ interface ConstructionPowerGridAudit {
 interface ConstructionPowerAuditAccumulator {
   grids: Map<string, ConstructionPowerGridAudit>;
   onPowerPlan: (sample: SimulationPowerAuditSample) => void;
+  experiment: (isolateConstructionAutomation: boolean) => SimulationContractExperiment;
 }
 
 function constructionPowerGridKey(planetId: PlanetId, gridId: PowerGridId): string {
@@ -1985,7 +1986,7 @@ function constructionPowerGridKey(planetId: PlanetId, gridId: PowerGridId): stri
 
 function createConstructionPowerAuditAccumulator(): ConstructionPowerAuditAccumulator {
   const grids = new Map<string, ConstructionPowerGridAudit>();
-  return {
+  const accumulator: ConstructionPowerAuditAccumulator = {
     grids,
     onPowerPlan: (sample) => {
       const finiteGenerationKw = sample.thermalGenerationKw + sample.fusionGenerationKw +
@@ -2045,7 +2046,9 @@ function createConstructionPowerAuditAccumulator(): ConstructionPowerAuditAccumu
       }
       grids.set(key, current);
     },
+    experiment: (isolateConstructionAutomation) => createSimulationPowerAudit(accumulator.onPowerPlan, isolateConstructionAutomation),
   };
+  return accumulator;
 }
 
 /**
@@ -4416,7 +4419,7 @@ export function createPureIdleAffineCalibration(
       flowSnapshots.push(capturePureIdleFlowSnapshot(candidate));
       researchSnapshots.push(captureResearchMacroCalibrationSnapshot(candidate));
     },
-    constructionPowerAudit.onPowerPlan,
+    constructionPowerAudit,
     true,
   );
   const sampledContract = createFastAffineContractFromSnapshots(
@@ -4542,7 +4545,7 @@ export function createPureIdleLightweightCalibration(
       researchSnapshots.push(captureResearchMacroCalibrationSnapshot(candidate));
       rocketSnapshots.push(capturePureIdleRocketCalibrationSnapshot(candidate));
     },
-    constructionPowerAudit.onPowerPlan,
+    constructionPowerAudit,
     options.isolateConstructionAutomation === true,
   );
   const sampled = topologyStable
@@ -4671,7 +4674,7 @@ export async function createPureIdleLightweightCalibrationAsync(
       rocketSnapshots.push(capturePureIdleRocketCalibrationSnapshot(candidate));
       asyncOptions.onProgress?.((index + 1) * FAST_OFFLINE_CALIBRATION_SLICE_SECONDS, FAST_OFFLINE_CALIBRATION_SECONDS);
     },
-    constructionPowerAudit.onPowerPlan,
+    constructionPowerAudit,
     options.isolateConstructionAutomation === true,
   );
   const sampled = topologyStable
@@ -7286,7 +7289,7 @@ async function runExactAsyncSession(
   options: OfflineApproximationAsyncOptions,
   wallSeconds: number,
   lookup?: SimulationAdvanceSession["lookup"],
-  onPowerPlan?: (sample: SimulationPowerAuditSample) => void,
+  powerAudit?: ConstructionPowerAuditAccumulator,
   isolateConstructionAutomation = false,
 ): Promise<{ state: GameState; lookup?: SimulationAdvanceSession["lookup"] }> {
   const entitiesBefore = source.entities;
@@ -7295,11 +7298,9 @@ async function runExactAsyncSession(
     mutateState: true,
     wallSeconds,
     lookup,
-    ...(onPowerPlan || isolateConstructionAutomation ? {
-      contractExperiment: {
-        ...(onPowerPlan ? { onPowerPlan } : {}),
-        ...(isolateConstructionAutomation ? { isolateConstructionAutomation: true } : {}),
-      },
+    ...(powerAudit || isolateConstructionAutomation ? {
+      contractExperiment: powerAudit?.experiment(isolateConstructionAutomation) ??
+        { isolateConstructionAutomation: true },
     } : {}),
   });
   const yieldAfterMs = Math.max(8, options.yieldAfterMs ?? 40);
@@ -7336,7 +7337,7 @@ async function runExactCalibrationWindowsAsync(
   windowCount: number,
   options: OfflineApproximationAsyncOptions,
   onWindowCompleted: (state: GameState, windowIndex: number) => void,
-  onPowerPlan?: (sample: SimulationPowerAuditSample) => void,
+  powerAudit?: ConstructionPowerAuditAccumulator,
   isolateConstructionAutomation = false,
 ): Promise<GameState> {
   let state = source;
@@ -7348,7 +7349,7 @@ async function runExactCalibrationWindowsAsync(
       options,
       windowWallSeconds,
       lookup,
-      onPowerPlan,
+      powerAudit,
       isolateConstructionAutomation,
     );
     state = result.state;

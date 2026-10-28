@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { CONSTRUCTION, TECHNOLOGIES } from "./content";
+import { CONSTRUCTION, ITEMS, RECIPES, TECHNOLOGIES } from "./content";
+import { createRecursiveCraftPlanner } from "./recursiveCrafting";
 import {
-  advancePersistentSimulationRuntime, createPersistentSimulationRuntime, createPlayerInitialState,
+  advancePersistentSimulationRuntime, advanceSimulationSession, completeSimulationAdvanceSession,
+  createPersistentSimulationRuntime, createPlayerInitialState, createSimulationAdvanceSession,
   getConstructionAutomationStatus, getConstructionQuantumDeliveryStatus, setConstructionAutomationTarget,
 } from "./engine";
 import { exportGame, migrateGame } from "./storage";
@@ -65,6 +67,72 @@ describe("construction quantum recovery in the persistent Web runtime", () => {
     expect(Object.values(end.quantumLogisticsNetwork.inventory).every(n => n === "0")).toBe(true);
     expect(Object.values(end.constructionAutomation.quantumMaterialBuffer ?? {})).toEqual([]);
   });
+
+  it("finishes only the actually buffered batch after the warehouse has emptied", () => {
+    const s = factory({});
+    s.constructionAutomation.targetStock.arc_smelter = 2;
+    s.constructionAutomation.quantumMaterialBuffer = {
+      entity_1: Object.fromEntries(Object.entries(direct).map(([itemId, amount]) => [itemId, Number(amount)])),
+    };
+    const end = run(s);
+    expect(end.construction.arc_smelter).toBe(1);
+    expect(end.constructionAutomation.totalCrafted).toBe(1);
+    expect(end.quantumLogisticsNetwork.inventory).toEqual({});
+    expect(Object.values(end.constructionAutomation.quantumMaterialBuffer ?? {})).toEqual([]);
+  });
+
+  it("rechecks warehouse availability when advanced ingredients arrive in a later phase", () => {
+    const s = factory({});
+    s.constructionAutomation.targetStock = { ray_receiver: 1 };
+    s.construction.ray_receiver = 0;
+    const ingredients = { steel: 20, high_purity_silicon: 20, processor: 5, circuit_board: 10, prism: 20 };
+    s.tray = { ...ingredients };
+    s.planetTrays.home = s.tray;
+    const runtime = createPersistentSimulationRuntime(s);
+    for (let second = 0; second < 30; second++) advancePersistentSimulationRuntime(runtime, 1, 1);
+    expect(runtime.state.construction.ray_receiver).toBe(1);
+    expect(runtime.state.tray.prism).toBe(0);
+
+    runtime.state.constructionAutomation.targetStock.ray_receiver = 2;
+    Object.assign(runtime.state.tray, ingredients);
+    runtime.state.quantumLogisticsNetwork.inventory.optical_grating_crystal = "10";
+    for (let second = 0; second < 30; second++) advancePersistentSimulationRuntime(runtime, 1, 1);
+    expect(runtime.state.construction.ray_receiver).toBe(2);
+    expect(runtime.state.quantumLogisticsNetwork.inventory.optical_grating_crystal).toBe("0");
+    expect(runtime.state.tray.prism).toBe(20);
+  });
+
+  it.each([0, 6, 7].flatMap(stock => [false, true].map(dense => ({ stock, dense }))))(
+    "matches full-inventory replanning with $stock advanced ingredients and dense warehouse=$dense", ({ stock, dense }) => {
+      const planner = createRecursiveCraftPlanner({ recipes: Object.values(RECIPES),
+        completedTechnologyIds: Object.keys(TECHNOLOGIES) as GameState["research"]["completedTechIds"],
+      });
+      const relevant = planner.inventoryDependencies(CONSTRUCTION.find(definition => definition.buildingId === "ray_receiver")!.costs);
+      const unrelated = Object.fromEntries(Object.keys(ITEMS).filter(itemId => !relevant.has(itemId as ItemId)).map(itemId => [itemId, "1000000"]));
+      if (dense) expect(Object.keys(unrelated).length).toBeGreaterThan(relevant.size);
+      const source = factory({ ...(dense ? unrelated : { solar_sail: "1000000", deuteron_fuel_rod: "1000000" }), optical_grating_crystal: String(stock) });
+      source.constructionAutomation.targetStock = { ray_receiver: 1 };
+      source.construction.ray_receiver = 0;
+      source.tray = { steel: 20, high_purity_silicon: 20, processor: 5, circuit_board: 10, prism: 20 };
+      source.planetTrays.home = source.tray;
+      source.constructionAutomation.quantumMaterialBuffer = { entity_1: { optical_grating_crystal: 3, prism: 2 } };
+      const original = JSON.stringify(source);
+      const settle = (batchConstructionAutomation: boolean) => {
+        const session = createSimulationAdvanceSession(source, 30, { batchConstructionAutomation });
+        advanceSimulationSession(session, Number.MAX_SAFE_INTEGER);
+        return completeSimulationAdvanceSession(session);
+      };
+      const reference = settle(false);
+      const actual = settle(true);
+      expect(actual).toStrictEqual(reference);
+      expect(JSON.stringify(actual)).toBe(JSON.stringify(reference));
+      expect(JSON.stringify(source)).toBe(original);
+      expect(actual.construction.ray_receiver).toBe(1);
+      expect(actual.tray.prism).toBe(stock === 7 ? 20 : 0);
+      expect(actual.quantumLogisticsNetwork.inventory.solar_sail).toBe("1000000");
+      expect(actual.quantumLogisticsNetwork.inventory.deuteron_fuel_rod).toBe("1000000");
+    },
+  );
 
   it("prefers an advanced recipe supplied by quantum stock over a locally funded basic recipe", () => {
     const s = factory({ optical_grating_crystal: "10" });

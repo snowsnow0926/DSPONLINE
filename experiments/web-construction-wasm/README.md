@@ -180,6 +180,10 @@ node experiments/web-construction-wasm/run.mjs --entry=terminal-decode-cooperati
 node experiments/web-construction-wasm/run.mjs --entry=terminal-decode --decode-mode=profile --migration-phases=1 --decoder-ref=d2eeba23 --prepared=D:/private/prepared.json --name=decode-phases
 ```
 
+分批解码也可用 `--decoder-ref=<commit>` 固定旧实现；编译器必须实际加载该提交的
+`storage.ts`，否则采样失败。`large-save --macro-profile=1` 的独立计时也包含递归规划的
+库存规范化、阻断选择及唯一库存分支；嵌套计时不能相加，插桩结果不混入正常性能对照。
+
 ## 已有终态一致性探针
 
 `--entry=terminal-parity` 使用同一只读大档对照旧结算顺序和保留的 Worker 终态结算顺序，

@@ -6742,7 +6742,7 @@ function constructionQuantumMissingMaterials(
       recipeDecisions: job.recipeDecisions,
     };
     if (definition && !constructionAutomationInputsAvailable(state, center.planetId, job, step, center.id)) {
-      const available = constructionQuantumPlanningInventory(quantumBuffer, warehouse, job.inventory);
+      const available = constructionQuantumPlanningInventory([quantumBuffer, warehouse, job.inventory]);
       const repaired = buildConstructionAutomationPlan(state, definition, center.planetId, available);
       if (!repaired.blocker) remainingPlan = repaired;
     }
@@ -6775,7 +6775,7 @@ function constructionQuantumMissingMaterials(
     }
     return missingMaterials;
   }
-  const virtualInventory = constructionQuantumPlanningInventory(quantumBuffer, warehouse);
+  const virtualInventory = constructionQuantumPlanningInventory([quantumBuffer, warehouse]);
   const selected = constructionQuantumTarget(state, center, virtualInventory);
   if (!selected) return [];
   const { target } = selected;
@@ -6828,8 +6828,21 @@ function constructionQuantumWarehouseInventory(state: GameState): Partial<Record
   return inventory;
 }
 
-function constructionQuantumPlanningInventory(...sources: Array<Partial<Record<ItemId, number>>>): Partial<Record<ItemId, number>> {
+function constructionQuantumPlanningInventory(
+  sources: readonly Partial<Record<ItemId, number>>[],
+  relevantItems?: ReadonlySet<ItemId>,
+): Partial<Record<ItemId, number>> {
   const result: Partial<Record<ItemId, number>> = {};
+  if (relevantItems) {
+    // The recursive planner's complete input closure includes higher-priority
+    // alternatives. Preserve source order and saturating addition per item,
+    // without merging unrelated warehouse entries into a temporary object.
+    for (const itemId of relevantItems) for (const source of sources) {
+      if (!Object.prototype.propertyIsEnumerable.call(source, itemId)) continue;
+      result[itemId] = constructionQuantumSafeAdd(result[itemId] ?? 0, source[itemId] ?? 0);
+    }
+    return result;
+  }
   for (const source of sources) for (const [itemId, amount] of Object.entries(source) as Array<[ItemId, number]>) {
     result[itemId] = constructionQuantumSafeAdd(result[itemId] ?? 0, amount);
   }
@@ -11430,6 +11443,22 @@ function createConstructionPlanningContext(state: GameState, projectInventory = 
   };
 }
 
+function constructionPlanningInventoryDependencies(
+  planning: ConstructionPlanningContext | undefined,
+  definition: ConstructionAutomationTargetDefinition,
+): ReadonlySet<ItemId> | undefined {
+  if (!planning?.projectInventory) return undefined;
+  let dependencies = planning.inventoryDependencies.get(definition.id);
+  if (!dependencies) {
+    const requirements = definition.kind === "fleet" && definition.recipeId
+      ? RECIPES[definition.recipeId].inputs
+      : definition.costs;
+    dependencies = planning.planner.inventoryDependencies(requirements);
+    planning.inventoryDependencies.set(definition.id, dependencies);
+  }
+  return dependencies;
+}
+
 function recursiveManufacturingInventory(state: GameState): Partial<Record<ItemId, number>> {
   return {
     ...state.tray,
@@ -11953,14 +11982,7 @@ function buildConstructionAutomationPlan(
 ): ConstructionAutomationPlan {
   const tray = trayForPlanet(state, planetId);
   const planning = context ?? createConstructionPlanningContext(state);
-  let dependencies = planning.inventoryDependencies.get(definition.id);
-  if (planning.projectInventory && !dependencies) {
-    const requirements = definition.kind === "fleet" && definition.recipeId
-      ? RECIPES[definition.recipeId].inputs
-      : definition.costs;
-    dependencies = planning.planner.inventoryDependencies(requirements);
-    planning.inventoryDependencies.set(definition.id, dependencies);
-  }
+  const dependencies = constructionPlanningInventoryDependencies(planning, definition);
   // Only input dependencies can affect route selection. Carrying every other
   // stocked item through each recursive branch multiplies allocation cost.
   // The complete tray remains authoritative and is changed only by execution.
@@ -13289,6 +13311,10 @@ function runConstructionCenters(
   const towerStacks = lookup?.quantumTowerStacks ?? state.entities
     .filter(isQuantumStation).reduce((sum, tower) => sum + Math.max(0, tower.machineCount), 0);
   const warehouseForPlanning = towerStacks > 0 ? constructionQuantumWarehouseInventory(state) : {};
+  // This private planning snapshot is read-only for the synchronous phase.
+  // Actual deliveries and consumption continue to read the live center buffer.
+  const warehousePlanningItemCount = Object.keys(warehouseForPlanning).length;
+  const hasWarehouseForPlanning = warehousePlanningItemCount > 0;
   const planCache = lookup?.constructionAutomationPlanCache ?? new Map<string, CachedConstructionAutomationPlan>();
   const planningContext = state.constructionAutomation.enabled
     ? createConstructionPlanningContext(state, batchConstructionAutomation)
@@ -13395,10 +13421,10 @@ function runConstructionCenters(
           if (profiler) profiler.constructionPlanBuilds += 1;
           resolved = {
             plan: buildConstructionAutomationPlan(state, target.definition, entity.planetId,
-              constructionQuantumPlanningInventory(quantumBuffer, warehouseForPlanning), planningContext),
+              constructionQuantumPlanningInventory([quantumBuffer, warehouseForPlanning]), planningContext),
             batch: null,
           };
-        } else if (Object.keys(quantumBuffer).length > 0 || Object.keys(warehouseForPlanning).length > 0) {
+        } else if (hasWarehouseForPlanning || Object.keys(quantumBuffer).length > 0) {
           // A direct quantum delivery changes the planner's virtual input set;
           // bypass the tray-only cache and spend one bounded plan build. The
           // resulting repeatable batch consumes the center buffer directly,
@@ -13418,8 +13444,10 @@ function runConstructionCenters(
             }
             budget.remainingPlanBuilds -= 1;
             if (profiler) profiler.constructionPlanBuilds += 1;
+            const dependencies = constructionPlanningInventoryDependencies(planningContext, target.definition);
             const directPlan = buildConstructionAutomationPlan(state, target.definition, entity.planetId,
-              constructionQuantumPlanningInventory(quantumBuffer, warehouseForPlanning), planningContext);
+              constructionQuantumPlanningInventory([quantumBuffer, warehouseForPlanning],
+                dependencies && dependencies.size < warehousePlanningItemCount ? dependencies : undefined), planningContext);
             const directBaseBatch = directPlan.blocker
               ? null
               : analyzeRepeatableConstructionAutomationPlan(state, target.definition, directPlan, planningContext);
@@ -13466,7 +13494,7 @@ function runConstructionCenters(
         // Leave a forecast as a demand, not a persisted job, until its first
         // step has actually arrived. Other ready targets can use this slice.
         const firstStep = plan.steps[0];
-        if (firstStep && Object.keys(warehouseForPlanning).length > 0 &&
+        if (firstStep && hasWarehouseForPlanning &&
           !constructionMaterialsAvailable({}, trayForPlanet(state, entity.planetId), quantumBuffer,
             constructionAutomationRequirements(firstStep))) {
           blockedTargets.add(target.definition.id);
@@ -13522,9 +13550,9 @@ function runConstructionCenters(
         // Do not immediately replace a warehouse-backed advanced recipe with
         // a local basic recipe while its real delivery is pending. No work or
         // material is credited by this read-only availability check.
-        if (Object.keys(warehouseForPlanning).length > 0 &&
+        if (hasWarehouseForPlanning &&
           constructionMaterialsAvailable(job.inventory, trayForPlanet(state, entity.planetId),
-          constructionQuantumPlanningInventory(constructionAutomationQuantumBuffer(state, entity.id), warehouseForPlanning),
+          constructionQuantumPlanningInventory([constructionAutomationQuantumBuffer(state, entity.id), warehouseForPlanning]),
           constructionAutomationRequirements(step))) break;
         if (repairConstructionAutomationJob(state, entity.planetId, job, step, entity.id, planningContext)) continue;
         break;

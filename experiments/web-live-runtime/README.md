@@ -1,5 +1,15 @@
 # Production-page large-save runtime probe
 
+`--worker-heaps=1 --post-stop-memory-tail=1` adds diagnostic snapshots
+10 and 30 seconds after the stop overlay closes, and rechecks the primary
+catalog and paused state at each point. `--post-stop-heap-gc=1` additionally
+requests GC only after the natural 10-second snapshot; do not combine it with
+global `--worker-heap-gc=1`. These modes require Worker heap sampling, are marked
+`profiled: true`, and must remain outside normal performance comparisons.
+See the [memory-tail investigation](../../docs/reviews/2026-10-28-web-stop-memory-tail.md).
+The current [low-impact development policy](../../docs/reviews/2026-10-28-web-resource-policy.md)
+defers this large-save/browser work while the user's other project needs the machine.
+
 `--idb-operations=1` optionally records main-page `IDBObjectStore.put` and
 `IDBRequest.result` getter durations, phase, database/store names and success.
 It records no keys or values and is disabled by default. These synchronous

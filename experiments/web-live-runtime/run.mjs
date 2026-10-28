@@ -20,6 +20,10 @@ const allProcessMemory = options["all-process-memory"] === "1";
 const workerHeapMemory = options["worker-heaps"] === "1";
 const workerHeapGc = options["worker-heap-gc"] === "1";
 if (workerHeapGc && !workerHeapMemory) throw new Error("--worker-heap-gc requires --worker-heaps; diagnostic only");
+const postStopMemoryTail = options["post-stop-memory-tail"] === "1";
+const postStopHeapGc = options["post-stop-heap-gc"] === "1";
+if (postStopMemoryTail && !workerHeapMemory) throw new Error("--post-stop-memory-tail requires --worker-heaps; diagnostic only");
+if (postStopHeapGc && (!postStopMemoryTail || workerHeapGc)) throw new Error("--post-stop-heap-gc requires a memory tail and no earlier forced GC");
 const mainHeapAllocations = options["main-heap-allocations"] === "1";
 if (mainHeapAllocations && !workerHeapMemory) throw new Error("--main-heap-allocations requires --worker-heaps; diagnostic only");
 const mainHeapSnapshot = options["main-heap-snapshot"] === "1";
@@ -88,14 +92,14 @@ async function capturePrivateMainHeap(session, stage) {
   if (!mainHeapSnapshotResult.complete) throw Error("Private main heap snapshot incomplete; retain metadata and exclude from analysis");
 }
 
-async function sampleHeaps(stage) {
+async function sampleHeaps(stage, collectGarbage = workerHeapGc) {
   const session = await browser.newBrowserCDPSession();
   const workers = [];
   let main;
   try {
     const pageSession = await context.newCDPSession(page);
     try {
-      if (workerHeapGc) await pageSession.send("HeapProfiler.collectGarbage");
+      if (collectGarbage) await pageSession.send("HeapProfiler.collectGarbage");
       main = await pageSession.send("Runtime.getHeapUsage");
       if (mainHeapSnapshot && stage === "normal simulation warmed") await capturePrivateMainHeap(pageSession, stage);
     } finally { await pageSession.detach(); }
@@ -131,13 +135,13 @@ async function sampleHeaps(stage) {
             session.on("Target.receivedMessageFromTarget", listener);
           });
           try {
-            const [result] = await Promise.all([bounded(response, workerHeapGc ? 10000 : 3000), session.send("Target.sendMessageToTarget", {
+            const [result] = await Promise.all([bounded(response, collectGarbage ? 10000 : 3000), session.send("Target.sendMessageToTarget", {
               sessionId, message: JSON.stringify({ id, method }),
             })]);
             return result;
           } finally { session.off("Target.receivedMessageFromTarget", listener); listener = undefined; }
         };
-        if (workerHeapGc) await requestWorker(2, "HeapProfiler.collectGarbage");
+        if (collectGarbage) await requestWorker(2, "HeapProfiler.collectGarbage");
         const usage = await requestWorker(1, "Runtime.getHeapUsage");
         workers.push({ script: new URL(target.url).pathname.split("/").at(-1), ...usage });
       } catch (error) {
@@ -147,7 +151,7 @@ async function sampleHeaps(stage) {
         if (sessionId) await session.send("Target.detachFromTarget", { sessionId }).catch(() => {});
       }
     }
-    heapSamples.push({ stage, ...(workerHeapGc ? { forcedGc: true } : {}), main, workers });
+    heapSamples.push({ stage, ...(collectGarbage ? { forcedGc: true } : {}), main, workers });
   } finally { await session.detach(); }
 }
 
@@ -591,6 +595,7 @@ try {
   await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click({ noWaitAfter: true });
   await overlay.waitFor({ state: "hidden" });
   const stopMs = Date.now() - stopStarted;
+  const stopCompletedAt = Date.now();
   if (backgroundPresentationExperiment) await page.evaluate(() => {
     const root = document.querySelector(".game-shell[data-factory-canvas-source]");
     if (!root || [...root.children].some((child) => child.hasAttribute("inert"))) {
@@ -611,7 +616,7 @@ try {
     return canvas ? { builds: canvas.getAttribute("data-hit-index-builds"), reuses: canvas.getAttribute("data-hit-index-reuses") } : null;
   });
   await sampleProcesses("replication stopped");
-  const durable = await page.evaluate(async () => {
+  const readDurable = () => page.evaluate(async () => {
     const request = (operation) => new Promise((resolve, reject) => {
       operation.onsuccess = () => resolve(operation.result);
       operation.onerror = () => reject(operation.error);
@@ -623,12 +628,29 @@ try {
     return { catalog: record ? JSON.parse(record.value) : null,
       paused: document.querySelector(".game-shell")?.getAttribute("data-simulation-paused") };
   });
+  const durable = await readDurable();
   if (durable.catalog?.integrity !== "valid" || durable.catalog.entityCount !== seeded.entities ||
     durable.catalog.beltCount !== seeded.belts || durable.paused !== "true") throw Error("Invalid terminal checkpoint or pause restoration");
   if (durable.catalog.settings) {
     if (durable.catalog.settings.autosaveIntervalSeconds !== 0) throw Error("Automatic saving preference changed");
     for (const [key, value] of Object.entries(seeded.backupSettings)) {
       if (JSON.stringify(durable.catalog.settings[key]) !== JSON.stringify(value)) throw Error(`Backup preference changed: ${key}`);
+    }
+  }
+  if (postStopMemoryTail) {
+    for (const seconds of [10, 30]) {
+      await page.waitForTimeout(Math.max(0, seconds * 1000 - (Date.now() - stopCompletedAt)));
+      await sampleProcesses(`replication stopped +${seconds}s`);
+      if (seconds === 10 && postStopHeapGc) {
+        await sampleHeaps("replication stopped diagnostic GC", true);
+        await sampleProcesses("replication stopped after diagnostic GC");
+      }
+      const after = await readDurable();
+      if (JSON.stringify(after) !== JSON.stringify(durable)) throw Error("Diagnostic memory tail changed the primary catalog or pause state");
+    }
+    const expectedHeaps = 5 + (startupWorkerHeaps ? 1 : 0) + 2 + (postStopHeapGc ? 2 : 0);
+    if (heapSamples.length !== expectedHeaps || heapSamples.some(row => !row.main || row.workers.some(worker => worker.error))) {
+      throw Error("Diagnostic memory-tail heap evidence incomplete");
     }
   }
   if (errors.length) throw Error(errors.join("\n"));
@@ -639,7 +661,7 @@ try {
     throw Error("Startup Worker diagnostic did not capture its exact boundary");
   }
   if (mainHeapSnapshot && !mainHeapSnapshotResult?.complete) throw Error("Private main heap snapshot did not complete");
-  if (runtimeRetention && retentionSamples.length !== (startupWorkerHeaps ? 6 : 5)) throw Error("Runtime retention diagnostic stages incomplete");
+  if (runtimeRetention && retentionSamples.length !== (startupWorkerHeaps ? 6 : 5) + (postStopMemoryTail ? 2 : 0)) throw Error("Runtime retention diagnostic stages incomplete");
   if (handoffProgress) {
     if (!trace.handoff?.length || trace.handoffCapped) throw Error("Handoff progress diagnostic missing or truncated");
     for (const phase of ["starting", "stopping"]) {
@@ -653,9 +675,9 @@ try {
     }
   }
   const evidence = { browser: await browser.version(), supply, observationSeconds: seconds,
-    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions || styleReadDiagnostics || handoffProgress,
+    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapMemory || postStopMemoryTail || postStopHeapGc || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions || styleReadDiagnostics || handoffProgress,
     profilePhase, timelinePhase, backgroundPresentationExperiment,
-    postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
+    postStopObservationSeconds: postStopSeconds, postStopMemoryTail, postStopHeapGc, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
     retainedNormalDebt: Boolean(options["retain-debt"]), styleReadDiagnostics, handoffProgress,
     seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };

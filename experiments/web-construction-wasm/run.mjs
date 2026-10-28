@@ -50,13 +50,13 @@ if (macroWorkerReference && entry !== "macro-finalization") throw new Error("Mac
 const decoderFiles = ["src/game/storage.ts", "src/game/saveTransferDecode.ts"];
 const decoderReference = options["decoder-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["decoder-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
-if (entry === "terminal-decode-cooperative" && decoderReference) throw new Error("Use terminal-decode/sync for a frozen decoder reference");
 const migrationPhases = entry === "terminal-decode" && options["migration-phases"] === "1";
 const macroProfile = entry === "large-save" && options["macro-profile"] === "1";
 const constructionPhaseCacheLimit = Number(options["construction-phases"] ?? 4);
 if (![4, 8, 16, 32].includes(constructionPhaseCacheLimit)) throw new Error("Invalid construction phase cache limit");
 if (constructionPhaseCacheLimit !== 4 && entry !== "large-save") throw new Error("Construction phase experiment requires large-save");
 const macroProfileFunctions = {
+  "src/game/recursiveCrafting.ts": ["normalizedInventory", "preferredBlocker", "planRequirementsFromWork", "firstLazyPlan", "directlySuppliedWork"],
   "src/game/engine.ts": ["advanceConstructionAutomationMacroInPlace", "runConstructionCenters", "resolveConstructionAutomationPlan", "tryRunConstructionAutomationBatch", "constructionAutomationPlanCacheKey", "constructionAutomationCachedPlanValid", "constructionAutomationInventorySnapshot", "buildConstructionAutomationPlan", "retainConstructionPlanPhases", "analyzeRepeatableConstructionAutomationPlan", "tryBuildStableConstructionAutomationCycle", "constructionAutomationBatchSignature"],
   "src/game/offlineApproximation.ts": ["advancePureIdleConstructionDomainInPlace", "captureConstructionRecipeStageSnapshot", "createConstructionRecipeReceipt", "createConstructionPowerAllocation"],
   "src/game/pureIdleReplication.ts": ["advancePureIdleReplicationInPlace"],
@@ -177,6 +177,9 @@ if (macroWorkerReference && !referenceSourceLoads.some((row) => row.file === "sr
 }
 if (measurementReference && !referenceSourceLoads.some(row => row.file === measurementFile && row.reference === measurementReference)) {
   throw new Error("Requested measurement source was not loaded by the compiler");
+}
+if (decoderReference && !referenceSourceLoads.some(row => row.file === "src/game/storage.ts" && row.reference === decoderReference)) {
+  throw new Error("Requested canonical decoder source was not loaded by the compiler");
 }
 if (runtimeReference && ["large-save", "macro-finalization"].includes(entry) &&
   !referenceSourceLoads.some(row => row.file === "src/game/recursiveCrafting.ts" && row.reference === runtimeReference)) {

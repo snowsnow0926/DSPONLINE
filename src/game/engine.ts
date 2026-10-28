@@ -1527,6 +1527,37 @@ export function getStationSlots(station: FactoryEntity): StationSlot[] {
   return slots.slice(0, STATION_SLOT_COUNT);
 }
 
+function stationSlotFromSnapshot(station: FactoryEntity, itemId: ItemId, remoteMode?: StationLogisticsMode): StationSlot | undefined {
+  return getStationSlots(station).find((slot) => slot.itemId === itemId &&
+    (remoteMode === undefined || slot.remoteMode === remoteMode));
+}
+
+/** Read one fresh normalized slot without allocating all five snapshots.
+ * Public/editable snapshots and legacy or unusual record shapes retain the
+ * full reader. Slot edits are read on every call; no array identity is cached. */
+function readStationSlot(station: FactoryEntity, itemId: ItemId, remoteMode?: StationLogisticsMode): StationSlot | undefined {
+  const slots = station.stationSlots;
+  if (station.buildingId === "orbital_collector" || typeof itemId !== "string" ||
+    !Array.isArray(slots) || slots.length !== STATION_SLOT_COUNT) {
+    return stationSlotFromSnapshot(station, itemId, remoteMode);
+  }
+  let found: StationSlot | undefined;
+  for (let index = 0; index < STATION_SLOT_COUNT; index++) {
+    const slot = slots[index];
+    if (!slot || typeof slot !== "object" ||
+      (slot.itemId !== undefined && typeof slot.itemId !== "string") ||
+      typeof slot.minStock !== "number" || typeof slot.maxStock !== "number" || typeof slot.warperBudget !== "number") {
+      return stationSlotFromSnapshot(station, itemId, remoteMode);
+    }
+    if (found || slot.itemId !== itemId) continue;
+    const normalized = normalizeStationSlot(slot);
+    if (normalized.itemId === itemId && (remoteMode === undefined || normalized.remoteMode === remoteMode)) {
+      found = normalized;
+    }
+  }
+  return found;
+}
+
 function ensureStationSlots(station: FactoryEntity): StationSlot[] {
   station.stationSlots = getStationSlots(station);
   const primary = station.stationSlots.find((slot) => slot.itemId);
@@ -1645,7 +1676,7 @@ export function getStationSlotCapacity(state: GameState, station: FactoryEntity,
 
 export function getEntityItemInputCapacity(state: GameState, entity: FactoryEntity, itemId: ItemId): number {
   if (entity.kind === "station" && entity.buildingId !== "orbital_collector") {
-    const slot = getStationSlots(entity).find((candidate) => candidate.itemId === itemId);
+    const slot = readStationSlot(entity, itemId);
     if (slot) return getStationSlotCapacity(state, entity, slot);
   }
   const rated = getEntityInputCapacity(state, entity);
@@ -1683,7 +1714,7 @@ function hasQuantumBoundaryLogistics(station: FactoryEntity): boolean {
 
 function quantumSupplySlot(station: FactoryEntity, itemId: ItemId): StationSlot | undefined {
   if (!isQuantumStation(station)) return undefined;
-  return getStationSlots(station).find((slot) => slot.itemId === itemId && slot.remoteMode === "supply");
+  return readStationSlot(station, itemId, "supply");
 }
 
 interface QuantumFreeCapacityValue {

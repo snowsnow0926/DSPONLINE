@@ -1984,6 +1984,7 @@ interface IndexedBeltRoute {
   capacity: number;
   compatible: boolean;
   targetCapacityIndex?: number;
+  reservationTargetCapacityIndex?: number;
   sourceGroupIndex?: number;
   /** Stable UTF-8 byte order inside one source/item group for deterministic batching. */
   stableSourceOrder?: number;
@@ -2032,6 +2033,10 @@ export interface SimulationBeltRuntimeIndex {
   activeQueueEnabled: boolean;
   initiallyDormantRouteCount: number;
   targetCapacityGroupCount: number;
+  reservationTargetCapacityGroupCount: number;
+  /** Reservation has different port/item ownership from belt transfer. */
+  reservationEpoch: number;
+  reservationTargetCapacityLedgers: RuntimeTargetCapacityLedger[];
   /** Per-topology scratch reused by every exact belt phase. */
   settlementEpoch: number;
   sourceAvailabilityLedgers: RuntimeSourceAvailabilityLedger[];
@@ -2287,6 +2292,9 @@ function buildSimulationLookupContext(
       activeQueueEnabled: false,
       initiallyDormantRouteCount: 0,
       targetCapacityGroupCount: 0,
+      reservationTargetCapacityGroupCount: 0,
+      reservationEpoch: 0,
+      reservationTargetCapacityLedgers: [],
       settlementEpoch: 0,
       sourceAvailabilityLedgers: [],
       targetCapacityLedgers: [],
@@ -2441,6 +2449,7 @@ function buildSimulationLookupContext(
     };
   });
   const targetCapacityIndexByKey = new Map<string, number>();
+  const reservationTargetCapacityIndexByKey = new Map<string, number>();
   for (const route of context.beltRoutes) {
     if (!route.target) continue;
     const key = beltTargetCapacityKey(route.target, route.belt.itemId, route.belt.targetPortIndex);
@@ -2450,8 +2459,23 @@ function buildSimulationLookupContext(
       targetCapacityIndexByKey.set(key, index);
     }
     route.targetCapacityIndex = index;
+    // Preserve reservation's original ownership: ordinary targets share
+    // across ports, black-hole ports share across items, and hubs share the
+    // planet's item tray. The transfer index above cannot represent this.
+    const reservationKey = route.target.buildingId === "material_delivery_hub"
+      ? `tray:${route.target.planetId}:${route.belt.itemId}`
+      : route.target.buildingId === "micro_black_hole_connector"
+        ? `black-hole:${route.target.id}:${route.belt.targetPortIndex ?? -1}`
+        : `${route.target.id}:${route.belt.itemId}`;
+    let reservationIndex = reservationTargetCapacityIndexByKey.get(reservationKey);
+    if (reservationIndex === undefined) {
+      reservationIndex = reservationTargetCapacityIndexByKey.size;
+      reservationTargetCapacityIndexByKey.set(reservationKey, reservationIndex);
+    }
+    route.reservationTargetCapacityIndex = reservationIndex;
   }
   context.beltRuntime.targetCapacityGroupCount = targetCapacityIndexByKey.size;
+  context.beltRuntime.reservationTargetCapacityGroupCount = reservationTargetCapacityIndexByKey.size;
   for (const route of context.beltRoutes) {
     const key = `${route.belt.source}:${route.belt.itemId}`;
     let group = context.beltRuntime.routeGroupByKey.get(key);
@@ -5482,7 +5506,11 @@ function reserveBeltStepOutputCapacity(
   const creditLimit = normalizeBuildingBufferLimit(state.settings.beltBufferLimit);
   const allowanceByBelt = new Map<string, number>();
   const outputCredits = new Map<string, number>();
-  const remainingTargetCapacity = new Map<string, number>();
+  const reservationRuntime = forceFlatRouteOracle ? undefined : lookup?.beltRuntime;
+  const reservationEpoch = reservationRuntime ? ++reservationRuntime.reservationEpoch : 0;
+  // Lazily allocate the original Map only for the unindexed/oracle path.
+  // The indexed ledger is bounded by topology and refreshed for every phase.
+  let remainingTargetCapacity: Map<string, number> | undefined;
   const routes = forceFlatRouteOracle
     ? lookup?.beltRoutes ?? createIndexedBeltRoutes(state)
     : lookup?.beltRuntime.activeQueueEnabled
@@ -5513,18 +5541,33 @@ function reserveBeltStepOutputCapacity(
     if (!route.compatible || !source || !target) continue;
     const allowance = Math.max(0, Math.floor(belt.progress + EPSILON));
     if (allowance < 1) continue;
-    const targetKey = target.buildingId === "material_delivery_hub"
+    const index = reservationRuntime ? route.reservationTargetCapacityIndex : undefined;
+    const cached = index === undefined ? undefined : reservationRuntime!.reservationTargetCapacityLedgers[index];
+    const targetKey = index !== undefined ? undefined : target.buildingId === "material_delivery_hub"
       ? `tray:${target.planetId}:${belt.itemId}`
       : target.buildingId === "micro_black_hole_connector"
         ? `black-hole:${target.id}:${belt.targetPortIndex ?? -1}`
         : `${target.id}:${belt.itemId}`;
-    const targetFree = remainingTargetCapacity.has(targetKey)
-      ? remainingTargetCapacity.get(targetKey)!
-      : targetFreeCapacity(state, target, belt.itemId, belt.targetPortIndex, lookup);
+    const targetFree = cached?.epoch === reservationEpoch
+      ? cached.free
+      : targetKey !== undefined && remainingTargetCapacity?.has(targetKey)
+        ? remainingTargetCapacity.get(targetKey)!
+        : targetFreeCapacity(state, target, belt.itemId, belt.targetPortIndex, lookup);
     const reserved = Math.min(allowance, Math.max(0, Math.floor(targetFree)));
     if (reserved < 1) continue;
     allowanceByBelt.set(belt.id, reserved);
-    remainingTargetCapacity.set(targetKey, Math.max(0, targetFree - reserved));
+    // The legacy path does not cache an initial zero/invalid allowance. Only
+    // mark a group visited after a successful reservation, including when it
+    // consumes the final unit and leaves a cached zero for later routes.
+    const free = Math.max(0, targetFree - reserved);
+    if (index !== undefined) {
+      const ledger = cached ?? { epoch: reservationEpoch, free };
+      ledger.epoch = reservationEpoch;
+      ledger.free = free;
+      reservationRuntime!.reservationTargetCapacityLedgers[index] = ledger;
+    } else {
+      (remainingTargetCapacity ??= new Map()).set(targetKey!, free);
+    }
     const sourceKey = outputCapacityCreditKey(source.id, belt.itemId);
     outputCredits.set(sourceKey, Math.min(
       creditLimit,

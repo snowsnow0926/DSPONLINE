@@ -1,29 +1,29 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-10-27-v1.3.3";
+export const CURRENT_RELEASE_ID = "2026-10-28-v1.3.4";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const en = locale === "en";
   return {
     id: CURRENT_RELEASE_ID,
-    date: en ? "October 27, 2026" : "2026年10月27日",
-    version: "1.3.3",
-    title: en ? "Smoother Time Warp Transitions and Large Saves" : "时间扭曲切换与大档流畅度优化",
+    date: en ? "October 28, 2026" : "2026年10月28日",
+    version: "1.3.4",
+    title: en ? "Large-Factory Performance and Bigger Blueprints" : "大档性能与蓝图扩容",
     summary: en
-      ? "Reduce pauses when entering and leaving time warp, saving large factories and returning to the canvas. Existing saves, material rules and backup preferences are preserved. Very large factories can still take time and use substantial memory."
-      : "减少进入和退出时间扭曲、保存大工厂及恢复画布时的停顿。现有存档、材料规则和备份偏好保持；超大工厂仍可能需要等待并占用较多内存。",
+      ? "Reduce large-factory computation, save checks and canvas pauses, and expand Web blueprint exchange capacity eightfold. Existing factories, materials and backup preferences are preserved."
+      : "进一步减少终局大档的重复计算、存档检查和画面停顿，网页版蓝图交换容量扩大到原来的八倍；现有工厂、材料与备份偏好保持。",
     items: [
-      { id: "v133-time-warp-start", title: en ? "Smoother time-warp startup" : "时间扭曲启动更顺畅",
-        description: en ? "Reduce repeated power preparation and transfer large startup checkpoints in smaller batches. Repeated clicks and page restoration cannot start the same run twice." : "减少供电准备中的重复工作，大档启动检查点分批交接；重复点击和页面恢复不会重复启动同一次挂机。" },
-      { id: "v133-idle-stop", title: en ? "Fewer pauses while stopping and saving" : "停止结算与保存更少卡顿",
-        description: en ? "Reduce repeated checkpoint work, split large result processing and reuse background save work. The complete saved result is still verified before success is reported." : "减少重复检查点，分段处理大档结果并复用后台保存工作；仍会完整核对保存结果，再报告成功。" },
-      { id: "v133-recovery", title: en ? "Safer cancellation and recovery" : "取消、重试与恢复更可靠",
-        description: en ? "Prevent late results from reviving a cancelled run, avoid repeating a completed save on retry, and restore normal simulation correctly before a new run." : "防止迟到结果重新激活已取消的挂机，重试不重复写入已完成的存档；重新开始前正确恢复普通模拟。" },
-      { id: "v133-memory-canvas", title: en ? "Less retained memory and repeated canvas work" : "减少保存后的内存滞留与画布重复计算",
-        description: en ? "Retire idle large-save background workers and reuse unchanged belt geometry and construction display queries when returning to the factory." : "大档保存后台空闲后及时释放，回到工厂时复用未变化的连线与建筑制造显示结果。" },
-      { id: "v133-compatibility", title: en ? "Existing factories and materials preserved" : "工厂、材料和备份设置保持",
-        description: en ? "GameState v47 remains compatible. Existing factories, inventories, recipe choices and backup preferences are preserved; extreme endgame memory use and long waits still need further work." : "旧存档可直接继续，工厂、库存、配方选择和备份偏好保持不变；极端终局场景的内存峰值和长等待仍需继续优化。" },
+      { id: "v134-transitions", title: en ? "Faster time-warp transitions" : "大档进入、退出更流畅",
+        description: en ? "Split large startup copies, reduce unnecessary focus and canvas work, release old display state, and speed up complete save checks. Checkpoints, independent readback and recovery stay intact." : "大档启动复制分段处理，减少无效焦点与画布计算，释放旧显示状态并加快完整存档检查；检查点、独立读回和失败恢复全部保留。" },
+      { id: "v134-simulation", title: en ? "Less repeated factory computation" : "减少普通模拟与巨构制造的重复计算",
+        description: en ? "Reuse stable belt inputs and repeated construction batches while continuing to check live stock, advanced recipes, quantum supply and material conservation." : "复用传送带阶段内不变的输入和重复制造批次，继续检查实时库存、高级配方、量子供料和材料守恒。" },
+      { id: "v134-blueprint-capacity", title: en ? "Eightfold Web blueprint capacity" : "网页版蓝图交换容量扩大八倍",
+        description: en ? "Exchange up to 4,096 building nodes, 8,192 internal belts, 1,024 external ports and 8 MiB per file. Existing larger local blueprints are preserved. Windows performance-edition native limits are separate." : "单张交换蓝图支持 4,096 个建筑节点、8,192 条内部线路、1,024 个外部端口和 8 MiB 文件；已有更大本地蓝图保留。Windows 性能版原生接口使用独立限额。" },
+      { id: "v134-blueprint-workflow", title: en ? "Faster large-blueprint copying and construction" : "大蓝图复制与施工收尾更快",
+        description: en ? "Avoid repeatedly searching the entire factory while capturing large selections and completing queued construction. Exact material spending, installed fleet, ports and immutable queue versions are preserved." : "大选区复制和排队施工收尾避免反复搜索整个工厂，保持精确扣料、已装载具、端口和不可变施工版本。" },
+      { id: "v134-compatibility", title: en ? "Existing saves and backup preferences preserved" : "存档、材料与备份设置保持",
+        description: en ? "GameState v47 remains compatible. Save and cloud formats, inventories, recipe choices and backup preferences are unchanged. Extreme memory use, conservation mode and long-idle performance still need further verification." : "旧存档可直接继续；存档与云端格式、库存、配方选择和备份偏好不变。极端内存、守恒模式和长时挂机性能仍需继续验证。" },
     ],
   } as const;
 }

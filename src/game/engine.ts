@@ -1723,7 +1723,9 @@ interface QuantumFreeCapacityValue {
   free: number;
 }
 
-const quantumFreeCapacityValues = new WeakMap<SimulationLookupContext, Map<ItemId, QuantumFreeCapacityValue>>();
+// The lookup owns this bounded cache. Rebuilding a lookup in place replaces
+// the cache together with its indexes instead of retaining an older generation.
+const quantumFreeCapacityValues = Symbol("quantumFreeCapacityValues");
 const QUANTUM_FREE_CAPACITY_MEMO_LIMIT = 512;
 const MAX_SAFE_QUANTUM_FREE = BigInt(Number.MAX_SAFE_INTEGER);
 
@@ -1744,7 +1746,7 @@ function quantumInventoryFree(state: GameState, itemId: ItemId, lookup?: Simulat
   const memoizable = (inventory === undefined || inventory.length <= QUANTUM_MAX_INTEGER_DIGITS) &&
     (configuredCapacity === undefined ||
       typeof configuredCapacity === "string" && configuredCapacity.length <= QUANTUM_MAX_INTEGER_DIGITS);
-  let values = memoizable ? quantumFreeCapacityValues.get(lookup) : undefined;
+  const values = memoizable ? lookup[quantumFreeCapacityValues] : undefined;
   const cached = values?.get(itemId);
   if (cached && cached.inventory === inventory && cached.configuredCapacity === configuredCapacity) return cached.free;
   const current = BigInt(normalizeQuantumInteger(inventory));
@@ -1754,8 +1756,7 @@ function quantumInventoryFree(state: GameState, itemId: ItemId, lookup?: Simulat
     ? QUANTUM_ITEM_CAPACITY_DEFAULT : normalizeQuantumItemCapacity(configuredCapacity));
   const free = capacity > current ? capacity - current : 0n;
   const result = Number(free > MAX_SAFE_QUANTUM_FREE ? MAX_SAFE_QUANTUM_FREE : free);
-  if (memoizable) {
-    if (!values) quantumFreeCapacityValues.set(lookup, values = new Map());
+  if (values) {
     if (!values.has(itemId) && values.size >= QUANTUM_FREE_CAPACITY_MEMO_LIMIT) values.clear();
     values.set(itemId, { inventory, configuredCapacity, free: result });
   }
@@ -2086,6 +2087,8 @@ interface BlockedStationDispatchCache {
 }
 
 export interface SimulationLookupContext {
+  /** Private, generation-owned scalar memo; never part of GameState or a save. */
+  [quantumFreeCapacityValues]?: Map<ItemId, QuantumFreeCapacityValue>;
   entityById: Map<string, FactoryEntity>;
   entitiesByPlanet: Map<PlanetId, FactoryEntity[]>;
   /** Planet/grid partitions avoid scanning every planet entity for each grid. */
@@ -2244,6 +2247,7 @@ function buildSimulationLookupContext(
     }
   }
   const context: SimulationLookupContext = {
+    [quantumFreeCapacityValues]: new Map(),
     entityById: powerController ? new Map([[powerController.id, powerController]]) :
       new Map(state.entities.map((entity) => [entity.id, entity])),
     entitiesByPlanet: new Map(),

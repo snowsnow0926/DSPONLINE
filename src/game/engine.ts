@@ -7387,7 +7387,14 @@ export function runPlanetSimulationPhase(
   }
   if (profiler) profiler.constructionMs += profileNow() - subsystemStartedAt;
   subsystemStartedAt = profiler ? profileNow() : 0;
-  runRayReceivers(state, seconds, reception, planetId, beltStepReservation.outputCredits, phaseLookup.entitiesByPlanet.get(planetId) ?? []);
+  const planetEntitiesForRays = phaseLookup.entitiesByPlanet.get(planetId) ?? [];
+  // A sparse global view is cheaper than checking every local machine. Cap
+  // that tradeoff at the original list size, and retain the full-list oracle
+  // and hook path so they can observe changes made inside the current phase.
+  const rayCandidates = batchPowerStorage && !contractExperiment &&
+    phaseLookup.rayReceivers.length < planetEntitiesForRays.length
+    ? phaseLookup.rayReceivers : planetEntitiesForRays;
+  runRayReceivers(state, seconds, reception, planetId, beltStepReservation.outputCredits, rayCandidates);
   if (profiler) profiler.dysonMs += profileNow() - subsystemStartedAt;
   subsystemStartedAt = profiler ? profileNow() : 0;
   const storage = gridStoredEnergy(state, planetId, undefined, phaseLookup);

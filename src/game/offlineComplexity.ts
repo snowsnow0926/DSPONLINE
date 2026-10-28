@@ -26,6 +26,18 @@ function hasAmount(entity: FactoryEntity, itemId: ItemId): boolean {
   return finiteNonNegative(entity.inputs[itemId]) > 0 || finiteNonNegative(entity.outputs[itemId]) > 0;
 }
 
+function hasNearCacheAmount(
+  inventory: FactoryEntity["inputs"],
+  itemIds: readonly ItemId[],
+  upperBoundary: number,
+): boolean {
+  for (const itemId of itemIds) {
+    const value = inventory[itemId];
+    if (typeof value === "number" && Number.isFinite(value) && (value <= 1 || value >= upperBoundary)) return true;
+  }
+  return false;
+}
+
 function deviceMemory(): number | null {
   if (typeof navigator === "undefined") return null;
   const value = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
@@ -72,10 +84,7 @@ function normalizedDevice(device?: Partial<OfflineDeviceCapability>): OfflineDev
   };
 }
 
-function estimateSerializedBytes(state: GameState): number {
-  const entityMaps = state.entities.reduce((sum, entity) => sum +
-    Object.keys(entity.inputs).length + Object.keys(entity.outputs).length +
-    (entity.stationSlots?.length ?? 0) * 3 + (entity.stationRoutes?.length ?? 0) * 6, 0);
+function estimateSerializedBytes(state: GameState, entityMaps: number): number {
   const blueprintNodes = state.blueprints.reduce((sum, blueprint) => sum + blueprint.entities.length + blueprint.belts.length, 0);
   const queueNodes = state.constructionQueue.reduce((sum, entry) => sum + Object.keys(entry.reservedConstruction ?? {}).length, 0);
   return Math.max(64 * 1024, Math.floor(
@@ -93,22 +102,34 @@ export function classifyOfflineWorkload(
   } = {},
 ): OfflineComplexityReport {
   const device = normalizedDevice(options.device);
-  const stationCount = state.entities.filter((entity) => entity.kind === "station").length;
-  const quantumStationCount = state.entities.filter((entity) => entity.quantumMode === "quantum" || Boolean(entity.quantumTransition)).length;
-  const routeCount = state.entities.reduce((sum, entity) => sum + (entity.stationRoutes?.length ?? 0), 0);
+  let stationCount = 0;
+  let quantumStationCount = 0;
+  let routeCount = 0;
+  let entityMaps = 0;
+  const estimateSize = options.serializedBytes == null;
   const activeConstructionJobs = Object.keys(state.constructionAutomation.jobs ?? {}).length + state.constructionQueue.length + state.handcraftQueue.length;
   const fluidIds = new Set<ItemId>(Object.values(ITEMS).filter((item) => item.kind === "fluid").map((item) => item.id));
-  let fluidOrGasConnections = state.belts.filter((belt) => fluidIds.has(belt.itemId)).length;
+  let fluidOrGasConnections = state.belts.reduce((sum, belt) => sum + (fluidIds.has(belt.itemId) ? 1 : 0), 0);
   let nearCacheBoundaryCount = 0;
   let finiteResourceBoundaryCount = 0;
   for (const entity of state.entities) {
+    if (entity.kind === "station") stationCount += 1;
+    if (entity.quantumMode === "quantum" || Boolean(entity.quantumTransition)) quantumStationCount += 1;
+    const entityRoutes = entity.stationRoutes?.length ?? 0;
+    routeCount += entityRoutes;
     for (const itemId of fluidIds) if (hasAmount(entity, itemId)) fluidOrGasConnections += 1;
-    const values = [...Object.values(entity.inputs), ...Object.values(entity.outputs)]
-      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    // Reuse the own inventory keys for both boundary detection and the size
+    // estimate instead of materializing, combining and filtering every value.
+    const inputIds = Object.keys(entity.inputs) as ItemId[];
+    const outputIds = Object.keys(entity.outputs) as ItemId[];
+    if (estimateSize) entityMaps += inputIds.length + outputIds.length +
+      (entity.stationSlots?.length ?? 0) * 3 + entityRoutes * 6;
     const cacheLimit = entity.kind === "station" || entity.kind === "storage" || entity.kind === "splitter"
       ? state.settings.logisticsBufferLimit
       : state.settings.productionBufferLimit;
-    if (values.some((value) => value <= 1 || value >= cacheLimit * 0.9)) nearCacheBoundaryCount += 1;
+    const upperBoundary = cacheLimit * 0.9;
+    if (hasNearCacheAmount(entity.inputs, inputIds, upperBoundary) ||
+      hasNearCacheAmount(entity.outputs, outputIds, upperBoundary)) nearCacheBoundaryCount += 1;
     if (entity.kind === "vein" && entity.resourceRemaining !== undefined && entity.resourceRemaining >= 0 && entity.resourceRemaining <= Math.max(10, entity.minerCount * 60)) {
       finiteResourceBoundaryCount += 1;
     }
@@ -117,7 +138,7 @@ export function classifyOfflineWorkload(
     layer.nodes.some((node) => finiteNonNegative(node.completedStructurePoints) > 0 || finiteNonNegative(node.requiredStructurePoints) > 0) ||
     layer.frames.length > 0 || layer.shells.length > 0,
   )).length + (state.dysonSwarm.sailsInOrbit > 0 || state.dysonSphere.totalRocketsLaunched > 0 ? 1 : 0);
-  const estimatedSerializedBytes = Math.max(0, Math.floor(options.serializedBytes ?? estimateSerializedBytes(state)));
+  const estimatedSerializedBytes = Math.max(0, Math.floor(options.serializedBytes ?? estimateSerializedBytes(state, entityMaps)));
   // fast-30s-v6-final-conservation-gate retains the immutable source, one Worker-owned mutable
   // calibration candidate and compact material/research projections. Lookup
   // indexes are reused while entity/belt array identities remain stable, and

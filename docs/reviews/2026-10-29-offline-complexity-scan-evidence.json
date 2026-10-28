@@ -1,0 +1,111 @@
+{
+  "formatVersion": 1,
+  "status": "pending-full-and-page-qualification",
+  "cpu": {
+    "scope": "Pure classification only; four fresh Node processes ABBA, twelve measured calls each, no page/FPS/whole-mode timing claim",
+    "records": {
+      "cpu-baseline-01": {
+        "medianMs": 46.884250000000065,
+        "rangeMs": [
+          45.690399999999954,
+          52.5005000000001
+        ],
+        "samples": 12,
+        "sourceJsonSha256": "6f9e0b241bf09d1dc0962047016ba9320b6573d8d9b96bdf8c76e47c759132ee"
+      },
+      "cpu-candidate-01": {
+        "medianMs": 30.620500000000106,
+        "rangeMs": [
+          29.637199999999893,
+          33.59029999999984
+        ],
+        "samples": 12,
+        "sourceJsonSha256": "d8c950d92625835c7f1c945d71645ebc0853fa9c37092745e6b913596c26a1ba"
+      },
+      "cpu-candidate-02": {
+        "medianMs": 31.087499999999977,
+        "rangeMs": [
+          29.347099999999955,
+          39.760899999999765
+        ],
+        "samples": 12,
+        "sourceJsonSha256": "38025e9d28649169e22a1bf905fe424382dba0fd8f4087597e791717c593c972"
+      },
+      "cpu-baseline-02": {
+        "medianMs": 47.34060000000022,
+        "rangeMs": [
+          44.48819999999978,
+          55.42629999999963
+        ],
+        "samples": 12,
+        "sourceJsonSha256": "94e3a1d6088b0f4a0c5a13f6e9795508ba026fefcea26bcce1dd794e55969845"
+      }
+    },
+    "baselineMedianMs": 47.112425000000144,
+    "candidateMedianMs": 30.854000000000042,
+    "changePercent": -34.509845332733455,
+    "savedMilliseconds": 16.258425000000102,
+    "allReportsEqual": true,
+    "callerStateUnchanged": true,
+    "noForcedGc": true,
+    "fullReportParityCases": 5132,
+    "candidateAccepted": false,
+    "productionPublished": false,
+    "goalStatus": "active"
+  },
+  "fullReportParity": {
+    "scope": "Isolated pure classification; all reports compared with frozen old implementation, no page/Worker/FPS or GC claim",
+    "mode": "proof",
+    "variant": null,
+    "sourceFreeze": {
+      "baseline": "5730f267759e7788916a8d762a1c28067ced0838",
+      "accepted": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+      "candidateSourceSha256": "f39e0138d0e1ddfec740b0f53b6d4fcc6a56f6859a264c2182c8d44bd306ebe2",
+      "contentSha256": "a681a0765489df577e9e1d47d1449e142901b70d8fc1063bbbdd37752c999d64",
+      "fixtureSha256": "6a6aa320dd9d5fd5e5b618b745fc864c2ccb2d96143e0b852d1f270358de9ebf",
+      "classificationOnly": true
+    },
+    "baselineSourceSha256": "259466cc641acf537eb7e4bbed78682381473c4b2a9bb597b8c44864ae19c2e1",
+    "baselineMatchesAcceptedClassifier": true,
+    "callerStateUnchanged": true,
+    "fixtureEntityCount": 110042,
+    "fixtureBeltCount": 233300,
+    "callerStateSha256": "625d89d22b0bbc50de46a289a6c68877caea06750bba44cee6311d76d10d7974",
+    "reportComparisons": 5132,
+    "uniqueReportHashes": 1299
+  },
+  "targetedTests": {
+    "filesPassed": 4,
+    "passed": 34,
+    "skipped": 0,
+    "failed": 0,
+    "newBoundaryCases": 19
+  },
+  "applicationTypecheck": 0,
+  "diagnosticSourceParity": {
+    "scope": "Source-equivalent hidden-source-map diagnostic, not frozen performance qualification",
+    "runtimeSourceCommit": "5730f267759e7788916a8d762a1c28067ced0838",
+    "sourceHead": "b86d25cbaece390483748ed91134f00df57dacb8",
+    "sourceHashesVerified": 35,
+    "allTrackedRuntimeSourceEqual": true,
+    "literalFrozenJavaScriptParity": false,
+    "matchingJavaScriptFiles": 143,
+    "nonmatchingOrRenamedJavaScriptFiles": 36,
+    "sourceMaps": 176,
+    "mapFileNamesValidated": true,
+    "diagnosticDist": "D:\\GameDev\\DSPidle2\\artifacts\\web-offline-classification-20261029\\diagnostic-dist",
+    "diagnosticOnly": true,
+    "note": "Initial literal frozen-JS preflight refused a renamed chunk. Use this separate diagnostic package and its own maps for function attribution only. No timings or working sets enter qualification."
+  },
+  "acceptedOverallRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+  "productionPublished": false,
+  "goalStatus": "active",
+  "evidenceFileSha256": {
+    "report-parity-01.json": "4aed83e3b8d567d7dfcc1784129b3c7fdd64230e808a334efdec0488e8e64849",
+    "cpu-comparison.json": "93e117691bf2da2ab0d4a34c6b3f7d21611cd52760427224b131c200fa926242",
+    "source-freeze.json": "5c4cb22fa5c1bb6718135df8820088783f85ccbe4450d4a67d9769f7dcda591e",
+    "start-profile-analysis.json": "cb22d0a13ced32425d6f8fe5e94951fafa7edf98cbffdcf556ac55b28f22a3f4",
+    "stable-start-profile-01.json": "a2b143aa25a25740833a648a13cbedbc4758b995ff5f0fa7fbf4820be874d5bd",
+    "classification-start-profile-server-cleanup.json": "fa88f1e3882a7e49f13c2e1b1bac2fa6a447bf3c67e5e4b15b14facd0f080de5"
+  }
+}

@@ -179,6 +179,10 @@ async function sampleProcesses(stage, stoppedAtMs) {
       const sampled = process.platform === "win32" && ids.length ? JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-Command",
         `Get-Process -Id ${ids.join(",")} -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64,PeakWorkingSet64,PrivateMemorySize64 | ConvertTo-Json -Compress`], { encoding: "utf8", timeout: 5000, windowsHide: true }) || "null") : null;
       const rows = sampled ? Array.isArray(sampled) ? sampled : [sampled] : [];
+      if (process.platform === "win32" && rows.some(row => !Number.isSafeInteger(row.Id) || row.Id <= 0 ||
+        !["WorkingSet64", "PeakWorkingSet64", "PrivateMemorySize64"].every(field => Number.isFinite(row[field]) && row[field] >= 0))) {
+        throw Error("Incomplete process memory row");
+      }
       const rendererRows = rows.filter((row) => rendererIds.has(row.Id));
       const memory = rendererRows.length === 1 ? rendererRows[0] : rendererRows.length ? rendererRows : null;
       if (process.platform === "win32" && (!rendererRows.length || rendererRows.some(row => !(row.PeakWorkingSet64 > 0)))) {

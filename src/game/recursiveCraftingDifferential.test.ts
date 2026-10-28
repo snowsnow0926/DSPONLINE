@@ -5,6 +5,56 @@ import * as eager from "./recursiveCrafting.eager-reference";
 import type { ItemId, RecipeDefinition, RecipeId } from "./types";
 
 describe("lazy recursive planner matches the frozen eager planner", () => {
+  it.each([1, 2, 3, 8, 24, 64])("preserves mixed stocked inputs and later shared-input backtracking at limit %i", (optionLimit) => {
+    const high: RecipeDefinition = { id: "mixed-stocked-high" as RecipeId, name: "high", buildingId: "arc_smelter", duration: 1,
+      recursivePriority: 100, inputs: [{ itemId: "stone", amount: 1 }, { itemId: "iron_ingot", amount: 1 }], outputs: [{ itemId: "steel", amount: 1 }] };
+    const low: RecipeDefinition = { ...high, id: "mixed-stocked-low" as RecipeId, recursivePriority: 0,
+      inputs: [{ itemId: "copper_ore", amount: 1 }] };
+    const ingot: RecipeDefinition = { ...high, id: "mixed-stocked-ingot" as RecipeId,
+      inputs: [{ itemId: "iron_ore", amount: 1 }], outputs: [{ itemId: "iron_ingot", amount: 1 }] };
+    const inventory = { stone: 2, iron_ore: 1, copper_ore: 1 };
+    const before = structuredClone(inventory);
+    const args = { recipes: [high, low, ingot], inventory, completedTechnologyIds: [], optionLimit,
+      requirements: [{ itemId: "stone" as const, amount: 1 }, { itemId: "steel" as const, amount: 1 }, { itemId: "iron_ore" as const, amount: 1 }] };
+    const expected = eager.planRecursiveRequirements(args);
+    const actual = planRecursiveRequirements(args);
+    expect(actual).toStrictEqual(expected);
+    expect(JSON.stringify(actual)).toBe(JSON.stringify(expected));
+    expect(actual.possible).toBe(optionLimit > 1);
+    if (actual.possible) expect(actual.steps.at(-1)?.recipeId).toBe(low.id);
+    expect(inventory).toEqual(before);
+  });
+
+  it.each([0, 0.5])("preserves a stocked nonrecursive cost of %s beside a missing intermediate", (amount) => {
+    const ingot: RecipeDefinition = { id: "mixed-stocked-ingot" as RecipeId, name: "ingot", buildingId: "arc_smelter", duration: 1,
+      inputs: [{ itemId: "iron_ore", amount: 1 }], outputs: [{ itemId: "iron_ingot", amount: 1 }] };
+    const recipe: RecipeDefinition = { ...ingot, id: "mixed-stocked-selected" as RecipeId,
+      inputs: [{ itemId: "stone", amount }, { itemId: "iron_ingot", amount: 1 }], outputs: [{ itemId: "steel", amount: 1 }] };
+    const inventory = { stone: 1, iron_ore: 1 };
+    const args = { inventory, recipe, batches: 1, recipes: [ingot, recipe], completedTechnologyIds: [] };
+    const expected = eager.planSelectedRecipe(args);
+    const actual = planSelectedRecipe(args);
+    expect(actual).toStrictEqual(expected);
+    expect(JSON.stringify(actual)).toBe(JSON.stringify(expected));
+    expect(inventory).toEqual({ stone: 1, iron_ore: 1 });
+  });
+
+  it("keeps duplicate debits isolated while recursively replenishing the later requirement", () => {
+    const recipe: RecipeDefinition = { id: "mixed-stocked-duplicate" as RecipeId, name: "duplicate", buildingId: "arc_smelter", duration: 1,
+      inputs: [{ itemId: "iron_ore", amount: 2 }, { itemId: "iron_ore", amount: 3 }, { itemId: "copper_ore", amount: 1 }], outputs: [{ itemId: "steel", amount: 1 }] };
+    const refill: RecipeDefinition = { ...recipe, id: "mixed-stocked-refill" as RecipeId,
+      inputs: [{ itemId: "stone", amount: 1 }], outputs: [{ itemId: "iron_ore", amount: 1 }] };
+    const inventory = { iron_ore: 4, copper_ore: 2, stone: 1 };
+    const args = { inventory, recipe, batches: 1, recipes: [recipe, refill], completedTechnologyIds: [] };
+    const expected = eager.planSelectedRecipe(args);
+    const first = planSelectedRecipe(args);
+    expect(first).toStrictEqual(expected);
+    expect(JSON.stringify(first)).toBe(JSON.stringify(expected));
+    first.inventory.iron_ore = -1;
+    expect(planSelectedRecipe(args)).toStrictEqual(expected);
+    expect(inventory).toEqual({ iron_ore: 4, copper_ore: 2, stone: 1 });
+  });
+
   it.each([
     { name: "all stock", inputs: [{ itemId: "iron_ore", amount: 2 }, { itemId: "copper_ore", amount: 3 }], inventory: { iron_ore: 20, copper_ore: 30 } },
     { name: "late shortage", inputs: [{ itemId: "iron_ore", amount: 2 }, { itemId: "copper_ore", amount: 3 }], inventory: { iron_ore: 20, copper_ore: 0 } },

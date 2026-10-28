@@ -242,7 +242,18 @@ function lazyRequirements(
     candidates = (function* () {
       let emitted = 0;
       for (const candidate of previous) {
-        for (const option of lazyItemOptions(context, candidate, requirement.itemId, requirement.amount, resolving, depth)) {
+        const required = Math.max(0, Math.floor(requirement.amount));
+        const current = Math.max(0, Math.floor(candidate.inventory[requirement.itemId] ?? 0));
+        if (current >= required) {
+          // A stocked requirement has one option. Keep its owned debit and
+          // this input's global cap without creating an item generator.
+          const next = cloneWork(candidate);
+          next.inventory[requirement.itemId] = Math.max(0, Math.floor((next.inventory[requirement.itemId] ?? 0) - requirement.amount));
+          yield next;
+          if (++emitted >= context.optionLimit) return;
+          continue;
+        }
+        for (const option of lazyMissingItemOptions(context, candidate, requirement.itemId, required, current, resolving, depth)) {
           const next = cloneWork(option);
           next.inventory[requirement.itemId] = Math.max(0, Math.floor((next.inventory[requirement.itemId] ?? 0) - requirement.amount));
           yield next;
@@ -279,17 +290,16 @@ function directlySuppliedWork(
   return next;
 }
 
-function* lazyItemOptions(
+/** The caller has normalized these amounts and handled already-stocked items. */
+function* lazyMissingItemOptions(
   context: PlannerContext,
   work: PlannerWork,
   itemId: ItemId,
-  requiredAmount: number,
+  required: number,
+  current: number,
   resolving: ReadonlySet<ItemId>,
   depth: number,
 ): Generator<PlannerWork> {
-  const required = Math.max(0, Math.floor(requiredAmount));
-  const current = Math.max(0, Math.floor(work.inventory[itemId] ?? 0));
-  if (current >= required) { yield work; return; }
   if (resolving.has(itemId)) return;
   const nextResolving = new Set(resolving);
   nextResolving.add(itemId);

@@ -1,0 +1,121 @@
+{
+  "scope": "Small synthetic and public-catalog Node tests; eight instrumented iterator-call comparisons, no wall-time benchmark.",
+  "sourceCommitAtChecks": "9251bedb645ae0779146a0ad96de476dbc1bec80",
+  "sourceDirtyAtChecks": true,
+  "sourceHashes": {
+    "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+    "src/game/engine.ts": "c94148c4048fc6c6c2170df8f12af26f78e083d61da8a68e1fd525bcc0cfea39",
+    "src/game/constructionQuantumPlanningContext.test.ts": "87c526ffc68a7f32ab96e06c2b1ade7d43e609fc5779a20ebadf48798d7f3f37",
+    "src/game/recursiveCraftingDifferential.test.ts": "2d98c737b498e91626f510522907ca98dc4a80af5b57cc6089fdc52058042e42"
+  },
+  "focusedChecks": {
+    "recursive-differential": 216,
+    "recursive-api": 12,
+    "recursive-inventory": 65,
+    "context-5": 5,
+    "quantum-23": 23,
+    "offline-domain-14": 14,
+    "batching-20": 20
+  },
+  "focusedPassed": 355,
+  "focusedFailed": 0,
+  "applicationTypes": "passed",
+  "differentialExecution": {
+    "passed": 216,
+    "mode": "direct tool execution at 2026-10-28 20:44:20 +08:00; unchanged source, not rerun"
+  },
+  "reference": "9251bedb645ae0779146a0ad96de476dbc1bec80",
+  "baselinePlannerSha256": "b377c80a558c676b1e87dd7d803c461b5f9acffeb1e59288bc7a0274fd2e3adb",
+  "candidatePlannerSha256": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+  "completePlansEqual": true,
+  "inputUnchanged": true,
+  "iteratorCases": [
+    {
+      "optionLimit": 1,
+      "tail": "conflict",
+      "possible": false,
+      "fullPlanSha256": "0f1677abbeedb030da1acc180bca0f41f9c07dbfa4c1905b6adff202bf0a0383",
+      "baselineGeneratorNextCalls": 11,
+      "candidateGeneratorNextCalls": 9,
+      "changePercent": -18.181818181818176
+    },
+    {
+      "optionLimit": 1,
+      "tail": "stocked",
+      "possible": true,
+      "fullPlanSha256": "db4ee910c863aa6c7ab73dbf823ec01aa40af748eebe547881ca8f1b379218b5",
+      "baselineGeneratorNextCalls": 10,
+      "candidateGeneratorNextCalls": 7,
+      "changePercent": -30.000000000000004
+    },
+    {
+      "optionLimit": 2,
+      "tail": "conflict",
+      "possible": true,
+      "fullPlanSha256": "9e06c42cfde50a4bb9aaff7601d1cbf7f737f87675b2d645f1fb00e72c09d1fa",
+      "baselineGeneratorNextCalls": 17,
+      "candidateGeneratorNextCalls": 13,
+      "changePercent": -23.529411764705888
+    },
+    {
+      "optionLimit": 2,
+      "tail": "stocked",
+      "possible": true,
+      "fullPlanSha256": "db4ee910c863aa6c7ab73dbf823ec01aa40af748eebe547881ca8f1b379218b5",
+      "baselineGeneratorNextCalls": 10,
+      "candidateGeneratorNextCalls": 7,
+      "changePercent": -30.000000000000004
+    },
+    {
+      "optionLimit": 8,
+      "tail": "conflict",
+      "possible": true,
+      "fullPlanSha256": "9e06c42cfde50a4bb9aaff7601d1cbf7f737f87675b2d645f1fb00e72c09d1fa",
+      "baselineGeneratorNextCalls": 17,
+      "candidateGeneratorNextCalls": 13,
+      "changePercent": -23.529411764705888
+    },
+    {
+      "optionLimit": 8,
+      "tail": "stocked",
+      "possible": true,
+      "fullPlanSha256": "db4ee910c863aa6c7ab73dbf823ec01aa40af748eebe547881ca8f1b379218b5",
+      "baselineGeneratorNextCalls": 10,
+      "candidateGeneratorNextCalls": 7,
+      "changePercent": -30.000000000000004
+    },
+    {
+      "optionLimit": 24,
+      "tail": "conflict",
+      "possible": true,
+      "fullPlanSha256": "9e06c42cfde50a4bb9aaff7601d1cbf7f737f87675b2d645f1fb00e72c09d1fa",
+      "baselineGeneratorNextCalls": 17,
+      "candidateGeneratorNextCalls": 13,
+      "changePercent": -23.529411764705888
+    },
+    {
+      "optionLimit": 24,
+      "tail": "stocked",
+      "possible": true,
+      "fullPlanSha256": "db4ee910c863aa6c7ab73dbf823ec01aa40af748eebe547881ca8f1b379218b5",
+      "baselineGeneratorNextCalls": 10,
+      "candidateGeneratorNextCalls": 7,
+      "changePercent": -30.000000000000004
+    }
+  ],
+  "resourcePolicy": {
+    "priority": "Idle",
+    "logicalProcessors": 1,
+    "workers": 1,
+    "minimumAvailableMemoryGiB": 8
+  },
+  "fullRegression": false,
+  "largeSave": false,
+  "browser": false,
+  "build": false,
+  "forcedGc": false,
+  "performanceQualified": false,
+  "published": false,
+  "gateEvidenceSha256": "6acc84d7e1a213147c400d40e0bcdc600469a65805d84702b85653773d7358c8",
+  "iteratorEvidenceSha256": "b53c58178c2fc2f585c9e42ffac0115958bd544df11dc07d1c679b719dd812f1"
+}

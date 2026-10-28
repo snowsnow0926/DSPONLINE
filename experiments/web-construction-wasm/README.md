@@ -15,6 +15,12 @@
 每次另外验证完整字节 SHA-256，最后复核源状态未变；不含规范化、数据库或 UI，
 同一页面的 GC/缓存会影响样本，不能把局部差值当成整页收益。
 
+终态分批原型经过两版整页对照后已从游戏撤回，保存在
+`terminal-projection-prototype.ts`。原 7 项回归用例移入实验目录，
+用 `npx vitest run --config experiments/web-construction-wasm/vitest.projection.config.ts`
+单独验证；默认游戏测试不启用该原型。完整撤回数字见
+[验证记录](../../docs/reviews/2026-10-28-web-bounded-terminal-projection.md)。
+
 `--entry=terminal-parity --terminal-path=terminal-safe --research-case=replication`
 另行比较宏观终态源 envelope 与规范化后保存的完整 SHA-256；
 `sourceProjectionDifferences` 只输出变化字段和数量，不输出正文或实体身份。

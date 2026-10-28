@@ -194,7 +194,7 @@ try {
     ...(rendererMemory ? { rendererMemory } : {}),
     ...(decoderReference ? { decoderReference, decoderFiles } : {}),
     ...(entry === "macro-finalization" ? { macroWorkerReference, macroSourceHashes: Object.fromEntries(await Promise.all([
-      "src/game/pureIdleMacro.worker.ts", "src/game/pureIdleMacro.ts", "src/game/pureIdleMacroClient.ts", "src/game/persistentSaveTransfer.ts",
+      "src/game/pureIdleMacro.worker.ts", "src/game/pureIdleMacro.ts", "src/game/pureIdleMacroClient.ts",
       "src/game/saveTransfer.ts", "src/game/saveProjection.ts", "src/game/storage.ts", "src/game/save.worker.ts", "src/game/engine.ts",
       "experiments/web-construction-wasm/macro-finalization.ts", "experiments/web-construction-wasm/macro-finalization-clock.worker.ts",
     ].map(async file => [file, macroWorkerReference && file === "src/game/pureIdleMacro.worker.ts"
@@ -221,7 +221,7 @@ try {
     ...(entry === "save-state-chunks" ? { chunkTransportSourceSha256: await fileHash(resolve(sourceRoot, "src/game/saveStateChunkTransfer.ts")) } : {}),
     ...(entry === "power-matrix" ? { probeSourceSha256: await fileHash(resolve(root, "experiments/web-construction-wasm/power-matrix.ts")) } : {}),
     ...(entry === "save-projection-chunks" ? { projectionSourceHashes: Object.fromEntries(await Promise.all([
-      "src/game/persistentSaveTransfer.ts", "src/game/saveProjection.ts", "src/game/saveTransfer.ts", "src/game/saveEnvelopeIntegrity.ts",
+      "experiments/web-construction-wasm/terminal-projection-prototype.ts", "src/game/saveProjection.ts", "src/game/saveTransfer.ts", "src/game/saveEnvelopeIntegrity.ts",
       "experiments/web-construction-wasm/save-projection-chunks.ts",
     ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(entry === "payload-checksum" ? { checksumSourceHashes: Object.fromEntries(await Promise.all([

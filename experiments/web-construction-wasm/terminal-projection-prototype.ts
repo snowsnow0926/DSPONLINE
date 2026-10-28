@@ -1,8 +1,8 @@
-import type { ContentPackRegistry } from "./contentPacks";
-import { createPersistentSaveProjectionParts, projectPersistentSaveState } from "./saveProjection";
+import type { ContentPackRegistry } from "../../src/game/contentPacks";
+import { createPersistentSaveProjectionParts, projectPersistentSaveState } from "../../src/game/saveProjection";
 import { computeSavePayloadChecksum, decodeVerifiedSaveTransfer, serializeSaveEnvelopeToTransfer,
-  type SaveTransferOptions, type SerializedSaveTransfer } from "./saveTransfer";
-import type { GameState } from "./types";
+  type SaveTransferOptions, type SerializedSaveTransfer } from "../../src/game/saveTransfer";
+import type { GameState } from "../../src/game/types";
 
 /** Macro-Worker-only framing. Keep the shared/ordinary serializer unchanged.
  * Use its tiny empty-state envelope as the header oracle, then replace only

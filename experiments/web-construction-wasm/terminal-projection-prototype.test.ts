@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createContentPackRegistry } from "./contentPacks";
-import { createInitialState } from "./engine";
-import { serializePersistentSaveEnvelopeToTransfer, serializeSaveStateJsonChunksToTransfer } from "./persistentSaveTransfer";
-import { projectPersistentSaveState } from "./saveProjection";
-import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
-import type { FactoryEntity, GameState } from "./types";
+import { createContentPackRegistry } from "../../src/game/contentPacks";
+import { createInitialState } from "../../src/game/engine";
+import { serializePersistentSaveEnvelopeToTransfer, serializeSaveStateJsonChunksToTransfer } from "./terminal-projection-prototype";
+import { projectPersistentSaveState } from "../../src/game/saveProjection";
+import { serializeSaveEnvelopeToTransfer } from "../../src/game/saveTransfer";
+import type { FactoryEntity, GameState } from "../../src/game/types";
 
 const registry = createContentPackRegistry();
 const options = { formatVersion: 2, kind: "primary" as const, savedAt: 1_800_000_000_000,

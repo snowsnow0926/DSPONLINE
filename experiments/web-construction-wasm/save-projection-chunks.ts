@@ -1,5 +1,5 @@
 import { createContentPackRegistry } from "../../src/game/contentPacks";
-import { serializePersistentSaveEnvelopeToTransfer } from "../../src/game/persistentSaveTransfer";
+import { serializePersistentSaveEnvelopeToTransfer } from "./terminal-projection-prototype";
 import { projectPersistentSaveState } from "../../src/game/saveProjection";
 import { serializeSaveEnvelopeToTransfer } from "../../src/game/saveTransfer";
 import type { GameState } from "../../src/game/types";

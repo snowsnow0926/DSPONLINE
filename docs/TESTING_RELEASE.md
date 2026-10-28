@@ -1,5 +1,7 @@
 # 测试与发布基线
 
+> **2026-10-29 新预留账本候选**：14 项新回归加既有量子/来源预留共 42 项通过；长窗口八条 Node 结果的完整状态/存档正文一致，短窗口另八条仅独立初筛。首次类型检查的测试端口类型已修正；修正后类型检查、全量单元、构建、完整浏览器及真实 Worker/自然峰值待完成，不能沿用 cae 的完整通过数。[候选记录](./reviews/2026-10-29-belt-reservation-capacity-ledger.md)。
+
 > **2026-10-29 宏 CPU 实机及整体对照已完成**：22 项协议/CLI 单核心 Idle 检查通过，另有一次真实宏 Worker CPU 诊断 **18,131 点 / 20.431 秒**，无暂停/GC/引擎插桩，映射与实际 Worker 字节匹配；带采样耗时不作性能对照。独立八次自然网页/64 个完整系统点核验通过，守恒进入少 8.45%，但守恒/产率复制峰值多 11.98%/18.60%，整体继续暂缓。36 个游戏运行源码不变，冻结 cae 的已有完整矩阵不重跑、不记作新增次数。准备失败和不完整两页另存，不混入整组；所有自有服务已退出。[完整证据](./reviews/2026-10-29-web-aggregate-recheck.md)。
 
 > **2026-10-29 后台 CPU 诊断入口待实机验证**：新增默认关闭的 macro-worker-cpu，仅采样同源新宏 Worker，不暂停、不 GC、不启用引擎插桩；始终标为 profiled，与自然内存/其它诊断互斥。单核心 Idle、单 worker 的 **22 项协议和 CLI 测试通过，0 失败/跳过**，包含创建时 URL 尚空、稍后才可识别的 Worker；真实 Chrome 采样待验，不能据此声明游戏提速。整体对照首次因内存保护在页面启动前退出，后续单服务宿主在第三页前退出、前两页保留为不完整组；均不作为整体资格。后续按每次一个可自行关闭的独立服务进程继续，保留 12 GiB 稳定门槛。[入口及失败边界](../experiments/web-live-runtime/README.md#cpu-归因)。
@@ -1566,7 +1568,3 @@ production-preview Chrome 的匿名活动行星为 106 节点，默认与 expand
 匿名 byte-shape 性能夹具分别为 31,142,707 和 62,285,414 bytes；后者低于 64 MiB 云正文边界，但两者只用于 catalog/惰性读取性能，不是第 54 节的玩家同形容量证据。Chromium 各冷重载五轮并等待真实“继续游戏”摘要可见的合并 p95 为 220 ms：catalog-backed 两种尺寸均为 payload get 0、`getAll` 0、主线程大正文 `JSON.parse` 0、raw cache 0；35 MiB legacy 建索引为严格串行两次 payload get（Worker 输入与提交前精确复核）、主线程大正文解析 0、同步 fallback 0。损坏 primary 只读一次后按原顺序读取 backup 并选中正确状态；冷启动槽位/快照摘要不读正文，玩家选择后各只读对应 payload 一次且 raw cache 仍为 0。
 
 开发侧门禁为 catalog/store/preview/mode/transfer Vitest 31/31、完整 storage/mode Vitest 107/107、catalog Chromium 4/4、既有 IndexedDB v1→v2、lease/fencing/CAS/conflict/35 MiB readback Chromium 18/18、速通云恢复 7/7，以及既有快照批量管理 1/1；typecheck、启动长任务门禁与生产 build 全部通过。catalog key 明确位于 1.0.43 精确 payload key 命名空间之外；回滚客户端的旧 `isSaveKey` 对 primary/backup/slot/snapshot/conflict catalog 均返回 false，旧版不会将 side-record 误当存档、槽位、快照或正文缓存。最终菜单静态闭包为 267,852 gzip bytes，低于 286,720-byte 预算 18,868 bytes；无 budget 放宽。测试仅使用匿名运行时夹具和浏览器临时 IndexedDB，未部署、未写入玩家数据。
-# 2026-10-29 新预留账本候选的验证状态
-
-14 项新回归加既有量子/来源预留合计 42 项通过；八条长窗口 Node 结果的完整状态及正式存档正文一致，短窗口另八条保留为独立初筛，不算真实大档或浏览器证明。首次类型检查在测试端口类型失败后已修正，修正后类型检查/全量单元/构建/完整浏览器和真实 Worker/自然峰值仍待完成。不能沿用 cae 的全量通过数作为新引擎的通过数；见[候选记录](./reviews/2026-10-29-belt-reservation-capacity-ledger.md)。
-

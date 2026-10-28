@@ -1,5 +1,7 @@
 # 系统架构
 
+> **2026-10-29 开发候选边界**：预留容量账本为拓扑有界的临时标量，不进入 GameState/Worker payload/存档，每次预留使用独立阶段代号。普通目标归属建筑 id/物料，黑洞为建筑 id/端口，配送站为行星/物料；和搬运分别建索引。只在成功预留后记账，保留首次零余量和已有零余量的差别；无索引/平铺参考走原 Map。整组性能仍待接受。[候选验证](./reviews/2026-10-29-belt-reservation-capacity-ledger.md)。
+
 > **2026-10-29 复杂度扫描局部验证通过**：仅合并分类器的重复实体遍历，库存键同时用于边界判断和体积估算，流体目录与安全阈值仍实时读取；无持久字段/跨次缓存。5,132 份完整旧/新报告一致，全量单元 3,862/38、Chromium 524/34 等通过；四次网页检查及准备间隔少 25.25%、进入最长帧间隔少 14.41%。整体启动仍约 29 秒，退出/内存无收益，整体候选未替代 8c54。16 个计算/保存 Worker 与父候选字节相同。此前 lookup 所有者变体已撤回，模块 WeakMap 保持。[完整范围](./reviews/2026-10-29-offline-complexity-scan.md)、[撤回证据](./reviews/2026-10-29-lookup-owned-capacity.md)。
 
 > **2026-10-29 缓存所有者候选（未验收）**：容量标量 Map 从模块弱关联表改为 lookup 的私有 Symbol 字段，构建/原位重建索引时同步换代；原始值匹配和界限保持，不进入 GameState/存档，未初始化内部字段时直接计算。62 项回归/类型通过，尚未证明实际回收收益，不能认定旧 WeakMap 导致高占用。[边界与待验](./reviews/2026-10-29-lookup-owned-capacity.md)。
@@ -640,7 +642,3 @@ API 表面：
 - stack 后层使用 `aria-hidden`、`tabIndex=-1`、无 pointer events 的无视觉壳；只有实际线路端点才保留隐藏 handle 几何。`marker` 模式由唯一 halo 节点持有成员数组并绘制“叠放 N”入口，其他成员不复制该数组，避免展开模式形成 O(N²) 引用；入口通过画布级 inverse-zoom 变量维持至少 44px 屏幕点击高度。`representative` 绘制一张代表卡，`all` 保留全部卡；每组最多一个数量/聚合告警徽标。选择、采矿、拖动或连接 source/candidate 会把目标移出隐藏层，普通 focus 不会让数量入口闪退。历史重叠不迁移、不重排、不修改机器数量。
 - `dsp-idle-network.ui.canvas-detail.v1` 接受 `auto/full/medium/minimal`；`dsp-idle-network.ui.canvas-overlap.v1` 接受 `marker/representative/all`；`dsp-idle-network.ui.canvas-interaction-detail.v1` 接受 `selected/hover/base`。三者缺失或损坏分别回退 `auto`、`marker`、`selected`，并与 `dsp-idle-network.ui.blueprint-allow-overlap.v1` 一样只属于设备 UI，不进入存档或云同步。交互展开偏好只控制普通选择/悬停/聚焦；拖动、采矿和连线安全目标始终可强制完整显示。重叠放置开关仍同时约束即时蓝图、排队蓝图和单/多选拖动；默认复用同一 rounded-position 冲突判定并排除正在移动成员自己的旧位置，开启时只跳过 exact-overlap guard，其他材料、ID、线路、资源锚点和锁定校验不变。
 - 需要跨保存周期保留的只是订单当次命令语义：`ConstructionQueueEntry.allowExactOverlap?: true`。loader 只接受字面 true，旧/损坏值回退 undefined；`blueprintVersionId` 绝不编码策略后缀。1.0.43 客户端回滚会按旧 loader 丢弃此可选意图，因此重叠订单会变为不兼容而不会静默施工；玩家可取消并完整取回预留施工材料/载具，再在新版本重建订单。
-# 2026-10-29 开发候选：预留容量阶段账本
-
-`SimulationBeltRuntimeIndex` 的预留账本为拓扑有界的临时标量，不进入 GameState/Worker payload/存档；每次 `reserveBeltStepOutputCapacity` 使用独立阶段代号。预留容量的归属为普通建筑 id/物料、黑洞 id/端口、配送站行星/物料，和搬运的目标索引不同，分别建立。仅成功预留后标记已访问，保留首次零余量与已有零余量的差别。无索引及平铺参考仍走原 Map。此边界在当前开发候选中实现，整组性能与发布接受仍待门禁；见[验证记录](./reviews/2026-10-29-belt-reservation-capacity-ledger.md)。
-

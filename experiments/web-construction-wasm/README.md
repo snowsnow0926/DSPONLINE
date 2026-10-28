@@ -135,7 +135,8 @@ node experiments/web-construction-wasm/run.mjs --entry=large-save --prepared=D:/
 node experiments/web-construction-wasm/run.mjs --entry=conservative-calibration --runtime-ref=8c54cd02fd93 --prepared=D:/private/prepared.json --output=D:/private/probe --name=conservative-old-01
 ```
 
-仅诊断时显式加 `--calibration-profile=1`，按同步函数外层统计嵌套调用次数与耗时；
+仅诊断时显式加 `--calibration-profile=1`，按同步函数外层统计嵌套调用次数与耗时，
+并注入既有模拟 profiler，分别读取三个精确窗口的生产、线路、电力等统计；
 这些数字不能相加成总耗时，插桩记录不能混入正式性能比较。正常记录关闭插桩。
 两种记录都保留输入前后校验及完整结果；不因尾段安全冻结就假称持续生产成功，
 需检查初始化证书、有效合同与结算字段。

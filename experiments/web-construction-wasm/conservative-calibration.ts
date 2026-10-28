@@ -1,4 +1,4 @@
-import { advancePersistentSimulationRuntime, createPersistentSimulationRuntime, refreshTimeWarpPowerSnapshotInPlace } from "../../src/game/engine";
+import { advancePersistentSimulationRuntime, createPersistentSimulationRuntime, refreshTimeWarpPowerSnapshotInPlace, type SimulationProfiler } from "../../src/game/engine";
 import { createPureIdleMacroSessionAsync, advancePureIdleMacroSession, finalizePureIdleMacroCandidate } from "../../src/game/pureIdleMacro";
 import { serializeEnvelope } from "../../src/game/storage";
 import type { GameState } from "../../src/game/types";
@@ -14,6 +14,15 @@ async function digest(text: string): Promise<string> {
   const bytes = new TextEncoder().encode(text);
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
     .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function takeEngineProfiles() {
+  const scope = globalThis as unknown as {
+    __dspCalibrationEngineProfiles?: Array<{ profile: SimulationProfiler; activeQueueEnabled: boolean | null; initiallyDormantRoutes: number | null }>;
+  };
+  const profiles = scope.__dspCalibrationEngineProfiles ?? [];
+  scope.__dspCalibrationEngineProfiles = [];
+  return profiles;
 }
 
 // Fresh, exclusively owned browser state. Mirrors the Worker's asynchronous
@@ -35,6 +44,7 @@ async function runConservativeCalibration() {
   refreshTimeWarpPowerSnapshotInPlace(state);
   const setupMs = performance.now() - setupStarted;
   const setupProfile = takeProfile();
+  const setupEngineProfiles = takeEngineProfiles();
   const progress: Array<{ simulationSeconds: number; total: number; atMs: number }> = [];
   const start = performance.now();
   const session = await createPureIdleMacroSessionAsync(state, "stable", {
@@ -46,12 +56,13 @@ async function runConservativeCalibration() {
     },
   }).catch((error: unknown) => {
     console.log(`[conservative-calibration] aborted ${JSON.stringify({
-      elapsedMs: performance.now() - start, progress, partialProfile: takeProfile(),
+      elapsedMs: performance.now() - start, progress, partialProfile: takeProfile(), partialEngineProfiles: takeEngineProfiles(),
     })}`);
     throw error;
   });
   const initializationMs = performance.now() - start;
   const initializationProfile = takeProfile();
+  const initializationEngineProfiles = takeEngineProfiles();
   if (!session.conservativeOnly || session.actualMultiplier !== 8 || session.settledWallSeconds > 5) {
     throw new Error("Expected owned large-save conservative prefix at 8x");
   }
@@ -83,7 +94,8 @@ async function runConservativeCalibration() {
   const fullEnvelopeSha256 = await digest(envelope);
   return {
     scope: "Owned async conservative calibration and fixed 30 wall seconds at 8x; no UI/database qualification",
-    mode: "stable", supply: "stock", setupMs, setupProfile, initializationMs, initializationProfile,
+    mode: "stable", supply: "stock", setupMs, setupProfile, setupEngineProfiles,
+    initializationMs, initializationProfile, initializationEngineProfiles,
     initialization, progress, buckets, finalizeMs, finalizeProfile,
     fullStateJsonLength: fullStateJson.length, fullStateSha256,
     fullEnvelopeJsonLength: envelope.length, fullEnvelopeSha256,

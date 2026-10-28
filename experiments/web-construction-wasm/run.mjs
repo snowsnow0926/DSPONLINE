@@ -154,9 +154,16 @@ const frozenRuntimePlugins = () => macroStages || contractDirect || measurementR
       const exported = Boolean(matches[0][2]);
       const original = `__macroProbe_${name}`;
       code = code.replace(pattern, (_match, lead) => `${lead}function ${original}(`);
+      const attachEngineProfiler = calibrationProfile && relative === "src/game/engine.ts" && name === "createSimulationAdvanceSession"
+        ? "args[2] = { ...args[2], profiler: createSimulationProfiler() };" : "";
+      const captureEngineProfiler = calibrationProfile && relative === "src/game/engine.ts" && name === "completeSimulationAdvanceSession"
+        ? `if (args[0].profiler) ((globalThis as any).__dspCalibrationEngineProfiles ??= []).push({
+          profile: { ...args[0].profiler }, activeQueueEnabled: args[0].lookup?.beltRuntime.activeQueueEnabled ?? null,
+          initiallyDormantRoutes: args[0].lookup?.beltRuntime.initiallyDormantRouteCount ?? null });` : "";
       code += `\n${exported ? "export " : ""}function ${name}(...args: Parameters<typeof ${original}>): ReturnType<typeof ${original}> {
         const start = performance.now();
-        try { return ${original}(...args); }
+        ${attachEngineProfiler}
+        try { const value = ${original}(...args); ${captureEngineProfiler} return value; }
         finally {
           const bag = (globalThis as any).__dspMacroProbeProfile ??= {};
           const row = bag[${JSON.stringify(name)}] ??= { calls: 0, milliseconds: 0 };

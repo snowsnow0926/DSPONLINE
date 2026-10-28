@@ -12,9 +12,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "large-save", "save-profile", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "large-save", "save-profile", "save-projection-chunks", "save-responsiveness", "save-inspection", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
-const callable = entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
+const callable = entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
       : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
@@ -185,7 +185,7 @@ try {
     ]))) } : {}),
     ...(entry === "terminal-parity" || entry === "save-state-chunks" || entry === "terminal-owner" || entry === "canonical-owner-parity" || entry === "persistence-retirement" ? { saveSourceFiles: Object.fromEntries(await Promise.all([
       "src/game/authoritativeSaveSerializationClient.ts", "src/game/save.worker.ts", "src/game/storage.ts",
-      "src/game/pureIdleMacroClient.ts", "src/App.tsx",
+      "src/game/pureIdleMacroClient.ts", "src/App.tsx", "src/game/saveProjection.ts", "src/game/saveTransfer.ts", "src/game/saveEnvelopeIntegrity.ts",
       ...(entry === "persistence-retirement" ? ["src/game/authoritativeSavePersistenceClient.ts", "src/game/authoritativeSavePersistence.worker.ts", "src/game/localSaveStore.ts"] : []),
       ...(entry === "persistence-retirement" && options["startup-parity"] === "1" ? ["src/game/pureIdleRecovery.ts", "src/game/saveStateChunkTransfer.ts"] : []),
       ...(entry === "persistence-retirement" && options["startup-owner-parity"] === "1" ? ["src/game/pureIdleRecovery.ts", "src/game/saveStateChunkTransfer.ts",
@@ -199,6 +199,10 @@ try {
     ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(entry === "save-state-chunks" ? { chunkTransportSourceSha256: await fileHash(resolve(sourceRoot, "src/game/saveStateChunkTransfer.ts")) } : {}),
     ...(entry === "power-matrix" ? { probeSourceSha256: await fileHash(resolve(root, "experiments/web-construction-wasm/power-matrix.ts")) } : {}),
+    ...(entry === "save-projection-chunks" ? { projectionSourceHashes: Object.fromEntries(await Promise.all([
+      "src/game/persistentSaveTransfer.ts", "src/game/saveProjection.ts", "src/game/saveTransfer.ts", "src/game/saveEnvelopeIntegrity.ts",
+      "experiments/web-construction-wasm/save-projection-chunks.ts",
+    ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(runtimeReference || ["quantum-runtime", "power-snapshot", "power-matrix", "read-models", "belt-flow", "power-copy"].includes(entry) ? { runtimeReference, runtimeFiles,
       runtimeSourceHashes: Object.fromEntries(await Promise.all(runtimeFiles.map(async (file) => [file,
         runtimeReference

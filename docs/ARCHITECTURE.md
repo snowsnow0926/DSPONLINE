@@ -1,5 +1,7 @@
 # 系统架构
 
+> **2026-10-28 终态只读分批投影候选（待验，未发布）**：宏观 Worker 复用 `createPersistentSaveProjectionParts`，按原字段顺序和每批 512 条记录生成 JSON 片段，统一生成原 v2 完整字节及校验，不构造第二份完整稀疏图、不修改运行候选。规范化/权威 proof/独立持久化/CAS/读回/恢复仍保留；普通单字符串路径不换算法。[边界和待验项](./reviews/2026-10-28-web-bounded-terminal-projection.md)。
+
 > **2026-10-28 Web 渲染上下文保留修正（未发布）**：坐标取消用 `canvasTopology.entities` 的不可变几何索引，随几何变化而非库存/流量刷新更新；连线读取使用当前 frame 自带身份，无 frame 时按原选择器返回同一 Web state，移除无效 renderer 时钟/会话依赖。原生所有权/端点/闭合行宇宙及提交重验保留，无新增持久化字段。历史 76 层根路径与同档 GC 定位后，正式冻结网页峰值少 11.31%、停止后工作集少 27.39%；等待仍约 10/12 秒。[实现、回归和当前局限](./reviews/2026-10-28-web-render-context-retention.md)。
 
 > **2026-10-28 模态焦点资格提前筛选（未发布）**：共享可访问面板先检查连接/禁用和原有标签/tabindex/contenteditable 资格，仅有资格的目标进入隐藏/inert/样式检查；Tab 循环先排除负 tabindex。同步恢复、嵌套链与滚动锁不改，无新调度/缓存/持久化字段；实档避免对不可聚焦 body 的无效样式重算，退出帧约 163→106 ms。总等待小幅回升、内存仍高，继续数据通路目标。[实现、诊断和资格](./reviews/2026-10-28-web-modal-focus-eligibility.md)。

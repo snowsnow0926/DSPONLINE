@@ -1,4 +1,4 @@
-import { measureSaveStateJson } from "./saveEnvelopeIntegrity";
+import { measureSaveStateJson, measureSaveStateJsonChunks } from "./saveEnvelopeIntegrity";
 import type { SaveMode } from "./types";
 import { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
 export { computeSavePayloadTextChecksum } from "./payloadTextChecksum";
@@ -94,7 +94,35 @@ export function computeSavePayloadChecksum(bytes: ArrayBuffer | ArrayBufferView)
 export function serializeSaveEnvelopeToTransfer(state: unknown, options: SaveTransferOptions): SerializedSaveTransfer {
   const stateJson = JSON.stringify(state);
   if (typeof stateJson !== "string") throw new Error("存档状态无法序列化");
-  const { stateChecksum, byteLength: stateByteLength } = measureSaveStateJson(options.formatVersion, stateJson);
+  return serializeMeasuredStateJsonChunks([stateJson], options, measureSaveStateJson(options.formatVersion, stateJson));
+}
+
+/** Internal framing for complete, ordered JSON fragments from a projection.
+ * No full state string or object graph is assembled. Rejoin only a surrogate
+ * split at a fragment boundary so encodeInto has the exact whole-text result. */
+export function serializeSaveStateJsonChunksToTransfer(source: Iterable<string>, options: SaveTransferOptions): SerializedSaveTransfer {
+  const chunks: string[] = [];
+  let pending = "";
+  for (const fragment of source) {
+    let chunk = pending + fragment;
+    pending = "";
+    const last = chunk.charCodeAt(chunk.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) {
+      pending = chunk.slice(-1);
+      chunk = chunk.slice(0, -1);
+    }
+    if (chunk.length) chunks.push(chunk);
+  }
+  if (pending) chunks.push(pending);
+  if (!chunks.length) throw new Error("存档状态无法序列化");
+  return serializeMeasuredStateJsonChunks(chunks, options, measureSaveStateJsonChunks(options.formatVersion, chunks));
+}
+
+function serializeMeasuredStateJsonChunks(
+  chunks: readonly string[],
+  options: SaveTransferOptions,
+  { stateChecksum, byteLength: stateByteLength }: { stateChecksum: string; byteLength: number },
+): SerializedSaveTransfer {
   const prefix = saveEnvelopePrefix(options);
   const suffix = saveEnvelopeSuffix(stateChecksum);
   const byteLength = utf8Length(prefix) + stateByteLength + utf8Length(suffix);
@@ -102,7 +130,7 @@ export function serializeSaveEnvelopeToTransfer(state: unknown, options: SaveTra
   const view = new Uint8Array(bytes);
   const encoder = new TextEncoder();
   let offset = writeUtf8(encoder, view, 0, prefix);
-  offset = writeUtf8(encoder, view, offset, stateJson);
+  for (const chunk of chunks) offset = writeUtf8(encoder, view, offset, chunk);
   offset = writeUtf8(encoder, view, offset, suffix);
   if (offset !== byteLength) throw new Error("存档 UTF-8 长度自检失败");
   const payloadChecksum = computeSavePayloadChecksum(bytes);

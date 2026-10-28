@@ -28,6 +28,7 @@ const runtimeRetention = mainHeapSnapshot || options["runtime-retention"] === "1
 if (runtimeRetention && (!workerHeapMemory || !workerHeapGc)) throw new Error("--runtime-retention requires --worker-heaps and --worker-heap-gc; diagnostic only");
 const runtimeTransitions = options["runtime-transitions"] === "1";
 const styleReadDiagnostics = options["style-read-diagnostics"] === "1";
+const handoffProgress = options["handoff-progress"] === "1";
 const profilePhase = options["profile-phase"] ?? "all";
 if (!["all", "starting", "stopping"].includes(profilePhase)) throw new Error("Invalid profiler phase");
 const timelinePhase = options.timeline ?? null;
@@ -190,7 +191,7 @@ try {
     } finally { await session.detach(); }
   });
   await context.route("**/api/**", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"isolated runtime test"}' }));
-  await context.addInitScript(({ profileSteps, idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention, runtimeTransitions, styleReadDiagnostics }) => {
+  await context.addInitScript(({ profileSteps, idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention, runtimeTransitions, styleReadDiagnostics, handoffProgress }) => {
     if (location.hostname !== "127.0.0.1") return;
     if (runtimeRetention) globalThis.__DSP_RUNTIME_TRANSITIONS__ = { enabled: true, events: [], active: {} };
     if (runtimeTransitions && !globalThis.__DSP_RUNTIME_TRANSITIONS__) {
@@ -201,6 +202,7 @@ try {
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     const trace = { active: false, phase: "idle", startedAt: 0, lastElapsed: 0, frames: [], tasks: [], sends: [], events: [] };
     globalThis.__LIVE_RUNTIME_TRACE__ = trace;
+    if (handoffProgress) { trace.handoff = []; trace.handoffCapped = false; }
     if (styleReadDiagnostics) {
       trace.styleReads = [];
       const getComputedStyle = window.getComputedStyle;
@@ -315,6 +317,30 @@ try {
             profiler: data.profiler,
             error: data.runtimeError?.message });
         });
+        if (handoffProgress && ["canonical-terminal-decoder", "authoritative-save-persistence",
+          "authoritative-save-serialization", "pure-idle-checkpoint-owner", "pure-idle-macro"].includes(name)) {
+          this.addEventListener("message", ({ data }) => {
+            if (!trace.active) return;
+            if (trace.handoff.length >= 2000) { trace.handoffCapped = true; return; }
+            const row = { name, phase: trace.phase, at: performance.now() - trace.startedAt };
+            const numeric = (label, value) => { if (typeof value === "number" && Number.isFinite(value)) row[label] = value; };
+            const tag = (label, value) => { if (typeof value === "string" && /^[a-z0-9-]{1,80}$/.test(value)) row[label] = value; };
+            tag("type", data.type); tag("stage", data.progress?.stage ?? data.phase);
+            tag("collection", data.collection);
+            numeric("durationMs", data.durationMs); numeric("compressionDurationMs", data.compressionDurationMs);
+            numeric("byteLength", data.byteLength); numeric("bytes", data.progress?.bytes);
+            numeric("entityCount", data.entityCount); numeric("beltCount", data.beltCount);
+            numeric("recordCount", Array.isArray(data.records) ? data.records.length : undefined);
+            const proof = data.result?.proof ?? data.proof;
+            numeric("proofByteLength", proof?.byteLength); numeric("storedByteLength", proof?.storedByteLength);
+            numeric("workerDecodeMs", proof?.workerDecodeMs); numeric("idbWriteMs", proof?.idbWriteMs);
+            numeric("backupVerifyMs", proof?.backupVerifyMs); numeric("totalBytesWritten", proof?.totalBytesWritten);
+            tag("transportEncoding", proof?.transportEncoding);
+            if (typeof data.result?.ok === "boolean") row.ok = data.result.ok;
+            if (typeof data.error === "string" || data.type === "error") row.failed = true;
+            trace.handoff.push(row);
+          });
+        }
       }
     };
     let last = performance.now();
@@ -328,7 +354,7 @@ try {
     new PerformanceObserver((list) => {
       if (trace.active) for (const entry of list.getEntries()) trace.tasks.push({ phase: trace.phase, at: entry.startTime - trace.startedAt, duration: entry.duration });
     }).observe({ type: "longtask" });
-  }, { profileSteps: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention, runtimeTransitions, styleReadDiagnostics });
+  }, { profileSteps: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupWorkerHeaps, runtimeRetention, runtimeTransitions, styleReadDiagnostics, handoffProgress });
   context.on("page", (opened) => {
     opened.setDefaultTimeout(120_000);
     opened.on("pageerror", (error) => { errors.push(error.message); console.log(`Page error: ${error.message}`); });
@@ -614,12 +640,24 @@ try {
   }
   if (mainHeapSnapshot && !mainHeapSnapshotResult?.complete) throw Error("Private main heap snapshot did not complete");
   if (runtimeRetention && retentionSamples.length !== (startupWorkerHeaps ? 6 : 5)) throw Error("Runtime retention diagnostic stages incomplete");
+  if (handoffProgress) {
+    if (!trace.handoff?.length || trace.handoffCapped) throw Error("Handoff progress diagnostic missing or truncated");
+    for (const phase of ["starting", "stopping"]) {
+      const rows = trace.handoff.filter((row) => row.phase === phase);
+      if (!rows.some((row) => Number.isFinite(row.durationMs) && Number.isFinite(row.compressionDurationMs)) ||
+        !rows.some((row) => row.name === "authoritative-save-persistence" && row.ok === true &&
+          Number.isFinite(row.workerDecodeMs) && Number.isFinite(row.idbWriteMs) && Number.isFinite(row.backupVerifyMs)) ||
+        rows.some((row) => row.failed || row.ok === false)) {
+        throw Error(`Handoff progress diagnostic incomplete or failed: ${phase}`);
+      }
+    }
+  }
   const evidence = { browser: await browser.version(), supply, observationSeconds: seconds,
-    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions || styleReadDiagnostics,
+    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions || styleReadDiagnostics || handoffProgress,
     profilePhase, timelinePhase, backgroundPresentationExperiment,
     postStopObservationSeconds: postStopSeconds, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
-    retainedNormalDebt: Boolean(options["retain-debt"]), styleReadDiagnostics,
+    retainedNormalDebt: Boolean(options["retain-debt"]), styleReadDiagnostics, handoffProgress,
     seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };
   await writeFile(resolve(output, `${name}.json`), JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify({ supply, stopMs, events: trace.events.filter((event) => event.summary),

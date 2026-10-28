@@ -25,8 +25,7 @@ import type {
   PureIdleMacroWorkerRequest,
   PureIdleMacroWorkerResponse,
 } from "./pureIdleMacroProtocol";
-import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
-import { projectPersistentSaveState } from "./saveProjection";
+import { serializePersistentSaveEnvelopeToTransfer } from "./persistentSaveTransfer";
 import {
   createImmutableWorkerBinaryPayload,
   workerBinaryPayloadTransferables,
@@ -193,10 +192,11 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
     // boundary as ordinary autosave/manual-save. Serializing the full runtime
     // state here retained exact defaults on every late-game entity and could
     // hold the Worker for minutes on 70+ MiB saves.
-    const persistent = projectPersistentSaveState(finalState, sessionContext.registry);
-    const mode = persistent.mode === "speedrun" ? "speedrun" : "normal";
+    // Read-only bounded projection leaves the macro candidate intact for any
+    // retry and never materializes a second complete sparse entity/belt graph.
+    const mode = finalState.mode === "speedrun" ? "speedrun" : "normal";
     const savedAt = Date.now();
-    const serialized = serializeSaveEnvelopeToTransfer(persistent, {
+    const serialized = serializePersistentSaveEnvelopeToTransfer(finalState, sessionContext.registry, {
       formatVersion: 2,
       kind: "primary",
       mode,
@@ -205,12 +205,12 @@ async function processRequest(request: PureIdleMacroWorkerRequest): Promise<void
     });
     const identity: PureIdleMacroFinalizedIdentity = {
       stateChecksum: serialized.stateChecksum,
-      stateVersion: persistent.version,
+      stateVersion: finalState.version,
       mode,
-      activePlanetId: persistent.activePlanetId,
-      entityCount: persistent.entities.length,
-      beltCount: persistent.belts.length,
-      elapsedSeconds: persistent.elapsedSeconds,
+      activePlanetId: finalState.activePlanetId,
+      entityCount: finalState.entities.length,
+      beltCount: finalState.belts.length,
+      elapsedSeconds: finalState.elapsedSeconds,
       algorithmVersion: result.summary.algorithmVersion,
       settledWallSeconds: result.summary.settledWallSeconds,
       settledSimulationSeconds: result.summary.settledSimulationSeconds,

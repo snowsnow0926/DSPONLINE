@@ -97,6 +97,7 @@ async function runTerminalParityProbe(path = "legacy", scenario = "natural") {
   let candidate: GameState | null = path !== "legacy" ? applyPureIdleMacroFinalState(state, 30, terminal) : state;
   let projected: GameState | null = projectPersistentSaveState(candidate, registry);
   const encoded = serializeSaveEnvelopeToTransfer(projected, metadata);
+  const sourcePayloadSha256 = await digest(encoded.bytes);
   state = null;
   candidate = null;
   projected = null;
@@ -110,6 +111,10 @@ async function runTerminalParityProbe(path = "legacy", scenario = "natural") {
   const persistedStateSha256 = await digest(new TextEncoder().encode(JSON.stringify(persisted)).buffer);
   const saved = serializeSaveEnvelopeToTransfer(persisted, metadata);
   const payloadSha256 = await digest(saved.bytes);
+  // Characterize whether the existing canonical migration/projection can be
+  // elided. This is evidence only: differences must never enable raw reuse.
+  const sourceProjectionDifferences = path !== "legacy" && sourcePayloadSha256 !== payloadSha256
+    ? summarizeDifferences(JSON.parse(raw).state as GameState, persisted) : undefined;
   const summary = { entities: persisted.entities.length, belts: persisted.belts.length,
     paused: persisted.paused, idleSeconds: persisted.idleSettlement.totalIdleTime };
   const differences = path === "terminal" && uiStateSha256 !== persistedStateSha256
@@ -126,6 +131,9 @@ async function runTerminalParityProbe(path = "legacy", scenario = "natural") {
     if (workerPayloadSha256 !== worker.proof.payloadSha256) throw new Error("Worker payload proof mismatch");
   }
   return { path, scenario, uiStateSha256, persistedStateSha256, payloadSha256, payloadBytes: saved.byteLength,
+    sourcePayloadSha256, sourcePayloadBytes: encoded.byteLength,
+    sourcePayloadMatchesCanonical: sourcePayloadSha256 === payloadSha256,
+    ...(sourceProjectionDifferences ? { sourceProjectionDifferences } : {}),
     ...(workerPayloadSha256 ? { workerPayloadSha256 } : {}), ...(differences ? { differences } : {}),
     ...(replicationSummary ? { replicationSummary } : {}), ...summary };
 }

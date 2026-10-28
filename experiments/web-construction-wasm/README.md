@@ -10,6 +10,16 @@
 
 ## 启动恢复日志入库实验
 
+`--entry=save-projection-chunks` 在同一只读大档中交替执行完整投影/分批投影/
+分批投影/完整投影，计时包含投影、JSON、UTF-8 编码与完整 FNV 校验。
+每次另外验证完整字节 SHA-256，最后复核源状态未变；不含规范化、数据库或 UI，
+同一页面的 GC/缓存会影响样本，不能把局部差值当成整页收益。
+
+`--entry=terminal-parity --terminal-path=terminal-safe --research-case=replication`
+另行比较宏观终态源 envelope 与规范化后保存的完整 SHA-256；
+`sourceProjectionDifferences` 只输出变化字段和数量，不输出正文或实体身份。
+相同摘要不足以证明可跳过规范化，发现正文差异必须保留原流程。
+
 使用 `--entry=startup-idb --prepared=<只读 prepared.json 的绝对路径>`，通过 `--transport-mode=main`、`worker-chunks`、`worker-ack` 比较主线程写入、分批后台写入和按确认逐批发送。沿用 `--output`、`--name` 保存证据。准备和哈希在计时窗口外；计时包含交接和事务完成，随后独立读回完整状态并校验调用方未变化。此实验不是整页、内存或发布资格验证。
 
 Worker 每批接收最多 512 个实体或 2,048 条带，检查顺序和总数，在临时数据库调用真实恢复日志 API。它自己持有隔离浏览器的锁，不能直接用于页面已经持锁的正式启动流程。[本轮数字与剩余门槛](../../docs/reviews/2026-10-27-web-startup-idb.md)。

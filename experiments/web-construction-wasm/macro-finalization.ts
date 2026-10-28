@@ -12,7 +12,8 @@ const digest = async (bytes: ArrayBuffer) => [...new Uint8Array(await crypto.sub
   .map((value) => value.toString(16).padStart(2, "0")).join("");
 const stateDigest = (state: GameState) => digest(new TextEncoder().encode(JSON.stringify(state)).buffer);
 
-async function runMacroFinalization() {
+async function runMacroFinalization(mode: "replication" | "stable" = "replication") {
+  if (mode !== "replication" && mode !== "stable") throw new Error("Unknown macro mode");
   let state = (await (await fetch("/prepared.json")).json()).state as GameState;
   state.timeWarp.enabled = false;
   state.timeWarp.pendingSimulationSeconds = state.timeWarp.pendingWallSeconds = 0;
@@ -48,7 +49,7 @@ async function runMacroFinalization() {
   const client = new PureIdleMacroClient();
   try {
     const registry = createContentPackRegistry();
-    await client.initialize(state, "replication", createContentPackRuntimeSnapshot(registry), {
+    await client.initialize(state, mode, createContentPackRuntimeSnapshot(registry), {
       startedPaused: true, baselineIdleSettlement: structuredClone(state.idleSettlement), baselineTotalProduced: { ...state.totalProduced },
     });
     const result = await client.finalizeEnvelope(30, { terminal: true, binaryTransport: "array-buffer" });
@@ -64,7 +65,7 @@ async function runMacroFinalization() {
     const payloadSha256 = await digest(body);
     if (payloadSha256 !== saved.proof.payloadSha256 || body.byteLength !== saved.proof.byteLength) throw new Error("Saved payload proof mismatch");
     if (before !== await stateDigest(state)) throw new Error("Macro initialization changed caller state");
-    return { scope: "actual macro Worker, fixed 30 seconds at 8x, full envelope/canonical state/actual save Worker bytes; diagnostic only, no database/UI qualification",
+    return { scope: "actual macro Worker, fixed 30 seconds at 8x, full envelope/canonical state/actual save Worker bytes; diagnostic only, no database/UI qualification", macroMode: mode,
       inputUnchanged: true, diagnosticPhases, finalizationDurationMs: result.durationMs, sourcePayloadSha256, sourcePayloadBytes: envelope.verification.byteLength, canonicalStateSha256,
       payloadSha256, payloadBytes: body.byteLength, identity: { mode: canonical.mode, version: canonical.version,
         entities: canonical.entities.length, belts: canonical.belts.length, elapsedSeconds: canonical.elapsedSeconds },

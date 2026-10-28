@@ -45,6 +45,12 @@
 `sourceProjectionDifferences` 只输出变化字段和数量，不输出正文或实体身份。
 相同摘要不足以证明可跳过规范化，发现正文差异必须保留原流程。
 
+`macro-finalization` 可显式加 `--macro-mode=stable` 验证实际守恒 Worker，默认仍为
+`replication`。两种模式都核对完整源载荷、规范化状态及实际保存 Worker 的解压正文，
+不等于网页或数据库资格。校准墙钟等待使用原 `performance.now()`，固定 `Date.now()`
+仅令保存时间可复现；没有减少精确校准。宏相关引用须实际编译引擎、量子、递归、
+纯挂机及离线五份冻结源码，缺失即失败；实际 Worker 探针也有 180 秒浏览器预算。
+
 `--entry=macro-finalization` 运行真实宏观 Worker，在固定时钟下推进 30 秒墙钟、
 8 倍复制，分别对完整源 envelope、规范化状态和真实保存 Worker 的正文求 SHA-256。
 可用 `--macro-worker-ref=<commit>` 只替换宏观 Worker 入口为指定 Git 源码，

@@ -14,6 +14,9 @@ const output = resolve(options.output ?? resolve(root, "artifacts/web-constructi
 const entry = options.entry ?? "probe";
 if (!["probe", "payload-checksum", "large-save", "conservative-calibration", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "save-inspection-runs", "save-inspection-stack", "save-inspection-local-hash", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy", "blueprint-scale", "save-state-measure"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
+const workerMacroMode = options["macro-mode"] ?? "replication";
+if (options["macro-mode"] && entry !== "macro-finalization") throw new Error("Macro mode requires macro-finalization");
+if (!["stable", "replication"].includes(workerMacroMode)) throw new Error("Unknown macro mode");
 const contractDirect = options["contract-omit-direct"] === "1";
 const macroStages = options["macro-stages"] === "1";
 if (macroStages && entry !== "macro-finalization") throw new Error("Macro stage diagnostics require macro-finalization");
@@ -69,7 +72,8 @@ const calibrationProfileFunctions = {
 };
 const runtimeFiles = entry === "belt-flow" ? ["src/game/beltFlow.ts"] : entry === "read-models"
   ? ["src/game/nativeFactoryInteractionFrame.ts", "src/game/webFactoryReadModelAdapter.ts"]
-  : entry === "conservative-calibration" ? ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts", "src/game/recursiveCrafting.ts", "src/game/pureIdleMacro.ts", "src/game/offlineApproximation.ts"]
+  : ["conservative-calibration", "large-save", "macro-finalization"].includes(entry)
+    ? ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts", "src/game/recursiveCrafting.ts", "src/game/pureIdleMacro.ts", "src/game/offlineApproximation.ts"]
   : ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts", "src/game/recursiveCrafting.ts"];
 const runtimeReference = options["runtime-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["runtime-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
@@ -203,7 +207,7 @@ if (runtimeReference && ["large-save", "macro-finalization"].includes(entry) &&
 if (contractDirect && !referenceSourceLoads.some(row => row.file === "save-field-contract.mjs" && row.experimental)) {
   throw new Error("Contract descriptor replacement was not loaded");
 }
-if (entry === "conservative-calibration" && runtimeFiles.some(file =>
+if (runtimeReference && ["conservative-calibration", "large-save", "macro-finalization"].includes(entry) && runtimeFiles.some(file =>
   !referenceSourceLoads.some(row => row.file === file && row.reference === runtimeReference))) {
   throw new Error("Requested conservative runtime reference was not actually compiled");
 }
@@ -236,8 +240,8 @@ try {
   browser = await chromium.launch({ headless: true, channel: options.channel ?? "chrome",
     args: options.memory ? ["--enable-precise-memory-info"] : [] });
   const page = await browser.newPage();
-  if (entry === "conservative-calibration") conservativeWatchdog = setTimeout(() => {
-    console.error("Conservative probe exceeded its 180-second browser budget");
+  if (entry === "conservative-calibration" || entry === "macro-finalization") conservativeWatchdog = setTimeout(() => {
+    console.error("Macro probe exceeded its 180-second browser budget");
     void browser.close().catch(() => {});
   }, 180_000);
   if (options.memory) await page.addInitScript(() => { globalThis.recordHeapMeasurements = true; });
@@ -256,6 +260,8 @@ try {
   await page.waitForFunction((name) => typeof globalThis[name] === "function", callable);
   const result = entry === "large-save"
     ? await page.evaluate(({ name, supply }) => globalThis[name](supply), { name: callable, supply: options.supply ?? "tray" })
+    : entry === "macro-finalization"
+    ? await page.evaluate(({ name, mode }) => globalThis[name](mode), { name: callable, mode: workerMacroMode })
     : entry === "terminal-parity"
     ? await page.evaluate(({ name, path, scenario }) => globalThis[name](path, scenario),
       { name: callable, path: options["terminal-path"] ?? "legacy", scenario: options["research-case"] ?? "natural" })
@@ -290,7 +296,7 @@ try {
       runnerSourceSha256: await fileHash(resolve(root, "experiments/web-construction-wasm/run.mjs")) } : {}),
     bundleSha256: createHash("sha256").update(code).digest("hex"), referenceSourceLoads, workerAssetHashes,
     ...(entry.startsWith("save-inspection") ? { inspectionReference } : {}),
-    ...(entry === "macro-finalization" ? { macroStages } : {}),
+    ...(entry === "macro-finalization" ? { macroStages, macroMode: workerMacroMode, browserBudgetMs: 180_000 } : {}),
     ...(entry === "save-profile" ? { contractDirect, contractSourceHash: await fileHash(resolve(sourceRoot, "save-field-contract.mjs")),
       contractPrototypeHash: await fileHash(resolve(root, "experiments/web-save-checkpoints/contract-omit-direct-body.mjs")) } : {}),
     ...(entry === "save-state-measure" ? { measurementReference, measurementSourceHash: createHash("sha256").update(execFileSync("git", ["show", measurementReference + ":" + measurementFile], { cwd: sourceRoot })).digest("hex"),

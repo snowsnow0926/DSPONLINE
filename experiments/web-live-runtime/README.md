@@ -1,5 +1,13 @@
 # Production-page large-save runtime probe
 
+`--macro-mode=stable` selects the real **开始纯挂机（守恒模式）** accessible button;
+the default `replication` retains the existing protocol. Both modes keep the
+same original-inventory seeding, at-least-40-simulation-second normal warmup,
+real start/stop controls and primary/catalog verification. The output records
+`macroMode`; process-stage labels use `conservative` or `replication` accordingly.
+Give each run an explicit unique `--name` when comparing frozen bundles. Mode
+selection does not enable CPU/heap/GC diagnostics or change the game rules.
+
 `--worker-heaps=1 --post-stop-memory-tail=1` adds diagnostic snapshots
 10 and 30 seconds after the stop overlay closes, and rechecks the primary
 catalog and paused state at each point. `--post-stop-heap-gc=1` additionally

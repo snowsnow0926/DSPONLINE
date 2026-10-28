@@ -5,6 +5,9 @@ import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
 const options = Object.fromEntries(process.argv.slice(2).map((arg) => arg.replace(/^--/, "").split(/=(.*)/s, 2)));
+const macroMode = options["macro-mode"] ?? "replication";
+if (!["stable", "replication"].includes(macroMode)) throw new Error("Unknown macro mode");
+const macroLabel = macroMode === "stable" ? "conservative" : "replication";
 const idbOperations = options["idb-operations"] === "1";
 const startupBufferGc = options["startup-buffer-gc"] === "1";
 const startupWorkerHeaps = options["startup-worker-heaps"] === "1";
@@ -43,7 +46,7 @@ if (backgroundPresentationExperiment !== null && backgroundPresentationExperimen
   throw new Error("Unknown isolated background presentation experiment");
 }
 const output = resolve(options.output ?? "artifacts/web-live-runtime");
-const name = options.name ?? `live-${supply}`;
+const name = options.name ?? (macroMode === "stable" ? `live-stable-${supply}` : `live-${supply}`);
 if (!/^[a-z0-9-]+$/i.test(name)) throw new Error("Invalid evidence name");
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({ channel: "chrome", headless: true });
@@ -469,7 +472,7 @@ try {
   if (await node.count()) await node.evaluate((element) => element.click());
   else await page.locator(".react-flow__pane").click({ position: { x: 430, y: 270 } });
   await page.locator(".time-warp-inspector").waitFor();
-  const start = page.getByRole("button", { name: "开始产率复制挂机", exact: true });
+  const start = page.getByRole("button", { name: macroMode === "stable" ? "开始纯挂机（守恒模式）" : "开始产率复制挂机", exact: true });
   await start.waitFor();
   await sampleProcesses("factory mounted");
   if (options.profile && profilePhase === "all") {
@@ -511,10 +514,10 @@ try {
     profilerTimeline = { phase: profilePhase, startTraceBeforeMs: beforeMs, startTraceAfterMs: afterMs };
   }
   await page.evaluate(() => { globalThis.__LIVE_RUNTIME_TRACE__.phase = "starting"; });
-  console.log("Starting replication through the real UI");
+  console.log(`Starting ${macroLabel} through the real UI`);
   const startStartedAt = Date.now();
   await start.click({ noWaitAfter: true });
-  console.log("Replication click dispatched");
+  console.log(`${macroLabel} click dispatched`);
   const overlay = page.getByRole("dialog", { name: "纯挂机", exact: true });
   let statusInFlight = false;
   const statusTimer = setInterval(async () => {
@@ -559,7 +562,7 @@ try {
   console.log(`Observing ${seconds} seconds of active replication`);
   await page.waitForTimeout(seconds * 1000);
   const visibleSummary = (await overlay.innerText()).slice(0, 5000);
-  await sampleProcesses("replication running");
+  await sampleProcesses(`${macroLabel} running`);
   const geometryBeforeStop = await page.evaluate(() => {
     const canvas = document.querySelector(".canvas-belt-layer__topology");
     return canvas ? { builds: canvas.getAttribute("data-hit-index-builds"), reuses: canvas.getAttribute("data-hit-index-reuses") } : null;
@@ -591,7 +594,7 @@ try {
     profilerTimeline = { phase: profilePhase, startTraceBeforeMs: beforeMs, startTraceAfterMs: afterMs };
   }
   const stopStarted = Date.now();
-  console.log("Stopping replication and committing the verified checkpoint");
+  console.log(`Stopping ${macroLabel} and committing the verified checkpoint`);
   await overlay.getByRole("button", { name: "停止并结算纯挂机", exact: true }).click({ noWaitAfter: true });
   await overlay.waitFor({ state: "hidden" });
   const stopMs = Date.now() - stopStarted;
@@ -615,7 +618,7 @@ try {
     const canvas = document.querySelector(".canvas-belt-layer__topology");
     return canvas ? { builds: canvas.getAttribute("data-hit-index-builds"), reuses: canvas.getAttribute("data-hit-index-reuses") } : null;
   });
-  await sampleProcesses("replication stopped");
+  await sampleProcesses(`${macroLabel} stopped`);
   const readDurable = () => page.evaluate(async () => {
     const request = (operation) => new Promise((resolve, reject) => {
       operation.onsuccess = () => resolve(operation.result);
@@ -640,10 +643,10 @@ try {
   if (postStopMemoryTail) {
     for (const seconds of [10, 30]) {
       await page.waitForTimeout(Math.max(0, seconds * 1000 - (Date.now() - stopCompletedAt)));
-      await sampleProcesses(`replication stopped +${seconds}s`);
+      await sampleProcesses(`${macroLabel} stopped +${seconds}s`);
       if (seconds === 10 && postStopHeapGc) {
-        await sampleHeaps("replication stopped diagnostic GC", true);
-        await sampleProcesses("replication stopped after diagnostic GC");
+        await sampleHeaps(`${macroLabel} stopped diagnostic GC`, true);
+        await sampleProcesses(`${macroLabel} stopped after diagnostic GC`);
       }
       const after = await readDurable();
       if (JSON.stringify(after) !== JSON.stringify(durable)) throw Error("Diagnostic memory tail changed the primary catalog or pause state");
@@ -674,7 +677,7 @@ try {
       }
     }
   }
-  const evidence = { browser: await browser.version(), supply, observationSeconds: seconds,
+  const evidence = { browser: await browser.version(), supply, macroMode, observationSeconds: seconds,
     profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapMemory || postStopMemoryTail || postStopHeapGc || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions || styleReadDiagnostics || handoffProgress,
     profilePhase, timelinePhase, backgroundPresentationExperiment,
     postStopObservationSeconds: postStopSeconds, postStopMemoryTail, postStopHeapGc, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,

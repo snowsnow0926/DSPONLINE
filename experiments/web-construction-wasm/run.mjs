@@ -28,6 +28,10 @@ const callable = entry === "save-inspection-local-hash" ? "runSaveInspectionLoca
                   : entry === "persistence-retirement" ? options["startup-owner-parity"] === "1" ? "runStartupSharedOwnerParity"
                     : options["startup-parity"] === "1" ? "runStartupCheckpointParity" : "runPersistenceRetirement" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
+const inspectionFile = "src/game/canonicalSaveEnvelopeInspection.ts";
+const inspectionReference = options["inspection-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["inspection-ref"]}^{commit}`],
+  { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
+if (inspectionReference && !entry.startsWith("save-inspection")) throw new Error("Inspection reference requires a save-inspection probe");
 const macroWorkerReference = options["macro-worker-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["macro-worker-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
 if (macroWorkerReference && entry !== "macro-finalization") throw new Error("Macro Worker reference requires macro-finalization");
@@ -57,13 +61,17 @@ const fileHash = async (path) => {
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest("hex");
 };
+const inspectionSourceHash = async (file) => inspectionReference && file === inspectionFile
+  ? createHash("sha256").update(execFileSync("git", ["show", `${inspectionReference}:${file}`], { cwd: sourceRoot })).digest("hex")
+  : fileHash(resolve(sourceRoot, file));
 const inputHash = fixtureMode ? await fileHash(options.prepared) : null;
 const wasmPath = options.wasm ?? resolve(output, "target/wasm32-unknown-unknown/release/dsp_web_construction_probe.wasm");
 await mkdir(output, { recursive: true });
 const referenceSourceLoads = [];
-const frozenRuntimePlugins = () => decoderReference || runtimeReference || macroWorkerReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
+const frozenRuntimePlugins = () => decoderReference || runtimeReference || macroWorkerReference || inspectionReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
     const relative = id.replaceAll("\\", "/").replace(`${sourceRoot.replaceAll("\\", "/")}/`, "").split("?")[0];
-    const reference = relative === "src/game/pureIdleMacro.worker.ts" && macroWorkerReference ? macroWorkerReference
+    const reference = relative === inspectionFile && inspectionReference ? inspectionReference
+      : relative === "src/game/pureIdleMacro.worker.ts" && macroWorkerReference ? macroWorkerReference
       : runtimeFiles.includes(relative) ? runtimeReference : decoderFiles.includes(relative) ? decoderReference : null;
     const profileFunctions = macroProfile ? macroProfileFunctions[relative] : undefined;
     const overridePhaseCache = constructionPhaseCacheLimit !== 4 && relative === "src/game/engine.ts";
@@ -120,6 +128,9 @@ const bundle = await build({ root, configFile: false, publicDir: false, logLevel
 const code = (Array.isArray(bundle) ? bundle : [bundle]).flatMap((entry) => entry.output)
   .find((entry) => entry.type === "chunk" && entry.isEntry)?.code;
 if (!code) throw new Error("Missing browser probe bundle");
+if (inspectionReference && !referenceSourceLoads.some((row) => row.file === inspectionFile && row.reference === inspectionReference)) {
+  throw new Error("Requested inspector reference was not actually loaded by the compiler");
+}
 if (macroWorkerReference && !referenceSourceLoads.some((row) => row.file === "src/game/pureIdleMacro.worker.ts" && row.reference === macroWorkerReference)) {
   throw new Error("Requested macro Worker source reference was not actually loaded by the Worker compiler");
 }
@@ -191,6 +202,7 @@ try {
       : await fileHash(resolve(sourceRoot, file))]))) } : {}),
     sourceDirty: Boolean(execFileSync("git", ["status", "--porcelain"], { cwd: sourceRoot, encoding: "utf8" }).trim()),
     bundleSha256: createHash("sha256").update(code).digest("hex"), referenceSourceLoads, workerAssetHashes,
+    ...(entry.startsWith("save-inspection") ? { inspectionReference } : {}),
     ...(rendererMemory ? { rendererMemory } : {}),
     ...(decoderReference ? { decoderReference, decoderFiles } : {}),
     ...(entry === "macro-finalization" ? { macroWorkerReference, macroSourceHashes: Object.fromEntries(await Promise.all([
@@ -231,15 +243,15 @@ try {
     ...(entry === "save-inspection-runs" ? { inspectionSourceHashes: Object.fromEntries(await Promise.all([
       "src/game/canonicalSaveEnvelopeInspection.ts", "experiments/web-save-checkpoints/inspection-run-skip.ts",
       "experiments/web-save-checkpoints/inspection-token-skip.ts", "experiments/web-construction-wasm/save-inspection-runs.ts",
-    ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
+    ].map(async file => [file, await inspectionSourceHash(file)]))) } : {}),
     ...(entry === "save-inspection-stack" ? { inspectionSourceHashes: Object.fromEntries(await Promise.all([
       "src/game/canonicalSaveEnvelopeInspection.ts", "experiments/web-save-checkpoints/inspection-stack-reuse.ts",
       "experiments/web-construction-wasm/save-inspection-stack.ts",
-    ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
+    ].map(async file => [file, await inspectionSourceHash(file)]))) } : {}),
     ...(entry === "save-inspection-local-hash" ? { inspectionSourceHashes: Object.fromEntries(await Promise.all([
       "src/game/canonicalSaveEnvelopeInspection.ts", "experiments/web-save-checkpoints/inspection-local-hash.ts",
       "experiments/web-construction-wasm/save-inspection-stack.ts", "experiments/web-construction-wasm/save-inspection-local-hash.ts",
-    ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
+    ].map(async file => [file, await inspectionSourceHash(file)]))) } : {}),
     ...(runtimeReference || ["quantum-runtime", "power-snapshot", "power-matrix", "read-models", "belt-flow", "power-copy"].includes(entry) ? { runtimeReference, runtimeFiles,
       runtimeSourceHashes: Object.fromEntries(await Promise.all(runtimeFiles.map(async (file) => [file,
         runtimeReference

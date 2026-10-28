@@ -192,21 +192,26 @@ function countArrayElements(raw: string, range: JsonRange): number {
   return scanArrayElements(raw, range).count;
 }
 
+/** Keep the per-character accumulator local; a captured mutable value forces
+ * extra context work throughout a large checksum. All UTF-16 units and their
+ * original FNV order are still processed, without another state string. */
+function mixChecksumRange(hash: number, value: string, start: number, end: number): number {
+  let index = start;
+  for (; index + 3 < end; index += 4) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+    hash = Math.imul(hash ^ value.charCodeAt(index + 1), 0x01000193);
+    hash = Math.imul(hash ^ value.charCodeAt(index + 2), 0x01000193);
+    hash = Math.imul(hash ^ value.charCodeAt(index + 3), 0x01000193);
+  }
+  for (; index < end; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+  return hash;
+}
+
 function checksumRange(formatVersion: number, raw: string, state: JsonRange): string {
-  let hash = 0x811c9dc5;
-  const mix = (value: string, start = 0, end = value.length) => {
-    let index = start;
-    for (; index + 3 < end; index += 4) {
-      hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
-      hash = Math.imul(hash ^ value.charCodeAt(index + 1), 0x01000193);
-      hash = Math.imul(hash ^ value.charCodeAt(index + 2), 0x01000193);
-      hash = Math.imul(hash ^ value.charCodeAt(index + 3), 0x01000193);
-    }
-    for (; index < end; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
-  };
-  mix(`{"formatVersion":${JSON.stringify(formatVersion)},"state":`);
-  mix(raw, state.start, state.end);
-  mix("}");
+  const prefix = `{"formatVersion":${JSON.stringify(formatVersion)},"state":`;
+  let hash = mixChecksumRange(0x811c9dc5, prefix, 0, prefix.length);
+  hash = mixChecksumRange(hash, raw, state.start, state.end);
+  hash = Math.imul(hash ^ 0x7d, 0x01000193);
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 

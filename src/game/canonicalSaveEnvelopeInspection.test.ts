@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { inspectCanonicalSaveEnvelope } from "./canonicalSaveEnvelopeInspection";
-import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";
+import { computeSaveStateChecksum, computeSaveStateChecksumFromJson } from "./saveEnvelopeIntegrity";
 import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
 
 function fixtureRaw(): string {
@@ -28,6 +28,28 @@ function fixtureRaw(): string {
 }
 
 describe("canonical save envelope inspection", () => {
+  it("preserves whole-text reference checksums across envelope offsets and raw UTF-16 tails", () => {
+    for (const formatVersion of [0, 1, 2, 47]) {
+      for (const text of ["", "abc", "物料🧪", "\ud800", "\udc00", "\ud800\udc00", "\\u1234"]) {
+        for (const tail of [0, 1, 2, 3, 4, 7]) {
+          const state = { version: 47, mode: "normal", activePlanetId: "home", entities: [{ text: text + "x".repeat(tail) }],
+            belts: [], elapsedSeconds: 0.5, research: { completedTechIds: [] }, dysonSphere: { structurePoints: 0 } };
+          // Direct stored strings may contain lone UTF-16 units; do not round
+          // them through UTF-8 or normalize them while computing the proof.
+          const stateJson = JSON.stringify(state).replace(/\\u(d800|dc00)/g,
+            (_, unit: string) => String.fromCharCode(Number.parseInt(unit, 16)));
+          const checksum = computeSaveStateChecksumFromJson(formatVersion, stateJson);
+          for (const savedAt of [17, 1_800_000_000_000]) {
+            const raw = ` \n{"slot":"main","formatVersion":${formatVersion},"kind":"primary","savedAt":${savedAt},"mode":"normal","state":${stateJson},"checksum":"${checksum}"}\t`;
+            expect(inspectCanonicalSaveEnvelope(raw)).toMatchObject({ formatVersion, savedAt,
+              recordedChecksum: checksum, computedChecksum: checksum,
+              state: { entityCount: 1, beltCount: 0, elapsedSeconds: 0 } });
+          }
+        }
+      }
+    }
+  });
+
   it("keeps exact checksums across string escapes, Unicode and checksum loop tails", () => {
     const texts = ["", "abc", "quote\"slash\\", "\u0000\n\t", "\\u1234", "物料🧪", "\ud800", "\udc00", "},]\\\""];
     for (let index = 0; index < 256; index++) {

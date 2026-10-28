@@ -20,6 +20,7 @@ if (!Number.isFinite(seconds) || seconds < 5 || seconds > 120) throw new Error("
 const postStopSeconds = Number(options["post-stop-seconds"] ?? 0);
 if (!Number.isFinite(postStopSeconds) || postStopSeconds < 0 || postStopSeconds > 10) throw new Error("Invalid post-stop observation window");
 const allProcessMemory = options["all-process-memory"] === "1";
+const processMemoryTail = options["process-memory-tail"] === "1";
 const workerHeapMemory = options["worker-heaps"] === "1";
 const workerHeapGc = options["worker-heap-gc"] === "1";
 if (workerHeapGc && !workerHeapMemory) throw new Error("--worker-heap-gc requires --worker-heaps; diagnostic only");
@@ -44,6 +45,12 @@ if (timelinePhase && options.profile) throw new Error("Capture CPU sampling and 
 const backgroundPresentationExperiment = options["background-experiment"] ?? null;
 if (backgroundPresentationExperiment !== null && backgroundPresentationExperiment !== "opacity-inert") {
   throw new Error("Unknown isolated background presentation experiment");
+}
+if (processMemoryTail && (process.platform !== "win32" || !allProcessMemory || options.profile ||
+  options["engine-profile"] || options["retain-debt"] || timelinePhase || backgroundPresentationExperiment ||
+  workerHeapMemory || postStopMemoryTail || startupBufferGc || startupWorkerHeaps || runtimeRetention ||
+  runtimeTransitions || styleReadDiagnostics || handoffProgress || idbOperations)) {
+  throw new Error("--process-memory-tail requires Windows process memory sampling without heap/GC, profiling or other diagnostic experiments");
 }
 const output = resolve(options.output ?? "artifacts/web-live-runtime");
 const name = options.name ?? (macroMode === "stable" ? `live-stable-${supply}` : `live-${supply}`);
@@ -159,7 +166,7 @@ async function sampleHeaps(stage, collectGarbage = workerHeapGc) {
   } finally { await session.detach(); }
 }
 
-async function sampleProcesses(stage) {
+async function sampleProcesses(stage, stoppedAtMs) {
   let sampledStage = false;
   for (let attempt = 1; attempt <= 3; attempt++) {
     let session;
@@ -168,6 +175,7 @@ async function sampleProcesses(stage) {
       const { processInfo } = await bounded(session.send("SystemInfo.getProcessInfo"));
       const rendererIds = new Set(processInfo.filter((item) => item.type === "renderer").map((item) => item.id));
       const ids = processInfo.filter((item) => Number.isSafeInteger(item.id) && item.id > 0 && (allProcessMemory || rendererIds.has(item.id))).map((item) => item.id);
+      const queryStartedAtMs = Date.now();
       const sampled = process.platform === "win32" && ids.length ? JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-Command",
         `Get-Process -Id ${ids.join(",")} -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64,PeakWorkingSet64,PrivateMemorySize64 | ConvertTo-Json -Compress`], { encoding: "utf8", timeout: 5000, windowsHide: true }) || "null") : null;
       const rows = sampled ? Array.isArray(sampled) ? sampled : [sampled] : [];
@@ -176,7 +184,10 @@ async function sampleProcesses(stage) {
       if (process.platform === "win32" && (!rendererRows.length || rendererRows.some(row => !(row.PeakWorkingSet64 > 0)))) {
         throw Error("Renderer memory sample unavailable");
       }
-      const sample = { stage, attempt, processInfo, memory, ...(allProcessMemory ? { allProcessMemory: rows,
+      const sample = { stage, attempt, processInfo, memory,
+        ...(stoppedAtMs === undefined ? {} : { queryStartedAfterStopMs: queryStartedAtMs - stoppedAtMs,
+          queryEndedAfterStopMs: Date.now() - stoppedAtMs }),
+        ...(allProcessMemory ? { allProcessMemory: rows,
         sampledBrowserWorkingSetBytes: rows.reduce((sum, row) => sum + row.WorkingSet64, 0),
         sampledBrowserPrivateBytes: rows.reduce((sum, row) => sum + row.PrivateMemorySize64, 0) } : {}) };
       await writeFile(resolve(output, `${name}-processes.json`), JSON.stringify([...processSamples, sample], null, 2));
@@ -636,7 +647,7 @@ try {
     const canvas = document.querySelector(".canvas-belt-layer__topology");
     return canvas ? { builds: canvas.getAttribute("data-hit-index-builds"), reuses: canvas.getAttribute("data-hit-index-reuses") } : null;
   });
-  await sampleProcesses(`${macroLabel} stopped`);
+  await sampleProcesses(`${macroLabel} stopped`, processMemoryTail ? stopCompletedAt : undefined);
   const readDurable = () => page.evaluate(async () => {
     const request = (operation) => new Promise((resolve, reject) => {
       operation.onsuccess = () => resolve(operation.result);
@@ -658,6 +669,15 @@ try {
       if (JSON.stringify(durable.catalog.settings[key]) !== JSON.stringify(value)) throw Error(`Backup preference changed: ${key}`);
     }
   }
+  if (processMemoryTail) {
+    for (const tailSeconds of [10, 30, 60]) {
+      await page.waitForTimeout(Math.max(0, tailSeconds * 1000 - (Date.now() - stopCompletedAt)));
+      await sampleProcesses(`${macroLabel} stopped +${tailSeconds}s natural`, stopCompletedAt);
+      const after = await readDurable();
+      if (JSON.stringify(after) !== JSON.stringify(durable)) throw Error("Natural memory tail changed the primary catalog or pause state");
+    }
+    if (heapSamples.length) throw Error("Natural process memory tail unexpectedly inspected the heap");
+  }
   if (postStopMemoryTail) {
     for (const seconds of [10, 30]) {
       await page.waitForTimeout(Math.max(0, seconds * 1000 - (Date.now() - stopCompletedAt)));
@@ -677,6 +697,7 @@ try {
   if (errors.length) throw Error(errors.join("\n"));
   if (allProcessMemory && process.platform === "win32") {
     const requiredStages = ["factory mounted", "normal simulation warmed", "replication ready", `${macroLabel} running`, `${macroLabel} stopped`];
+    if (processMemoryTail) requiredStages.push(...[10, 30, 60].map(seconds => `${macroLabel} stopped +${seconds}s natural`));
     if (requiredStages.some(stage => processSamples.filter(sample => sample.stage === stage && sample.memory).length !== 1)) {
       throw Error("Required process memory samples incomplete; evidence retained");
     }
@@ -704,7 +725,7 @@ try {
   const evidence = { browser: await browser.version(), supply, macroMode, observationSeconds: seconds,
     profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapMemory || postStopMemoryTail || postStopHeapGc || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions || styleReadDiagnostics || handoffProgress,
     profilePhase, timelinePhase, backgroundPresentationExperiment,
-    postStopObservationSeconds: postStopSeconds, postStopMemoryTail, postStopHeapGc, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
+    postStopObservationSeconds: postStopSeconds, processMemoryTail, postStopMemoryTail, postStopHeapGc, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
     retainedNormalDebt: Boolean(options["retain-debt"]), styleReadDiagnostics, handoffProgress,
     seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, processSamplingErrors, durable, geometryBeforeStop, geometryAfterStop };

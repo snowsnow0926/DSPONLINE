@@ -81,6 +81,17 @@ test("rejects an existing macro Worker and detaches without profiling", async ()
   assert.equal(root.workerCalls.length, 0);
 });
 
+test("waits for the script URL when target creation reports an empty URL", async () => {
+  const { root, capture } = await setup();
+  root.emit("Target.targetCreated", { targetInfo: { ...target(), url: "" } });
+  assert.equal(root.workerCalls.length, 0);
+  root.emit("Target.targetInfoChanged", { targetInfo: target() });
+  const result = await capture.finish();
+  assert.equal(result.complete, true);
+  assert.equal(result.matchingTargetCount, 1);
+  assert.equal(root.listenerCount("Target.targetInfoChanged"), 0);
+});
+
 for (const method of ["Profiler.enable", "Profiler.start", "Profiler.stop"]) {
   test("rejects a failed " + method + " command and releases all listeners", async () => {
     const { root, capture } = await setup({ failWorker: method });

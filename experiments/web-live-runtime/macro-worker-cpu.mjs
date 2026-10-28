@@ -71,6 +71,7 @@ export async function createMacroWorkerCpuCapture({
   const cleanup = async () => {
     clearTimeout(captureTimer);
     root.off("Target.targetCreated", created);
+    root.off("Target.targetInfoChanged", created);
     if (sessionId) {
       if (started) await request("Profiler.disable").catch(recordError);
       await rootSend("Target.detachFromTarget", { sessionId }).catch(recordError);
@@ -116,6 +117,7 @@ export async function createMacroWorkerCpuCapture({
     if (existing.targetInfos.some(matches)) throw Error("Macro Worker already exists before the startup diagnostic");
     root.on("Target.receivedMessageFromTarget", receive);
     root.on("Target.targetCreated", created);
+    root.on("Target.targetInfoChanged", created);
     await rootSend("Target.setDiscoverTargets", { discover: true });
     captureTimer = setTimeout(() => { void finish({ readyObserved: false }).catch(recordError); }, captureLimitMs);
   } catch (error) { await cleanup(); throw error; }

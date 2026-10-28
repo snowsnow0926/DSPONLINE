@@ -3,6 +3,7 @@ import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createMacroWorkerCpuCapture } from "./macro-worker-cpu.mjs";
 
 const options = Object.fromEntries(process.argv.slice(2).map((arg) => arg.replace(/^--/, "").split(/=(.*)/s, 2)));
 const macroMode = options["macro-mode"] ?? "replication";
@@ -37,6 +38,10 @@ if (runtimeRetention && (!workerHeapMemory || !workerHeapGc)) throw new Error("-
 const runtimeTransitions = options["runtime-transitions"] === "1";
 const styleReadDiagnostics = options["style-read-diagnostics"] === "1";
 const handoffProgress = options["handoff-progress"] === "1";
+const macroWorkerCpu = options["macro-worker-cpu"] === "1";
+if (options["macro-worker-cpu"] !== undefined && !["0", "1"].includes(options["macro-worker-cpu"])) {
+  throw new Error("Invalid --macro-worker-cpu flag");
+}
 const profilePhase = options["profile-phase"] ?? "all";
 if (!["all", "starting", "stopping"].includes(profilePhase)) throw new Error("Invalid profiler phase");
 const timelinePhase = options.timeline ?? null;
@@ -45,6 +50,12 @@ if (timelinePhase && options.profile) throw new Error("Capture CPU sampling and 
 const backgroundPresentationExperiment = options["background-experiment"] ?? null;
 if (backgroundPresentationExperiment !== null && backgroundPresentationExperiment !== "opacity-inert") {
   throw new Error("Unknown isolated background presentation experiment");
+}
+if (macroWorkerCpu && (macroMode !== "stable" || options.profile || options["engine-profile"] ||
+  options["retain-debt"] || timelinePhase || backgroundPresentationExperiment || workerHeapMemory ||
+  postStopMemoryTail || startupBufferGc || startupWorkerHeaps || runtimeRetention || runtimeTransitions ||
+  styleReadDiagnostics || handoffProgress || idbOperations || processMemoryTail)) {
+  throw new Error("--macro-worker-cpu requires an isolated stable-mode startup diagnostic without other profiling or experiments");
 }
 if (processMemoryTail && (process.platform !== "win32" || !allProcessMemory || options.profile ||
   options["engine-profile"] || options["retain-debt"] || timelinePhase || backgroundPresentationExperiment ||
@@ -61,6 +72,7 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 900 
 let page;
 let profiler;
 let profilerTimeline;
+let macroCpuCapture, macroCpuResult, macroCpuError;
 let allocationSession;
 let mainHeapSnapshotResult;
 let timelineSession, timelineComplete, timelineTiming;
@@ -538,6 +550,10 @@ try {
   // tick. Let that established rule run before comparing macro transitions.
   if (!options["retain-debt"]) await page.waitForTimeout(1_500);
   await sampleProcesses("normal simulation warmed");
+  if (macroWorkerCpu) {
+    macroCpuCapture = await createMacroWorkerCpuCapture({ browser, origin: base.origin, output, name,
+      readClock: () => page.evaluate(() => performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt) });
+  }
   if (options.profile && profilePhase === "starting") {
     profiler = await context.newCDPSession(page);
     await profiler.send("Profiler.enable");
@@ -571,6 +587,10 @@ try {
     await page.waitForFunction(() => globalThis.__LIVE_RUNTIME_TRACE__.events.some((event) => event.type === "ready"));
   } finally { clearInterval(statusTimer); }
   const startMs = Date.now() - startStartedAt;
+  if (macroCpuCapture) {
+    try { macroCpuResult = await macroCpuCapture.finish(); }
+    catch (error) { macroCpuError = String(error); }
+  }
   if (profiler && profilePhase === "starting") {
     const beforeMs = await page.evaluate(() => performance.now() - globalThis.__LIVE_RUNTIME_TRACE__.startedAt);
     const capture = await profiler.send("Profiler.stop");
@@ -727,11 +747,12 @@ try {
     }
   }
   const evidence = { browser: await browser.version(), supply, macroMode, observationSeconds: seconds,
-    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapMemory || postStopMemoryTail || postStopHeapGc || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions || styleReadDiagnostics || handoffProgress,
+    profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapMemory || postStopMemoryTail || postStopHeapGc || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions || styleReadDiagnostics || handoffProgress || macroWorkerCpu,
     profilePhase, timelinePhase, backgroundPresentationExperiment,
     postStopObservationSeconds: postStopSeconds, processMemoryTail, postStopMemoryTail, postStopHeapGc, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
     retainedNormalDebt: Boolean(options["retain-debt"]), styleReadDiagnostics, handoffProgress,
+    macroWorkerCpu, macroCpuResult, macroCpuError,
     seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, processSamplingErrors, durable, geometryBeforeStop, geometryAfterStop };
   await writeFile(resolve(output, `${name}.json`), JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify({ supply, stopMs, events: trace.events.filter((event) => event.summary),
@@ -749,6 +770,14 @@ try {
 } finally {
   let timelineFailure;
   let profilerFailure;
+  if (macroCpuCapture && !macroCpuResult && !macroCpuError) {
+    try { macroCpuResult = await macroCpuCapture.finish({ readyObserved: false }); }
+    catch (error) { macroCpuError = String(error); }
+  }
+  if (macroCpuError) {
+    try { await writeFile(resolve(output, `${name}-macro-worker-cpu-error.json`), JSON.stringify({ error: macroCpuError })); }
+    catch { /* browser cleanup must still complete if evidence storage fails */ }
+  }
   if (timelineSession) {
     try {
       await bounded(timelineSession.send("Tracing.end"), 10_000);
@@ -791,4 +820,7 @@ try {
   await browser.close();
   if (timelineFailure && !primaryFailed) throw timelineFailure;
   if (profilerFailure && !primaryFailed) throw profilerFailure;
+  if (macroWorkerCpu && (!macroCpuResult?.complete || macroCpuError) && !primaryFailed) {
+    throw Error("Macro Worker CPU diagnostic incomplete; retain metadata and exclude from performance qualification");
+  }
 }

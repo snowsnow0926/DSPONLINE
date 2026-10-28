@@ -98,6 +98,23 @@ sanitized aggregates belong in review documentation.
 
 ## CPU 归因
 
+`--macro-mode=stable --macro-worker-cpu=1` 是独立的后台宏 Worker 启动采样入口。
+它在真实滚动窗口预热后监听新创建的、同源的 pureIdleMacro Worker，使用
+1,000 微秒 CPU 采样，不暂停 Worker、不强制 GC、不启用引擎插桩，也不修改
+校准、计时或权威参数。默认关闭；启用时结果始终为 profiled，禁止与自然内存
+尾部、主线程采样或其它实验混用。现有 Worker、替换 Worker、空采样、协议超时、
+写入和清理失败均不得视为成功；原采样与失败元数据留在私有输出目录。
+
+输出为名字后缀 -macro-worker.cpuprofile 和 -macro-worker-cpu.json。
+后者记录采样边界、所有权、完整性与错误；只有与实际采样 Worker 字节一致的
+源码映射才可用于函数归因。21 项无浏览器协议/命令行测试已通过，真实浏览器
+端口采样仍需独立验证；所有带采样耗时都不能当作性能提升。
+
+```powershell
+node --test --test-concurrency=1 experiments/web-live-runtime/macro-worker-cpu.test.mjs
+node experiments/web-live-runtime/run.mjs --url=http://127.0.0.1:4490 --macro-mode=stable --macro-worker-cpu=1 --supply=stock --seconds=5 --post-stop-seconds=3 --output=D:/private/diagnostics --name=macro-start
+```
+
 ```powershell
 node experiments/web-live-runtime/run.mjs --url=http://127.0.0.1:4397 --supply=stock --seconds=5 --profile=1 --profile-phase=stopping --post-stop-seconds=3 --output=D:/private/diagnostics --name=stop-profile
 node experiments/web-live-runtime/analyze-profile.mjs --profile=D:/private/diagnostics/stop-profile.cpuprofile --dist=D:/private/diagnostic-dist --output=D:/private/diagnostics/stop-profile-analysis.json

@@ -1,0 +1,665 @@
+{
+  "formatVersion": 1,
+  "scope": "Rejected lookup-owned capacity cache experiment; no production deployment",
+  "adjudication": {
+    "decision": "reject-no-reproducible-gain",
+    "dateUtc": "2026-10-28T21:11:32.769730+00:00",
+    "candidateRuntime": "a7e1e0b4409dc5420e628a0155e95a90e5ce4718",
+    "controlRuntime": "5730f267759e7788916a8d762a1c28067ced0838",
+    "lastAcceptedRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+    "confirmationRuns": 4,
+    "completeProcessSamples": 32,
+    "rendererTenSecondChangePercent": 0.6711586436641159,
+    "browserTenSecondChangePercent": -0.1457256733986001,
+    "reason": "Independent ABBA found both variants bimodal at 10 seconds; the earlier renderer-only 28.7% drop did not reproduce. Headroom CPU calibration was flat (+0.169%).",
+    "notStarted": [
+      "full-unit-01",
+      "chromium-full-01",
+      "pwa-preview-01",
+      "durable-01",
+      "20-run-real-parity"
+    ],
+    "productionPublished": false,
+    "goalStatus": "active",
+    "revertedEngineSha256": "62d66dcffa75812847c0a6b980456131807b52a423add30044fc7b007d228a20"
+  },
+  "confirmation": {
+    "scope": "Four serial ABBA conservative-mode pages; OS-only natural stop/+10/+30/+60 sampling. No renderer heap inspection, profiling or forced GC. Separate cohort; actual sample query spans preserved. One fixture, 8x, original stock.",
+    "browser": "147.0.7727.138",
+    "plan": {
+      "mode": "stable",
+      "order": "ABBA",
+      "runs": 4,
+      "sourceCommit": "a7e1e0b4409dc5420e628a0155e95a90e5ce4718",
+      "baselineRuntime": "5730f267759e7788916a8d762a1c28067ced0838",
+      "sampleTargets": [
+        3,
+        10,
+        30,
+        60
+      ],
+      "minimumStableHeadroomGiB": 12,
+      "cooldownSeconds": 10,
+      "scope": "Isolate only the lookup cache ownership change; neither variant is accepted. No heap/GC/profiling.",
+      "candidateAccepted": false,
+      "goalStatus": "active",
+      "validationToolCommit": "8174f9f6c193fac8f401222b58427514390dbc8b",
+      "independentConfirmation": true,
+      "requireAllAuxiliaryProcessFields": true,
+      "priorGroup": "Primary renderer valid; one +10s auxiliary row incomplete, no browser total claim at that stage. Original records preserved."
+    },
+    "runs": 4,
+    "completeEightPointSamples": true,
+    "gameCatalogAndPauseUnchanged": true,
+    "backupsUnchanged": true,
+    "records": {
+      "owner-confirm-page-baseline-01": {
+        "stages": {
+          "3": {
+            "rendererWorkingSetBytes": 2503753728,
+            "rendererPrivateBytes": 2465558528,
+            "rendererLifetimePeakBytes": 4617388032,
+            "browserWorkingSetBytes": 3188211712,
+            "browserPrivateBytes": 3174977536,
+            "queryStartedAfterStopMs": 3262,
+            "queryEndedAfterStopMs": 3679,
+            "attempt": 1
+          },
+          "10": {
+            "rendererWorkingSetBytes": 1893994496,
+            "rendererPrivateBytes": 1852186624,
+            "rendererLifetimePeakBytes": 4617388032,
+            "browserWorkingSetBytes": 2607607808,
+            "browserPrivateBytes": 2560106496,
+            "queryStartedAfterStopMs": 10006,
+            "queryEndedAfterStopMs": 10465,
+            "attempt": 1
+          },
+          "30": {
+            "rendererWorkingSetBytes": 1217540096,
+            "rendererPrivateBytes": 1174609920,
+            "rendererLifetimePeakBytes": 4617388032,
+            "browserWorkingSetBytes": 1787310080,
+            "browserPrivateBytes": 1747927040,
+            "queryStartedAfterStopMs": 30004,
+            "queryEndedAfterStopMs": 30420,
+            "attempt": 1
+          },
+          "60": {
+            "rendererWorkingSetBytes": 1229316096,
+            "rendererPrivateBytes": 1186349056,
+            "rendererLifetimePeakBytes": 4617388032,
+            "browserWorkingSetBytes": 1798492160,
+            "browserPrivateBytes": 1759674368,
+            "queryStartedAfterStopMs": 60016,
+            "queryEndedAfterStopMs": 60480,
+            "attempt": 1
+          }
+        },
+        "sourceJsonSha256": "b13e37989227939a9e94bd6d5ce5a5eb25dd3fdc9d2653436d8a79f88a18a654",
+        "samplingErrors": [],
+        "startMs": 28611,
+        "stopMs": 10018
+      },
+      "owner-confirm-page-candidate-01": {
+        "stages": {
+          "3": {
+            "rendererWorkingSetBytes": 2496823296,
+            "rendererPrivateBytes": 2458337280,
+            "rendererLifetimePeakBytes": 4277960704,
+            "browserWorkingSetBytes": 3180929024,
+            "browserPrivateBytes": 3174879232,
+            "queryStartedAfterStopMs": 3223,
+            "queryEndedAfterStopMs": 3649,
+            "attempt": 1
+          },
+          "10": {
+            "rendererWorkingSetBytes": 1380634624,
+            "rendererPrivateBytes": 1341407232,
+            "rendererLifetimePeakBytes": 4277960704,
+            "browserWorkingSetBytes": 2064556032,
+            "browserPrivateBytes": 2037620736,
+            "queryStartedAfterStopMs": 10003,
+            "queryEndedAfterStopMs": 10433,
+            "attempt": 1
+          },
+          "30": {
+            "rendererWorkingSetBytes": 1231081472,
+            "rendererPrivateBytes": 1192267776,
+            "rendererLifetimePeakBytes": 4277960704,
+            "browserWorkingSetBytes": 1801850880,
+            "browserPrivateBytes": 1774043136,
+            "queryStartedAfterStopMs": 30006,
+            "queryEndedAfterStopMs": 30438,
+            "attempt": 1
+          },
+          "60": {
+            "rendererWorkingSetBytes": 1243664384,
+            "rendererPrivateBytes": 1205112832,
+            "rendererLifetimePeakBytes": 4277960704,
+            "browserWorkingSetBytes": 1814114304,
+            "browserPrivateBytes": 1786888192,
+            "queryStartedAfterStopMs": 60016,
+            "queryEndedAfterStopMs": 60483,
+            "attempt": 1
+          }
+        },
+        "sourceJsonSha256": "13e9a9b052b06e7b532a49583849855a3f83c2ef35c852d79744d2d007dd1042",
+        "samplingErrors": [],
+        "startMs": 28295,
+        "stopMs": 10025
+      },
+      "owner-confirm-page-candidate-02": {
+        "stages": {
+          "3": {
+            "rendererWorkingSetBytes": 2550886400,
+            "rendererPrivateBytes": 2520834048,
+            "rendererLifetimePeakBytes": 4559986688,
+            "browserWorkingSetBytes": 3236028416,
+            "browserPrivateBytes": 3236200448,
+            "queryStartedAfterStopMs": 3244,
+            "queryEndedAfterStopMs": 3700,
+            "attempt": 1
+          },
+          "10": {
+            "rendererWorkingSetBytes": 1902018560,
+            "rendererPrivateBytes": 1866227712,
+            "rendererLifetimePeakBytes": 4559986688,
+            "browserWorkingSetBytes": 2586087424,
+            "browserPrivateBytes": 2560991232,
+            "queryStartedAfterStopMs": 10016,
+            "queryEndedAfterStopMs": 10477,
+            "attempt": 1
+          },
+          "30": {
+            "rendererWorkingSetBytes": 1229594624,
+            "rendererPrivateBytes": 1189011456,
+            "rendererLifetimePeakBytes": 4559986688,
+            "browserWorkingSetBytes": 1799086080,
+            "browserPrivateBytes": 1767469056,
+            "queryStartedAfterStopMs": 30015,
+            "queryEndedAfterStopMs": 30449,
+            "attempt": 1
+          },
+          "60": {
+            "rendererWorkingSetBytes": 1242112000,
+            "rendererPrivateBytes": 1201516544,
+            "rendererLifetimePeakBytes": 4559986688,
+            "browserWorkingSetBytes": 1811333120,
+            "browserPrivateBytes": 1779986432,
+            "queryStartedAfterStopMs": 60015,
+            "queryEndedAfterStopMs": 60494,
+            "attempt": 1
+          }
+        },
+        "sourceJsonSha256": "5c3431db87871b5e290697e7a89a1eaeb7edc5dba66c06b73c5af59597675d23",
+        "samplingErrors": [],
+        "startMs": 30201,
+        "stopMs": 10573
+      },
+      "owner-confirm-page-baseline-02": {
+        "stages": {
+          "3": {
+            "rendererWorkingSetBytes": 2564784128,
+            "rendererPrivateBytes": 2526277632,
+            "rendererLifetimePeakBytes": 4297367552,
+            "browserWorkingSetBytes": 3248553984,
+            "browserPrivateBytes": 3241893888,
+            "queryStartedAfterStopMs": 3235,
+            "queryEndedAfterStopMs": 3677,
+            "attempt": 1
+          },
+          "10": {
+            "rendererWorkingSetBytes": 1366773760,
+            "rendererPrivateBytes": 1332957184,
+            "rendererLifetimePeakBytes": 4297367552,
+            "browserWorkingSetBytes": 2049822720,
+            "browserPrivateBytes": 2028773376,
+            "queryStartedAfterStopMs": 10011,
+            "queryEndedAfterStopMs": 10477,
+            "attempt": 1
+          },
+          "30": {
+            "rendererWorkingSetBytes": 1238163456,
+            "rendererPrivateBytes": 1198092288,
+            "rendererLifetimePeakBytes": 4297367552,
+            "browserWorkingSetBytes": 1808728064,
+            "browserPrivateBytes": 1779998720,
+            "queryStartedAfterStopMs": 30006,
+            "queryEndedAfterStopMs": 30450,
+            "attempt": 1
+          },
+          "60": {
+            "rendererWorkingSetBytes": 1249624064,
+            "rendererPrivateBytes": 1209286656,
+            "rendererLifetimePeakBytes": 4297367552,
+            "browserWorkingSetBytes": 1820045312,
+            "browserPrivateBytes": 1791193088,
+            "queryStartedAfterStopMs": 60008,
+            "queryEndedAfterStopMs": 60441,
+            "attempt": 1
+          }
+        },
+        "sourceJsonSha256": "5900746849b3c630654d5b58d0e3a5c645aaa5189b00de377b4cec3bdef3eda0",
+        "samplingErrors": [],
+        "startMs": 29250,
+        "stopMs": 10550
+      }
+    },
+    "metrics": {
+      "3": {
+        "rendererWorkingSetBytes": {
+          "baseline": [
+            2503753728,
+            2564784128
+          ],
+          "candidate": [
+            2496823296,
+            2550886400
+          ],
+          "baselineMedian": 2534268928.0,
+          "candidateMedian": 2523854848.0,
+          "baselineRange": [
+            2503753728,
+            2564784128
+          ],
+          "candidateRange": [
+            2496823296,
+            2550886400
+          ],
+          "changePercent": -0.4109303430642086
+        },
+        "rendererPrivateBytes": {
+          "baseline": [
+            2465558528,
+            2526277632
+          ],
+          "candidate": [
+            2458337280,
+            2520834048
+          ],
+          "baselineMedian": 2495918080.0,
+          "candidateMedian": 2489585664.0,
+          "baselineRange": [
+            2465558528,
+            2526277632
+          ],
+          "candidateRange": [
+            2458337280,
+            2520834048
+          ],
+          "changePercent": -0.25371089102411704
+        },
+        "browserWorkingSetBytes": {
+          "baseline": [
+            3188211712,
+            3248553984
+          ],
+          "candidate": [
+            3180929024,
+            3236028416
+          ],
+          "baselineMedian": 3218382848.0,
+          "candidateMedian": 3208478720.0,
+          "baselineRange": [
+            3188211712,
+            3248553984
+          ],
+          "candidateRange": [
+            3180929024,
+            3236028416
+          ],
+          "changePercent": -0.30773616650843216
+        },
+        "browserPrivateBytes": {
+          "baseline": [
+            3174977536,
+            3241893888
+          ],
+          "candidate": [
+            3174879232,
+            3236200448
+          ],
+          "baselineMedian": 3208435712.0,
+          "candidateMedian": 3205539840.0,
+          "baselineRange": [
+            3174977536,
+            3241893888
+          ],
+          "candidateRange": [
+            3174879232,
+            3236200448
+          ],
+          "changePercent": -0.09025806529858738
+        }
+      },
+      "10": {
+        "rendererWorkingSetBytes": {
+          "baseline": [
+            1893994496,
+            1366773760
+          ],
+          "candidate": [
+            1380634624,
+            1902018560
+          ],
+          "baselineMedian": 1630384128.0,
+          "candidateMedian": 1641326592.0,
+          "baselineRange": [
+            1366773760,
+            1893994496
+          ],
+          "candidateRange": [
+            1380634624,
+            1902018560
+          ],
+          "changePercent": 0.6711586436641159
+        },
+        "rendererPrivateBytes": {
+          "baseline": [
+            1852186624,
+            1332957184
+          ],
+          "candidate": [
+            1341407232,
+            1866227712
+          ],
+          "baselineMedian": 1592571904.0,
+          "candidateMedian": 1603817472.0,
+          "baselineRange": [
+            1332957184,
+            1852186624
+          ],
+          "candidateRange": [
+            1341407232,
+            1866227712
+          ],
+          "changePercent": 0.7061262334061569
+        },
+        "browserWorkingSetBytes": {
+          "baseline": [
+            2607607808,
+            2049822720
+          ],
+          "candidate": [
+            2064556032,
+            2586087424
+          ],
+          "baselineMedian": 2328715264.0,
+          "candidateMedian": 2325321728.0,
+          "baselineRange": [
+            2049822720,
+            2607607808
+          ],
+          "candidateRange": [
+            2064556032,
+            2586087424
+          ],
+          "changePercent": -0.1457256733986001
+        },
+        "browserPrivateBytes": {
+          "baseline": [
+            2560106496,
+            2028773376
+          ],
+          "candidate": [
+            2037620736,
+            2560991232
+          ],
+          "baselineMedian": 2294439936.0,
+          "candidateMedian": 2299305984.0,
+          "baselineRange": [
+            2028773376,
+            2560106496
+          ],
+          "candidateRange": [
+            2037620736,
+            2560991232
+          ],
+          "changePercent": 0.212079990574221
+        }
+      },
+      "30": {
+        "rendererWorkingSetBytes": {
+          "baseline": [
+            1217540096,
+            1238163456
+          ],
+          "candidate": [
+            1231081472,
+            1229594624
+          ],
+          "baselineMedian": 1227851776.0,
+          "candidateMedian": 1230338048.0,
+          "baselineRange": [
+            1217540096,
+            1238163456
+          ],
+          "candidateRange": [
+            1229594624,
+            1231081472
+          ],
+          "changePercent": 0.20248958779858217
+        },
+        "rendererPrivateBytes": {
+          "baseline": [
+            1174609920,
+            1198092288
+          ],
+          "candidate": [
+            1192267776,
+            1189011456
+          ],
+          "baselineMedian": 1186351104.0,
+          "candidateMedian": 1190639616.0,
+          "baselineRange": [
+            1174609920,
+            1198092288
+          ],
+          "candidateRange": [
+            1189011456,
+            1192267776
+          ],
+          "changePercent": 0.3614875887534952
+        },
+        "browserWorkingSetBytes": {
+          "baseline": [
+            1787310080,
+            1808728064
+          ],
+          "candidate": [
+            1801850880,
+            1799086080
+          ],
+          "baselineMedian": 1798019072.0,
+          "candidateMedian": 1800468480.0,
+          "baselineRange": [
+            1787310080,
+            1808728064
+          ],
+          "candidateRange": [
+            1799086080,
+            1801850880
+          ],
+          "changePercent": 0.13622814341314182
+        },
+        "browserPrivateBytes": {
+          "baseline": [
+            1747927040,
+            1779998720
+          ],
+          "candidate": [
+            1774043136,
+            1767469056
+          ],
+          "baselineMedian": 1763962880.0,
+          "candidateMedian": 1770756096.0,
+          "baselineRange": [
+            1747927040,
+            1779998720
+          ],
+          "candidateRange": [
+            1767469056,
+            1774043136
+          ],
+          "changePercent": 0.38511105176997074
+        }
+      },
+      "60": {
+        "rendererWorkingSetBytes": {
+          "baseline": [
+            1229316096,
+            1249624064
+          ],
+          "candidate": [
+            1243664384,
+            1242112000
+          ],
+          "baselineMedian": 1239470080.0,
+          "candidateMedian": 1242888192.0,
+          "baselineRange": [
+            1229316096,
+            1249624064
+          ],
+          "candidateRange": [
+            1242112000,
+            1243664384
+          ],
+          "changePercent": 0.27577204606665795
+        },
+        "rendererPrivateBytes": {
+          "baseline": [
+            1186349056,
+            1209286656
+          ],
+          "candidate": [
+            1205112832,
+            1201516544
+          ],
+          "baselineMedian": 1197817856.0,
+          "candidateMedian": 1203314688.0,
+          "baselineRange": [
+            1186349056,
+            1209286656
+          ],
+          "candidateRange": [
+            1201516544,
+            1205112832
+          ],
+          "changePercent": 0.45890382852999956
+        },
+        "browserWorkingSetBytes": {
+          "baseline": [
+            1798492160,
+            1820045312
+          ],
+          "candidate": [
+            1814114304,
+            1811333120
+          ],
+          "baselineMedian": 1809268736.0,
+          "candidateMedian": 1812723712.0,
+          "baselineRange": [
+            1798492160,
+            1820045312
+          ],
+          "candidateRange": [
+            1811333120,
+            1814114304
+          ],
+          "changePercent": 0.19095980222585407
+        },
+        "browserPrivateBytes": {
+          "baseline": [
+            1759674368,
+            1791193088
+          ],
+          "candidate": [
+            1786888192,
+            1779986432
+          ],
+          "baselineMedian": 1775433728.0,
+          "candidateMedian": 1783437312.0,
+          "baselineRange": [
+            1759674368,
+            1791193088
+          ],
+          "candidateRange": [
+            1779986432,
+            1786888192
+          ],
+          "changePercent": 0.45079598713131386
+        }
+      }
+    },
+    "candidateAccepted": false,
+    "productionPublished": false,
+    "goalStatus": "active"
+  },
+  "headroomCalibration": {
+    "completeResultsEqual": true,
+    "completeInitializationStatusEqual": true,
+    "fiveFrozenSourcesVerified": true,
+    "metrics": {
+      "setupMs": {
+        "baseline": [
+          3492.7000000476837,
+          3589.9000000953674
+        ],
+        "candidate": [
+          3518.399999856949,
+          3502.4000000953674
+        ],
+        "baselineMedian": 3541.3000000715256,
+        "candidateMedian": 3510.399999976158,
+        "changePercent": -0.8725609266298617
+      },
+      "initializationMs": {
+        "baseline": [
+          19336.799999952316,
+          19677.099999904633
+        ],
+        "candidate": [
+          19590.799999952316,
+          19489.200000047684
+        ],
+        "baselineMedian": 19506.949999928474,
+        "candidateMedian": 19540.0,
+        "changePercent": 0.16942679440736796
+      },
+      "finalizeMs": {
+        "baseline": [
+          125.79999995231628,
+          123.60000014305115
+        ],
+        "candidate": [
+          189.59999990463257,
+          123.70000004768372
+        ],
+        "baselineMedian": 124.70000004768372,
+        "candidateMedian": 156.64999997615814,
+        "changePercent": 25.62149151263604
+      }
+    },
+    "candidateAccepted": false,
+    "scope": "New independent headroom/cooldown ABBA cohort; prior interrupted timings excluded from improvement claims, raw data preserved."
+  },
+  "workingDistRestoration": {
+    "candidatePreserved": "D:\\GameDev\\DSPidle2\\artifacts\\web-lookup-owned-capacity-20261029\\working-dist-a7-preserved",
+    "candidateFileCount": 198,
+    "restoredControl": "D:\\GameDev\\Worktrees\\DSPidle2\\web-performance-loop-20261026\\dist",
+    "restoredRuntime": "5730f267759e7788916a8d762a1c28067ced0838",
+    "sourceEngineRestored": true,
+    "allHashesVerified": true
+  },
+  "evidenceFiles": {
+    "owner-confirm-page-comparison.json": "4861ca85062179a197c887f8d2275d5797dfa8c5f6a0658b74facfc5996edc8f",
+    "owner-renderer-preliminary-comparison.json": "9fba05772cbcdc3df1938b571022834ba96a02f6c419d28f1ae06f9d8f38a516",
+    "owner-confirm-adjudication.json": "f65a35395062f7122a3d97143f787f7df739b135c6c01101cf8871bf72c7ea4a",
+    "headroom-calibration-comparison.json": "661190595b26dbf62198c94417ec8192f9dd644833f6077ae6e35d2850922af3",
+    "calibration-series-01-status.json": "90b35c4bfcb05e2f0d4bedaa80e427007993ba6d137df5b5526c0aa65244f486",
+    "candidate-web-manifest.json": "bf7b3afe9f391b29889147c22e2c6c6a5146bef7e98ad65143181a99a9193628",
+    "candidate-source-provenance.json": "37c319a3b9b69915f2ce29101f1de52506fabe653ddffa6fa32477504e6b6865",
+    "working-dist-restoration.json": "fa20c1f0c3a9348cc62b3b6b6cccdb6133d66b95fdece78ab79aed81cc935a90"
+  }
+}

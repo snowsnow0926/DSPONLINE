@@ -60,6 +60,7 @@ let timelineSession, timelineComplete, timelineTiming;
 let primaryFailed = false;
 const errors = [];
 const processSamples = [];
+const processSamplingErrors = [];
 const heapSamples = [];
 const retentionSamples = [];
 const startupBufferSamples = [];
@@ -159,26 +160,43 @@ async function sampleHeaps(stage, collectGarbage = workerHeapGc) {
 }
 
 async function sampleProcesses(stage) {
-  try {
-    const session = await bounded(browser.newBrowserCDPSession());
-    const { processInfo } = await bounded(session.send("SystemInfo.getProcessInfo"));
-    const rendererIds = new Set(processInfo.filter((item) => item.type === "renderer").map((item) => item.id));
-    const ids = processInfo.filter((item) => Number.isSafeInteger(item.id) && item.id > 0 && (allProcessMemory || rendererIds.has(item.id))).map((item) => item.id);
-    const sampled = process.platform === "win32" && ids.length ? JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-Command",
-      `Get-Process -Id ${ids.join(",")} -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64,PeakWorkingSet64,PrivateMemorySize64 | ConvertTo-Json -Compress`], { encoding: "utf8" }) || "null") : null;
-    const rows = sampled ? Array.isArray(sampled) ? sampled : [sampled] : [];
-    const rendererRows = rows.filter((row) => rendererIds.has(row.Id));
-    const memory = rendererRows.length === 1 ? rendererRows[0] : rendererRows.length ? rendererRows : null;
-    processSamples.push({ stage, processInfo, memory, ...(allProcessMemory ? { allProcessMemory: rows,
-      sampledBrowserWorkingSetBytes: rows.reduce((sum, row) => sum + row.WorkingSet64, 0),
-      sampledBrowserPrivateBytes: rows.reduce((sum, row) => sum + row.PrivateMemorySize64, 0) } : {}) });
-    await session.detach();
-    await writeFile(resolve(output, `${name}-processes.json`), JSON.stringify(processSamples, null, 2));
-    if (workerHeapMemory) {
+  let sampledStage = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let session;
+    try {
+      session = await bounded(browser.newBrowserCDPSession());
+      const { processInfo } = await bounded(session.send("SystemInfo.getProcessInfo"));
+      const rendererIds = new Set(processInfo.filter((item) => item.type === "renderer").map((item) => item.id));
+      const ids = processInfo.filter((item) => Number.isSafeInteger(item.id) && item.id > 0 && (allProcessMemory || rendererIds.has(item.id))).map((item) => item.id);
+      const sampled = process.platform === "win32" && ids.length ? JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-Command",
+        `Get-Process -Id ${ids.join(",")} -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64,PeakWorkingSet64,PrivateMemorySize64 | ConvertTo-Json -Compress`], { encoding: "utf8", timeout: 5000, windowsHide: true }) || "null") : null;
+      const rows = sampled ? Array.isArray(sampled) ? sampled : [sampled] : [];
+      const rendererRows = rows.filter((row) => rendererIds.has(row.Id));
+      const memory = rendererRows.length === 1 ? rendererRows[0] : rendererRows.length ? rendererRows : null;
+      if (process.platform === "win32" && (!rendererRows.length || rendererRows.some(row => !(row.PeakWorkingSet64 > 0)))) {
+        throw Error("Renderer memory sample unavailable");
+      }
+      const sample = { stage, attempt, processInfo, memory, ...(allProcessMemory ? { allProcessMemory: rows,
+        sampledBrowserWorkingSetBytes: rows.reduce((sum, row) => sum + row.WorkingSet64, 0),
+        sampledBrowserPrivateBytes: rows.reduce((sum, row) => sum + row.PrivateMemorySize64, 0) } : {}) };
+      await writeFile(resolve(output, `${name}-processes.json`), JSON.stringify([...processSamples, sample], null, 2));
+      processSamples.push(sample);
+      sampledStage = true;
+      break;
+    } catch (error) {
+      processSamplingErrors.push({ stage, attempt, error: String(error) });
+      await writeFile(resolve(output, `${name}-process-sampling-errors.json`), JSON.stringify(processSamplingErrors, null, 2)).catch(() => {});
+    } finally {
+      if (session) await bounded(session.detach()).catch(() => {});
+    }
+    if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (sampledStage && workerHeapMemory) {
+    try {
       await sampleHeaps(stage);
       await writeFile(resolve(output, `${name}-heaps.json`), JSON.stringify(heapSamples, null, 2));
-    }
-  } catch { /* process sampling must not change the game outcome */ }
+    } catch { /* Heap diagnostics have their own completeness checks. */ }
+  }
 }
 
 try {
@@ -657,6 +675,12 @@ try {
     }
   }
   if (errors.length) throw Error(errors.join("\n"));
+  if (allProcessMemory && process.platform === "win32") {
+    const requiredStages = ["factory mounted", "normal simulation warmed", "replication ready", `${macroLabel} running`, `${macroLabel} stopped`];
+    if (requiredStages.some(stage => processSamples.filter(sample => sample.stage === stage && sample.memory).length !== 1)) {
+      throw Error("Required process memory samples incomplete; evidence retained");
+    }
+  }
   if (startupBufferGc && (startupBufferSamples.length !== 1 || startupBufferSamples[0].error)) {
     throw Error("Startup buffer GC diagnostic did not capture its exact boundary");
   }
@@ -683,7 +707,7 @@ try {
     postStopObservationSeconds: postStopSeconds, postStopMemoryTail, postStopHeapGc, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
     retainedNormalDebt: Boolean(options["retain-debt"]), styleReadDiagnostics, handoffProgress,
-    seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, durable, geometryBeforeStop, geometryAfterStop };
+    seeded, warmup, startMs, stopMs, visibleSummary, trace, processSamples, processSamplingErrors, durable, geometryBeforeStop, geometryAfterStop };
   await writeFile(resolve(output, `${name}.json`), JSON.stringify(evidence, null, 2));
   console.log(JSON.stringify({ supply, stopMs, events: trace.events.filter((event) => event.summary),
     runningMaxFrameGap: Math.max(0, ...trace.frames.filter((frame) => frame.phase === "running").map((frame) => frame.gap)) }, null, 2));

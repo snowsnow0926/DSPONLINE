@@ -12,10 +12,16 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "payload-checksum", "large-save", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "save-inspection-runs", "save-inspection-stack", "save-inspection-local-hash", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy", "blueprint-scale"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "payload-checksum", "large-save", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "save-inspection-runs", "save-inspection-stack", "save-inspection-local-hash", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy", "blueprint-scale", "save-state-measure"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
+const contractDirect = options["contract-omit-direct"] === "1";
+const macroStages = options["macro-stages"] === "1";
+if (macroStages && entry !== "macro-finalization") throw new Error("Macro stage diagnostics require macro-finalization");
+
+if (contractDirect && entry !== "save-profile") throw new Error("Contract descriptor experiment requires save-profile");
+
 const needsWasm = entry === "probe" || entry === "payload-checksum";
-const callable = entry === "blueprint-scale" ? "runBlueprintScale" : entry === "save-inspection-local-hash" ? "runSaveInspectionLocalHash" : entry === "save-inspection-stack" ? "runSaveInspectionStack" : entry === "save-inspection-runs" ? "runSaveInspectionRuns" : entry === "payload-checksum" ? "runPayloadChecksum" : entry === "macro-finalization" ? "runMacroFinalization" : entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
+const callable = entry === "save-state-measure" ? "runSaveStateMeasure" : entry === "blueprint-scale" ? "runBlueprintScale" : entry === "save-inspection-local-hash" ? "runSaveInspectionLocalHash" : entry === "save-inspection-stack" ? "runSaveInspectionStack" : entry === "save-inspection-runs" ? "runSaveInspectionRuns" : entry === "payload-checksum" ? "runPayloadChecksum" : entry === "macro-finalization" ? "runMacroFinalization" : entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
       : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
@@ -29,6 +35,12 @@ const callable = entry === "blueprint-scale" ? "runBlueprintScale" : entry === "
                     : options["startup-parity"] === "1" ? "runStartupCheckpointParity" : "runPersistenceRetirement" : "runConstructionWasmProbe";
 const sourceRoot = resolve(options.source ?? root);
 const inspectionFile = "src/game/canonicalSaveEnvelopeInspection.ts";
+const measurementFile = "src/game/saveEnvelopeIntegrity.ts";
+const measurementReference = options["measure-ref"] ? execFileSync("git", ["rev-parse", "--verify", options["measure-ref"] + "^{commit}"],
+  { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
+if (entry === "save-state-measure" && !measurementReference) throw new Error("State measurement requires a frozen --measure-ref");
+if (measurementReference && entry !== "save-state-measure") throw new Error("Measurement reference requires save-state-measure");
+
 const inspectionReference = options["inspection-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["inspection-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
 if (inspectionReference && !entry.startsWith("save-inspection")) throw new Error("Inspection reference requires a save-inspection probe");
@@ -51,7 +63,7 @@ const macroProfileFunctions = {
 };
 const runtimeFiles = entry === "belt-flow" ? ["src/game/beltFlow.ts"] : entry === "read-models"
   ? ["src/game/nativeFactoryInteractionFrame.ts", "src/game/webFactoryReadModelAdapter.ts"]
-  : ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts"];
+  : ["src/game/engine.ts", "src/game/quantumLogisticsNetwork.ts", "src/game/recursiveCrafting.ts"];
 const runtimeReference = options["runtime-ref"] ? execFileSync("git", ["rev-parse", "--verify", `${options["runtime-ref"]}^{commit}`],
   { cwd: sourceRoot, encoding: "utf8" }).trim() : null;
 const label = options.name ?? (fixtureMode ? `browser-${entry}` : "browser-wasm-probe");
@@ -68,12 +80,41 @@ const inputHash = fixtureMode ? await fileHash(options.prepared) : null;
 const wasmPath = options.wasm ?? resolve(output, "target/wasm32-unknown-unknown/release/dsp_web_construction_probe.wasm");
 await mkdir(output, { recursive: true });
 const referenceSourceLoads = [];
-const frozenRuntimePlugins = () => decoderReference || runtimeReference || macroWorkerReference || inspectionReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
+const frozenRuntimePlugins = () => macroStages || contractDirect || measurementReference || decoderReference || runtimeReference || macroWorkerReference || inspectionReference || migrationPhases || macroProfile || constructionPhaseCacheLimit !== 4 ? [{ name: "frozen-runtime-reference", enforce: "pre", async load(id) {
     const relative = id.replaceAll("\\", "/").replace(`${sourceRoot.replaceAll("\\", "/")}/`, "").split("?")[0];
-    const reference = relative === inspectionFile && inspectionReference ? inspectionReference
+    const reference = relative === measurementFile && measurementReference ? measurementReference : relative === inspectionFile && inspectionReference ? inspectionReference
       : relative === "src/game/pureIdleMacro.worker.ts" && macroWorkerReference ? macroWorkerReference
       : runtimeFiles.includes(relative) ? runtimeReference : decoderFiles.includes(relative) ? decoderReference : null;
     const profileFunctions = macroProfile ? macroProfileFunctions[relative] : undefined;
+    if (macroStages && relative === "src/game/pureIdleMacro.worker.ts") {
+      let code = reference ? execFileSync("git", ["show", reference + ":" + relative], { cwd: sourceRoot, encoding: "utf8" })
+        : await readFile(id.split("?")[0], "utf8");
+      if (reference) referenceSourceLoads.push({ file: relative, reference, sha256: createHash("sha256").update(code).digest("hex") });
+      for (const [anchor, insert] of [
+        ["    const result = finalizePureIdleMacroCandidate(", '    const __phases = [{ phase: "begin", at: performance.now() }];\n'],
+        ["    const finalState = request.terminal", '    __phases.push({ phase: "settlement", at: performance.now() });\n'],
+        ["    const persistent = projectPersistentSaveState(finalState", '    __phases.push({ phase: "terminal-application", at: performance.now() });\n'],
+        ['    const mode = persistent.mode === "speedrun"', '    __phases.push({ phase: "projection", at: performance.now() });\n'],
+        ["    const identity: PureIdleMacroFinalizedIdentity", '    __phases.push({ phase: "serialization", at: performance.now() });\n'],
+        ['    self.postMessage({\n      id: request.id,\n      type: "finalized",', '    __phases.push({ phase: "binary-payload", at: performance.now() });\n    self.postMessage({ __dspMacroFinalizePhases: __phases });\n'],
+      ]) {
+        if (code.split(anchor).length !== 2) throw new Error("Macro stage anchor changed: " + anchor.slice(0, 80));
+        code = code.replace(anchor, insert + anchor);
+      }
+      referenceSourceLoads.push({ file: relative, experimental: "macro-finalize-stages", sha256: createHash("sha256").update(code).digest("hex") });
+      return code;
+    }
+
+    if (contractDirect && relative === "save-field-contract.mjs") {
+      const source = await readFile(id.split("?")[0], "utf8");
+      const anchor = "export function omitSaveContractDefaults(";
+      if (source.split(anchor).length !== 2) throw new Error("Contract projection anchor changed");
+      const replacement = await readFile(resolve(root, "experiments/web-save-checkpoints/contract-omit-direct-body.mjs"), "utf8");
+      const code = source.slice(0, source.indexOf(anchor)) + replacement;
+      referenceSourceLoads.push({ file: relative, experimental: "direct-property-descriptor", sha256: createHash("sha256").update(code).digest("hex") });
+      return code;
+    }
+
     const overridePhaseCache = constructionPhaseCacheLimit !== 4 && relative === "src/game/engine.ts";
     if (!reference && !(migrationPhases && relative === "src/game/storage.ts") && !profileFunctions && !overridePhaseCache) return;
     let code = reference ? execFileSync("git", ["show", `${reference}:${relative}`],
@@ -133,6 +174,19 @@ if (inspectionReference && !referenceSourceLoads.some((row) => row.file === insp
 }
 if (macroWorkerReference && !referenceSourceLoads.some((row) => row.file === "src/game/pureIdleMacro.worker.ts" && row.reference === macroWorkerReference)) {
   throw new Error("Requested macro Worker source reference was not actually loaded by the Worker compiler");
+}
+if (measurementReference && !referenceSourceLoads.some(row => row.file === measurementFile && row.reference === measurementReference)) {
+  throw new Error("Requested measurement source was not loaded by the compiler");
+}
+if (runtimeReference && ["large-save", "macro-finalization"].includes(entry) &&
+  !referenceSourceLoads.some(row => row.file === "src/game/recursiveCrafting.ts" && row.reference === runtimeReference)) {
+  throw new Error("Requested recursive planner reference was not compiled");
+}
+if (contractDirect && !referenceSourceLoads.some(row => row.file === "save-field-contract.mjs" && row.experimental)) {
+  throw new Error("Contract descriptor replacement was not loaded");
+}
+if (macroStages && !referenceSourceLoads.some(row => row.experimental === "macro-finalize-stages")) {
+  throw new Error("Macro stage diagnostics were not compiled");
 }
 const workerAssetHashes = Object.fromEntries((Array.isArray(bundle) ? bundle : [bundle]).flatMap((entry) => entry.output)
   .filter((entry) => entry.fileName.includes(".worker-") && entry.fileName.endsWith(".js"))
@@ -196,18 +250,23 @@ try {
   if (fixtureMode && inputHash !== await fileHash(options.prepared)) throw new Error("Input fixture changed during the run");
   const evidence = { browser: await browser.version(), sourceCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim(),
     ...(entry === "large-save" ? { macroProfile, constructionPhaseCacheLimit, macroSourceHashes: Object.fromEntries(await Promise.all([
-      ...Object.keys(macroProfileFunctions), "src/game/pureIdleMacro.ts", "experiments/web-construction-wasm/large-save.ts",
+      ...Object.keys(macroProfileFunctions), "src/game/recursiveCrafting.ts", "src/game/pureIdleMacro.ts", "experiments/web-construction-wasm/large-save.ts",
     ].map(async file => [file, runtimeReference && runtimeFiles.includes(file)
       ? createHash("sha256").update(execFileSync("git", ["show", `${runtimeReference}:${file}`], { cwd: sourceRoot })).digest("hex")
       : await fileHash(resolve(sourceRoot, file))]))) } : {}),
     sourceDirty: Boolean(execFileSync("git", ["status", "--porcelain"], { cwd: sourceRoot, encoding: "utf8" }).trim()),
     bundleSha256: createHash("sha256").update(code).digest("hex"), referenceSourceLoads, workerAssetHashes,
     ...(entry.startsWith("save-inspection") ? { inspectionReference } : {}),
+    ...(entry === "macro-finalization" ? { macroStages } : {}),
+    ...(entry === "save-profile" ? { contractDirect, contractSourceHash: await fileHash(resolve(sourceRoot, "save-field-contract.mjs")),
+      contractPrototypeHash: await fileHash(resolve(root, "experiments/web-save-checkpoints/contract-omit-direct-body.mjs")) } : {}),
+    ...(entry === "save-state-measure" ? { measurementReference, measurementSourceHash: createHash("sha256").update(execFileSync("git", ["show", measurementReference + ":" + measurementFile], { cwd: sourceRoot })).digest("hex"),
+      measurementPrototypeHash: await fileHash(resolve(root, "experiments/web-save-checkpoints/state-measure-ascii.ts")) } : {}),
     ...(rendererMemory ? { rendererMemory } : {}),
     ...(decoderReference ? { decoderReference, decoderFiles } : {}),
     ...(entry === "macro-finalization" ? { macroWorkerReference, macroSourceHashes: Object.fromEntries(await Promise.all([
       "src/game/pureIdleMacro.worker.ts", "src/game/pureIdleMacro.ts", "src/game/pureIdleMacroClient.ts",
-      "src/game/saveTransfer.ts", "src/game/saveProjection.ts", "src/game/storage.ts", "src/game/save.worker.ts", "src/game/engine.ts",
+      "src/game/saveTransfer.ts", "src/game/saveProjection.ts", "src/game/storage.ts", "src/game/save.worker.ts", "src/game/engine.ts", "src/game/recursiveCrafting.ts",
       "experiments/web-construction-wasm/macro-finalization.ts", "experiments/web-construction-wasm/macro-finalization-clock.worker.ts",
     ].map(async file => [file, macroWorkerReference && file === "src/game/pureIdleMacro.worker.ts"
       ? createHash("sha256").update(execFileSync("git", ["show", `${macroWorkerReference}:${file}`], { cwd: sourceRoot })).digest("hex")

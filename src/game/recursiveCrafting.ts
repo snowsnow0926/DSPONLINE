@@ -254,6 +254,31 @@ function lazyRequirements(
   return candidates;
 }
 
+/** A fully stocked input list has exactly one option in the ordered search. */
+function directlySuppliedWork(
+  work: PlannerWork,
+  requirements: readonly ItemAmount[],
+  batches = 1,
+): PlannerWork | undefined {
+  for (let index = 0; index < requirements.length; index += 1) {
+    const input = requirements[index];
+    const required = input.amount * batches;
+    // Preserve the general planner for unusual numeric inputs and duplicate
+    // requirements, whose sequential debits may need intermediate crafting.
+    if (!Number.isSafeInteger(required) || required < 0) return undefined;
+    for (let earlier = 0; earlier < index; earlier += 1) {
+      if (requirements[earlier].itemId === input.itemId) return undefined;
+    }
+    const current = Math.max(0, Math.floor(work.inventory[input.itemId] ?? 0));
+    if (!Number.isFinite(current) || current < required) return undefined;
+  }
+  const next = cloneWork(work);
+  for (const input of requirements) {
+    next.inventory[input.itemId] = Math.max(0, Math.floor((next.inventory[input.itemId] ?? 0) - input.amount * batches));
+  }
+  return next;
+}
+
 function* lazyItemOptions(
   context: PlannerContext,
   work: PlannerWork,
@@ -280,9 +305,12 @@ function* lazyItemOptions(
     const batches = Math.max(1, Math.ceil((required - current) / getRecipeNetOutput(recipe, itemId)));
     const primary = recipe.outputs.find((output) => output.itemId === itemId && output.amount > 0)!;
     let viable = false;
-    for (const candidate of lazyRequirements(context, [cloneWork(work)], recipe.inputs.map((input) => ({
+    const inputs = recipe.inputs;
+    const direct = directlySuppliedWork(work, inputs, batches);
+    const candidates = direct ? [direct] : lazyRequirements(context, [cloneWork(work)], inputs.map((input) => ({
       itemId: input.itemId, amount: input.amount * batches,
-    })), nextResolving, depth + 1)) {
+    })), nextResolving, depth + 1);
+    for (const candidate of candidates) {
       viable = true;
       for (const output of recipe.outputs) {
         candidate.inventory[output.itemId] = Math.floor((candidate.inventory[output.itemId] ?? 0) + output.amount * batches);
@@ -305,6 +333,8 @@ function* lazyItemOptions(
 }
 
 function firstLazyPlan(context: PlannerContext, initial: PlannerWork, requirements: ItemAmount[]): PlannerWork | undefined {
+  const direct = directlySuppliedWork(initial, requirements);
+  if (direct) return direct;
   const iterator = lazyRequirements(context, [initial], requirements, new Set(), 0)[Symbol.iterator]();
   try { return iterator.next().value; }
   finally { iterator.return?.(); }

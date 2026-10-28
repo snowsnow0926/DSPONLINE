@@ -35,8 +35,13 @@ async function runMacroFinalization() {
   const before = await stateDigest(state);
   const originalNow = Date.now;
   const NativeWorker = globalThis.Worker;
+  const diagnosticPhases: Array<{ phase: string; at: number }> = [];
   function ClockWorker(url: string | URL, options?: WorkerOptions): Worker {
-    return new NativeWorker(options?.name === "pure-idle-macro" ? clockWorkerUrl : url, options);
+    const worker = new NativeWorker(options?.name === "pure-idle-macro" ? clockWorkerUrl : url, options);
+    if (options?.name === "pure-idle-macro") worker.addEventListener("message", ({ data }) => {
+      if (Array.isArray(data?.__dspMacroFinalizePhases)) diagnosticPhases.push(...data.__dspMacroFinalizePhases);
+    });
+    return worker;
   }
   Date.now = () => 1_786_377_600_000;
   globalThis.Worker = ClockWorker as unknown as typeof Worker;
@@ -60,7 +65,7 @@ async function runMacroFinalization() {
     if (payloadSha256 !== saved.proof.payloadSha256 || body.byteLength !== saved.proof.byteLength) throw new Error("Saved payload proof mismatch");
     if (before !== await stateDigest(state)) throw new Error("Macro initialization changed caller state");
     return { scope: "actual macro Worker, fixed 30 seconds at 8x, full envelope/canonical state/actual save Worker bytes; diagnostic only, no database/UI qualification",
-      inputUnchanged: true, sourcePayloadSha256, sourcePayloadBytes: envelope.verification.byteLength, canonicalStateSha256,
+      inputUnchanged: true, diagnosticPhases, finalizationDurationMs: result.durationMs, sourcePayloadSha256, sourcePayloadBytes: envelope.verification.byteLength, canonicalStateSha256,
       payloadSha256, payloadBytes: body.byteLength, identity: { mode: canonical.mode, version: canonical.version,
         entities: canonical.entities.length, belts: canonical.belts.length, elapsedSeconds: canonical.elapsedSeconds },
       settledWallSeconds: result.summary.settledWallSeconds, settledSimulationSeconds: result.summary.settledSimulationSeconds };

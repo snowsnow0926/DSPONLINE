@@ -1,5 +1,24 @@
 # Web construction kernel probe
 
+## 发布后存档/规划定位实验
+
+`--entry=save-state-measure --measure-ref=<commit>` 比较冻结版本的完整 UTF-16
+校验/UTF-8 测量与 ASCII 分支原型，必须记录编译器实际加载的旧模块；另验证
+1,008 项边界向量及完整输入不变。原型未接入游戏，不代表保存或整页提速。
+
+`--entry=save-profile --contract-omit-direct=1` 只在实验编译中替换字段默认值
+投影的描述符读取代码，保留原冻结字段清单、默认值和检查。替换片段位于
+`web-save-checkpoints/contract-omit-direct-body.mjs`，依赖原模块私有上下文，
+不能单独导入调用；不改通用运行合约。四次结果收益小，保持实验状态。
+
+`--entry=macro-finalization --macro-stages=1` 在实际宏观 Worker 中临时添加
+六个固定阶段标签和时间，不携带对象或存档内容；只能作阶段归因。
+源信封、规范化状态及实际保存 Worker 正文仍分别全文核对。默认关闭。
+
+`--runtime-ref=<commit>` 的制造/实际宏观入口同时固定递归规划模块；若编译器
+没有实际加载请求的旧模块则拒绝执行，避免已经修改的规划器成为旧对照。
+完整方法及开发验收见 [原料备齐的递归分支](../../docs/reviews/2026-10-28-web-stocked-recipe-inputs.md)。
+
 这是性能实验，不是游戏运行后端，不会进入 Web 发布包。只读显式提供的夹具，并在全新隔离浏览器的临时数据库中测试写入；不访问玩家当前浏览器存档或线上云档。生产 JS、原生 Host、存档版本和自动备份开关均不受影响。
 
 ## 复制模式制造阶段诊断

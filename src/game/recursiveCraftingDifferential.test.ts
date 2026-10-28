@@ -5,6 +5,23 @@ import * as eager from "./recursiveCrafting.eager-reference";
 import type { ItemId, RecipeDefinition, RecipeId } from "./types";
 
 describe("lazy recursive planner matches the frozen eager planner", () => {
+  it.each([
+    { name: "all stock", inputs: [{ itemId: "iron_ore", amount: 2 }, { itemId: "copper_ore", amount: 3 }], inventory: { iron_ore: 20, copper_ore: 30 } },
+    { name: "late shortage", inputs: [{ itemId: "iron_ore", amount: 2 }, { itemId: "copper_ore", amount: 3 }], inventory: { iron_ore: 20, copper_ore: 0 } },
+    { name: "repeated input", inputs: [{ itemId: "iron_ore", amount: 2 }, { itemId: "iron_ore", amount: 3 }], inventory: { iron_ore: 4 } },
+    { name: "free input", inputs: [], inventory: { iron_ore: 4 } },
+    { name: "fractional cost", inputs: [{ itemId: "iron_ore", amount: 0.5 }], inventory: { iron_ore: 4 } },
+    { name: "zero cost", inputs: [{ itemId: "iron_ore", amount: 0 }], inventory: { iron_ore: 4 } },
+  ])("preserves complete ordered results and caller stock for $name", ({ inputs, inventory }) => {
+    const recipe: RecipeDefinition = { id: "stocked-input-route" as RecipeId, name: "stocked input route", buildingId: "arc_smelter", duration: 1,
+      inputs: inputs as Array<{ itemId: ItemId; amount: number }>, outputs: [{ itemId: "steel", amount: 1 }] };
+    const original = structuredClone(inventory);
+    const args = { recipes: [recipe], inventory, completedTechnologyIds: [], requirements: [{ itemId: "steel" as const, amount: 1 }] };
+    expect(planRecursiveRequirements(args)).toEqual(eager.planRecursiveRequirements(args));
+    expect(planSelectedRecipe({ ...args, recipe, batches: 2 })).toEqual(eager.planSelectedRecipe({ ...args, recipe, batches: 2 }));
+    expect(inventory).toEqual(original);
+  });
+
   it("owns its technology snapshot and keeps repeated plan results isolated", () => {
     const recipes = Object.values(RECIPES);
     const completedTechnologyIds = Object.keys(TECHNOLOGIES) as (keyof typeof TECHNOLOGIES)[];
@@ -21,6 +38,20 @@ describe("lazy recursive planner matches the frozen eager planner", () => {
     first.decisions.length = 0;
     expect(planner.requirements(inventory, requirements)).toEqual(expected);
     expect(inventory.steel).toBe(1_000);
+  });
+  it("rechecks stocked high-priority inputs after depletion and replenishment", () => {
+    const high: RecipeDefinition = { id: "stocked-high" as RecipeId, name: "high", buildingId: "arc_smelter", duration: 1,
+      recursivePriority: 100, inputs: [{ itemId: "iron_ore", amount: 2 }, { itemId: "copper_ore", amount: 3 }], outputs: [{ itemId: "steel", amount: 1 }] };
+    const low: RecipeDefinition = { ...high, id: "stocked-low" as RecipeId, recursivePriority: 0, inputs: [{ itemId: "stone", amount: 1 }] };
+    const options = { recipes: [high, low], completedTechnologyIds: [] };
+    const planner = createRecursiveCraftPlanner(options);
+    const requirements = [{ itemId: "steel" as const, amount: 1 }];
+    for (const copper_ore of [30, 0, 3]) {
+      const inventory = { iron_ore: 20, copper_ore, stone: 5 };
+      const before = structuredClone(inventory);
+      expect(planner.requirements(inventory, requirements)).toEqual(eager.planRecursiveRequirements({ ...options, inventory, requirements }));
+      expect(inventory).toEqual(before);
+    }
   });
   it.each(Array.from({ length: 192 }, (_, index) => index))("preserves complete plans and blockers for catalog case %i", (index) => {
     let seed = index + 1;

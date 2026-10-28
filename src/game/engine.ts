@@ -7366,16 +7366,24 @@ export function runPlanetSimulationPhase(
   if (profiler) profiler.productionMs += profileNow() - subsystemStartedAt;
   subsystemStartedAt = profiler ? profileNow() : 0;
   if (!contractExperiment?.isolateConstructionAutomation) {
-    runConstructionCenters(
-      state,
-      seconds,
-      power,
-      planetId,
-      phaseLookup.entitiesByPlanet.get(planetId) ?? [],
-      batchConstructionAutomation,
-      profiler,
-      phaseLookup,
-    );
+    // Keep full-list selection for the independent oracle and mutable hooks.
+    // Ordinary simulation already owns this ordered topology view.
+    const centers = batchConstructionAutomation && !contractExperiment
+      ? phaseLookup.constructionCentersByPlanet.get(planetId)
+      : (phaseLookup.entitiesByPlanet.get(planetId) ?? []).filter((entity) =>
+        entity.planetId === planetId && entity.buildingId === "construction_center");
+    if (centers?.length) {
+      runConstructionCenters(
+        state,
+        seconds,
+        power,
+        planetId,
+        centers,
+        batchConstructionAutomation,
+        profiler,
+        phaseLookup,
+      );
+    }
   }
   if (profiler) profiler.constructionMs += profileNow() - subsystemStartedAt;
   subsystemStartedAt = profiler ? profileNow() : 0;
@@ -13319,12 +13327,11 @@ function runConstructionCenters(
   seconds: number,
   power: PowerPlan,
   planetId: PlanetId,
-  entities = state.entities,
+  centerEntities: readonly FactoryEntity[],
   batchConstructionAutomation = true,
   profiler?: SimulationProfiler,
   lookup?: Pick<ConstructionAutomationLookup, "constructionAutomationPlanCache" | "quantumTowerStacks">,
 ): void {
-  const centerEntities = entities.filter((entity) => entity.planetId === planetId && entity.buildingId === "construction_center");
   if (centerEntities.length === 0) return;
   // Warehouse stock may choose a recipe but is never spendable until the
   // shared allocator delivers it. Without a working download endpoint keep
@@ -13809,7 +13816,8 @@ export function advanceConstructionAutomationMacroInPlace(
         seconds,
         power,
         planetId,
-        centersByPlanet.get(planetId) ?? [],
+        (centersByPlanet.get(planetId) ?? []).filter((entity) =>
+          entity.planetId === planetId && entity.buildingId === "construction_center"),
         true,
         computeProfiler,
         lookup,

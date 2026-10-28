@@ -1,0 +1,347 @@
+{
+  "scope": "Member-filter predicate visits on topology views in small synthetic Node fixtures; not total entity visits, elapsed time, FPS or memory.",
+  "sourceCommitAtChecks": "8da5681fcd075613cc0995674155c53d7f5eedd3",
+  "sourceDirtyAtChecks": true,
+  "sourceHashes": {
+    "src/game/constructionBatchSnapshot.test.ts": "37532dc6ac54c98ac0127553d4389cf5a7b51590d21ec22ab896d0817f75894f",
+    "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+    "src/game/engine.ts": "7e912aea6b4fda8e714f0343e4ae24cfbefa109490024e07bb7f0b40bf8c2ba6",
+    "src/game/constructionCenterLookup.test.ts": "608906d15cdf4f5b9c622ce6d02a8eea5ba0e1c71270fde4edd7219b0f144b6d"
+  },
+  "baselineCommit": "8da5681fcd075613cc0995674155c53d7f5eedd3",
+  "actualLoadedBaselineEngineSha256": "62ef3e3ff22d4aa41c44961a6735f83eff914ae745e532413fad00102cdd02dc",
+  "actualLoadedBaselineTestBodySha256": "379d613f2f4f2ce56940b8124390e556ab5f85a7f57f4faf9989bf7cb8205810",
+  "baselineConfigSha256": "0c1f5da9c2a3efe2e99f562e6473e407b9744e91700ba8adf7d448e172306555",
+  "baselineValidRecordSha256": "2fdaa5db8310b6bbdd69e47d1104d706ebeacb43364c85b60cedb8a5f2182c82",
+  "baselineUsesLoadOverrideWithModuleMarkers": true,
+  "workspaceEngineReplacedForBaseline": false,
+  "focusedChecks": {
+    "snapshot-5": {
+      "passed": 5,
+      "failed": 0,
+      "log": "light-snapshot-5-01.log",
+      "scope": "same unchanged final engine and unchanged test file; not rerun for fixture-only correction",
+      "availableMemoryGiBAtStart": 13.55,
+      "logSha256": "83247333ca39c494a9cba78d215e557956faf11ee06bca43f8c36832ee6287d3"
+    },
+    "quantum-23": {
+      "passed": 23,
+      "failed": 0,
+      "log": "light-quantum-23-01.log",
+      "scope": "same unchanged final engine and unchanged test file; not rerun for fixture-only correction",
+      "availableMemoryGiBAtStart": 13.54,
+      "logSha256": "8cc69f0de94c54c0c13f71ebaf66434676d02086f9fb0bb1c35e0de1a6e967a2"
+    },
+    "context-5": {
+      "passed": 5,
+      "failed": 0,
+      "log": "light-context-5-01.log",
+      "scope": "same unchanged final engine and unchanged test file; not rerun for fixture-only correction",
+      "availableMemoryGiBAtStart": 13.55,
+      "logSha256": "681ebcb2bfa3741f1665978a89fe28eeeb7bc1a7aafbe94273d23f87cd15b6e8"
+    },
+    "offline-domain-14": {
+      "passed": 14,
+      "failed": 0,
+      "log": "light-offline-domain-14-01.log",
+      "scope": "same unchanged final engine and unchanged test file; not rerun for fixture-only correction",
+      "availableMemoryGiBAtStart": 13.59,
+      "logSha256": "f0f6f33a333bdb39bbc6a556d1215dc09cf5f64aee14a797e864df5f5af5bb91"
+    },
+    "batching-20": {
+      "passed": 20,
+      "failed": 0,
+      "log": "light-batching-20-01.log",
+      "scope": "same unchanged final engine and unchanged test file; not rerun for fixture-only correction",
+      "availableMemoryGiBAtStart": 13.56,
+      "logSha256": "a9064e44f97daca5ad23793cfa2edce9333985945dd1413052c99d506b5189aa"
+    },
+    "construction-guard-14": {
+      "passed": 14,
+      "failed": 0,
+      "log": "light-construction-guard-14-01.log",
+      "scope": "same unchanged final engine and unchanged test file; not rerun for fixture-only correction",
+      "availableMemoryGiBAtStart": 13.56,
+      "logSha256": "eb7a29ee1b7c3ca76c6b397828870ff860f6f5c58fe44751c89982d27d394529"
+    },
+    "lookup-refresh-2": {
+      "passed": 2,
+      "failed": 0,
+      "log": "light-lookup-refresh-2-01.log",
+      "scope": "same unchanged final engine and unchanged test file; not rerun for fixture-only correction",
+      "availableMemoryGiBAtStart": 12.92,
+      "logSha256": "8e4bd65bbd609edb3ce451becb74fb17b1bad54f2d1f73b5cc29c64febc5488d"
+    },
+    "persistent-index-2": {
+      "passed": 2,
+      "failed": 0,
+      "log": "light-persistent-index-2-01.log",
+      "scope": "same unchanged final engine and unchanged test file; not rerun for fixture-only correction",
+      "availableMemoryGiBAtStart": 11.56,
+      "logSha256": "bb1884c3a035fcb6cf836470ec7647eae2e23c2792b0e752acda657fdc0c3fdf"
+    },
+    "reference-path-1": {
+      "passed": 1,
+      "failed": 0,
+      "log": "light-reference-path-1-01.log",
+      "scope": "same unchanged final engine and unchanged test file; not rerun for fixture-only correction",
+      "availableMemoryGiBAtStart": 11.16,
+      "logSha256": "a4ece03d50c7c7bf8afdd060254a29ca4e7a5f1abf76249ad6021890caa275ce"
+    },
+    "center-lookup-7": {
+      "passed": 7,
+      "failed": 0,
+      "log": "candidate-05.log",
+      "scope": "corrected complete fixture, current source",
+      "availableMemoryGiBAtStart": 12.27,
+      "logSha256": "e59b11b884cd2ba53a04e7c38df2b886049f9404c36b17ca2d541a9198d29171"
+    }
+  },
+  "focusedPassed": 93,
+  "focusedFailed": 0,
+  "applicationTypes": "passed",
+  "applicationTypesLog": "light-application-types-03.log",
+  "applicationTypesLogSha256": "862c941b4f66d105abe09d5430e48023b4c95032d61faf99404e4f8c753a5202",
+  "sameEngineChecksCarriedWithinThisRound": 86,
+  "correctedFixtureCurrentTests": 7,
+  "completeNewStateCheckpointsEqualToFrozenBaseline": 18,
+  "mutableOwnedPlacementRemovalMatchesFullListOracle": true,
+  "priorQuantumAndBatchCheckpointsStillPassing": 30,
+  "filterVisitSamples": {
+    "no-centers": {
+      "beforeFilterVisits": [
+        {
+          "planet": 66,
+          "centers": 0
+        },
+        {
+          "planet": 66,
+          "centers": 0
+        },
+        {
+          "planet": 66,
+          "centers": 0
+        }
+      ],
+      "afterFilterVisits": [
+        {
+          "planet": 0,
+          "centers": 0
+        },
+        {
+          "planet": 0,
+          "centers": 0
+        },
+        {
+          "planet": 0,
+          "centers": 0
+        }
+      ],
+      "completeStateSha256At1s2s3s": [
+        "7cb7fbc3c333c067fa1d3150b7b4de5a500ab331f9e59e95d66ac8a865654f0c",
+        "4846e236ebb3fe81d65d2a9915c476707768d7a5f5650191f58f3a704f0180f5",
+        "b514bd4bf14bf25acc04cfbc393b3e74bedebcb2ac8736da4e6cf949a83bcb27"
+      ]
+    },
+    "one-center": {
+      "beforeFilterVisits": [
+        {
+          "planet": 67,
+          "centers": 0
+        },
+        {
+          "planet": 67,
+          "centers": 0
+        },
+        {
+          "planet": 67,
+          "centers": 0
+        }
+      ],
+      "afterFilterVisits": [
+        {
+          "planet": 0,
+          "centers": 0
+        },
+        {
+          "planet": 0,
+          "centers": 0
+        },
+        {
+          "planet": 0,
+          "centers": 0
+        }
+      ],
+      "completeStateSha256At1s2s3s": [
+        "89f577ae18cf67c0d94db3b251bfaf92c10ffc94670a805e25d0c437e20f1204",
+        "45f2b8974111ebff63a5396f945604c6e0b49ef5308506907b58d2d420a923e4",
+        "1debf1af07a6a46a561714899be628d48cd1c1eb1f887f0e2b8ec8070cc17133"
+      ]
+    },
+    "several-centers": {
+      "beforeFilterVisits": [
+        {
+          "planet": 69,
+          "centers": 0
+        },
+        {
+          "planet": 69,
+          "centers": 0
+        },
+        {
+          "planet": 69,
+          "centers": 0
+        }
+      ],
+      "afterFilterVisits": [
+        {
+          "planet": 0,
+          "centers": 0
+        },
+        {
+          "planet": 0,
+          "centers": 0
+        },
+        {
+          "planet": 0,
+          "centers": 0
+        }
+      ],
+      "completeStateSha256At1s2s3s": [
+        "d3ce76543068292f6a887bf02273375278c4d4b8658075e6a53a55c72524a716",
+        "03bb4939bd5139693b318d14e02b0f2a0fc69786bb4b38ec0b9cdba244b81492",
+        "6965fce6f2292747bbc1ea0e89961cbbde59597626f394434a1fb4b6b8badbab"
+      ]
+    },
+    "disabled": {
+      "beforeFilterVisits": [
+        {
+          "planet": 67,
+          "centers": 0
+        },
+        {
+          "planet": 67,
+          "centers": 0
+        },
+        {
+          "planet": 67,
+          "centers": 0
+        }
+      ],
+      "afterFilterVisits": [
+        {
+          "planet": 0,
+          "centers": 0
+        },
+        {
+          "planet": 0,
+          "centers": 0
+        },
+        {
+          "planet": 0,
+          "centers": 0
+        }
+      ],
+      "completeStateSha256At1s2s3s": [
+        "ecb7419062046b947c1b51eee6616c22ba23274700e297d5a611ce66474e4f15",
+        "1add24f9d9c499a6b1e987044c6a0b5e49871fd1f9c2617a0fffa12db689b27d",
+        "e0663b4c6498067934c12e8ffd2b86d28558f0633cd7583a16bf3acd5d9e65c2"
+      ]
+    },
+    "reference": {
+      "beforeFilterVisits": [
+        {
+          "planet": 67,
+          "centers": 0
+        },
+        {
+          "planet": 67,
+          "centers": 0
+        },
+        {
+          "planet": 67,
+          "centers": 0
+        }
+      ],
+      "afterFilterVisits": [
+        {
+          "planet": 67,
+          "centers": 0
+        },
+        {
+          "planet": 67,
+          "centers": 0
+        },
+        {
+          "planet": 67,
+          "centers": 0
+        }
+      ],
+      "completeStateSha256At1s2s3s": [
+        "89f577ae18cf67c0d94db3b251bfaf92c10ffc94670a805e25d0c437e20f1204",
+        "45f2b8974111ebff63a5396f945604c6e0b49ef5308506907b58d2d420a923e4",
+        "1debf1af07a6a46a561714899be628d48cd1c1eb1f887f0e2b8ec8070cc17133"
+      ]
+    },
+    "production-hook": {
+      "beforeFilterVisits": [
+        {
+          "planet": 66,
+          "centers": 0
+        },
+        {
+          "planet": 66,
+          "centers": 0
+        },
+        {
+          "planet": 66,
+          "centers": 0
+        }
+      ],
+      "afterFilterVisits": [
+        {
+          "planet": 66,
+          "centers": 0
+        },
+        {
+          "planet": 66,
+          "centers": 0
+        },
+        {
+          "planet": 66,
+          "centers": 0
+        }
+      ],
+      "completeStateSha256At1s2s3s": [
+        "d0b86c611d0d6d6001b959daf770112beef4dbb88db41718cd0325b77c42b531",
+        "c120b74d5ac5e5646470ae36a4d579fbe16e5ef6d89314ef361caec4b15716bc",
+        "08bcb85297cc5a63b1a24efa8d360eb66c50710b65d204f8a963edce4182d6f6"
+      ]
+    }
+  },
+  "initialProbeIssuesRetained": [
+    "baseline-01.log: 6 pass, 1 lifecycle strict-comparison failure from mixing copying and mutable ownership. Corrected to equal ownership without weakening comparison.",
+    "light-application-types-01.log: TS2740 from incomplete fixture planetTrays. Fixed to retain initial full planet record; new frozen valid baseline and candidate comparison replace the earlier fixture data.",
+    "baseline-02.log and candidate-01/02/03.log use the earlier incomplete fixture; excluded from final fixture qualification.",
+    "baseline-valid-01.log: deferred at 6 GiB before Node. candidate-04.log: deferred at 7.39 GiB before Node. Neither is a test pass or test failure."
+  ],
+  "resourcePolicy": {
+    "priority": "Idle",
+    "logicalProcessors": 1,
+    "workers": 1,
+    "serialTests": true,
+    "minimumAvailableMemoryGiB": 8,
+    "memoryHardLimit": false,
+    "otherProcessesModified": false
+  },
+  "fullRegression": false,
+  "formalBenchmark": false,
+  "largeSaveLoaded": false,
+  "webBuild": false,
+  "acceptedPerformanceResult": false,
+  "published": false,
+  "productionAccess": false,
+  "saveSchemaChanged": false,
+  "backupSettingsChanged": false,
+  "rawEvidenceDirectory": "D:\\GameDev\\DSPidle2\\artifacts\\web-construction-center-index-20261028"
+}

@@ -30,6 +30,27 @@ function unrolledChecksum(bytes: Uint8Array): string {
 const digest = async (bytes: Uint8Array<ArrayBuffer>) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
   .map((value) => value.toString(16).padStart(2, "0")).join("");
 
+// Control for the production helper's fixed-length view construction. Keep
+// this loop separate so its input proof does not depend on inlining a wrapper.
+function unrolledFixedViewChecksum(bytes: ArrayBuffer | ArrayBufferView): string {
+  const view = bytes instanceof ArrayBuffer ? new Uint8Array(bytes)
+    : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let hash = 0x811c9dc5;
+  let index = 0;
+  for (; index + 7 < view.length; index += 8) {
+    hash = Math.imul(hash ^ view[index], 0x01000193);
+    hash = Math.imul(hash ^ view[index + 1], 0x01000193);
+    hash = Math.imul(hash ^ view[index + 2], 0x01000193);
+    hash = Math.imul(hash ^ view[index + 3], 0x01000193);
+    hash = Math.imul(hash ^ view[index + 4], 0x01000193);
+    hash = Math.imul(hash ^ view[index + 5], 0x01000193);
+    hash = Math.imul(hash ^ view[index + 6], 0x01000193);
+    hash = Math.imul(hash ^ view[index + 7], 0x01000193);
+  }
+  for (; index < view.length; index++) hash = Math.imul(hash ^ view[index], 0x01000193);
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 function call(wasm: ChecksumExports, bytes: Uint8Array<ArrayBuffer>) {
   const start = performance.now();
   const memoryBeforeBytes = wasm.memory.buffer.byteLength;
@@ -66,14 +87,15 @@ async function runPayloadChecksum() {
   const coldTotalMs = performance.now() - coldStart;
   if (cold.checksum !== expected) throw new Error("Cold WASM checksum changed full payload");
   const samples = [];
-  for (const implementation of ["js", "unrolled", "wasm", "wasm", "unrolled", "js"] as const) {
+  for (const implementation of ["js", "unrolled", "unrolled-fixed", "wasm", "wasm", "unrolled-fixed", "unrolled", "js"] as const) {
     if (implementation === "wasm") {
       const result = call(wasm, bytes);
       if (result.checksum !== expected) throw new Error("WASM checksum changed full payload");
       samples.push({ implementation, ...result });
     } else {
       const start = performance.now();
-      const checksum = implementation === "js" ? computeSavePayloadChecksum(bytes) : unrolledChecksum(bytes);
+      const checksum = implementation === "js" ? computeSavePayloadChecksum(bytes)
+        : implementation === "unrolled-fixed" ? unrolledFixedViewChecksum(bytes) : unrolledChecksum(bytes);
       const durationMs = performance.now() - start;
       if (checksum !== expected) throw new Error("JS checksum changed full payload");
       samples.push({ implementation, checksum, durationMs });
@@ -90,7 +112,8 @@ async function runPayloadChecksum() {
   }
   for (const vector of vectors) {
     const baseline = computeSavePayloadChecksum(vector);
-    if (call(vectorInstance.exports as ChecksumExports, vector).checksum !== baseline || unrolledChecksum(vector) !== baseline) {
+    if (call(vectorInstance.exports as ChecksumExports, vector).checksum !== baseline || unrolledChecksum(vector) !== baseline ||
+      unrolledFixedViewChecksum(vector) !== baseline) {
       throw new Error("Checksum byte/Unicode/view boundary differs");
     }
   }

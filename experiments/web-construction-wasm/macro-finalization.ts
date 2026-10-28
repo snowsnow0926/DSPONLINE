@@ -47,6 +47,7 @@ async function runMacroFinalization() {
       startedPaused: true, baselineIdleSettlement: structuredClone(state.idleSettlement), baselineTotalProduced: { ...state.totalProduced },
     });
     const result = await client.finalizeEnvelope(30, { terminal: true, binaryTransport: "array-buffer" });
+    client.close();
     const envelope = result.finalEnvelope;
     if (!(envelope.payloadBytes instanceof ArrayBuffer)) throw new Error("Expected exact transferable bytes");
     const sourcePayloadSha256 = await digest(envelope.payloadBytes);

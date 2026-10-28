@@ -12,10 +12,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const options = Object.fromEntries(process.argv.slice(2).map((entry) => entry.replace(/^--/, "").split(/=(.*)/s, 2)));
 const output = resolve(options.output ?? resolve(root, "artifacts/web-construction-wasm"));
 const entry = options.entry ?? "probe";
-if (!["probe", "payload-checksum", "large-save", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "save-inspection-runs", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy"].includes(entry)) throw new Error("Unknown probe entry");
+if (!["probe", "payload-checksum", "large-save", "save-profile", "save-projection-chunks", "macro-finalization", "save-responsiveness", "save-inspection", "save-inspection-runs", "save-inspection-stack", "quantum-runtime", "power-snapshot", "power-matrix", "terminal-parity", "terminal-decode", "terminal-decode-cooperative", "save-state-chunks", "terminal-owner", "terminal-owner-faults", "canonical-owner-parity", "persistence-retirement", "startup-idb", "read-models", "belt-flow", "power-copy"].includes(entry)) throw new Error("Unknown probe entry");
 const fixtureMode = entry !== "probe";
 const needsWasm = entry === "probe" || entry === "payload-checksum";
-const callable = entry === "save-inspection-runs" ? "runSaveInspectionRuns" : entry === "payload-checksum" ? "runPayloadChecksum" : entry === "macro-finalization" ? "runMacroFinalization" : entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
+const callable = entry === "save-inspection-stack" ? "runSaveInspectionStack" : entry === "save-inspection-runs" ? "runSaveInspectionRuns" : entry === "payload-checksum" ? "runPayloadChecksum" : entry === "macro-finalization" ? "runMacroFinalization" : entry === "save-projection-chunks" ? "runSaveProjectionChunks" : entry === "power-copy" ? "runPowerCopyProbe" : entry === "belt-flow" ? "runBeltFlowProbe" : entry === "power-matrix" ? "runPowerMatrixProbe" : entry === "read-models" ? "runReadModelsProbe" : entry === "large-save" ? "runLargeSaveProbe" : entry === "save-profile" ? "runSaveProfile"
   : entry === "save-responsiveness" ? "runSaveResponsiveness" : entry === "save-inspection" ? "runSaveInspection"
     : entry === "quantum-runtime" ? "runQuantumRuntimeProbe" : entry === "power-snapshot" ? "runPowerSnapshotProbe"
       : entry === "terminal-parity" ? "runTerminalParityProbe" : entry === "terminal-decode" ? "runTerminalDecodeProbe"
@@ -231,6 +231,10 @@ try {
     ...(entry === "save-inspection-runs" ? { inspectionSourceHashes: Object.fromEntries(await Promise.all([
       "src/game/canonicalSaveEnvelopeInspection.ts", "experiments/web-save-checkpoints/inspection-run-skip.ts",
       "experiments/web-save-checkpoints/inspection-token-skip.ts", "experiments/web-construction-wasm/save-inspection-runs.ts",
+    ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
+    ...(entry === "save-inspection-stack" ? { inspectionSourceHashes: Object.fromEntries(await Promise.all([
+      "src/game/canonicalSaveEnvelopeInspection.ts", "experiments/web-save-checkpoints/inspection-stack-reuse.ts",
+      "experiments/web-construction-wasm/save-inspection-stack.ts",
     ].map(async file => [file, await fileHash(resolve(sourceRoot, file))]))) } : {}),
     ...(runtimeReference || ["quantum-runtime", "power-snapshot", "power-matrix", "read-models", "belt-flow", "power-copy"].includes(entry) ? { runtimeReference, runtimeFiles,
       runtimeSourceHashes: Object.fromEntries(await Promise.all(runtimeFiles.map(async (file) => [file,

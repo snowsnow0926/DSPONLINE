@@ -1,0 +1,227 @@
+{
+  "decision": "continue-real-save-and-natural-peak-qualification; whole candidate not accepted",
+  "runtimeCommit": "fde9d2bcfb6d51563857f9514067c8d342111f5e",
+  "lastGameSourceCommit": "047b3295a890edb170c08504e819a2fd225603fe",
+  "acceptedWholeRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+  "unit": {
+    "passed": 3876,
+    "skipped": 38,
+    "failed": 0,
+    "passedFiles": 428,
+    "skippedFiles": 16,
+    "workers": 2
+  },
+  "typecheckPassed": true,
+  "buildPassed": true,
+  "browser": {
+    "chromium-full-02": {
+      "startTime": "2026-10-28T23:30:18.231Z",
+      "duration": 489331.526,
+      "expected": 524,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "pwa-preview-01": {
+      "startTime": "2026-10-28T23:38:33.583Z",
+      "duration": 7960.972,
+      "expected": 1,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durable-01": {
+      "startTime": "2026-10-28T23:38:47.382Z",
+      "duration": 47195.643000000004,
+      "expected": 21,
+      "skipped": 22,
+      "unexpected": 0,
+      "flaky": 0
+    }
+  },
+  "candidateProvenance": {
+    "runtimeCommit": "fde9d2bcfb6d51563857f9514067c8d342111f5e",
+    "runtimeSourcesLastChangedCommit": "047b3295a890edb170c08504e819a2fd225603fe",
+    "buildId": "1.3.4+fde9d2bcfb6d",
+    "fileCount": 198,
+    "workerCount": 16,
+    "baselineCommit": "cae3588d648dcf380a1994a4f028933609d9e616",
+    "baselineBuildId": "1.3.4+cae3588d648d",
+    "baselineFrozenFilesVerified": 198,
+    "manifestSha256": "5d7515aa2778d1a4ef7e2ac56dcd6a79e66e57b894a23a2a395aa92986bfe1a3",
+    "aggregateSha256": "d7fcf3c0176b4b0191a7b5b47b52b9035487fa295e12aa0e843c8b655d55e76a",
+    "sourceHashes": {
+      "native/native-coverage-manifest.json": "3ddff06f173967a28d8eac69645def38556394f866e6e4ebfd3fcd3f23db2657",
+      "src/App.tsx": "4ddab435610c8803bee77faccc50698941297bebc11fedecb17fc984aaa2f43d",
+      "src/components/AccessibleDialog.tsx": "f749ff22448453fa065a5605a1fd0e8550e2b82458899033ad950e6b31c2ff49",
+      "src/components/BlueprintWorkspace.tsx": "63e36803c09c682d36fa655f953cf14a940863e2793b9b7276dd649ebae36812",
+      "src/components/TimeWarpIdleOverlay.tsx": "ba4c3237910eb8fd6000c61ef369e5414dab2a84433386cb27b5f25287dcaa4d",
+      "src/game/authoritativeSavePersistence.worker.ts": "cbe421da6daa1c5dddf80a748bcd13dab2ffda2b80e561b698350e13a36c934b",
+      "src/game/authoritativeSavePersistenceClient.ts": "6d00bb29914b8f684077c726ebcdbf6662648a4e90c0568bad24ff34839b1d33",
+      "src/game/beltFlow.ts": "b80f99d8428337c328aa0029448a9fedefdc6d4f177fcb7193ac5e025bbcf78e",
+      "src/game/blueprintExchange.ts": "5efc142f1c12a0ad0c7c888d67ea6082895bd3a2c8c15164b9ef483b712fd701",
+      "src/game/blueprintExchangeFile.ts": "d367fd04a0cce8b11d427a2e2923b9ea1fc59c88de4b766ae01c42dd0bd237c0",
+      "src/game/blueprintExchangeLimits.ts": "814b17ea46438bf1f0178e1a7f159914c3d11d55349706edbfe9cfeddcfbe80a",
+      "src/game/canonicalSaveEnvelopeInspection.ts": "fa86ca733abe4e3d0bf46b5a11ff8575895b529c4e8d0e22c0ae74fbcad4de75",
+      "src/game/canonicalTerminalOwner.worker.ts": "0ceeb80d51e0c1aba294963b0932d36c32ed1a05cd36abfc65963705c221900a",
+      "src/game/canonicalTerminalOwnerClient.ts": "d35451af32da5ab5077498d266887152ce6b939cd4ad1f9086e52c14232bc186",
+      "src/game/chunkedSaveJournal.ts": "e3ef1b98502ef92375bcccfe7bd1ef0980166ad9999102d7a76a1c5771e8f74a",
+      "src/game/contentPacks.ts": "8a6518eb5dec3b2b95990cf0ecfe5ae901c18b147887e4871e72f3aa2770dee6",
+      "src/game/engine.ts": "294057d5e277358b27432b19a31a16474aab739789b0ec954bcf357b1f0cb4c2",
+      "src/game/nativeBlueprintImportInput.ts": "fdcead58f36762d51acb070016ddc8c555f4b2e671084783a4d37af52c211eb2",
+      "src/game/payloadTextChecksum.ts": "d5ec856e3fedd62e1cb14d84ee5dd7775b2933107c772bd49fc521de78791891",
+      "src/game/pureIdleCheckpointOwnerClient.ts": "b88061a1c83b575c219849d5e96d43fc0e7c6c3715bbdd8d58ad5e3e8645448a",
+      "src/game/pureIdleMacro.ts": "4acafb9f17b07b7d6907e0dfb8dcba29dcb79d85c8183f9cd9e949feec7bfbd4",
+      "src/game/pureIdleMacro.worker.ts": "1da6696457673abc6d14fcbc930cdd5ea06c988ba29458bf0070404f5858ce02",
+      "src/game/pureIdleMacroValidation.ts": "e071bfadd9453c244c8b0cec4f3772c358c9b9e7de67d6c55ab07dbbc73d9c1e",
+      "src/game/pureIdleRecovery.ts": "64c1632132600b1765b4281a552fbf8e2d0d0d14e1da1b6a882f99ab2a2c51e9",
+      "src/game/pureIdleReplication.ts": "391a12eb4594a5b412dd37fd65e8eba600ad499908b1c1ce3118fd0789589901",
+      "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+      "src/game/saveEnvelopeIntegrity.ts": "f565a06497bbc254e2277b3c5fda38c02deb05543f1489effe900c08c91ac6cb",
+      "src/game/saveFieldContract.ts": "e3d6a34ec01bea4d1c16d194ca8e67b0db78860c9147be00d35ae3ff54199918",
+      "src/game/saveProjection.ts": "7d62c35d7665960f04930dcf552ce432d07d3ca4beac7bb859b85b42af8e5077",
+      "src/game/saveTransfer.ts": "f844fa15734902546aef43a22e82fc6c9e698a8a7af3ed0c4c2f7c2a8a11dbb7",
+      "src/game/saveTransferDecode.ts": "ba79bb4c94d33fd4ea7fa6a51497db2c4c44e296ce52b5e8a5beaa64d9badc09",
+      "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+      "src/game/types.ts": "713e623c9a602feecba953c079b0c83bb758a81fb738e45d9390224d714a7d78",
+      "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+      "src/game/offlineApproximation.ts": "de7f65b3f55fcc825d3008c0068dd7da0714b4d55efa79d6b60db75b03f0c5f9",
+      "src/game/offlineComplexity.ts": "f39e0138d0e1ddfec740b0f53b6d4fcc6a56f6859a264c2182c8d44bd306ebe2"
+    },
+    "changedProductionSources": [
+      "src/game/engine.ts"
+    ],
+    "sourceAndTestChanges": [
+      "src/game/beltReservationCapacityLedger.test.ts",
+      "src/game/engine.ts"
+    ],
+    "workerHashes": {
+      "authoritativeSavePersistence": "0c3205e0fb9f67b03329d05f5d528bc318651731f326dd12d105571e69cf03bd",
+      "canonicalTerminalOwner": "73a162c173d17b5b97c3877ec55655777d6865ad2d700ef3c8b25f3faf531470",
+      "canvasBeltRender": "db59115bf059fe1cfacc964b65c9d4f94066b56466f669c380ddd60e3c4586e6",
+      "chunkedSaveJournal": "c94c3f9cea08611b8b0fb911e552eb507c41236d27213d378c88ae8b1c162f9d",
+      "localSaveCatalog": "e95f2553a39c479548e143623a9552b1dd640c6bee7159db72198cf5dfe227b5",
+      "multicoreSimulation": "b062d103e101216f4efb1eb75bdc822c47c0e2ea561a2dbb2df9210844f16d86",
+      "offlineSimulation": "9c08b522eff0df335d285168c78405c5901ca6b43e6b9d1f49259928e8fc0c12",
+      "pureIdleCheckpointOwner": "a77cdfd22f9798be44cbcae11ee814952d5fbaa8b7e0af4f10064adfcf72ff70",
+      "pureIdleMacro": "e2d34815aec2bdb6a09a99664b2b068babb5ad7322ab515abc33b96464f10c33",
+      "save": "03561e912b6bbde766bf60ce30d66ba54c8165efaa22a6124db83ab291cd6fdb",
+      "saveInspection": "95105ebc07847eab86171c320b3fa62b853145c538e3d5cf6b3d40de6fb58463",
+      "saveSummary": "b1ac29e08a5738b2cb8efe382d2dbf12f457d1904e772ef46e7287e63bc9680b",
+      "simulation": "06375f1a74ec65ea83882246fa638f89b7758e211708a946c3a2a6ca6cf5f96a",
+      "simulationRuntimeRecoveryPersistence": "f374c8969ca81fd470a2a136fd916500e1f99057337a18be5b0e4d0cacb8190e",
+      "snapshotSaveRewrap": "3068c3f90cf76fb10016621946be64fdfe311ea816813e8a08937bfdb38437db",
+      "statistics": "6f8740ee35f5b5a68b6134e372cce1a82f52795151119091c001a275fcee0f9d"
+    },
+    "changedWorkers": [
+      "multicoreSimulation",
+      "offlineSimulation",
+      "pureIdleMacro",
+      "simulation"
+    ],
+    "archive": "candidate-web-fde9d2bcfb6d.tar.gz",
+    "archiveSha256": "aa6161b4c02d159f7059c4427fa0102b287c39d4153b1952bb1b9702f4e59364",
+    "archiveVerified": true,
+    "productionPublished": false,
+    "acceptedOverallRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1"
+  },
+  "cpuLongScreening": {
+    "storage": {
+      "exactStateAndEnvelopeParity": true,
+      "cpuMsBefore": [
+        1563,
+        1578
+      ],
+      "cpuMsAfter": [
+        1406,
+        1454
+      ],
+      "cpuMedianChangePct": -8.946195479146768,
+      "initMsBefore": [
+        5.643899999999917,
+        5.676899999999932
+      ],
+      "initMsAfter": [
+        5.9284999999999854,
+        5.819600000000037
+      ],
+      "wallMsBefore": [
+        1599.1479000000002,
+        1671.1912999999997
+      ],
+      "wallMsAfter": [
+        1443.1313000000002,
+        1477.6859000000002
+      ]
+    },
+    "quantum": {
+      "exactStateAndEnvelopeParity": true,
+      "cpuMsBefore": [
+        2406,
+        2406
+      ],
+      "cpuMsAfter": [
+        2360,
+        2359
+      ],
+      "cpuMedianChangePct": -1.9326683291770563,
+      "initMsBefore": [
+        10.424399999999878,
+        10.4692
+      ],
+      "initMsAfter": [
+        13.896099999999933,
+        10.619400000000041
+      ],
+      "wallMsBefore": [
+        2472.5517999999997,
+        2437.5017
+      ],
+      "wallMsAfter": [
+        2423.5628999999994,
+        2372.3173
+      ]
+    }
+  },
+  "cpuScope": "Two synthetic Node scenes, four fresh ABBA processes, 24 warm/1800 measured steps, complete state/save body equality. Not real Web/peak/FPS gains.",
+  "priorShortScreening": {
+    "cohort": "cpu-trial-1..4",
+    "fullStateAndSerializedEnvelopeParity": "valid, exact all eight rows",
+    "cpuTiming": "valid but short ~300-450ms windows and two samples per variant; no acceptance",
+    "initAndWallTiming": "invalid: broad fake timers freeze performance.now; no claims from either field",
+    "correctiveAction": "New independent 1800-step ABBA cohort fakes Date only and uses new immutable manifest/probe/config; first source/data retained."
+  },
+  "browserFirstAttempt": {
+    "attempt": "chromium-full-01",
+    "outcome": {
+      "passed": 521,
+      "failed": 2,
+      "skipped": 34,
+      "didNotRun": 1,
+      "flaky": 0
+    },
+    "cause": "Private runner invoked node Playwright directly, so npm_package_version was missing. The two assertions expected undefined; the application correctly reported 1.3.4. A serial tutorial successor did not run.",
+    "gameSourceChangedForFix": false,
+    "gameRuntime": "fde9d2bcfb6d51563857f9514067c8d342111f5e",
+    "correction": "Invoke maintained npm run test:e2e script for every gate, preserving original assertions and proper package environment. Repeat the entire matrix as chromium-full-02, then PWA/durable.",
+    "firstResultMustNotBeReportedAsPass": true
+  },
+  "otherPreparationFailures": {
+    "focused01": "32 passed/10 failed: nine wrong test assumptions about omitted legacy allowances and one unsupported stale lookup reuse. Corrected tests; game formula not changed.",
+    "focused02": "42 passed/0 skipped/0 failed, including 14 new regression cases.",
+    "typecheck01": "Failed on test-only broad black-hole port type. Narrowed to literal 0/1/2; typecheck02 and full suite pass.",
+    "documentation": "Three trailing blank-line warnings were fixed in fde9d2bc before all gates; later diff check passed."
+  },
+  "newCandidateRealSaveRuns": 0,
+  "newCandidateNaturalPeakRuns": 0,
+  "newCandidateMemoryConclusion": "Unmeasured. Previous cae aggregate memory regression remains unresolved; do not transfer its peak values to this candidate.",
+  "preparedNext": {
+    "script": "run-real-parity.ps1",
+    "audit": "audit-real-parity.py",
+    "caseCount": 20,
+    "started": false
+  },
+  "productionPublished": false,
+  "goalStatus": "active",
+  "savesAndDisabledBackupsPreserved": true
+}

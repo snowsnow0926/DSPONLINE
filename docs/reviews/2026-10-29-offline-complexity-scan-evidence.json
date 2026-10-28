@@ -1,6 +1,6 @@
 {
   "formatVersion": 1,
-  "status": "pending-full-and-page-qualification",
+  "status": "local-benefit-verified-aggregate-held",
   "cpu": {
     "scope": "Pure classification only; four fresh Node processes ABBA, twelve measured calls each, no page/FPS/whole-mode timing claim",
     "records": {
@@ -79,7 +79,7 @@
     "passed": 34,
     "skipped": 0,
     "failed": 0,
-    "newBoundaryCases": 19
+    "newBoundaryCases": 18
   },
   "applicationTypecheck": 0,
   "diagnosticSourceParity": {
@@ -106,6 +106,369 @@
     "source-freeze.json": "5c4cb22fa5c1bb6718135df8820088783f85ccbe4450d4a67d9769f7dcda591e",
     "start-profile-analysis.json": "cb22d0a13ced32425d6f8fe5e94951fafa7edf98cbffdcf556ac55b28f22a3f4",
     "stable-start-profile-01.json": "a2b143aa25a25740833a648a13cbedbc4758b995ff5f0fa7fbf4820be874d5bd",
-    "classification-start-profile-server-cleanup.json": "fa88f1e3882a7e49f13c2e1b1bac2fa6a447bf3c67e5e4b15b14facd0f080de5"
+    "classification-start-profile-server-cleanup.json": "fa88f1e3882a7e49f13c2e1b1bac2fa6a447bf3c67e5e4b15b14facd0f080de5",
+    "full-gates-summary.json": "be3aed78fa27805ca93ca49ecceb494d78e10bac9163f15173f0d218d3fe36e7",
+    "scan-page-comparison.json": "c38081ea190f20ee72560eed57b0439213418d0d77ccdc9af942369b79831e6c",
+    "qualification-adjudication.json": "c199cc78eee3f0aea71a264ba5b547320abf37e1cdebf58d6c0745dfefce9546",
+    "candidate-source-provenance.json": "16aea5462da222ad33e2c9a01c29db8d75672cb1fd1da0248eaf061fb0cbf0ce",
+    "candidate-web-manifest.json": "e762830d8c65a4cf5ab5ebdc9cac7ece1c86f90d126bed23c6e71ffc1b352e0f",
+    "scan-server-cleanup.json": "70ff34f0a8f433ada46749f63780113bb4c781b824e824cbda95fba773a33c54",
+    "stage-review-evidence.json": "61cf9c89185c1fe9c91339370a65cc30ed0c3ead5ff6084a9564ff383c600097",
+    "next-worker-calibration-investigation.json": "037ede4eaf24c4a7a774a166058f4ed7e51a94e10b53ad94da4b4e2ee7b98771"
+  },
+  "fullChecks": {
+    "chromium-full-01": {
+      "exitCode": 0,
+      "stats": {
+        "startTime": "2026-10-28T21:27:06.373Z",
+        "duration": 503309.674,
+        "expected": 524,
+        "skipped": 34,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "sourceCommit": "cae3588d648dcf380a1994a4f028933609d9e616",
+      "reportSha256": "fef778ebfe3bc2d3e3bcd448593ea933b25c4e83706ba1f0e8512edd15959ee7"
+    },
+    "pwa-preview-01": {
+      "exitCode": 0,
+      "stats": {
+        "startTime": "2026-10-28T21:35:30.554Z",
+        "duration": 8141.224999999999,
+        "expected": 1,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "sourceCommit": "cae3588d648dcf380a1994a4f028933609d9e616",
+      "reportSha256": "a7a7179f5ae96aead15552eb26965f24b5f281a17144b5f114c7a0f10a34dacf"
+    },
+    "durable-01": {
+      "exitCode": 0,
+      "stats": {
+        "startTime": "2026-10-28T21:35:39.297Z",
+        "duration": 48920.284999999996,
+        "expected": 21,
+        "skipped": 22,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "sourceCommit": "cae3588d648dcf380a1994a4f028933609d9e616",
+      "reportSha256": "f54af9c052101c1c3d317488464eb98570f9be57f3d01e18246e8c62f710abd6"
+    },
+    "full-unit-01": {
+      "passed": 3862,
+      "skipped": 38,
+      "failed": 0,
+      "filesPassed": 427,
+      "filesSkipped": 16,
+      "newBoundaryTests": 18,
+      "logSha256": "10c7e1b59f7d321307fc942a93e9cd095cff70b134035b4c7cf28c1b1f86f023"
+    }
+  },
+  "webComparison": {
+    "scope": "Four unprofiled conservative-mode Web pages ABBA, original-stock expanded fixture; snapshot-to-macro gap includes classification/client setup, not exclusive function CPU or input latency. Five OS samples per page; no natural long-tail or heap/GC claim.",
+    "browser": "147.0.7727.138",
+    "controlRuntime": "5730f267759e7788916a8d762a1c28067ced0838",
+    "candidateRuntime": "cae3588d648dcf380a1994a4f028933609d9e616",
+    "runs": 4,
+    "completeFivePointSamples": true,
+    "allReportsAndCatalogGuardsPassed": true,
+    "workersByteIdentical": true,
+    "records": {
+      "scan-page-baseline-01": {
+        "startMs": 29845,
+        "stopMs": 10226,
+        "snapshotToMacroInitializeMs": 63.799999952316284,
+        "macroInitializePostMessageMs": 0,
+        "rendererPeakBytes": 4306944000,
+        "stoppedRendererWorkingSetBytes": 2503852032,
+        "sampledBrowserMaximumBytes": 3202318336,
+        "stoppedBrowserWorkingSetBytes": 3188797440,
+        "samplingErrors": [],
+        "sourceJsonSha256": "1f882866e3e56e34928088c982ae0788c50484547789b761a8e6e4a897299573",
+        "startingMaximumFrameMs": 191.70000004768372,
+        "runningMaximumFrameMs": 90.09999990463257,
+        "stoppingMaximumFrameMs": 108.09999990463257,
+        "post-stopMaximumFrameMs": 60.09999990463257
+      },
+      "scan-page-candidate-01": {
+        "startMs": 29759,
+        "stopMs": 11057,
+        "snapshotToMacroInitializeMs": 42.5,
+        "macroInitializePostMessageMs": 0,
+        "rendererPeakBytes": 4631687168,
+        "stoppedRendererWorkingSetBytes": 2523209728,
+        "sampledBrowserMaximumBytes": 3211259904,
+        "stoppedBrowserWorkingSetBytes": 3211259904,
+        "samplingErrors": [],
+        "sourceJsonSha256": "48319c50bd995a40cd33bd30eb5b1ab8c7028bd90f589c210c2b592662489ce4",
+        "startingMaximumFrameMs": 159.39999985694885,
+        "runningMaximumFrameMs": 80.30000019073486,
+        "stoppingMaximumFrameMs": 126.59999990463257,
+        "post-stopMaximumFrameMs": 18.700000047683716
+      },
+      "scan-page-candidate-02": {
+        "startMs": 28543,
+        "stopMs": 10032,
+        "snapshotToMacroInitializeMs": 48.39999985694885,
+        "macroInitializePostMessageMs": 0,
+        "rendererPeakBytes": 4179140608,
+        "stoppedRendererWorkingSetBytes": 2572529664,
+        "sampledBrowserMaximumBytes": 3260293120,
+        "stoppedBrowserWorkingSetBytes": 3260293120,
+        "samplingErrors": [],
+        "sourceJsonSha256": "0e2e28aed6c5971c6de329ed94e778b2e328752dc7c609d58bfc29efa49b0c69",
+        "startingMaximumFrameMs": 169.59999990463257,
+        "runningMaximumFrameMs": 79.5,
+        "stoppingMaximumFrameMs": 100.20000004768372,
+        "post-stopMaximumFrameMs": 9.899999856948853
+      },
+      "scan-page-baseline-02": {
+        "startMs": 29239,
+        "stopMs": 10028,
+        "snapshotToMacroInitializeMs": 57.80000019073486,
+        "macroInitializePostMessageMs": 0,
+        "rendererPeakBytes": 4748754944,
+        "stoppedRendererWorkingSetBytes": 2468184064,
+        "sampledBrowserMaximumBytes": 3180572672,
+        "stoppedBrowserWorkingSetBytes": 3153756160,
+        "samplingErrors": [],
+        "sourceJsonSha256": "eff5b37c81c4ff6603acf031678073cb792394c06b1710c742d4730bc5d593db",
+        "startingMaximumFrameMs": 192.70000004768372,
+        "runningMaximumFrameMs": 84.29999995231628,
+        "stoppingMaximumFrameMs": 138.90000009536743,
+        "post-stopMaximumFrameMs": 8.900000095367432
+      }
+    },
+    "metrics": {
+      "snapshotToMacroInitializeMs": {
+        "baseline": [
+          63.799999952316284,
+          57.80000019073486
+        ],
+        "candidate": [
+          42.5,
+          48.39999985694885
+        ],
+        "baselineMedian": 60.800000071525574,
+        "candidateMedian": 45.449999928474426,
+        "changePercent": -25.24671073189686
+      },
+      "startMs": {
+        "baseline": [
+          29845,
+          29239
+        ],
+        "candidate": [
+          29759,
+          28543
+        ],
+        "baselineMedian": 29542.0,
+        "candidateMedian": 29151.0,
+        "changePercent": -1.3235393676799156
+      },
+      "stopMs": {
+        "baseline": [
+          10226,
+          10028
+        ],
+        "candidate": [
+          11057,
+          10032
+        ],
+        "baselineMedian": 10127.0,
+        "candidateMedian": 10544.5,
+        "changePercent": 4.122642440999313
+      },
+      "startingMaximumFrameMs": {
+        "baseline": [
+          191.70000004768372,
+          192.70000004768372
+        ],
+        "candidate": [
+          159.39999985694885,
+          169.59999990463257
+        ],
+        "baselineMedian": 192.20000004768372,
+        "candidateMedian": 164.4999998807907,
+        "changePercent": -14.41207084288283
+      },
+      "stoppingMaximumFrameMs": {
+        "baseline": [
+          108.09999990463257,
+          138.90000009536743
+        ],
+        "candidate": [
+          126.59999990463257,
+          100.20000004768372
+        ],
+        "baselineMedian": 123.5,
+        "candidateMedian": 113.39999997615814,
+        "changePercent": -8.178137671127006
+      },
+      "rendererPeakBytes": {
+        "baseline": [
+          4306944000,
+          4748754944
+        ],
+        "candidate": [
+          4631687168,
+          4179140608
+        ],
+        "baselineMedian": 4527849472.0,
+        "candidateMedian": 4405413888.0,
+        "changePercent": -2.7040559708783496
+      },
+      "stoppedRendererWorkingSetBytes": {
+        "baseline": [
+          2503852032,
+          2468184064
+        ],
+        "candidate": [
+          2523209728,
+          2572529664
+        ],
+        "baselineMedian": 2486018048.0,
+        "candidateMedian": 2547869696.0,
+        "changePercent": 2.4879806504124025
+      },
+      "sampledBrowserMaximumBytes": {
+        "baseline": [
+          3202318336,
+          3180572672
+        ],
+        "candidate": [
+          3211259904,
+          3260293120
+        ],
+        "baselineMedian": 3191445504.0,
+        "candidateMedian": 3235776512.0,
+        "changePercent": 1.3890573392037364
+      },
+      "stoppedBrowserWorkingSetBytes": {
+        "baseline": [
+          3188797440,
+          3153756160
+        ],
+        "candidate": [
+          3211259904,
+          3260293120
+        ],
+        "baselineMedian": 3171276800.0,
+        "candidateMedian": 3235776512.0,
+        "changePercent": 2.03387203538965
+      }
+    },
+    "acceptedOverallRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+    "productionPublished": false,
+    "goalStatus": "active"
+  },
+  "adjudication": {
+    "decision": "retain-local-classification-change-aggregate-held",
+    "runtimeCommit": "cae3588d648dcf380a1994a4f028933609d9e616",
+    "componentVerified": true,
+    "candidateAcceptedAsWholeRuntime": false,
+    "acceptedOverallRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+    "newBoundaryTestsActual": 18,
+    "cpuChangePercent": -34.509845332733455,
+    "webPreparationGapChangePercent": -25.24671073189686,
+    "webStartingMaximumFrameChangePercent": -14.41207084288283,
+    "limits": [
+      "One fixture, one Windows/Chrome desktop; not low-memory or long-running qualification.",
+      "Full startup remains about 29 seconds. Stop wait median +4.12% with one 11.057-second sample; no exit wait benefit.",
+      "Stop renderer working set +2.49%, browser sum +2.03%; renderer peak ranges overlap. No memory gain claim or new natural long-tail qualification.",
+      "Parent 5730 is still held; no accepted-whole-runtime promotion without comparison against 8c54 and resolving original P0 concerns."
+    ],
+    "protectedRuntimeSourcesVerified": 36,
+    "frozenFilesVerifiedEach": 198,
+    "workersByteIdentical": 16,
+    "archiveVerified": true,
+    "savedFixtureUnchanged": true,
+    "newFixedSimulationReplays": 0,
+    "replayScopeReason": "Only classification changed. All sixteen simulation/save Workers and engine bytes equal the previously tested parent; current 5132 complete-report comparisons and full browser/unit checks cover the new routing logic. Prior parent twenty replays remain historical evidence, not rerun counts.",
+    "productionPublished": false,
+    "goalStatus": "active"
+  },
+  "frozenArtifact": {
+    "runtimeCommit": "cae3588d648dcf380a1994a4f028933609d9e616",
+    "runtimeSourcesLastChangedCommit": "cae3588d648dcf380a1994a4f028933609d9e616",
+    "buildId": "1.3.4+cae3588d648d",
+    "fileCount": 198,
+    "workerCount": 16,
+    "baselineCommit": "5730f267759e7788916a8d762a1c28067ced0838",
+    "baselineBuildId": "1.3.4+5730f267759e",
+    "baselineFrozenFilesVerified": 198,
+    "manifestSha256": "e762830d8c65a4cf5ab5ebdc9cac7ece1c86f90d126bed23c6e71ffc1b352e0f",
+    "aggregateSha256": "12894b035dcf2ebf19ccb683f0caec6523bb7c7326f377497c9cf1291394a3d6",
+    "sourceHashes": {
+      "native/native-coverage-manifest.json": "3ddff06f173967a28d8eac69645def38556394f866e6e4ebfd3fcd3f23db2657",
+      "src/App.tsx": "4ddab435610c8803bee77faccc50698941297bebc11fedecb17fc984aaa2f43d",
+      "src/components/AccessibleDialog.tsx": "f749ff22448453fa065a5605a1fd0e8550e2b82458899033ad950e6b31c2ff49",
+      "src/components/BlueprintWorkspace.tsx": "63e36803c09c682d36fa655f953cf14a940863e2793b9b7276dd649ebae36812",
+      "src/components/TimeWarpIdleOverlay.tsx": "ba4c3237910eb8fd6000c61ef369e5414dab2a84433386cb27b5f25287dcaa4d",
+      "src/game/authoritativeSavePersistence.worker.ts": "cbe421da6daa1c5dddf80a748bcd13dab2ffda2b80e561b698350e13a36c934b",
+      "src/game/authoritativeSavePersistenceClient.ts": "6d00bb29914b8f684077c726ebcdbf6662648a4e90c0568bad24ff34839b1d33",
+      "src/game/beltFlow.ts": "b80f99d8428337c328aa0029448a9fedefdc6d4f177fcb7193ac5e025bbcf78e",
+      "src/game/blueprintExchange.ts": "5efc142f1c12a0ad0c7c888d67ea6082895bd3a2c8c15164b9ef483b712fd701",
+      "src/game/blueprintExchangeFile.ts": "d367fd04a0cce8b11d427a2e2923b9ea1fc59c88de4b766ae01c42dd0bd237c0",
+      "src/game/blueprintExchangeLimits.ts": "814b17ea46438bf1f0178e1a7f159914c3d11d55349706edbfe9cfeddcfbe80a",
+      "src/game/canonicalSaveEnvelopeInspection.ts": "fa86ca733abe4e3d0bf46b5a11ff8575895b529c4e8d0e22c0ae74fbcad4de75",
+      "src/game/canonicalTerminalOwner.worker.ts": "0ceeb80d51e0c1aba294963b0932d36c32ed1a05cd36abfc65963705c221900a",
+      "src/game/canonicalTerminalOwnerClient.ts": "d35451af32da5ab5077498d266887152ce6b939cd4ad1f9086e52c14232bc186",
+      "src/game/chunkedSaveJournal.ts": "e3ef1b98502ef92375bcccfe7bd1ef0980166ad9999102d7a76a1c5771e8f74a",
+      "src/game/contentPacks.ts": "8a6518eb5dec3b2b95990cf0ecfe5ae901c18b147887e4871e72f3aa2770dee6",
+      "src/game/engine.ts": "62d66dcffa75812847c0a6b980456131807b52a423add30044fc7b007d228a20",
+      "src/game/nativeBlueprintImportInput.ts": "fdcead58f36762d51acb070016ddc8c555f4b2e671084783a4d37af52c211eb2",
+      "src/game/payloadTextChecksum.ts": "d5ec856e3fedd62e1cb14d84ee5dd7775b2933107c772bd49fc521de78791891",
+      "src/game/pureIdleCheckpointOwnerClient.ts": "b88061a1c83b575c219849d5e96d43fc0e7c6c3715bbdd8d58ad5e3e8645448a",
+      "src/game/pureIdleMacro.ts": "4acafb9f17b07b7d6907e0dfb8dcba29dcb79d85c8183f9cd9e949feec7bfbd4",
+      "src/game/pureIdleMacro.worker.ts": "1da6696457673abc6d14fcbc930cdd5ea06c988ba29458bf0070404f5858ce02",
+      "src/game/pureIdleMacroValidation.ts": "e071bfadd9453c244c8b0cec4f3772c358c9b9e7de67d6c55ab07dbbc73d9c1e",
+      "src/game/pureIdleRecovery.ts": "64c1632132600b1765b4281a552fbf8e2d0d0d14e1da1b6a882f99ab2a2c51e9",
+      "src/game/pureIdleReplication.ts": "391a12eb4594a5b412dd37fd65e8eba600ad499908b1c1ce3118fd0789589901",
+      "src/game/save.worker.ts": "ddb786730cdb0ca16c6a33c330be5309cdc8b48baaafc4b6f84d7ac4db525cd2",
+      "src/game/saveEnvelopeIntegrity.ts": "f565a06497bbc254e2277b3c5fda38c02deb05543f1489effe900c08c91ac6cb",
+      "src/game/saveFieldContract.ts": "e3d6a34ec01bea4d1c16d194ca8e67b0db78860c9147be00d35ae3ff54199918",
+      "src/game/saveProjection.ts": "7d62c35d7665960f04930dcf552ce432d07d3ca4beac7bb859b85b42af8e5077",
+      "src/game/saveTransfer.ts": "f844fa15734902546aef43a22e82fc6c9e698a8a7af3ed0c4c2f7c2a8a11dbb7",
+      "src/game/saveTransferDecode.ts": "ba79bb4c94d33fd4ea7fa6a51497db2c4c44e296ce52b5e8a5beaa64d9badc09",
+      "src/game/storage.ts": "2a92cf1b4408a6636d8afe4b24ff6fa24a979c1ec363be151badb38cbebe0870",
+      "src/game/types.ts": "713e623c9a602feecba953c079b0c83bb758a81fb738e45d9390224d714a7d78",
+      "src/game/recursiveCrafting.ts": "7bf4fddbf4794b54486618d342921de2d56ce37b73cd072138dfd90fab431acb",
+      "src/game/offlineApproximation.ts": "de7f65b3f55fcc825d3008c0068dd7da0714b4d55efa79d6b60db75b03f0c5f9",
+      "src/game/offlineComplexity.ts": "f39e0138d0e1ddfec740b0f53b6d4fcc6a56f6859a264c2182c8d44bd306ebe2"
+    },
+    "changedProductionSources": [
+      "src/game/offlineComplexity.ts"
+    ],
+    "sourceAndTestChanges": [
+      "src/game/offlineComplexity.ts",
+      "src/game/offlineComplexityScan.test.ts"
+    ],
+    "workerHashes": {
+      "authoritativeSavePersistence": "0c3205e0fb9f67b03329d05f5d528bc318651731f326dd12d105571e69cf03bd",
+      "canonicalTerminalOwner": "73a162c173d17b5b97c3877ec55655777d6865ad2d700ef3c8b25f3faf531470",
+      "canvasBeltRender": "db59115bf059fe1cfacc964b65c9d4f94066b56466f669c380ddd60e3c4586e6",
+      "chunkedSaveJournal": "c94c3f9cea08611b8b0fb911e552eb507c41236d27213d378c88ae8b1c162f9d",
+      "localSaveCatalog": "e95f2553a39c479548e143623a9552b1dd640c6bee7159db72198cf5dfe227b5",
+      "multicoreSimulation": "9b897408db5b8e8ce059a1a17fdb35d74cac8f3030454d055a5bea39704a6d69",
+      "offlineSimulation": "4e4589753428eafdaca10778c060be25366f249083ca890920f841a5fff0ce4e",
+      "pureIdleCheckpointOwner": "a77cdfd22f9798be44cbcae11ee814952d5fbaa8b7e0af4f10064adfcf72ff70",
+      "pureIdleMacro": "49276858f0444572704953732a2776b44ce0ab39d5e43f4cbd2f19e342b3e0be",
+      "save": "03561e912b6bbde766bf60ce30d66ba54c8165efaa22a6124db83ab291cd6fdb",
+      "saveInspection": "95105ebc07847eab86171c320b3fa62b853145c538e3d5cf6b3d40de6fb58463",
+      "saveSummary": "b1ac29e08a5738b2cb8efe382d2dbf12f457d1904e772ef46e7287e63bc9680b",
+      "simulation": "7b68937a755642d93f99b5dd71225e102bfcd537c40c63a01a85c7472239e4d2",
+      "simulationRuntimeRecoveryPersistence": "f374c8969ca81fd470a2a136fd916500e1f99057337a18be5b0e4d0cacb8190e",
+      "snapshotSaveRewrap": "3068c3f90cf76fb10016621946be64fdfe311ea816813e8a08937bfdb38437db",
+      "statistics": "6f8740ee35f5b5a68b6134e372cce1a82f52795151119091c001a275fcee0f9d"
+    },
+    "changedWorkers": [],
+    "archive": "candidate-web-cae3588d648d.tar.gz",
+    "archiveSha256": "cbe166fd6c484fded937332de6adad6415a177ee151c739e1813e18d6adbcc41",
+    "archiveVerified": true,
+    "productionPublished": false,
+    "acceptedOverallRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1"
   }
 }

@@ -520,14 +520,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "时间扭曲切换与大档流畅度优化");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.3");
+  await expect(dialog).toHaveAttribute("aria-label", "大档性能与蓝图扩容");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.4");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("时间扭曲启动更顺畅");
-  await expect(dialog).toContainText("停止结算与保存更少卡顿");
-  await expect(dialog).toContainText("取消、重试与恢复更可靠");
-  await expect(dialog).toContainText("减少保存后的内存滞留与画布重复计算");
-  await expect(dialog).toContainText("工厂、材料和备份设置保持");
+  await expect(dialog).toContainText("大档进入、退出更流畅");
+  await expect(dialog).toContainText("减少普通模拟与巨构制造的重复计算");
+  await expect(dialog).toContainText("网页版蓝图交换容量扩大八倍");
+  await expect(dialog).toContainText("大蓝图复制与施工收尾更快");
+  await expect(dialog).toContainText("存档、材料与备份设置保持");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

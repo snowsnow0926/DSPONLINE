@@ -1,0 +1,1464 @@
+{
+  "scope": "New forty-second snapshot-trigger-matched unprofiled fresh-browser pages, independent ABBA per mode; do not mix old ten-second cohorts; one self-closing owned Vite process at a time, no forced GC or heap inspection. Individual query spans and all rows retained.",
+  "sourceHead": "affc0fd18ec4cc4f37ddda18a2c1256f2cbb8ecd",
+  "baselineRuntime": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+  "candidateRuntime": "affc0fd18ec4cc4f37ddda18a2c1256f2cbb8ecd",
+  "browser": "147.0.7727.138",
+  "runs": 8,
+  "completeOsSamples": 64,
+  "guardsPassed": true,
+  "records": {
+    "owned-stable-baseline-01": {
+      "mode": "stable",
+      "variant": "baseline",
+      "startMs": 30104,
+      "stopMs": 10027,
+      "preparationGapMs": 58.700000047683716,
+      "macroPostMessageMs": 0,
+      "rendererLifetimePeakBytes": 3981541376,
+      "browserSampledMaximumBytes": 3211898880,
+      "samplingErrors": [],
+      "stages": {
+        "3": {
+          "rendererWorkingSetBytes": 2015797248,
+          "rendererPrivateBytes": 1975844864,
+          "browserWorkingSetBytes": 2589401088,
+          "browserPrivateBytes": 2578632704,
+          "queryStartedAfterStopMs": 3340,
+          "queryEndedAfterStopMs": 3739,
+          "attempt": 1
+        },
+        "10": {
+          "rendererWorkingSetBytes": 1359994880,
+          "rendererPrivateBytes": 1313693696,
+          "browserWorkingSetBytes": 1931513856,
+          "browserPrivateBytes": 1895067648,
+          "queryStartedAfterStopMs": 10006,
+          "queryEndedAfterStopMs": 10407,
+          "attempt": 1
+        },
+        "30": {
+          "rendererWorkingSetBytes": 1227116544,
+          "rendererPrivateBytes": 1187475456,
+          "browserWorkingSetBytes": 1797554176,
+          "browserPrivateBytes": 1767763968,
+          "queryStartedAfterStopMs": 30017,
+          "queryEndedAfterStopMs": 30405,
+          "attempt": 1
+        },
+        "60": {
+          "rendererWorkingSetBytes": 1239773184,
+          "rendererPrivateBytes": 1200873472,
+          "browserWorkingSetBytes": 1810022400,
+          "browserPrivateBytes": 1780867072,
+          "queryStartedAfterStopMs": 60011,
+          "queryEndedAfterStopMs": 60412,
+          "attempt": 1
+        }
+      },
+      "rawJsonSha256": "6eeb0f4c52ac195bfad1cdf4cfb74dedcd71a24a588a8acc0af1709a866bba2d",
+      "startingMaximumFrameMs": 178.80000019073486,
+      "runningMaximumFrameMs": 110.20000004768372,
+      "stoppingMaximumFrameMs": 100.29999995231628,
+      "post-stopMaximumFrameMs": 9.100000143051147
+    },
+    "owned-stable-candidate-01": {
+      "mode": "stable",
+      "variant": "candidate",
+      "startMs": 27678,
+      "stopMs": 10025,
+      "preparationGapMs": 38.700000047683716,
+      "macroPostMessageMs": 0,
+      "rendererLifetimePeakBytes": 4656115712,
+      "browserSampledMaximumBytes": 3185983488,
+      "samplingErrors": [],
+      "stages": {
+        "3": {
+          "rendererWorkingSetBytes": 2501423104,
+          "rendererPrivateBytes": 2477936640,
+          "browserWorkingSetBytes": 3185840128,
+          "browserPrivateBytes": 3187920896,
+          "queryStartedAfterStopMs": 3320,
+          "queryEndedAfterStopMs": 3729,
+          "attempt": 1
+        },
+        "10": {
+          "rendererWorkingSetBytes": 1392918528,
+          "rendererPrivateBytes": 1364504576,
+          "browserWorkingSetBytes": 2076401664,
+          "browserPrivateBytes": 2054201344,
+          "queryStartedAfterStopMs": 10013,
+          "queryEndedAfterStopMs": 10425,
+          "attempt": 1
+        },
+        "30": {
+          "rendererWorkingSetBytes": 1195651072,
+          "rendererPrivateBytes": 1153753088,
+          "browserWorkingSetBytes": 1767337984,
+          "browserPrivateBytes": 1731203072,
+          "queryStartedAfterStopMs": 30021,
+          "queryEndedAfterStopMs": 30460,
+          "attempt": 1
+        },
+        "60": {
+          "rendererWorkingSetBytes": 1208143872,
+          "rendererPrivateBytes": 1166372864,
+          "browserWorkingSetBytes": 1779662848,
+          "browserPrivateBytes": 1743597568,
+          "queryStartedAfterStopMs": 60015,
+          "queryEndedAfterStopMs": 60418,
+          "attempt": 1
+        }
+      },
+      "rawJsonSha256": "3031a2962d2911be78dc6466e59bac7666cfbefbdb105a39f2b113ec83732cbe",
+      "startingMaximumFrameMs": 158.79999995231628,
+      "runningMaximumFrameMs": 98.60000014305115,
+      "stoppingMaximumFrameMs": 133.80000019073486,
+      "post-stopMaximumFrameMs": 8.600000143051147
+    },
+    "owned-stable-candidate-02": {
+      "mode": "stable",
+      "variant": "candidate",
+      "startMs": 27369,
+      "stopMs": 10025,
+      "preparationGapMs": 50.5,
+      "macroPostMessageMs": 0.09999990463256836,
+      "rendererLifetimePeakBytes": 4438142976,
+      "browserSampledMaximumBytes": 3200458752,
+      "samplingErrors": [],
+      "stages": {
+        "3": {
+          "rendererWorkingSetBytes": 1999351808,
+          "rendererPrivateBytes": 1969852416,
+          "browserWorkingSetBytes": 2683133952,
+          "browserPrivateBytes": 2680172544,
+          "queryStartedAfterStopMs": 3314,
+          "queryEndedAfterStopMs": 3706,
+          "attempt": 1
+        },
+        "10": {
+          "rendererWorkingSetBytes": 1383776256,
+          "rendererPrivateBytes": 1349087232,
+          "browserWorkingSetBytes": 2067034112,
+          "browserPrivateBytes": 2039537664,
+          "queryStartedAfterStopMs": 10003,
+          "queryEndedAfterStopMs": 10399,
+          "attempt": 1
+        },
+        "30": {
+          "rendererWorkingSetBytes": 1224105984,
+          "rendererPrivateBytes": 1181257728,
+          "browserWorkingSetBytes": 1795731456,
+          "browserPrivateBytes": 1759727616,
+          "queryStartedAfterStopMs": 30016,
+          "queryEndedAfterStopMs": 30428,
+          "attempt": 1
+        },
+        "60": {
+          "rendererWorkingSetBytes": 1237495808,
+          "rendererPrivateBytes": 1194262528,
+          "browserWorkingSetBytes": 1808990208,
+          "browserPrivateBytes": 1772548096,
+          "queryStartedAfterStopMs": 60007,
+          "queryEndedAfterStopMs": 60407,
+          "attempt": 1
+        }
+      },
+      "rawJsonSha256": "07bd484e580fd44ff1ba89696bb393e222931934444f8ff7293ae87745d15345",
+      "startingMaximumFrameMs": 114.79999995231628,
+      "runningMaximumFrameMs": 99.40000009536743,
+      "stoppingMaximumFrameMs": 127,
+      "post-stopMaximumFrameMs": 9.400000095367432
+    },
+    "owned-stable-baseline-02": {
+      "mode": "stable",
+      "variant": "baseline",
+      "startMs": 30002,
+      "stopMs": 10140,
+      "preparationGapMs": 61.200000047683716,
+      "macroPostMessageMs": 0,
+      "rendererLifetimePeakBytes": 4295303168,
+      "browserSampledMaximumBytes": 3187036160,
+      "samplingErrors": [],
+      "stages": {
+        "3": {
+          "rendererWorkingSetBytes": 2039455744,
+          "rendererPrivateBytes": 1994358784,
+          "browserWorkingSetBytes": 2720505856,
+          "browserPrivateBytes": 2698604544,
+          "queryStartedAfterStopMs": 3308,
+          "queryEndedAfterStopMs": 3731,
+          "attempt": 1
+        },
+        "10": {
+          "rendererWorkingSetBytes": 1385955328,
+          "rendererPrivateBytes": 1334300672,
+          "browserWorkingSetBytes": 2065121280,
+          "browserPrivateBytes": 2017193984,
+          "queryStartedAfterStopMs": 10015,
+          "queryEndedAfterStopMs": 10429,
+          "attempt": 1
+        },
+        "30": {
+          "rendererWorkingSetBytes": 1231724544,
+          "rendererPrivateBytes": 1188339712,
+          "browserWorkingSetBytes": 1799987200,
+          "browserPrivateBytes": 1759981568,
+          "queryStartedAfterStopMs": 30016,
+          "queryEndedAfterStopMs": 30418,
+          "attempt": 1
+        },
+        "60": {
+          "rendererWorkingSetBytes": 1246269440,
+          "rendererPrivateBytes": 1203105792,
+          "browserWorkingSetBytes": 1814355968,
+          "browserPrivateBytes": 1774481408,
+          "queryStartedAfterStopMs": 60009,
+          "queryEndedAfterStopMs": 60399,
+          "attempt": 1
+        }
+      },
+      "rawJsonSha256": "1d08bc973775e4b87047745d5223cca214a3ea8d797ed67c8469378907eb3371",
+      "startingMaximumFrameMs": 181.30000019073486,
+      "runningMaximumFrameMs": 105.79999995231628,
+      "stoppingMaximumFrameMs": 125.70000004768372,
+      "post-stopMaximumFrameMs": 59.200000047683716
+    },
+    "owned-replication-baseline-01": {
+      "mode": "replication",
+      "variant": "baseline",
+      "startMs": 8852,
+      "stopMs": 10559,
+      "preparationGapMs": 0.9000000953674316,
+      "macroPostMessageMs": 0,
+      "rendererLifetimePeakBytes": 4274262016,
+      "browserSampledMaximumBytes": 3522580480,
+      "samplingErrors": [],
+      "stages": {
+        "3": {
+          "rendererWorkingSetBytes": 2494935040,
+          "rendererPrivateBytes": 2449739776,
+          "browserWorkingSetBytes": 3177914368,
+          "browserPrivateBytes": 3156557824,
+          "queryStartedAfterStopMs": 3269,
+          "queryEndedAfterStopMs": 3681,
+          "attempt": 1
+        },
+        "10": {
+          "rendererWorkingSetBytes": 1378775040,
+          "rendererPrivateBytes": 1328943104,
+          "browserWorkingSetBytes": 2060021760,
+          "browserPrivateBytes": 2015203328,
+          "queryStartedAfterStopMs": 10004,
+          "queryEndedAfterStopMs": 10403,
+          "attempt": 1
+        },
+        "30": {
+          "rendererWorkingSetBytes": 1224065024,
+          "rendererPrivateBytes": 1176666112,
+          "browserWorkingSetBytes": 1793789952,
+          "browserPrivateBytes": 1749819392,
+          "queryStartedAfterStopMs": 30012,
+          "queryEndedAfterStopMs": 30409,
+          "attempt": 1
+        },
+        "60": {
+          "rendererWorkingSetBytes": 1238933504,
+          "rendererPrivateBytes": 1191600128,
+          "browserWorkingSetBytes": 1808707584,
+          "browserPrivateBytes": 1764708352,
+          "queryStartedAfterStopMs": 60014,
+          "queryEndedAfterStopMs": 60418,
+          "attempt": 1
+        }
+      },
+      "rawJsonSha256": "a2e13aa76f41ff8f136ed3ea26b32dc538e806d4eb45e4939be5842e744a1ac8",
+      "startingMaximumFrameMs": 120.79999995231628,
+      "runningMaximumFrameMs": 85.40000009536743,
+      "stoppingMaximumFrameMs": 97.10000014305115,
+      "post-stopMaximumFrameMs": 32.5
+    },
+    "owned-replication-candidate-01": {
+      "mode": "replication",
+      "variant": "candidate",
+      "startMs": 8980,
+      "stopMs": 10644,
+      "preparationGapMs": 0.7000000476837158,
+      "macroPostMessageMs": 0,
+      "rendererLifetimePeakBytes": 4482830336,
+      "browserSampledMaximumBytes": 3233824768,
+      "samplingErrors": [],
+      "stages": {
+        "3": {
+          "rendererWorkingSetBytes": 2483027968,
+          "rendererPrivateBytes": 2443567104,
+          "browserWorkingSetBytes": 3167227904,
+          "browserPrivateBytes": 3149332480,
+          "queryStartedAfterStopMs": 3288,
+          "queryEndedAfterStopMs": 3706,
+          "attempt": 1
+        },
+        "10": {
+          "rendererWorkingSetBytes": 1892425728,
+          "rendererPrivateBytes": 1850613760,
+          "browserWorkingSetBytes": 2575065088,
+          "browserPrivateBytes": 2536112128,
+          "queryStartedAfterStopMs": 10004,
+          "queryEndedAfterStopMs": 10420,
+          "attempt": 1
+        },
+        "30": {
+          "rendererWorkingSetBytes": 1225359360,
+          "rendererPrivateBytes": 1180368896,
+          "browserWorkingSetBytes": 1796464640,
+          "browserPrivateBytes": 1753763840,
+          "queryStartedAfterStopMs": 30011,
+          "queryEndedAfterStopMs": 30424,
+          "attempt": 1
+        },
+        "60": {
+          "rendererWorkingSetBytes": 1238634496,
+          "rendererPrivateBytes": 1193005056,
+          "browserWorkingSetBytes": 1809543168,
+          "browserPrivateBytes": 1766277120,
+          "queryStartedAfterStopMs": 60016,
+          "queryEndedAfterStopMs": 60429,
+          "attempt": 1
+        }
+      },
+      "rawJsonSha256": "5c33f03f4a4ba6a8e6063742dc0a43646df2bdfd9fd09e60d06e72677015cc4a",
+      "startingMaximumFrameMs": 120.40000009536743,
+      "runningMaximumFrameMs": 88.70000004768372,
+      "stoppingMaximumFrameMs": 124.90000009536743,
+      "post-stopMaximumFrameMs": 61.700000047683716
+    },
+    "owned-replication-candidate-02": {
+      "mode": "replication",
+      "variant": "candidate",
+      "startMs": 9022,
+      "stopMs": 10528,
+      "preparationGapMs": 0.5999999046325684,
+      "macroPostMessageMs": 0,
+      "rendererLifetimePeakBytes": 4498427904,
+      "browserSampledMaximumBytes": 3252568064,
+      "samplingErrors": [],
+      "stages": {
+        "3": {
+          "rendererWorkingSetBytes": 2471239680,
+          "rendererPrivateBytes": 2428416000,
+          "browserWorkingSetBytes": 3153944576,
+          "browserPrivateBytes": 3142529024,
+          "queryStartedAfterStopMs": 3291,
+          "queryEndedAfterStopMs": 3697,
+          "attempt": 1
+        },
+        "10": {
+          "rendererWorkingSetBytes": 1877590016,
+          "rendererPrivateBytes": 1834729472,
+          "browserWorkingSetBytes": 2559860736,
+          "browserPrivateBytes": 2529247232,
+          "queryStartedAfterStopMs": 10011,
+          "queryEndedAfterStopMs": 10452,
+          "attempt": 1
+        },
+        "30": {
+          "rendererWorkingSetBytes": 1221152768,
+          "rendererPrivateBytes": 1177165824,
+          "browserWorkingSetBytes": 1792032768,
+          "browserPrivateBytes": 1759756288,
+          "queryStartedAfterStopMs": 30010,
+          "queryEndedAfterStopMs": 30427,
+          "attempt": 1
+        },
+        "60": {
+          "rendererWorkingSetBytes": 1234837504,
+          "rendererPrivateBytes": 1190604800,
+          "browserWorkingSetBytes": 1805459456,
+          "browserPrivateBytes": 1773076480,
+          "queryStartedAfterStopMs": 60015,
+          "queryEndedAfterStopMs": 60419,
+          "attempt": 1
+        }
+      },
+      "rawJsonSha256": "8473d3bcb41e2ad9eb83bbfcc017ac47647663241f3c5cc05b431444babab0e0",
+      "startingMaximumFrameMs": 130.5,
+      "runningMaximumFrameMs": 85.40000009536743,
+      "stoppingMaximumFrameMs": 110.10000014305115,
+      "post-stopMaximumFrameMs": 8.700000047683716
+    },
+    "owned-replication-baseline-02": {
+      "mode": "replication",
+      "variant": "baseline",
+      "startMs": 9212,
+      "stopMs": 10536,
+      "preparationGapMs": 1.0,
+      "macroPostMessageMs": 0,
+      "rendererLifetimePeakBytes": 4217659392,
+      "browserSampledMaximumBytes": 3472363520,
+      "samplingErrors": [],
+      "stages": {
+        "3": {
+          "rendererWorkingSetBytes": 2554785792,
+          "rendererPrivateBytes": 2517426176,
+          "browserWorkingSetBytes": 3233390592,
+          "browserPrivateBytes": 3216465920,
+          "queryStartedAfterStopMs": 3264,
+          "queryEndedAfterStopMs": 3671,
+          "attempt": 1
+        },
+        "10": {
+          "rendererWorkingSetBytes": 1373626368,
+          "rendererPrivateBytes": 1329668096,
+          "browserWorkingSetBytes": 2049830912,
+          "browserPrivateBytes": 2006863872,
+          "queryStartedAfterStopMs": 10012,
+          "queryEndedAfterStopMs": 10444,
+          "attempt": 1
+        },
+        "30": {
+          "rendererWorkingSetBytes": 1238188032,
+          "rendererPrivateBytes": 1196060672,
+          "browserWorkingSetBytes": 1803100160,
+          "browserPrivateBytes": 1761943552,
+          "queryStartedAfterStopMs": 30009,
+          "queryEndedAfterStopMs": 30426,
+          "attempt": 1
+        },
+        "60": {
+          "rendererWorkingSetBytes": 1251213312,
+          "rendererPrivateBytes": 1208823808,
+          "browserWorkingSetBytes": 1815982080,
+          "browserPrivateBytes": 1774600192,
+          "queryStartedAfterStopMs": 60017,
+          "queryEndedAfterStopMs": 60437,
+          "attempt": 1
+        }
+      },
+      "rawJsonSha256": "6c2c41c84ff65a8180f8e7b58c2df4dbd2a730a8af6c6413aaae7f488eaf1f1d",
+      "startingMaximumFrameMs": 120.29999995231628,
+      "runningMaximumFrameMs": 89.70000004768372,
+      "stoppingMaximumFrameMs": 101.70000004768372,
+      "post-stopMaximumFrameMs": 8.800000190734863
+    }
+  },
+  "metrics": {
+    "stable": {
+      "startMs": {
+        "baseline": [
+          30104,
+          30002
+        ],
+        "candidate": [
+          27678,
+          27369
+        ],
+        "baselineMedian": 30053.0,
+        "candidateMedian": 27523.5,
+        "baselineRange": [
+          30002,
+          30104
+        ],
+        "candidateRange": [
+          27369,
+          27678
+        ],
+        "changePercent": -8.416796991980835
+      },
+      "stopMs": {
+        "baseline": [
+          10027,
+          10140
+        ],
+        "candidate": [
+          10025,
+          10025
+        ],
+        "baselineMedian": 10083.5,
+        "candidateMedian": 10025.0,
+        "baselineRange": [
+          10027,
+          10140
+        ],
+        "candidateRange": [
+          10025,
+          10025
+        ],
+        "changePercent": -0.5801556999057822
+      },
+      "preparationGapMs": {
+        "baseline": [
+          58.700000047683716,
+          61.200000047683716
+        ],
+        "candidate": [
+          38.700000047683716,
+          50.5
+        ],
+        "baselineMedian": 59.950000047683716,
+        "candidateMedian": 44.60000002384186,
+        "baselineRange": [
+          58.700000047683716,
+          61.200000047683716
+        ],
+        "candidateRange": [
+          38.700000047683716,
+          50.5
+        ],
+        "changePercent": -25.604670578202835
+      },
+      "startingMaximumFrameMs": {
+        "baseline": [
+          178.80000019073486,
+          181.30000019073486
+        ],
+        "candidate": [
+          158.79999995231628,
+          114.79999995231628
+        ],
+        "baselineMedian": 180.05000019073486,
+        "candidateMedian": 136.79999995231628,
+        "baselineRange": [
+          178.80000019073486,
+          181.30000019073486
+        ],
+        "candidateRange": [
+          114.79999995231628,
+          158.79999995231628
+        ],
+        "changePercent": -24.021105355513438
+      },
+      "stoppingMaximumFrameMs": {
+        "baseline": [
+          100.29999995231628,
+          125.70000004768372
+        ],
+        "candidate": [
+          133.80000019073486,
+          127
+        ],
+        "baselineMedian": 113.0,
+        "candidateMedian": 130.40000009536743,
+        "baselineRange": [
+          100.29999995231628,
+          125.70000004768372
+        ],
+        "candidateRange": [
+          127,
+          133.80000019073486
+        ],
+        "changePercent": 15.398230172891525
+      },
+      "rendererLifetimePeakBytes": {
+        "baseline": [
+          3981541376,
+          4295303168
+        ],
+        "candidate": [
+          4656115712,
+          4438142976
+        ],
+        "baselineMedian": 4138422272.0,
+        "candidateMedian": 4547129344.0,
+        "baselineRange": [
+          3981541376,
+          4295303168
+        ],
+        "candidateRange": [
+          4438142976,
+          4656115712
+        ],
+        "changePercent": 9.875915146824333
+      },
+      "browserSampledMaximumBytes": {
+        "baseline": [
+          3211898880,
+          3187036160
+        ],
+        "candidate": [
+          3185983488,
+          3200458752
+        ],
+        "baselineMedian": 3199467520.0,
+        "candidateMedian": 3193221120.0,
+        "baselineRange": [
+          3187036160,
+          3211898880
+        ],
+        "candidateRange": [
+          3185983488,
+          3200458752
+        ],
+        "changePercent": -0.1952324866857813
+      },
+      "naturalMemory": {
+        "3": {
+          "rendererWorkingSetBytes": {
+            "baseline": [
+              2015797248,
+              2039455744
+            ],
+            "candidate": [
+              2501423104,
+              1999351808
+            ],
+            "baselineMedian": 2027626496.0,
+            "candidateMedian": 2250387456.0,
+            "baselineRange": [
+              2015797248,
+              2039455744
+            ],
+            "candidateRange": [
+              1999351808,
+              2501423104
+            ],
+            "changePercent": 10.986291629126544
+          },
+          "rendererPrivateBytes": {
+            "baseline": [
+              1975844864,
+              1994358784
+            ],
+            "candidate": [
+              2477936640,
+              1969852416
+            ],
+            "baselineMedian": 1985101824.0,
+            "candidateMedian": 2223894528.0,
+            "baselineRange": [
+              1975844864,
+              1994358784
+            ],
+            "candidateRange": [
+              1969852416,
+              2477936640
+            ],
+            "changePercent": 12.029242082848434
+          },
+          "browserWorkingSetBytes": {
+            "baseline": [
+              2589401088,
+              2720505856
+            ],
+            "candidate": [
+              3185840128,
+              2683133952
+            ],
+            "baselineMedian": 2654953472.0,
+            "candidateMedian": 2934487040.0,
+            "baselineRange": [
+              2589401088,
+              2720505856
+            ],
+            "candidateRange": [
+              2683133952,
+              3185840128
+            ],
+            "changePercent": 10.528755812410706
+          },
+          "browserPrivateBytes": {
+            "baseline": [
+              2578632704,
+              2698604544
+            ],
+            "candidate": [
+              3187920896,
+              2680172544
+            ],
+            "baselineMedian": 2638618624.0,
+            "candidateMedian": 2934046720.0,
+            "baselineRange": [
+              2578632704,
+              2698604544
+            ],
+            "candidateRange": [
+              2680172544,
+              3187920896
+            ],
+            "changePercent": 11.196316637534665
+          }
+        },
+        "10": {
+          "rendererWorkingSetBytes": {
+            "baseline": [
+              1359994880,
+              1385955328
+            ],
+            "candidate": [
+              1392918528,
+              1383776256
+            ],
+            "baselineMedian": 1372975104.0,
+            "candidateMedian": 1388347392.0,
+            "baselineRange": [
+              1359994880,
+              1385955328
+            ],
+            "candidateRange": [
+              1383776256,
+              1392918528
+            ],
+            "changePercent": 1.1196334117941964
+          },
+          "rendererPrivateBytes": {
+            "baseline": [
+              1313693696,
+              1334300672
+            ],
+            "candidate": [
+              1364504576,
+              1349087232
+            ],
+            "baselineMedian": 1323997184.0,
+            "candidateMedian": 1356795904.0,
+            "baselineRange": [
+              1313693696,
+              1334300672
+            ],
+            "candidateRange": [
+              1349087232,
+              1364504576
+            ],
+            "changePercent": 2.477249981824725
+          },
+          "browserWorkingSetBytes": {
+            "baseline": [
+              1931513856,
+              2065121280
+            ],
+            "candidate": [
+              2076401664,
+              2067034112
+            ],
+            "baselineMedian": 1998317568.0,
+            "candidateMedian": 2071717888.0,
+            "baselineRange": [
+              1931513856,
+              2065121280
+            ],
+            "candidateRange": [
+              2067034112,
+              2076401664
+            ],
+            "changePercent": 3.6731058754321033
+          },
+          "browserPrivateBytes": {
+            "baseline": [
+              1895067648,
+              2017193984
+            ],
+            "candidate": [
+              2054201344,
+              2039537664
+            ],
+            "baselineMedian": 1956130816.0,
+            "candidateMedian": 2046869504.0,
+            "baselineRange": [
+              1895067648,
+              2017193984
+            ],
+            "candidateRange": [
+              2039537664,
+              2054201344
+            ],
+            "changePercent": 4.638681997022442
+          }
+        },
+        "30": {
+          "rendererWorkingSetBytes": {
+            "baseline": [
+              1227116544,
+              1231724544
+            ],
+            "candidate": [
+              1195651072,
+              1224105984
+            ],
+            "baselineMedian": 1229420544.0,
+            "candidateMedian": 1209878528.0,
+            "baselineRange": [
+              1227116544,
+              1231724544
+            ],
+            "candidateRange": [
+              1195651072,
+              1224105984
+            ],
+            "changePercent": -1.5895306203700499
+          },
+          "rendererPrivateBytes": {
+            "baseline": [
+              1187475456,
+              1188339712
+            ],
+            "candidate": [
+              1153753088,
+              1181257728
+            ],
+            "baselineMedian": 1187907584.0,
+            "candidateMedian": 1167505408.0,
+            "baselineRange": [
+              1187475456,
+              1188339712
+            ],
+            "candidateRange": [
+              1153753088,
+              1181257728
+            ],
+            "changePercent": -1.7174884877239727
+          },
+          "browserWorkingSetBytes": {
+            "baseline": [
+              1797554176,
+              1799987200
+            ],
+            "candidate": [
+              1767337984,
+              1795731456
+            ],
+            "baselineMedian": 1798770688.0,
+            "candidateMedian": 1781534720.0,
+            "baselineRange": [
+              1797554176,
+              1799987200
+            ],
+            "candidateRange": [
+              1767337984,
+              1795731456
+            ],
+            "changePercent": -0.9582081871238546
+          },
+          "browserPrivateBytes": {
+            "baseline": [
+              1767763968,
+              1759981568
+            ],
+            "candidate": [
+              1731203072,
+              1759727616
+            ],
+            "baselineMedian": 1763872768.0,
+            "candidateMedian": 1745465344.0,
+            "baselineRange": [
+              1759981568,
+              1767763968
+            ],
+            "candidateRange": [
+              1731203072,
+              1759727616
+            ],
+            "changePercent": -1.0435800321851763
+          }
+        },
+        "60": {
+          "rendererWorkingSetBytes": {
+            "baseline": [
+              1239773184,
+              1246269440
+            ],
+            "candidate": [
+              1208143872,
+              1237495808
+            ],
+            "baselineMedian": 1243021312.0,
+            "candidateMedian": 1222819840.0,
+            "baselineRange": [
+              1239773184,
+              1246269440
+            ],
+            "candidateRange": [
+              1208143872,
+              1237495808
+            ],
+            "changePercent": -1.625191121421421
+          },
+          "rendererPrivateBytes": {
+            "baseline": [
+              1200873472,
+              1203105792
+            ],
+            "candidate": [
+              1166372864,
+              1194262528
+            ],
+            "baselineMedian": 1201989632.0,
+            "candidateMedian": 1180317696.0,
+            "baselineRange": [
+              1200873472,
+              1203105792
+            ],
+            "candidateRange": [
+              1166372864,
+              1194262528
+            ],
+            "changePercent": -1.8030052359053972
+          },
+          "browserWorkingSetBytes": {
+            "baseline": [
+              1810022400,
+              1814355968
+            ],
+            "candidate": [
+              1779662848,
+              1808990208
+            ],
+            "baselineMedian": 1812189184.0,
+            "candidateMedian": 1794326528.0,
+            "baselineRange": [
+              1810022400,
+              1814355968
+            ],
+            "candidateRange": [
+              1779662848,
+              1808990208
+            ],
+            "changePercent": -0.9856948798564247
+          },
+          "browserPrivateBytes": {
+            "baseline": [
+              1780867072,
+              1774481408
+            ],
+            "candidate": [
+              1743597568,
+              1772548096
+            ],
+            "baselineMedian": 1777674240.0,
+            "candidateMedian": 1758072832.0,
+            "baselineRange": [
+              1774481408,
+              1780867072
+            ],
+            "candidateRange": [
+              1743597568,
+              1772548096
+            ],
+            "changePercent": -1.1026434179526645
+          }
+        }
+      }
+    },
+    "replication": {
+      "startMs": {
+        "baseline": [
+          8852,
+          9212
+        ],
+        "candidate": [
+          8980,
+          9022
+        ],
+        "baselineMedian": 9032.0,
+        "candidateMedian": 9001.0,
+        "baselineRange": [
+          8852,
+          9212
+        ],
+        "candidateRange": [
+          8980,
+          9022
+        ],
+        "changePercent": -0.34322409211692273
+      },
+      "stopMs": {
+        "baseline": [
+          10559,
+          10536
+        ],
+        "candidate": [
+          10644,
+          10528
+        ],
+        "baselineMedian": 10547.5,
+        "candidateMedian": 10586.0,
+        "baselineRange": [
+          10536,
+          10559
+        ],
+        "candidateRange": [
+          10528,
+          10644
+        ],
+        "changePercent": 0.3650154064944289
+      },
+      "preparationGapMs": {
+        "baseline": [
+          0.9000000953674316,
+          1.0
+        ],
+        "candidate": [
+          0.7000000476837158,
+          0.5999999046325684
+        ],
+        "baselineMedian": 0.9500000476837158,
+        "candidateMedian": 0.6499999761581421,
+        "baselineRange": [
+          0.9000000953674316,
+          1.0
+        ],
+        "candidateRange": [
+          0.5999999046325684,
+          0.7000000476837158
+        ],
+        "changePercent": -31.578953312374246
+      },
+      "startingMaximumFrameMs": {
+        "baseline": [
+          120.79999995231628,
+          120.29999995231628
+        ],
+        "candidate": [
+          120.40000009536743,
+          130.5
+        ],
+        "baselineMedian": 120.54999995231628,
+        "candidateMedian": 125.45000004768372,
+        "baselineRange": [
+          120.29999995231628,
+          120.79999995231628
+        ],
+        "candidateRange": [
+          120.40000009536743,
+          130.5
+        ],
+        "changePercent": 4.064703523273017
+      },
+      "stoppingMaximumFrameMs": {
+        "baseline": [
+          97.10000014305115,
+          101.70000004768372
+        ],
+        "candidate": [
+          124.90000009536743,
+          110.10000014305115
+        ],
+        "baselineMedian": 99.40000009536743,
+        "candidateMedian": 117.50000011920929,
+        "baselineRange": [
+          97.10000014305115,
+          101.70000004768372
+        ],
+        "candidateRange": [
+          110.10000014305115,
+          124.90000009536743
+        ],
+        "changePercent": 18.20925553971444
+      },
+      "rendererLifetimePeakBytes": {
+        "baseline": [
+          4274262016,
+          4217659392
+        ],
+        "candidate": [
+          4482830336,
+          4498427904
+        ],
+        "baselineMedian": 4245960704.0,
+        "candidateMedian": 4490629120.0,
+        "baselineRange": [
+          4217659392,
+          4274262016
+        ],
+        "candidateRange": [
+          4482830336,
+          4498427904
+        ],
+        "changePercent": 5.762380602569039
+      },
+      "browserSampledMaximumBytes": {
+        "baseline": [
+          3522580480,
+          3472363520
+        ],
+        "candidate": [
+          3233824768,
+          3252568064
+        ],
+        "baselineMedian": 3497472000.0,
+        "candidateMedian": 3243196416.0,
+        "baselineRange": [
+          3472363520,
+          3522580480
+        ],
+        "candidateRange": [
+          3233824768,
+          3252568064
+        ],
+        "changePercent": -7.270267896354854
+      },
+      "naturalMemory": {
+        "3": {
+          "rendererWorkingSetBytes": {
+            "baseline": [
+              2494935040,
+              2554785792
+            ],
+            "candidate": [
+              2483027968,
+              2471239680
+            ],
+            "baselineMedian": 2524860416.0,
+            "candidateMedian": 2477133824.0,
+            "baselineRange": [
+              2494935040,
+              2554785792
+            ],
+            "candidateRange": [
+              2471239680,
+              2483027968
+            ],
+            "changePercent": -1.890266554838338
+          },
+          "rendererPrivateBytes": {
+            "baseline": [
+              2449739776,
+              2517426176
+            ],
+            "candidate": [
+              2443567104,
+              2428416000
+            ],
+            "baselineMedian": 2483582976.0,
+            "candidateMedian": 2435991552.0,
+            "baselineRange": [
+              2449739776,
+              2517426176
+            ],
+            "candidateRange": [
+              2428416000,
+              2443567104
+            ],
+            "changePercent": -1.9162405468187593
+          },
+          "browserWorkingSetBytes": {
+            "baseline": [
+              3177914368,
+              3233390592
+            ],
+            "candidate": [
+              3167227904,
+              3153944576
+            ],
+            "baselineMedian": 3205652480.0,
+            "candidateMedian": 3160586240.0,
+            "baselineRange": [
+              3177914368,
+              3233390592
+            ],
+            "candidateRange": [
+              3153944576,
+              3167227904
+            ],
+            "changePercent": -1.4058367300001318
+          },
+          "browserPrivateBytes": {
+            "baseline": [
+              3156557824,
+              3216465920
+            ],
+            "candidate": [
+              3149332480,
+              3142529024
+            ],
+            "baselineMedian": 3186511872.0,
+            "candidateMedian": 3145930752.0,
+            "baselineRange": [
+              3156557824,
+              3216465920
+            ],
+            "candidateRange": [
+              3142529024,
+              3149332480
+            ],
+            "changePercent": -1.2735279713403158
+          }
+        },
+        "10": {
+          "rendererWorkingSetBytes": {
+            "baseline": [
+              1378775040,
+              1373626368
+            ],
+            "candidate": [
+              1892425728,
+              1877590016
+            ],
+            "baselineMedian": 1376200704.0,
+            "candidateMedian": 1885007872.0,
+            "baselineRange": [
+              1373626368,
+              1378775040
+            ],
+            "candidateRange": [
+              1877590016,
+              1892425728
+            ],
+            "changePercent": 36.97187238177724
+          },
+          "rendererPrivateBytes": {
+            "baseline": [
+              1328943104,
+              1329668096
+            ],
+            "candidate": [
+              1850613760,
+              1834729472
+            ],
+            "baselineMedian": 1329305600.0,
+            "candidateMedian": 1842671616.0,
+            "baselineRange": [
+              1328943104,
+              1329668096
+            ],
+            "candidateRange": [
+              1834729472,
+              1850613760
+            ],
+            "changePercent": 38.619111812964604
+          },
+          "browserWorkingSetBytes": {
+            "baseline": [
+              2060021760,
+              2049830912
+            ],
+            "candidate": [
+              2575065088,
+              2559860736
+            ],
+            "baselineMedian": 2054926336.0,
+            "candidateMedian": 2567462912.0,
+            "baselineRange": [
+              2049830912,
+              2060021760
+            ],
+            "candidateRange": [
+              2559860736,
+              2575065088
+            ],
+            "changePercent": 24.941846674546685
+          },
+          "browserPrivateBytes": {
+            "baseline": [
+              2015203328,
+              2006863872
+            ],
+            "candidate": [
+              2536112128,
+              2529247232
+            ],
+            "baselineMedian": 2011033600.0,
+            "candidateMedian": 2532679680.0,
+            "baselineRange": [
+              2006863872,
+              2015203328
+            ],
+            "candidateRange": [
+              2529247232,
+              2536112128
+            ],
+            "changePercent": 25.939202607057375
+          }
+        },
+        "30": {
+          "rendererWorkingSetBytes": {
+            "baseline": [
+              1224065024,
+              1238188032
+            ],
+            "candidate": [
+              1225359360,
+              1221152768
+            ],
+            "baselineMedian": 1231126528.0,
+            "candidateMedian": 1223256064.0,
+            "baselineRange": [
+              1224065024,
+              1238188032
+            ],
+            "candidateRange": [
+              1221152768,
+              1225359360
+            ],
+            "changePercent": -0.6392896116685698
+          },
+          "rendererPrivateBytes": {
+            "baseline": [
+              1176666112,
+              1196060672
+            ],
+            "candidate": [
+              1180368896,
+              1177165824
+            ],
+            "baselineMedian": 1186363392.0,
+            "candidateMedian": 1178767360.0,
+            "baselineRange": [
+              1176666112,
+              1196060672
+            ],
+            "candidateRange": [
+              1177165824,
+              1180368896
+            ],
+            "changePercent": -0.640278691269669
+          },
+          "browserWorkingSetBytes": {
+            "baseline": [
+              1793789952,
+              1803100160
+            ],
+            "candidate": [
+              1796464640,
+              1792032768
+            ],
+            "baselineMedian": 1798445056.0,
+            "candidateMedian": 1794248704.0,
+            "baselineRange": [
+              1793789952,
+              1803100160
+            ],
+            "candidateRange": [
+              1792032768,
+              1796464640
+            ],
+            "changePercent": -0.23333223253054758
+          },
+          "browserPrivateBytes": {
+            "baseline": [
+              1749819392,
+              1761943552
+            ],
+            "candidate": [
+              1753763840,
+              1759756288
+            ],
+            "baselineMedian": 1755881472.0,
+            "candidateMedian": 1756760064.0,
+            "baselineRange": [
+              1749819392,
+              1761943552
+            ],
+            "candidateRange": [
+              1753763840,
+              1759756288
+            ],
+            "changePercent": 0.050037090430676834
+          }
+        },
+        "60": {
+          "rendererWorkingSetBytes": {
+            "baseline": [
+              1238933504,
+              1251213312
+            ],
+            "candidate": [
+              1238634496,
+              1234837504
+            ],
+            "baselineMedian": 1245073408.0,
+            "candidateMedian": 1236736000.0,
+            "baselineRange": [
+              1238933504,
+              1251213312
+            ],
+            "candidateRange": [
+              1234837504,
+              1238634496
+            ],
+            "changePercent": -0.6696318423017877
+          },
+          "rendererPrivateBytes": {
+            "baseline": [
+              1191600128,
+              1208823808
+            ],
+            "candidate": [
+              1193005056,
+              1190604800
+            ],
+            "baselineMedian": 1200211968.0,
+            "candidateMedian": 1191804928.0,
+            "baselineRange": [
+              1191600128,
+              1208823808
+            ],
+            "candidateRange": [
+              1190604800,
+              1193005056
+            ],
+            "changePercent": -0.7004629368934978
+          },
+          "browserWorkingSetBytes": {
+            "baseline": [
+              1808707584,
+              1815982080
+            ],
+            "candidate": [
+              1809543168,
+              1805459456
+            ],
+            "baselineMedian": 1812344832.0,
+            "candidateMedian": 1807501312.0,
+            "baselineRange": [
+              1808707584,
+              1815982080
+            ],
+            "candidateRange": [
+              1805459456,
+              1809543168
+            ],
+            "changePercent": -0.2672515690435695
+          },
+          "browserPrivateBytes": {
+            "baseline": [
+              1764708352,
+              1774600192
+            ],
+            "candidate": [
+              1766277120,
+              1773076480
+            ],
+            "baselineMedian": 1769654272.0,
+            "candidateMedian": 1769676800.0,
+            "baselineRange": [
+              1764708352,
+              1774600192
+            ],
+            "candidateRange": [
+              1766277120,
+              1773076480
+            ],
+            "changePercent": 0.001273017015601674
+          }
+        }
+      }
+    }
+  },
+  "candidateAccepted": false,
+  "productionPublished": false,
+  "goalStatus": "active",
+  "qualification": {
+    "unitPassed": 3916,
+    "unitSkipped": 38,
+    "chromiumPassed": 524,
+    "chromiumSkipped": 34,
+    "pwaPassed": 1,
+    "pwaSkipped": 0,
+    "durablePassed": 21,
+    "durableSkipped": 22,
+    "unexpected": 0,
+    "flaky": 0,
+    "frozenFiles": 198,
+    "frozenWorkers": 16,
+    "protectedRuntimeFiles": 40,
+    "largeOwnershipRestoreIndependentlyQualified": false,
+    "priorMath20InheritedOnly": true
+  },
+  "auditSourceSha256": "a7d9f94c642ecb1bfc78eeed6b2e3c0775aa2031d333287e7b7f197068853286",
+  "decision": "Do not accept whole AFF: both renderer lifetime peak ranges above controls, stopping frame intervals worse, replication +10s working set higher. Preserve all source/evidence. Isolate IO candidate atop exactly accepted8c54 math source and qualify anew; causal attribution is not yet established.",
+  "limits": [
+    "Two samples per variant per mode; no confidence interval/FPS or long-run leak claim.",
+    "40second trigger-matched protocol is independent of old10second cohorts.",
+    "Actual snapshot send is required, but is not independent snapshot commit or interrupted recovery proof.",
+    "Discrete whole-browser sampled maxima and lifetime renderer peaks measure different quantities; preserve both."
+  ]
+}

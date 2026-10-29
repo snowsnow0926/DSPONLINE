@@ -37,7 +37,6 @@ import type {
 import {
   workerBinaryPayloadByteLength,
   workerBinaryPayloadToArrayBuffer,
-  releaseOwnedWorkerPayloadBuffer,
   type WorkerBinaryPayload,
 } from "./workerBinaryPayload";
 
@@ -481,7 +480,7 @@ async function commitPayload(
   if (storedSha256 !== request.proof.storedSha256) {
     return failure("invalid", "authoritative 存档传输 SHA-256 与 Worker proof 不匹配");
   }
-  let payload: ArrayBuffer | null = await decodeSavePayloadTransport(storedPayload, request.proof.transportEncoding);
+  const payload = await decodeSavePayloadTransport(storedPayload, request.proof.transportEncoding);
   if (payload.byteLength !== request.proof.byteLength ||
     computeSavePayloadChecksum(payload) !== request.proof.payloadChecksum ||
     (payload === storedPayload ? storedSha256 : await sha256Bytes(payload)) !== request.proof.payloadSha256) {
@@ -493,11 +492,6 @@ async function commitPayload(
   } catch {
     return failure("invalid", "authoritative payload 不是合法 UTF-8");
   }
-  // The exact bytes are already proven and the immutable text now owns the
-  // persisted value. Drop only fresh decompression storage before inspection
-  // and IDB awaits; preserve the input buffer for its ownership return.
-  releaseOwnedWorkerPayloadBuffer(payload, storedPayload);
-  payload = null;
   // The serializer proof is not sufficient by itself: a caller could pair a
   // valid proof/seed with a different, structurally valid envelope. Reinspect
   // the exact bytes in this Worker and bind the envelope header and state
@@ -509,7 +503,7 @@ async function commitPayload(
   const decodeMs = Math.max(0, performance.now() - decodeStarted);
   const db = await openDatabase();
   try {
-    report({ stage: "writing-idb", key: request.key, bytes: request.proof.byteLength });
+    report({ stage: "writing-idb", key: request.key, bytes: payload.byteLength });
     const primaryWriteStarted = performance.now();
     const transaction = db.transaction(RECORD_STORE, "readwrite");
     const done = transactionDone(transaction);

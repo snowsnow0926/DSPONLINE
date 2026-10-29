@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-10-28-v1.3.4";
+const RELEASE_NOTE_ID = "2026-10-29-v1.3.5";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,14 +520,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "大档性能与蓝图扩容");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.4");
+  await expect(dialog).toHaveAttribute("aria-label", "巨构制造与工厂计算优化");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.5");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("大档进入、退出更流畅");
-  await expect(dialog).toContainText("减少普通模拟与巨构制造的重复计算");
-  await expect(dialog).toContainText("网页版蓝图交换容量扩大八倍");
-  await expect(dialog).toContainText("大蓝图复制与施工收尾更快");
-  await expect(dialog).toContainText("存档、材料与备份设置保持");
+  await expect(dialog).toContainText("原料齐备时制造更轻");
+  await expect(dialog).toContainText("减少制造批次重复计算");
+  await expect(dialog).toContainText("优化量子供料计算");
+  await expect(dialog).toContainText("优化大工厂供电统计");
+  await expect(dialog).toContainText("保留存档与材料规则");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

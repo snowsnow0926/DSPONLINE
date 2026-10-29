@@ -28,7 +28,6 @@ import { applyAuthoritativeSaveCheckpointOverlay as applyCheckpointOverlay } fro
 import {
   createImmutableWorkerBinaryPayload,
   workerBinaryPayloadToArrayBuffer,
-  releaseOwnedWorkerPayloadBuffer,
   workerBinaryPayloadTransferables,
   type WorkerBinaryPayload,
 } from "./workerBinaryPayload";
@@ -69,9 +68,7 @@ async function deserializeAuthoritativeEnvelopeTransfer(
   source: Extract<AuthoritativeSaveSerializationRequest, { envelopeTransfer: unknown }>["envelopeTransfer"],
   contentPackRegistry: AuthoritativeSaveSerializationRequest["contentPackRegistry"],
 ): Promise<GameState> {
-  const decoded = await workerBinaryPayloadToArrayBuffer(source.buffer);
-  const raw = decodeVerifiedSaveTransfer(decoded, source);
-  releaseOwnedWorkerPayloadBuffer(decoded, source.buffer);
+  const raw = decodeVerifiedSaveTransfer(await workerBinaryPayloadToArrayBuffer(source.buffer), source);
   const inspection = inspectSaveEnvelopeChecksum(raw);
   if (inspection.status !== "valid" || inspection.formatVersion !== 2 ||
     !inspection.parsed || !inspection.state ||

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-10-28-v1.3.4";
+const RELEASE_NOTE_ID = "2026-10-29-v1.3.5";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,19 +110,19 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en&releaseNotesTest=1");
-  const dialog = page.getByRole("dialog", { name: "Large-Factory Performance and Bigger Blueprints" });
+  const dialog = page.getByRole("dialog", { name: "Construction and Factory Computation Improvements" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.3.4");
-  await expect(dialog).toContainText("Faster time-warp transitions");
-  await expect(dialog).toContainText("Less repeated factory computation");
-  await expect(dialog).toContainText("Eightfold Web blueprint capacity");
-  await expect(dialog).toContainText("Faster large-blueprint copying and construction");
-  await expect(dialog).toContainText("Existing saves and backup preferences preserved");
+  await expect(dialog).toContainText("1.3.5");
+  await expect(dialog).toContainText("Lighter crafting when materials are ready");
+  await expect(dialog).toContainText("Less repeated batch planning");
+  await expect(dialog).toContainText("Lean quantum supply calculations");
+  await expect(dialog).toContainText("Lean large-factory power statistics");
+  await expect(dialog).toContainText("Existing saves and material rules preserved");
   await expect(dialog).toContainText("GameState v47 remains compatible.");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-10-28-v1.3.4");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-10-29-v1.3.5");
 });
 
 test("English light primary workspaces use opaque light surfaces", async ({ page }) => {

@@ -1,10 +1,9 @@
 import { computeAuthoritativeSaveProofBindingSha256 } from "./authoritativeSaveProof";
 import { sha256Bytes } from "./payloadDigest";
 import { decodeSavePayloadTransport, prepareSavePayloadTransport } from "./savePayloadCompression";
-import { rewrapVerifiedPrimarySaveBytesAsSnapshot } from "./saveTransfer";
+import { rewrapVerifiedPrimarySaveAsSnapshot } from "./saveTransfer";
 import type { AuthoritativeSavePayloadProof } from "./authoritativeSavePersistenceProtocol";
 import type { AuthoritativePrimarySnapshotSource } from "./authoritativeSaveSerializationProtocol";
-import { releaseOwnedWorkerPayloadBuffer } from "./workerBinaryPayload";
 
 /** Worker-only transform of an already committed primary. The persistence
  * Worker still independently validates the new envelope, catalog and CAS. */
@@ -24,22 +23,17 @@ export async function rewrapAuthoritativePrimarySnapshot(
     await sha256Bytes(source.bytes) !== source.proof.storedSha256) {
     throw new Error("自动快照主档来源证明不匹配");
   }
-  let decoded: ArrayBuffer | null = await decodeSavePayloadTransport(source.bytes, source.proof.transportEncoding);
+  const decoded = await decodeSavePayloadTransport(source.bytes, source.proof.transportEncoding);
   if (decoded.byteLength !== source.proof.byteLength || await sha256Bytes(decoded) !== source.proof.payloadSha256) {
     throw new Error("自动快照主档来源正文不匹配");
   }
-  const reframed = rewrapVerifiedPrimarySaveBytesAsSnapshot(
-    decoded, source.proof,
+  const reframed = rewrapVerifiedPrimarySaveAsSnapshot(
+    new TextDecoder("utf-8", { fatal: true }).decode(decoded), source.proof,
     { formatVersion: 2, savedAt: source.catalogSeed.savedAt, mode: source.catalogSeed.mode }, savedAt, reason,
   );
   if (!reframed) throw new Error("自动快照主档封装不匹配");
-  const bytes = reframed.bytes;
+  const bytes = new TextEncoder().encode(reframed.raw).buffer;
   if (bytes.byteLength !== reframed.verification.byteLength) throw new Error("自动快照长度不匹配");
-  // The new envelope owns independent bytes. Retain the original transport
-  // for retry, but release a consumed fresh decompression before another full
-  // digest and compression. Also tolerate a future reframe that reuses input.
-  if (bytes !== decoded) releaseOwnedWorkerPayloadBuffer(decoded, source.bytes);
-  decoded = null;
   const payloadSha256 = await sha256Bytes(bytes);
   const transport = await prepareSavePayloadTransport(bytes, payloadSha256);
   const catalogSeed = { ...source.catalogSeed, kind: "snapshot" as const, savedAt, reason };

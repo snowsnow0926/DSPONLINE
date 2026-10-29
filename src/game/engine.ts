@@ -137,14 +137,11 @@ import {
   getQuantumLogisticsMultiplier,
   getQuantumItemCapacity,
   normalizeQuantumInteger,
-  normalizeQuantumItemCapacity,
   setQuantumNetworkItemCapacity,
   settleQuantumAttachments,
   settleQuantumLogisticsNetwork,
   QUANTUM_SETTLEMENT_SECONDS,
   QUANTUM_UNIT_CAP_PER_MINUTE,
-  QUANTUM_ITEM_CAPACITY_DEFAULT,
-  QUANTUM_MAX_INTEGER_DIGITS,
 } from "./quantumLogisticsNetwork";
 import type { QuantumInventoryDepositBatch, QuantumSettlementInput, QuantumSettlementOutput } from "./quantumLogisticsNetwork";
 import { compareQuantumInteger } from "./quantumLogisticsNetwork";
@@ -1527,37 +1524,6 @@ export function getStationSlots(station: FactoryEntity): StationSlot[] {
   return slots.slice(0, STATION_SLOT_COUNT);
 }
 
-function stationSlotFromSnapshot(station: FactoryEntity, itemId: ItemId, remoteMode?: StationLogisticsMode): StationSlot | undefined {
-  return getStationSlots(station).find((slot) => slot.itemId === itemId &&
-    (remoteMode === undefined || slot.remoteMode === remoteMode));
-}
-
-/** Read one fresh normalized slot without allocating all five snapshots.
- * Public/editable snapshots and legacy or unusual record shapes retain the
- * full reader. Slot edits are read on every call; no array identity is cached. */
-function readStationSlot(station: FactoryEntity, itemId: ItemId, remoteMode?: StationLogisticsMode): StationSlot | undefined {
-  const slots = station.stationSlots;
-  if (station.buildingId === "orbital_collector" || typeof itemId !== "string" ||
-    !Array.isArray(slots) || slots.length !== STATION_SLOT_COUNT) {
-    return stationSlotFromSnapshot(station, itemId, remoteMode);
-  }
-  let found: StationSlot | undefined;
-  for (let index = 0; index < STATION_SLOT_COUNT; index++) {
-    const slot = slots[index];
-    if (!slot || typeof slot !== "object" ||
-      (slot.itemId !== undefined && typeof slot.itemId !== "string") ||
-      typeof slot.minStock !== "number" || typeof slot.maxStock !== "number" || typeof slot.warperBudget !== "number") {
-      return stationSlotFromSnapshot(station, itemId, remoteMode);
-    }
-    if (found || slot.itemId !== itemId) continue;
-    const normalized = normalizeStationSlot(slot);
-    if (normalized.itemId === itemId && (remoteMode === undefined || normalized.remoteMode === remoteMode)) {
-      found = normalized;
-    }
-  }
-  return found;
-}
-
 function ensureStationSlots(station: FactoryEntity): StationSlot[] {
   station.stationSlots = getStationSlots(station);
   const primary = station.stationSlots.find((slot) => slot.itemId);
@@ -1676,7 +1642,7 @@ export function getStationSlotCapacity(state: GameState, station: FactoryEntity,
 
 export function getEntityItemInputCapacity(state: GameState, entity: FactoryEntity, itemId: ItemId): number {
   if (entity.kind === "station" && entity.buildingId !== "orbital_collector") {
-    const slot = readStationSlot(entity, itemId);
+    const slot = getStationSlots(entity).find((candidate) => candidate.itemId === itemId);
     if (slot) return getStationSlotCapacity(state, entity, slot);
   }
   const rated = getEntityInputCapacity(state, entity);
@@ -1714,52 +1680,15 @@ function hasQuantumBoundaryLogistics(station: FactoryEntity): boolean {
 
 function quantumSupplySlot(station: FactoryEntity, itemId: ItemId): StationSlot | undefined {
   if (!isQuantumStation(station)) return undefined;
-  return readStationSlot(station, itemId, "supply");
+  return getStationSlots(station).find((slot) => slot.itemId === itemId && slot.remoteMode === "supply");
 }
 
-interface QuantumFreeCapacityValue {
-  inventory: unknown;
-  configuredCapacity: unknown;
-  free: number;
-}
-
-const quantumFreeCapacityValues = new WeakMap<SimulationLookupContext, Map<ItemId, QuantumFreeCapacityValue>>();
-const QUANTUM_FREE_CAPACITY_MEMO_LIMIT = 512;
-const MAX_SAFE_QUANTUM_FREE = BigInt(Number.MAX_SAFE_INTEGER);
-
-function quantumInventoryFree(state: GameState, itemId: ItemId, lookup?: SimulationLookupContext): number {
-  const network = state.quantumLogisticsNetwork;
-  if (!network?.enabled) return 0;
-  const inventory: unknown = network.inventory[itemId];
-  // Keep the original reader for unindexed and legacy scalar/object inputs.
-  // Normal string records are immutable values, not a promise that inventory
-  // stays unchanged: deposits, withdrawals and capacity edits all change keys.
-  if (!lookup || (inventory !== undefined && typeof inventory !== "string")) {
-    const current = BigInt(normalizeQuantumInteger(inventory));
-    const capacity = BigInt(getQuantumItemCapacity(network, itemId));
-    const free = capacity > current ? capacity - current : 0n;
-    return Number(free > MAX_SAFE_QUANTUM_FREE ? MAX_SAFE_QUANTUM_FREE : free);
-  }
-  const configuredCapacity: unknown = network.itemCapacities[itemId];
-  const memoizable = (inventory === undefined || inventory.length <= QUANTUM_MAX_INTEGER_DIGITS) &&
-    (configuredCapacity === undefined ||
-      typeof configuredCapacity === "string" && configuredCapacity.length <= QUANTUM_MAX_INTEGER_DIGITS);
-  let values = memoizable ? quantumFreeCapacityValues.get(lookup) : undefined;
-  const cached = values?.get(itemId);
-  if (cached && cached.inventory === inventory && cached.configuredCapacity === configuredCapacity) return cached.free;
-  const current = BigInt(normalizeQuantumInteger(inventory));
-  // Read each property once, like getQuantumItemCapacity; do not re-read an
-  // accessor after it has already supplied the value used as the cache key.
-  const capacity = BigInt(configuredCapacity === undefined
-    ? QUANTUM_ITEM_CAPACITY_DEFAULT : normalizeQuantumItemCapacity(configuredCapacity));
+function quantumInventoryFree(state: GameState, itemId: ItemId): number {
+  if (!state.quantumLogisticsNetwork?.enabled) return 0;
+  const current = BigInt(normalizeQuantumInteger(state.quantumLogisticsNetwork.inventory[itemId]));
+  const capacity = BigInt(getQuantumItemCapacity(state.quantumLogisticsNetwork, itemId));
   const free = capacity > current ? capacity - current : 0n;
-  const result = Number(free > MAX_SAFE_QUANTUM_FREE ? MAX_SAFE_QUANTUM_FREE : free);
-  if (memoizable) {
-    if (!values) quantumFreeCapacityValues.set(lookup, values = new Map());
-    if (!values.has(itemId) && values.size >= QUANTUM_FREE_CAPACITY_MEMO_LIMIT) values.clear();
-    values.set(itemId, { inventory, configuredCapacity, free: result });
-  }
-  return result;
+  return Number(free > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : free);
 }
 
 function quantumSupplyFreeCapacity(
@@ -1772,7 +1701,8 @@ function quantumSupplyFreeCapacity(
   if (!slot) return 0;
   const localCapacity = getEntityItemInputCapacity(state, station, itemId);
   const localFree = Math.max(0, Math.floor(localCapacity - (station.inputs[itemId] ?? 0)));
-  return Math.max(0, quantumInventoryFree(state, itemId, lookup) + localFree);
+  void lookup;
+  return Math.max(0, quantumInventoryFree(state, itemId) + localFree);
 }
 
 function recordImmediateQuantumUpload(state: GameState, itemId: ItemId, amount: number): void {
@@ -1907,9 +1837,9 @@ export interface SimulationProfiler {
 }
 
 /**
- * Local regression hooks and bounded offline power audits. This deliberately
- * stays out of GameState and save data. Ordinary hooks may change the state;
- * configurations created by createSimulationPowerAudit only observe it.
+ * Local benchmark hook for proving deterministic simulation contracts. The
+ * production runtime never supplies this object; it deliberately stays out of
+ * GameState and save data.
  */
 export interface SimulationContractExperiment {
   /** Test oracle: preserve the former per-lab full-factory progress reset. */
@@ -1951,24 +1881,6 @@ export interface SimulationPowerAuditSample {
   storageChargeKw: number;
 }
 
-const simulationPowerAudits = new WeakSet<SimulationContractExperiment>();
-
-/** The observer may update its own ledger, but must not mutate the simulation.
- * Freeze the entire configuration so state-mutating hooks cannot be added to
- * a registered audit. Unregistered regression hooks retain their live views. */
-export function createSimulationPowerAudit(
-  onPowerPlan: (sample: SimulationPowerAuditSample) => void,
-  isolateConstructionAutomation: boolean,
-): SimulationContractExperiment {
-  const audit: SimulationContractExperiment = Object.assign(Object.create(null), {
-    onPowerPlan,
-    isolateConstructionAutomation,
-  });
-  Object.freeze(audit);
-  simulationPowerAudits.add(audit);
-  return audit;
-}
-
 interface IndexedStationSlot {
   peer: FactoryEntity;
   peerSlotIndex: number;
@@ -1984,7 +1896,6 @@ interface IndexedBeltRoute {
   capacity: number;
   compatible: boolean;
   targetCapacityIndex?: number;
-  reservationTargetCapacityIndex?: number;
   sourceGroupIndex?: number;
   /** Stable UTF-8 byte order inside one source/item group for deterministic batching. */
   stableSourceOrder?: number;
@@ -2033,10 +1944,6 @@ export interface SimulationBeltRuntimeIndex {
   activeQueueEnabled: boolean;
   initiallyDormantRouteCount: number;
   targetCapacityGroupCount: number;
-  reservationTargetCapacityGroupCount: number;
-  /** Reservation has different port/item ownership from belt transfer. */
-  reservationEpoch: number;
-  reservationTargetCapacityLedgers: RuntimeTargetCapacityLedger[];
   /** Per-topology scratch reused by every exact belt phase. */
   settlementEpoch: number;
   sourceAvailabilityLedgers: RuntimeSourceAvailabilityLedger[];
@@ -2292,9 +2199,6 @@ function buildSimulationLookupContext(
       activeQueueEnabled: false,
       initiallyDormantRouteCount: 0,
       targetCapacityGroupCount: 0,
-      reservationTargetCapacityGroupCount: 0,
-      reservationEpoch: 0,
-      reservationTargetCapacityLedgers: [],
       settlementEpoch: 0,
       sourceAvailabilityLedgers: [],
       targetCapacityLedgers: [],
@@ -2449,7 +2353,6 @@ function buildSimulationLookupContext(
     };
   });
   const targetCapacityIndexByKey = new Map<string, number>();
-  const reservationTargetCapacityIndexByKey = new Map<string, number>();
   for (const route of context.beltRoutes) {
     if (!route.target) continue;
     const key = beltTargetCapacityKey(route.target, route.belt.itemId, route.belt.targetPortIndex);
@@ -2459,23 +2362,8 @@ function buildSimulationLookupContext(
       targetCapacityIndexByKey.set(key, index);
     }
     route.targetCapacityIndex = index;
-    // Preserve reservation's original ownership: ordinary targets share
-    // across ports, black-hole ports share across items, and hubs share the
-    // planet's item tray. The transfer index above cannot represent this.
-    const reservationKey = route.target.buildingId === "material_delivery_hub"
-      ? `tray:${route.target.planetId}:${route.belt.itemId}`
-      : route.target.buildingId === "micro_black_hole_connector"
-        ? `black-hole:${route.target.id}:${route.belt.targetPortIndex ?? -1}`
-        : `${route.target.id}:${route.belt.itemId}`;
-    let reservationIndex = reservationTargetCapacityIndexByKey.get(reservationKey);
-    if (reservationIndex === undefined) {
-      reservationIndex = reservationTargetCapacityIndexByKey.size;
-      reservationTargetCapacityIndexByKey.set(reservationKey, reservationIndex);
-    }
-    route.reservationTargetCapacityIndex = reservationIndex;
   }
   context.beltRuntime.targetCapacityGroupCount = targetCapacityIndexByKey.size;
-  context.beltRuntime.reservationTargetCapacityGroupCount = reservationTargetCapacityIndexByKey.size;
   for (const route of context.beltRoutes) {
     const key = `${route.belt.source}:${route.belt.itemId}`;
     let group = context.beltRuntime.routeGroupByKey.get(key);
@@ -5506,11 +5394,7 @@ function reserveBeltStepOutputCapacity(
   const creditLimit = normalizeBuildingBufferLimit(state.settings.beltBufferLimit);
   const allowanceByBelt = new Map<string, number>();
   const outputCredits = new Map<string, number>();
-  const reservationRuntime = forceFlatRouteOracle ? undefined : lookup?.beltRuntime;
-  const reservationEpoch = reservationRuntime ? ++reservationRuntime.reservationEpoch : 0;
-  // Lazily allocate the original Map only for the unindexed/oracle path.
-  // The indexed ledger is bounded by topology and refreshed for every phase.
-  let remainingTargetCapacity: Map<string, number> | undefined;
+  const remainingTargetCapacity = new Map<string, number>();
   const routes = forceFlatRouteOracle
     ? lookup?.beltRoutes ?? createIndexedBeltRoutes(state)
     : lookup?.beltRuntime.activeQueueEnabled
@@ -5541,33 +5425,18 @@ function reserveBeltStepOutputCapacity(
     if (!route.compatible || !source || !target) continue;
     const allowance = Math.max(0, Math.floor(belt.progress + EPSILON));
     if (allowance < 1) continue;
-    const index = reservationRuntime ? route.reservationTargetCapacityIndex : undefined;
-    const cached = index === undefined ? undefined : reservationRuntime!.reservationTargetCapacityLedgers[index];
-    const targetKey = index !== undefined ? undefined : target.buildingId === "material_delivery_hub"
+    const targetKey = target.buildingId === "material_delivery_hub"
       ? `tray:${target.planetId}:${belt.itemId}`
       : target.buildingId === "micro_black_hole_connector"
         ? `black-hole:${target.id}:${belt.targetPortIndex ?? -1}`
         : `${target.id}:${belt.itemId}`;
-    const targetFree = cached?.epoch === reservationEpoch
-      ? cached.free
-      : targetKey !== undefined && remainingTargetCapacity?.has(targetKey)
-        ? remainingTargetCapacity.get(targetKey)!
-        : targetFreeCapacity(state, target, belt.itemId, belt.targetPortIndex, lookup);
+    const targetFree = remainingTargetCapacity.has(targetKey)
+      ? remainingTargetCapacity.get(targetKey)!
+      : targetFreeCapacity(state, target, belt.itemId, belt.targetPortIndex, lookup);
     const reserved = Math.min(allowance, Math.max(0, Math.floor(targetFree)));
     if (reserved < 1) continue;
     allowanceByBelt.set(belt.id, reserved);
-    // The legacy path does not cache an initial zero/invalid allowance. Only
-    // mark a group visited after a successful reservation, including when it
-    // consumes the final unit and leaves a cached zero for later routes.
-    const free = Math.max(0, targetFree - reserved);
-    if (index !== undefined) {
-      const ledger = cached ?? { epoch: reservationEpoch, free };
-      ledger.epoch = reservationEpoch;
-      ledger.free = free;
-      reservationRuntime!.reservationTargetCapacityLedgers[index] = ledger;
-    } else {
-      (remainingTargetCapacity ??= new Map()).set(targetKey!, free);
-    }
+    remainingTargetCapacity.set(targetKey, Math.max(0, targetFree - reserved));
     const sourceKey = outputCapacityCreditKey(source.id, belt.itemId);
     outputCredits.set(sourceKey, Math.min(
       creditLimit,
@@ -7457,7 +7326,6 @@ export function runPlanetSimulationPhase(
   contractExperiment?: SimulationContractExperiment,
 ): SimulationPlanetPhaseResult {
   const phaseLookup = lookup ?? createSimulationLookupContext(state, profiler);
-  const readOnlyPowerAudit = Boolean(contractExperiment && simulationPowerAudits.has(contractExperiment));
   if (!lookup) ensureDynamicRouteLookup(state, phaseLookup);
   const baselineProduced = { ...state.totalProduced };
   let subsystemStartedAt = profiler ? profileNow() : 0;
@@ -7472,9 +7340,9 @@ export function runPlanetSimulationPhase(
     }
   }
   const power = combinePowerPlans(gridPlans);
-  // Ordinary taps may mutate state between grids. The bounded calibration
-  // observer only records samples, so it can share the original-order totals.
-  const gridInventory = batchPowerStorage && (!contractExperiment?.onPowerPlan || readOnlyPowerAudit)
+  // Grid inventory is reported before facilities run. A tap may mutate the
+  // state between grids, so keep its live readers and the independent oracle.
+  const gridInventory = batchPowerStorage && !contractExperiment?.onPowerPlan
     ? collectGridPowerInventory(planetId, phaseLookup.entitiesByPlanet.get(planetId) ?? [])
     : undefined;
   for (const gridPlan of gridPlans) {
@@ -7548,7 +7416,7 @@ export function runPlanetSimulationPhase(
   if (!contractExperiment?.isolateConstructionAutomation) {
     // Keep full-list selection for the independent oracle and mutable hooks.
     // Ordinary simulation already owns this ordered topology view.
-    const centers = batchConstructionAutomation && (!contractExperiment || readOnlyPowerAudit)
+    const centers = batchConstructionAutomation && !contractExperiment
       ? phaseLookup.constructionCentersByPlanet.get(planetId)
       : (phaseLookup.entitiesByPlanet.get(planetId) ?? []).filter((entity) =>
         entity.planetId === planetId && entity.buildingId === "construction_center");
@@ -7571,7 +7439,7 @@ export function runPlanetSimulationPhase(
   // A sparse global view is cheaper than checking every local machine. Cap
   // that tradeoff at the original list size, and retain the full-list oracle
   // and hook path so they can observe changes made inside the current phase.
-  const rayCandidates = batchPowerStorage && (!contractExperiment || readOnlyPowerAudit) &&
+  const rayCandidates = batchPowerStorage && !contractExperiment &&
     phaseLookup.rayReceivers.length < planetEntitiesForRays.length
     ? phaseLookup.rayReceivers : planetEntitiesForRays;
   runRayReceivers(state, seconds, reception, planetId, beltStepReservation.outputCredits, rayCandidates);

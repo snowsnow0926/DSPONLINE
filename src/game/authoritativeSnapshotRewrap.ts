@@ -4,6 +4,7 @@ import { decodeSavePayloadTransport, prepareSavePayloadTransport } from "./saveP
 import { rewrapVerifiedPrimarySaveBytesAsSnapshot } from "./saveTransfer";
 import type { AuthoritativeSavePayloadProof } from "./authoritativeSavePersistenceProtocol";
 import type { AuthoritativePrimarySnapshotSource } from "./authoritativeSaveSerializationProtocol";
+import { releaseOwnedWorkerPayloadBuffer } from "./workerBinaryPayload";
 
 /** Worker-only transform of an already committed primary. The persistence
  * Worker still independently validates the new envelope, catalog and CAS. */
@@ -23,7 +24,7 @@ export async function rewrapAuthoritativePrimarySnapshot(
     await sha256Bytes(source.bytes) !== source.proof.storedSha256) {
     throw new Error("自动快照主档来源证明不匹配");
   }
-  const decoded = await decodeSavePayloadTransport(source.bytes, source.proof.transportEncoding);
+  let decoded: ArrayBuffer | null = await decodeSavePayloadTransport(source.bytes, source.proof.transportEncoding);
   if (decoded.byteLength !== source.proof.byteLength || await sha256Bytes(decoded) !== source.proof.payloadSha256) {
     throw new Error("自动快照主档来源正文不匹配");
   }
@@ -34,6 +35,11 @@ export async function rewrapAuthoritativePrimarySnapshot(
   if (!reframed) throw new Error("自动快照主档封装不匹配");
   const bytes = reframed.bytes;
   if (bytes.byteLength !== reframed.verification.byteLength) throw new Error("自动快照长度不匹配");
+  // The new envelope owns independent bytes. Retain the original transport
+  // for retry, but release a consumed fresh decompression before another full
+  // digest and compression. Also tolerate a future reframe that reuses input.
+  if (bytes !== decoded) releaseOwnedWorkerPayloadBuffer(decoded, source.bytes);
+  decoded = null;
   const payloadSha256 = await sha256Bytes(bytes);
   const transport = await prepareSavePayloadTransport(bytes, payloadSha256);
   const catalogSeed = { ...source.catalogSeed, kind: "snapshot" as const, savedAt, reason };

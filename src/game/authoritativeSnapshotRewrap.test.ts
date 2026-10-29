@@ -7,6 +7,7 @@ import { projectPersistentSaveState } from "./saveProjection";
 import { serializeSaveEnvelopeToTransfer } from "./saveTransfer";
 import { sha256Bytes } from "./payloadDigest";
 import { decodeSavePayloadTransport, prepareSavePayloadTransport } from "./savePayloadCompression";
+import * as payloadCompression from "./savePayloadCompression";
 import type { AuthoritativePrimarySnapshotSource } from "./authoritativeSaveSerializationProtocol";
 
 async function fixture(mode: "normal" | "speedrun" = "normal", compress = true) {
@@ -38,9 +39,69 @@ async function fixture(mode: "normal" | "speedrun" = "normal", compress = true) 
   return { source, persistent };
 }
 
-afterEach(() => vi.restoreAllMocks());
+const transferDescriptor = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "transfer");
+const nativeTransfer = transferDescriptor?.value;
+afterEach(() => {
+  vi.restoreAllMocks();
+  if (transferDescriptor) Object.defineProperty(ArrayBuffer.prototype, "transfer", transferDescriptor);
+  else Reflect.deleteProperty(ArrayBuffer.prototype, "transfer");
+});
 
 describe("authoritative snapshot primary reuse", () => {
+  for (const compress of [false, true]) {
+    it.skipIf(typeof nativeTransfer !== "function")(
+      `releases only fresh ${compress ? "gzip decoded" : "raw"} storage before output compression and permits retry`, async () => {
+        const { source, persistent } = await fixture("normal", compress);
+        const originalDigest = await sha256Bytes(source.bytes);
+        const released: ArrayBuffer[] = [];
+        Object.defineProperty(ArrayBuffer.prototype, "transfer", {
+          configurable: true, writable: true,
+          value: function(this: ArrayBuffer, newByteLength: number) {
+            released.push(this);
+            return Reflect.apply(nativeTransfer, this, [newByteLength]);
+          },
+        });
+        const originalPrepare = payloadCompression.prepareSavePayloadTransport;
+        let preparations = 0;
+        vi.spyOn(payloadCompression, "prepareSavePayloadTransport").mockImplementation(async (...args) => {
+          preparations++;
+          expect(released).toHaveLength(compress ? preparations : 0);
+          expect(released.every((buffer) => buffer !== source.bytes && buffer !== args[0] && buffer.byteLength === 0)).toBe(true);
+          expect(source.bytes.byteLength).toBe(source.proof.storedByteLength);
+          return originalPrepare(...args);
+        });
+        for (const savedAt of [11, 12]) {
+          const snapshot = await rewrapAuthoritativePrimarySnapshot(source, savedAt, "自动快照");
+          const bytes = await decodeSavePayloadTransport(snapshot.bytes, snapshot.proof.transportEncoding);
+          const expected = serializeSaveEnvelopeToTransfer(persistent, {
+            formatVersion: 2, savedAt, mode: "normal", kind: "snapshot", slot: "main", reason: "自动快照",
+          });
+          expect(new Uint8Array(bytes)).toEqual(new Uint8Array(expected.bytes));
+          expect(await sha256Bytes(source.bytes)).toBe(originalDigest);
+        }
+        expect(preparations).toBe(2);
+      },
+    );
+  }
+
+  for (const behavior of ["missing", "throws"] as const) {
+    it(`keeps complete gzip snapshot and original source when transfer ${behavior}`, async () => {
+      const { source, persistent } = await fixture();
+      const originalDigest = await sha256Bytes(source.bytes);
+      Object.defineProperty(ArrayBuffer.prototype, "transfer", {
+        configurable: true, writable: true,
+        value: behavior === "missing" ? undefined : () => { throw new Error("unsupported transfer"); },
+      });
+      const snapshot = await rewrapAuthoritativePrimarySnapshot(source, 11, "自动快照");
+      const bytes = await decodeSavePayloadTransport(snapshot.bytes, snapshot.proof.transportEncoding);
+      const expected = serializeSaveEnvelopeToTransfer(persistent, {
+        formatVersion: 2, savedAt: 11, mode: "normal", kind: "snapshot", slot: "main", reason: "自动快照",
+      });
+      expect(new Uint8Array(bytes)).toEqual(new Uint8Array(expected.bytes));
+      expect(await sha256Bytes(source.bytes)).toBe(originalDigest);
+    });
+  }
+
   for (const mode of ["normal", "speedrun"] as const) for (const compress of [false, true]) {
     it(`preserves the entire ${mode} state from ${compress ? "gzip" : "raw"} without parsing or serializing GameState`, async () => {
       const { source, persistent } = await fixture(mode, compress);

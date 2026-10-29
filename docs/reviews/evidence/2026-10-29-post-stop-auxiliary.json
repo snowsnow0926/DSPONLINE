@@ -1,0 +1,390 @@
+{
+  "schema": 1,
+  "scope": "Five-second profiled auxiliary controls, not original ten-second trigger workload or natural performance.",
+  "sourceHead": "94777d2510ce1df7a4cbbe52b6948f35d941e2ea",
+  "candidateRuntime": "9f8776ea743da44366bcdc102a3cc63246ee3a45",
+  "runs": 4,
+  "completeHeapStages": 28,
+  "profiled": true,
+  "forcedGc": false,
+  "ownedServicesClosed0": 4,
+  "noStopSnapshotCases": 4,
+  "rows": [
+    {
+      "name": "heap-stable-baseline-01",
+      "variant": "baseline",
+      "startupSnapshotCount": 1,
+      "stopSnapshotCount": 0,
+      "validPrimaryAndSettings": true,
+      "completeHeapStages": 7,
+      "stages": [
+        {
+          "stage": "conservative stopped",
+          "main": {
+            "usedSize": 725048300,
+            "totalSize": 816979968,
+            "embedderHeapUsedSize": 29217656,
+            "backingStorageSize": 15871924
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-DmtbMnEs.js",
+              "usedSize": 183328760,
+              "totalSize": 202772480,
+              "embedderHeapUsedSize": 638360,
+              "backingStorageSize": 2551032
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1056320,
+              "totalSize": 3670016,
+              "embedderHeapUsedSize": 663672,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1918779392,
+          "rendererPrivateBytes": 1887842304
+        },
+        {
+          "stage": "conservative stopped +10s",
+          "main": {
+            "usedSize": 731232088,
+            "totalSize": 817766400,
+            "embedderHeapUsedSize": 31048680,
+            "backingStorageSize": 15872210
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-DmtbMnEs.js",
+              "usedSize": 183328760,
+              "totalSize": 202772480,
+              "embedderHeapUsedSize": 638360,
+              "backingStorageSize": 2551032
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1056320,
+              "totalSize": 3670016,
+              "embedderHeapUsedSize": 663672,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1895723008,
+          "rendererPrivateBytes": 1863962624
+        },
+        {
+          "stage": "conservative stopped +30s",
+          "main": {
+            "usedSize": 706034468,
+            "totalSize": 732651520,
+            "embedderHeapUsedSize": 16791984,
+            "backingStorageSize": 9958003
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-DmtbMnEs.js",
+              "usedSize": 183328760,
+              "totalSize": 202772480,
+              "embedderHeapUsedSize": 638360,
+              "backingStorageSize": 2551032
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1056320,
+              "totalSize": 3670016,
+              "embedderHeapUsedSize": 663672,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1230888960,
+          "rendererPrivateBytes": 1196376064
+        }
+      ],
+      "rawSha256": "0274d839e8e0c784125089f68b96ff32a98566d6025dc5f3ee67ece694829d06"
+    },
+    {
+      "name": "heap-stable-candidate-01",
+      "variant": "candidate",
+      "startupSnapshotCount": 1,
+      "stopSnapshotCount": 0,
+      "validPrimaryAndSettings": true,
+      "completeHeapStages": 7,
+      "stages": [
+        {
+          "stage": "conservative stopped",
+          "main": {
+            "usedSize": 721924556,
+            "totalSize": 789995520,
+            "embedderHeapUsedSize": 29206856,
+            "backingStorageSize": 15893870
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-av7yB5NI.js",
+              "usedSize": 183353652,
+              "totalSize": 204083200,
+              "embedderHeapUsedSize": 638360,
+              "backingStorageSize": 2552994
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1057280,
+              "totalSize": 3670016,
+              "embedderHeapUsedSize": 663672,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1350615040,
+          "rendererPrivateBytes": 1307287552
+        },
+        {
+          "stage": "conservative stopped +10s",
+          "main": {
+            "usedSize": 704007864,
+            "totalSize": 793665536,
+            "embedderHeapUsedSize": 31034504,
+            "backingStorageSize": 15873752
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-av7yB5NI.js",
+              "usedSize": 183353652,
+              "totalSize": 204083200,
+              "embedderHeapUsedSize": 638360,
+              "backingStorageSize": 2552994
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1057280,
+              "totalSize": 3670016,
+              "embedderHeapUsedSize": 663672,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1312395264,
+          "rendererPrivateBytes": 1277005824
+        },
+        {
+          "stage": "conservative stopped +30s",
+          "main": {
+            "usedSize": 678656632,
+            "totalSize": 704618496,
+            "embedderHeapUsedSize": 17012848,
+            "backingStorageSize": 9960028
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-av7yB5NI.js",
+              "usedSize": 183353652,
+              "totalSize": 204083200,
+              "embedderHeapUsedSize": 638360,
+              "backingStorageSize": 2552994
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1057280,
+              "totalSize": 3670016,
+              "embedderHeapUsedSize": 663672,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1200357376,
+          "rendererPrivateBytes": 1159929856
+        }
+      ],
+      "rawSha256": "e0bb86379a7023b46b01990b6d932a5c82f0a8e858cb332c3fc226537563b685"
+    },
+    {
+      "name": "heap-stable-candidate-02",
+      "variant": "candidate",
+      "startupSnapshotCount": 1,
+      "stopSnapshotCount": 0,
+      "validPrimaryAndSettings": true,
+      "completeHeapStages": 7,
+      "stages": [
+        {
+          "stage": "conservative stopped",
+          "main": {
+            "usedSize": 720484484,
+            "totalSize": 788160512,
+            "embedderHeapUsedSize": 29340640,
+            "backingStorageSize": 15894147
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-av7yB5NI.js",
+              "usedSize": 183346888,
+              "totalSize": 203558912,
+              "embedderHeapUsedSize": 510200,
+              "backingStorageSize": 2552994
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1056884,
+              "totalSize": 3407872,
+              "embedderHeapUsedSize": 663672,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1351192576,
+          "rendererPrivateBytes": 1307529216
+        },
+        {
+          "stage": "conservative stopped +10s",
+          "main": {
+            "usedSize": 703018092,
+            "totalSize": 791830528,
+            "embedderHeapUsedSize": 31045784,
+            "backingStorageSize": 15874029
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-av7yB5NI.js",
+              "usedSize": 183346888,
+              "totalSize": 203558912,
+              "embedderHeapUsedSize": 638360,
+              "backingStorageSize": 2552994
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1056884,
+              "totalSize": 3407872,
+              "embedderHeapUsedSize": 663672,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1330536448,
+          "rendererPrivateBytes": 1285697536
+        },
+        {
+          "stage": "conservative stopped +30s",
+          "main": {
+            "usedSize": 677824304,
+            "totalSize": 703045632,
+            "embedderHeapUsedSize": 16982288,
+            "backingStorageSize": 9959997
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-av7yB5NI.js",
+              "usedSize": 183346888,
+              "totalSize": 203558912,
+              "embedderHeapUsedSize": 638360,
+              "backingStorageSize": 2552994
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1056884,
+              "totalSize": 3407872,
+              "embedderHeapUsedSize": 663672,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1198587904,
+          "rendererPrivateBytes": 1157640192
+        }
+      ],
+      "rawSha256": "8a93736c96912edd655b48db18aec4fcf01f556900f670c68f6a3403f392a5f8"
+    },
+    {
+      "name": "heap-stable-baseline-02",
+      "variant": "baseline",
+      "startupSnapshotCount": 1,
+      "stopSnapshotCount": 0,
+      "validPrimaryAndSettings": true,
+      "completeHeapStages": 7,
+      "stages": [
+        {
+          "stage": "conservative stopped",
+          "main": {
+            "usedSize": 724363400,
+            "totalSize": 816455680,
+            "embedderHeapUsedSize": 29242080,
+            "backingStorageSize": 15872169
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-DmtbMnEs.js",
+              "usedSize": 183328040,
+              "totalSize": 202248192,
+              "embedderHeapUsedSize": 638560,
+              "backingStorageSize": 2551032
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1024124,
+              "totalSize": 3407872,
+              "embedderHeapUsedSize": 663624,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1935237120,
+          "rendererPrivateBytes": 1893703680
+        },
+        {
+          "stage": "conservative stopped +10s",
+          "main": {
+            "usedSize": 730547540,
+            "totalSize": 817242112,
+            "embedderHeapUsedSize": 31039424,
+            "backingStorageSize": 15872455
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-DmtbMnEs.js",
+              "usedSize": 183328040,
+              "totalSize": 202248192,
+              "embedderHeapUsedSize": 638560,
+              "backingStorageSize": 2551032
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1024124,
+              "totalSize": 3407872,
+              "embedderHeapUsedSize": 663624,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1363267584,
+          "rendererPrivateBytes": 1320271872
+        },
+        {
+          "stage": "conservative stopped +30s",
+          "main": {
+            "usedSize": 705957408,
+            "totalSize": 730816512,
+            "embedderHeapUsedSize": 16887984,
+            "backingStorageSize": 9958003
+          },
+          "workers": [
+            {
+              "script": "simulation.worker-DmtbMnEs.js",
+              "usedSize": 183328040,
+              "totalSize": 202248192,
+              "embedderHeapUsedSize": 638560,
+              "backingStorageSize": 2551032
+            },
+            {
+              "script": "canvasBeltRender.worker-DluzM9XN.js",
+              "usedSize": 1024124,
+              "totalSize": 3407872,
+              "embedderHeapUsedSize": 663624,
+              "backingStorageSize": 353388
+            }
+          ],
+          "rendererWorkingSetBytes": 1232609280,
+          "rendererPrivateBytes": 1197805568
+        }
+      ],
+      "rawSha256": "7ca4bcb4a2d85475eb9e7523650ec5c808ae58aefcc7979e6afd729e0cba2a20"
+    }
+  ],
+  "targetReproductionVerified": false,
+  "wholeCandidateAccepted": false,
+  "productionPublished": false,
+  "goalStatus": "active",
+  "scopeLimit": "Five-second window did not send stop automatic snapshot in all4 cases; not the original10second trigger workload or natural performance.",
+  "gameplaySourcesChanged": false,
+  "nextTriggerSeconds": 10,
+  "futureDiagnosticGuard": "Require actual authoritative-save-serialization snapshot send in stopping/post-stop, preserve strict heap errors, sample times and target listing state."
+}

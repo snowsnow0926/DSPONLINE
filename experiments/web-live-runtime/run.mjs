@@ -23,6 +23,15 @@ if (!Number.isFinite(postStopSeconds) || postStopSeconds < 0 || postStopSeconds 
 const allProcessMemory = options["all-process-memory"] === "1";
 const processMemoryTail = options["process-memory-tail"] === "1";
 const workerHeapMemory = options["worker-heaps"] === "1";
+const workerHeapTimeoutMs = Number(options["worker-heap-timeout-ms"] ?? 3000);
+if (!Number.isSafeInteger(workerHeapTimeoutMs) || workerHeapTimeoutMs < 500 || workerHeapTimeoutMs > 30000 ||
+  options["worker-heap-timeout-ms"] !== undefined && !workerHeapMemory) {
+  throw new Error("--worker-heap-timeout-ms requires --worker-heaps and an integer from 500 to 30000");
+}
+const requireStopSnapshot = options["require-stop-snapshot"] === "1";
+if (options["require-stop-snapshot"] !== undefined && !["0", "1"].includes(options["require-stop-snapshot"])) {
+  throw new Error("Invalid --require-stop-snapshot flag");
+}
 const workerHeapGc = options["worker-heap-gc"] === "1";
 if (workerHeapGc && !workerHeapMemory) throw new Error("--worker-heap-gc requires --worker-heaps; diagnostic only");
 const postStopMemoryTail = options["post-stop-memory-tail"] === "1";
@@ -116,14 +125,17 @@ async function capturePrivateMainHeap(session, stage) {
 }
 
 async function sampleHeaps(stage, collectGarbage = workerHeapGc) {
+  const sampleStartedAtMs = Date.now();
   const session = await browser.newBrowserCDPSession();
   const workers = [];
   let main;
+  let mainSampledAtMs;
   try {
     const pageSession = await context.newCDPSession(page);
     try {
       if (collectGarbage) await pageSession.send("HeapProfiler.collectGarbage");
       main = await pageSession.send("Runtime.getHeapUsage");
+      mainSampledAtMs = Date.now();
       if (mainHeapSnapshot && stage === "normal simulation warmed") await capturePrivateMainHeap(pageSession, stage);
     } finally { await pageSession.detach(); }
     if (allocationSession) {
@@ -144,6 +156,7 @@ async function sampleHeaps(stage, collectGarbage = workerHeapGc) {
     }
     const { targetInfos } = await session.send("Target.getTargets");
     for (const target of targetInfos.filter((item) => item.type === "worker" && item.url.startsWith(base.origin + "/"))) {
+      const workerSampleStartedAtMs = Date.now();
       let sessionId;
       let listener;
       try {
@@ -158,7 +171,7 @@ async function sampleHeaps(stage, collectGarbage = workerHeapGc) {
             session.on("Target.receivedMessageFromTarget", listener);
           });
           try {
-            const [result] = await Promise.all([bounded(response, collectGarbage ? 10000 : 3000), session.send("Target.sendMessageToTarget", {
+            const [result] = await Promise.all([bounded(response, collectGarbage ? 10000 : workerHeapTimeoutMs), session.send("Target.sendMessageToTarget", {
               sessionId, message: JSON.stringify({ id, method }),
             })]);
             return result;
@@ -166,15 +179,24 @@ async function sampleHeaps(stage, collectGarbage = workerHeapGc) {
         };
         if (collectGarbage) await requestWorker(2, "HeapProfiler.collectGarbage");
         const usage = await requestWorker(1, "Runtime.getHeapUsage");
-        workers.push({ script: new URL(target.url).pathname.split("/").at(-1), ...usage });
+        workers.push({ script: new URL(target.url).pathname.split("/").at(-1), targetId: target.targetId,
+          sampleStartedAtMs: workerSampleStartedAtMs, sampleEndedAtMs: Date.now(), ...usage });
       } catch (error) {
-        workers.push({ script: new URL(target.url).pathname.split("/").at(-1), error: String(error) });
+        let targetListedAfterError = null;
+        try {
+          const remaining = await session.send("Target.getTargets");
+          targetListedAfterError = remaining.targetInfos.some(item => item.targetId === target.targetId);
+        } catch { /* A failed liveness query cannot prove retirement. */ }
+        workers.push({ script: new URL(target.url).pathname.split("/").at(-1), targetId: target.targetId,
+          sampleStartedAtMs: workerSampleStartedAtMs, sampleEndedAtMs: Date.now(), targetListedAfterError,
+          error: String(error) });
       } finally {
         if (listener) session.off("Target.receivedMessageFromTarget", listener);
         if (sessionId) await session.send("Target.detachFromTarget", { sessionId }).catch(() => {});
       }
     }
-    heapSamples.push({ stage, ...(collectGarbage ? { forcedGc: true } : {}), main, workers });
+    heapSamples.push({ stage, sampleStartedAtMs, mainSampledAtMs, sampleEndedAtMs: Date.now(),
+      ...(collectGarbage ? { forcedGc: true } : {}), main, workers });
   } finally { await session.detach(); }
 }
 
@@ -693,6 +715,21 @@ try {
       if (JSON.stringify(durable.catalog.settings[key]) !== JSON.stringify(value)) throw Error(`Backup preference changed: ${key}`);
     }
   }
+  const stopSnapshotSendCount = trace.sends.filter(send => send.name === "authoritative-save-serialization" && send.type === "snapshot" &&
+    ["stopping", "post-stop"].includes(send.phase)).length;
+  if (workerHeapMemory || requireStopSnapshot) {
+    // Preserve the verified trigger path even if a later heap target retires
+    // during inspection and the strict diagnostic completeness check fails.
+    await writeFile(resolve(output, `${name}-checkpoint-evidence.json`), JSON.stringify({
+      observationSeconds: seconds, macroMode, requireStopSnapshot, stopSnapshotSendCount,
+      workerHeapMemory, forcedGcConfigured: workerHeapGc || postStopHeapGc,
+      sourcePrimaryChecksum: seeded.sourcePrimaryChecksum, startMs, stopMs, trace, durable,
+      geometryBeforeStop, geometryAfterStop,
+    }, null, 2));
+  }
+  if (requireStopSnapshot && stopSnapshotSendCount === 0) {
+    throw Error("Required stop automatic snapshot did not trigger; diagnostic workload mismatch");
+  }
   if (processMemoryTail) {
     for (const tailSeconds of [10, 30, 60]) {
       await page.waitForTimeout(Math.max(0, tailSeconds * 1000 - (Date.now() - stopCompletedAt)));
@@ -749,7 +786,8 @@ try {
   const evidence = { browser: await browser.version(), supply, macroMode, observationSeconds: seconds,
     profiled: Boolean(options.profile) || Boolean(timelinePhase) || workerHeapMemory || postStopMemoryTail || postStopHeapGc || workerHeapGc || mainHeapAllocations || mainHeapSnapshot || runtimeRetention || runtimeTransitions || styleReadDiagnostics || handoffProgress || macroWorkerCpu,
     profilePhase, timelinePhase, backgroundPresentationExperiment,
-    postStopObservationSeconds: postStopSeconds, processMemoryTail, postStopMemoryTail, postStopHeapGc, allProcessMemory, workerHeapMemory, workerHeapGc, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
+    postStopObservationSeconds: postStopSeconds, processMemoryTail, postStopMemoryTail, postStopHeapGc, allProcessMemory, workerHeapMemory, workerHeapTimeoutMs, workerHeapGc,
+    requireStopSnapshot, stopSnapshotSendCount, mainHeapAllocations, mainHeapSnapshot, mainHeapSnapshotResult, runtimeRetention, retentionSamples, runtimeTransitions, runtimeTransitionEvidence, heapSamples,
     engineProfiled: Boolean(options["engine-profile"]), idbOperations, startupBufferGc, startupBufferSamples, startupWorkerHeaps,
     retainedNormalDebt: Boolean(options["retain-debt"]), styleReadDiagnostics, handoffProgress,
     macroWorkerCpu, macroCpuResult, macroCpuError,

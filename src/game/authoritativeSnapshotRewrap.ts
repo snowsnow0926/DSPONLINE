@@ -1,7 +1,7 @@
 import { computeAuthoritativeSaveProofBindingSha256 } from "./authoritativeSaveProof";
 import { sha256Bytes } from "./payloadDigest";
 import { decodeSavePayloadTransport, prepareSavePayloadTransport } from "./savePayloadCompression";
-import { rewrapVerifiedPrimarySaveAsSnapshot } from "./saveTransfer";
+import { rewrapVerifiedPrimarySaveBytesAsSnapshot } from "./saveTransfer";
 import type { AuthoritativeSavePayloadProof } from "./authoritativeSavePersistenceProtocol";
 import type { AuthoritativePrimarySnapshotSource } from "./authoritativeSaveSerializationProtocol";
 
@@ -27,12 +27,12 @@ export async function rewrapAuthoritativePrimarySnapshot(
   if (decoded.byteLength !== source.proof.byteLength || await sha256Bytes(decoded) !== source.proof.payloadSha256) {
     throw new Error("自动快照主档来源正文不匹配");
   }
-  const reframed = rewrapVerifiedPrimarySaveAsSnapshot(
-    new TextDecoder("utf-8", { fatal: true }).decode(decoded), source.proof,
+  const reframed = rewrapVerifiedPrimarySaveBytesAsSnapshot(
+    decoded, source.proof,
     { formatVersion: 2, savedAt: source.catalogSeed.savedAt, mode: source.catalogSeed.mode }, savedAt, reason,
   );
   if (!reframed) throw new Error("自动快照主档封装不匹配");
-  const bytes = new TextEncoder().encode(reframed.raw).buffer;
+  const bytes = reframed.bytes;
   if (bytes.byteLength !== reframed.verification.byteLength) throw new Error("自动快照长度不匹配");
   const payloadSha256 = await sha256Bytes(bytes);
   const transport = await prepareSavePayloadTransport(bytes, payloadSha256);

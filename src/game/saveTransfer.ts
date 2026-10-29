@@ -147,6 +147,57 @@ export function rewrapVerifiedPrimarySaveAsSnapshot(
   };
 }
 
+/** Same exact local-v2 transform as the text path, without retaining a full
+ * decoded primary and a second full snapshot string beside the byte buffers.
+ * UTF-8 validation stays fatal, but each temporary decoder result is bounded.
+ * The committed primary proof is still required and the persistence Worker
+ * independently verifies the resulting snapshot before committing it. */
+export function rewrapVerifiedPrimarySaveBytesAsSnapshot(
+  bytes: ArrayBuffer,
+  verification: SaveTransferVerification,
+  source: Pick<SaveTransferOptions, "formatVersion" | "savedAt" | "mode">,
+  savedAt: number,
+  reason: string,
+): { bytes: ArrayBuffer; verification: SaveTransferVerification } | null {
+  if (source.formatVersion !== 2 || !Number.isSafeInteger(source.savedAt) || source.savedAt < 0 ||
+    !Number.isSafeInteger(savedAt) || savedAt < 0 ||
+    (source.mode !== "normal" && source.mode !== "speedrun") || verification.integrity !== "valid" ||
+    !/^[a-f0-9]{8}$/.test(verification.stateChecksum) || !/^[a-f0-9]{8}$/.test(verification.payloadChecksum) ||
+    bytes.byteLength !== verification.byteLength) return null;
+  const encoder = new TextEncoder();
+  const prefix = encoder.encode(saveEnvelopePrefix({ ...source, kind: "primary", slot: "main" }));
+  const suffix = encoder.encode(saveEnvelopeSuffix(verification.stateChecksum));
+  const input = new Uint8Array(bytes);
+  const stateEnd = input.length - suffix.length;
+  if (stateEnd <= prefix.length || input[prefix.length] !== 0x7b || input[stateEnd - 1] !== 0x7d) return null;
+  for (let index = 0; index < prefix.length; index++) if (input[index] !== prefix[index]) return null;
+  for (let index = 0; index < suffix.length; index++) if (input[stateEnd + index] !== suffix[index]) return null;
+  if (computeSavePayloadChecksum(input) !== verification.payloadChecksum) return null;
+  try {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    for (let offset = 0; offset < input.length; offset += 64 * 1024) {
+      decoder.decode(input.subarray(offset, Math.min(input.length, offset + 64 * 1024)), { stream: true });
+    }
+    decoder.decode();
+  } catch {
+    return null;
+  }
+  const snapshotPrefix = encoder.encode(saveEnvelopePrefix({ ...source, kind: "snapshot", slot: "main", savedAt, reason }));
+  const snapshot = new Uint8Array(snapshotPrefix.length + stateEnd - prefix.length + suffix.length);
+  snapshot.set(snapshotPrefix);
+  snapshot.set(input.subarray(prefix.length, stateEnd), snapshotPrefix.length);
+  snapshot.set(suffix, snapshot.length - suffix.length);
+  return {
+    bytes: snapshot.buffer,
+    verification: {
+      integrity: "valid",
+      stateChecksum: verification.stateChecksum,
+      payloadChecksum: computeSavePayloadChecksum(snapshot),
+      byteLength: snapshot.byteLength,
+    },
+  };
+}
+
 export function decodeVerifiedSaveTransfer(bytes: ArrayBuffer, verification: SaveTransferVerification): string {
   if (verification.integrity !== "valid" || bytes.byteLength !== verification.byteLength) {
     throw new Error("后台存档传输长度校验失败");

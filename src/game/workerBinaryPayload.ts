@@ -20,6 +20,25 @@ export async function workerBinaryPayloadToArrayBuffer(value: WorkerBinaryPayloa
   return value instanceof ArrayBuffer ? value : value.arrayBuffer();
 }
 
+/** Release a fresh, exclusively owned materialization after its bytes have
+ * been fully verified and consumed. Never detach the original transport:
+ * callers may still need to return it, retry, or recover from a later error.
+ * Unsupported runtimes retain the existing allocation/GC behavior. */
+export function releaseOwnedWorkerPayloadBuffer(decoded: ArrayBuffer, original: WorkerBinaryPayload): boolean {
+  if (decoded === original) return false;
+  try {
+    const transfer = (ArrayBuffer.prototype as ArrayBuffer & {
+      transfer?: (newByteLength: number) => ArrayBuffer;
+    }).transfer;
+    if (typeof transfer !== "function") return false;
+    Reflect.apply(transfer, decoded, [0]);
+    return decoded.byteLength === 0;
+  } catch {
+    // Cleanup must never turn a valid save into a failed write.
+    return false;
+  }
+}
+
 export function workerBinaryPayloadTransferables(value: WorkerBinaryPayload): Transferable[] {
   return value instanceof ArrayBuffer ? [value] : [];
 }

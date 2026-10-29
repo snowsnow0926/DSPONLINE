@@ -4,7 +4,7 @@ import { applyContentPackRegistry } from "./contentPacks";
 import { parseTrustedWorkerEnvelope } from "./storage";
 import { decodeVerifiedSaveTransfer } from "./saveTransfer";
 import { SaveStateChunkSender } from "./saveStateChunkTransfer";
-import { workerBinaryPayloadToArrayBuffer } from "./workerBinaryPayload";
+import { releaseOwnedWorkerPayloadBuffer, workerBinaryPayloadToArrayBuffer } from "./workerBinaryPayload";
 import type { CanonicalTerminalOwnerRequest } from "./canonicalTerminalOwnerProtocol";
 import type { GameState } from "./types";
 
@@ -28,6 +28,7 @@ async function canonical(data: Extract<CanonicalTerminalOwnerRequest, { type: "c
   if (!data.payload) throw new Error("终态后台缺少完整源数据");
   const bytes = await workerBinaryPayloadToArrayBuffer(data.payload);
   const raw = decodeVerifiedSaveTransfer(bytes, data.verification);
+  releaseOwnedWorkerPayloadBuffer(bytes, data.payload);
   return parseTrustedWorkerEnvelope(raw, data.verification, data.registry);
 }
 

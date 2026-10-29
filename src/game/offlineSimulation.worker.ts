@@ -24,6 +24,7 @@ import type { GameSettings, GameState } from "./types";
 import {
   createImmutableWorkerBinaryPayload,
   workerBinaryPayloadToArrayBuffer,
+  releaseOwnedWorkerPayloadBuffer,
   workerBinaryPayloadTransferables,
 } from "./workerBinaryPayload";
 
@@ -236,10 +237,12 @@ self.onmessage = async (event: MessageEvent<OfflineSimulationWorkerRequest>) => 
       let sourceRaw: string;
       let sourceState: GameState;
       try {
+        const decodedEnvelopeBytes = await workerBinaryPayloadToArrayBuffer(request.sourceEnvelope);
         sourceRaw = decodeVerifiedSaveTransfer(
-          await workerBinaryPayloadToArrayBuffer(request.sourceEnvelope),
+          decodedEnvelopeBytes,
           request.sourceVerification,
         );
+        releaseOwnedWorkerPayloadBuffer(decodedEnvelopeBytes, request.sourceEnvelope);
         sourceState = parseTrustedWorkerEnvelope(sourceRaw, request.sourceVerification, registry, { persistentProjection: false });
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : "后台宏 envelope 解码失败，原档与恢复日志保持不变");

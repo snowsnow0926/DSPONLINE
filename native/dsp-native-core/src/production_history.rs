@@ -2114,12 +2114,6 @@ impl CoreState {
                         .symbols
                         .resolve(self.entities.resources[index])
                         .unwrap_or_default();
-                    let item_kind = self
-                        .catalog
-                        .items
-                        .get(resource)
-                        .map(|item| item.kind.as_str())
-                        .unwrap_or("solid");
                     let planet_id = self
                         .symbols
                         .resolve(self.entities.planets[index])
@@ -2131,14 +2125,9 @@ impl CoreState {
                         .and_then(Value::as_str)
                         .unwrap_or("none");
                     let infinite = infinite_resource_mode
-                        || item_kind == "solid" && consumption_tenths <= 0.0
+                        || consumption_tenths <= 0.0
                         || resource == "water" && ocean_type == "water"
                         || resource == "sulfuric_acid" && ocean_type == "sulfuric-acid";
-                    let resource_consumption_tenths = if item_kind == "solid" {
-                        consumption_tenths
-                    } else {
-                        10.0
-                    };
                     let depleted = if infinite {
                         false
                     } else {
@@ -2150,9 +2139,7 @@ impl CoreState {
                             .unwrap_or(0.0)
                             .floor()
                             .clamp(0.0, 9.0);
-                        ((remaining * 10.0 - remainder).max(0.0) / resource_consumption_tenths)
-                            .floor()
-                            < 1.0
+                        ((remaining * 10.0 - remainder).max(0.0) / consumption_tenths).floor() < 1.0
                     };
                     if depleted {
                         true

@@ -3847,10 +3847,8 @@ export function validatePureIdleTerminalMaterialConservation(before: GameState, 
   );
 }
 
-function veinConsumptionTenths(state: GameState, itemId: ItemId): number {
-  return ITEMS[itemId]?.kind === "solid"
-    ? Math.max(0, Math.round(getVeinConsumptionMultiplier(state) * 10))
-    : 10;
+function veinConsumptionTenths(state: GameState): number {
+  return Math.max(0, Math.round(getVeinConsumptionMultiplier(state) * 10));
 }
 
 function hasAlternativeResourceProducer(state: GameState, itemId: ItemId): boolean {
@@ -3885,8 +3883,8 @@ function reconcilePureIdleFiniteResources(before: GameState, candidate: GameStat
       return `矿脉实体 ${beforeEntity.id} 在纯挂机结算中丢失`;
     }
     const itemId = beforeEntity.resourceId;
-    const beforeConsumption = veinConsumptionTenths(before, itemId);
-    const afterConsumption = veinConsumptionTenths(candidate, itemId);
+    const beforeConsumption = veinConsumptionTenths(before);
+    const afterConsumption = veinConsumptionTenths(candidate);
     if (beforeConsumption !== afterConsumption) return `矿脉 ${beforeEntity.id} 的采集消耗倍率跨越了结算边界`;
     if (beforeConsumption <= 0) continue;
 
@@ -3983,7 +3981,7 @@ export function capturePureIdleResourceAccountingBaseline(
     ])),
     consumptionTenthsByItem: new Map([...finiteItemIds].map((itemId) => [
       itemId,
-      veinConsumptionTenths(state, itemId),
+      veinConsumptionTenths(state),
     ])),
     alternativeProducerItems: new Set([...finiteItemIds].filter((itemId) =>
       hasAlternativeResourceProducer(state, itemId))),
@@ -4019,7 +4017,7 @@ export function validatePureIdleResourceAccountingFromBaseline(
     const producedDelta = afterProduced - beforeProduced;
     if (producedDelta < 0) return `累计产量 ${itemId} 在纯挂机结算中回退`;
     const beforeConsumptionTenths = before.consumptionTenthsByItem.get(itemId) ?? 10;
-    const consumptionTenths = veinConsumptionTenths(after, itemId);
+    const consumptionTenths = veinConsumptionTenths(after);
     // The exact consumption multiplier is represented in the reserve
     // remainder; derive the allowed bound from the observed finite reserve
     // rather than assuming the default 1:1 rule.  A finite resource mode with

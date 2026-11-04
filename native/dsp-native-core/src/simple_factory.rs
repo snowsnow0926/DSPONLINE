@@ -2724,13 +2724,12 @@ fn extractor_id(resource: &str) -> &'static str {
 
 fn vein_is_infinite(
     resource: &str,
-    item_kind: &str,
     profile: PlanetProfile,
     infinite_resource_mode: bool,
-    solid_consumption_tenths: f64,
+    consumption_tenths: f64,
 ) -> bool {
     infinite_resource_mode
-        || item_kind == "solid" && solid_consumption_tenths <= 0.0
+        || consumption_tenths <= 0.0
         || resource == "water" && profile.ocean_type == "water"
         || resource == "sulfuric_acid" && profile.ocean_type == "sulfuric-acid"
 }
@@ -2803,14 +2802,9 @@ fn probe_vein_settlement(
     let depletion_remainder = finite_number(object.get("resourceDepletionRemainder"))
         .floor()
         .clamp(0.0, 9.0);
-    let consumption_tenths = if item_kind == "solid" {
-        environment.context.finite_consumption_tenths
-    } else {
-        10.0
-    };
+    let consumption_tenths = environment.context.finite_consumption_tenths;
     let infinite = vein_is_infinite(
         &resource,
-        item_kind,
         environment.profiles[planet],
         environment.context.infinite_resource_mode,
         environment.context.finite_consumption_tenths,

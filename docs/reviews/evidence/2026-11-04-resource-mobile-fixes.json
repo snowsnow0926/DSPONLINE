@@ -1,0 +1,225 @@
+{
+  "base": "7d62d462560375cbcdb0816bb7844167a0df5391",
+  "developmentOnly": true,
+  "productionPublished": false,
+  "goalCleared": true,
+  "saveStateVersion": 47,
+  "preserved": {
+    "existingPlayerSavesNotOpened": true,
+    "productionDataNotTouched": true,
+    "autoBackupSettingsNotChanged": true,
+    "recipeAndFuelCostsUnchanged": true
+  },
+  "unit": {
+    "fullFirst": {
+      "passed": 3811,
+      "failed": 1,
+      "skipped": 38
+    },
+    "optimizedNativeRecheck": {
+      "passed": 5,
+      "failed": 0,
+      "filteredOrSkipped": 54
+    },
+    "uniqueAfterRecheck": {
+      "passed": 3812,
+      "skipped": 38,
+      "unresolved": 0,
+      "scope": "Combined full debug-host unit run plus optimized-host recheck; not a newly repeated full release-host suite."
+    }
+  },
+  "rust": {
+    "core": {
+      "passed": 1100,
+      "ignored": 3,
+      "failed": 0
+    },
+    "host": {
+      "passed": 242,
+      "failed": 2,
+      "reason": "Both fail creating Windows mklink junction fixtures with Access is denied before security assertions; unchanged host source, same failure on isolated D temporary root."
+    }
+  },
+  "browser": {
+    "fullStats": {
+      "startTime": "2026-11-04T10:21:18.668Z",
+      "duration": 916522.1660000001,
+      "expected": 524,
+      "skipped": 35,
+      "unexpected": 3,
+      "flaky": 0
+    },
+    "recheckStats": {
+      "startTime": "2026-11-04T10:37:16.108Z",
+      "duration": 39385.58,
+      "expected": 12,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "uniqueCases": 562,
+    "passed": 528,
+    "declaredSkipped": 34,
+    "notRun": [],
+    "unresolved": [],
+    "rechecked": [
+      {
+        "key": "[\"v102-light-i18n.spec.ts\",[\"English query and start-menu setting persist as a device preference\"],\"chromium\"]",
+        "file": "v102-light-i18n.spec.ts",
+        "title": "English query and start-menu setting persist as a device preference",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v102-light-i18n.spec.ts\",[\"English light factory and lazy workspaces stay readable on desktop\"],\"chromium\"]",
+        "file": "v102-light-i18n.spec.ts",
+        "title": "English light factory and lazy workspaces stay readable on desktop",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v102-light-i18n.spec.ts\",[\"light factory fabrication and minimap controls keep opaque readable surfaces\"],\"chromium\"]",
+        "file": "v102-light-i18n.spec.ts",
+        "title": "light factory fabrication and minimap controls keep opaque readable surfaces",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v102-light-i18n.spec.ts\",[\"English light release notes are localized and persist dismissal\"],\"chromium\"]",
+        "file": "v102-light-i18n.spec.ts",
+        "title": "English light release notes are localized and persist dismissal",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v102-light-i18n.spec.ts\",[\"English light primary workspaces use opaque light surfaces\"],\"chromium\"]",
+        "file": "v102-light-i18n.spec.ts",
+        "title": "English light primary workspaces use opaque light surfaces",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v102-light-i18n.spec.ts\",[\"English light next-mobile shell keeps navigation and settings reachable\"],\"chromium\"]",
+        "file": "v102-light-i18n.spec.ts",
+        "title": "English light next-mobile shell keeps navigation and settings reachable",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v115-pure-idle-tutorial.spec.ts\",[\"settings opens the complete tutorial and keeps independent reading progress\"],\"chromium\"]",
+        "file": "v115-pure-idle-tutorial.spec.ts",
+        "title": "settings opens the complete tutorial and keeps independent reading progress",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v115-pure-idle-tutorial.spec.ts\",[\"time warp starts a blocking pure-idle page and can stop safely\"],\"chromium\"]",
+        "file": "v115-pure-idle-tutorial.spec.ts",
+        "title": "time warp starts a blocking pure-idle page and can stop safely",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v115-pure-idle-tutorial.spec.ts\",[\"an interrupted frozen settlement exposes retry and explicit abandon actions\"],\"chromium\"]",
+        "file": "v115-pure-idle-tutorial.spec.ts",
+        "title": "an interrupted frozen settlement exposes retry and explicit abandon actions",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v115-pure-idle-tutorial.spec.ts\",[\"tutorial remains readable in portrait and landscape mobile shells\"],\"chromium\"]",
+        "file": "v115-pure-idle-tutorial.spec.ts",
+        "title": "tutorial remains readable in portrait and landscape mobile shells",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v139-cloud-hotfix.spec.ts\",[\"reports the current package version and a unique build id\"],\"chromium\"]",
+        "file": "v139-cloud-hotfix.spec.ts",
+        "title": "reports the current package version and a unique build id",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      },
+      {
+        "key": "[\"v139-cloud-hotfix.spec.ts\",[\"browser protocol uploads sparse v46 normal and speedrun saves without rewriting them\"],\"chromium\"]",
+        "file": "v139-cloud-hotfix.spec.ts",
+        "title": "browser protocol uploads sparse v46 normal and speedrun saves without rewriting them",
+        "status": "expected",
+        "expectedStatus": "passed",
+        "results": [
+          "passed"
+        ]
+      }
+    ],
+    "scope": "Full run plus corrected test fixture and npm version environment recheck; product runtime files unchanged between runs."
+  },
+  "phone": {
+    "focusedTests": 3,
+    "fontViewportConfigurations": 15,
+    "minimumCardHeightBeforePx": 44,
+    "minimumAfterPx": 84,
+    "allCountsAndGlyphsContained": true
+  },
+  "lightTheme": {
+    "oldReportVersion": "1.0.0",
+    "currentLargeBlackCardsAlreadyFixed": true,
+    "residualFixes": [
+      "fabricator-view container",
+      "canvas-minimap-toggle default hover and focus"
+    ],
+    "actualWindowsInstallerRun": false
+  },
+  "buildPending": true,
+  "artifacts": {
+    "unit-full-01.json": "dfba792fcbab67ee5a0445ca4b01692acfda6e42d4452fc02d2a80e105dbed56",
+    "native-release-recheck.json": "e812b422f7c7f4bb60bf368c56fcc7f902c30a1aa3914c54781983963e29ef82",
+    "native-full-01.log": "18fbdb74474c84e79ff821a42e57a262f9b9e04c8059f3497b4d4a388b2710ac",
+    "native-redirect-retry-exit.json": "4e6f10b563d8d2a28cd930d1e0ba2db7d8007700d022b054922ede1c22b2cf4f",
+    "native-release-build-exit.json": "dd0879c54e2d04e8dd057ea4adcafcd9f8e386012ae2f745744789c91df4d437",
+    "browser-full-02.json": "1b9f8939c31d409a9c67ec96995ec60600ffb4ab1b1ce5dd8320b88d12d83154",
+    "browser-recheck-01.json": "39277a803c3888e86ab633456b9cecf235335b7e82ff6980bebbebc781687886",
+    "browser-combined.json": "ef694fb0a3797787dcc401b4c490140476909230c12ff1f0d658a1ff4f8c2efd",
+    "ui-final-01.json": "8bd1da3945525979608486beb9de0431dab5871a140e1b633d87e5f5c295638e",
+    "typecheck-02.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "current-light-inspection.json": "cdcd43364350ecc80071daf4f4cfb14dafdaa47600cd85b4a43ecc77bd4897a9"
+  },
+  "screenshots": {
+    "artifacts/qa/recipe-catalog-portrait-2-top.png": "b8298a02a193b8f88f40be9478974257b647b85a211c68f6287095fb53859a88",
+    "artifacts/qa/recipe-catalog-landscape-2-top.png": "3f779ed997b5f59c0e90023b24353381cabadbc4eb4c6791c09f6799212673ff",
+    "artifacts/qa/recipe-catalog-desktop-1-top.png": "8cd626e3e463fa9733e3164ddbc4ac653a714d967c90185a8dcdf7a2b62c9e82",
+    "artifacts/qa/current-light-factory-controls.png": "4111ed11c24e838b746e3156bf213fd42b180c1c8da254f1e605f2fda3b53da2"
+  }
+}

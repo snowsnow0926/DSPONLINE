@@ -1426,11 +1426,7 @@ fn finite_vein_snapshot_at(
             .and_then(|progress| progress.get("level")),
         "endgame.infiniteResearch.vein_utilization.level",
     )?;
-    let consumption_tenths = if item_kind == "solid" {
-        10_i128.saturating_sub(vein_level.min(10))
-    } else {
-        10
-    };
+    let consumption_tenths = 10_i128.saturating_sub(vein_level.min(10));
     let ocean_type = base
         .get("galaxy")
         .and_then(Value::as_object)
@@ -1455,18 +1451,20 @@ fn finite_vein_snapshot_at(
         Some(remaining_value),
         &format!("entities.{entity_id}.resourceRemaining"),
     )?;
-    let tracks_depletion_remainder = item_kind == "solid";
-    let depletion_remainder = if tracks_depletion_remainder {
-        let remainder_value = entity.get("resourceDepletionRemainder").ok_or_else(|| {
-            anyhow!("finite solid vein {entity_id} has no resourceDepletionRemainder")
-        })?;
-        proof_counter(
-            Some(remainder_value),
-            &format!("entities.{entity_id}.resourceDepletionRemainder"),
-        )?
-    } else {
-        0
-    };
+    let tracks_depletion_remainder = true;
+    let depletion_remainder =
+        if let Some(remainder_value) = entity.get("resourceDepletionRemainder") {
+            proof_counter(
+                Some(remainder_value),
+                &format!("entities.{entity_id}.resourceDepletionRemainder"),
+            )?
+        } else if item_kind == "solid" {
+            bail!("finite solid vein {entity_id} has no resourceDepletionRemainder");
+        } else {
+            // Older fluid saves predate fractional depletion. Missing means zero;
+            // subsequent exact and macro steps both persist the integer remainder.
+            0
+        };
     if depletion_remainder >= 10 {
         bail!("finite vein {entity_id} depletion remainder is outside 0..9");
     }
@@ -17880,71 +17878,80 @@ mod tests {
     }
 
     #[test]
-    fn macro_v10_finite_fluid_vein_accepts_missing_solid_remainder_and_uses_whole_reserve() {
-        let mut state = productive_quantum_macro_fixture(15.0, "finite");
-        let catalog = Arc::make_mut(&mut state.catalog);
-        catalog.items.insert(
-            "crude_oil".to_owned(),
-            ItemDefinition {
-                id: "crude_oil".to_owned(),
-                name: "crude_oil".to_owned(),
-                kind: "fluid".to_owned(),
-                fuel_energy_mj: 0.0,
-            },
-        );
-        catalog.buildings.insert(
-            "oil_extractor".to_owned(),
-            BuildingDefinition {
-                id: "oil_extractor".to_owned(),
-                kind: "miner".to_owned(),
-                speed: 1.0,
-                input_capacity: 0.0,
-                output_capacity: 1_000_000.0,
-                power_demand_kw: 1.0,
-                power_generation_kw: 0.0,
-                power_charge_kw: 0.0,
-                energy_capacity_mj: 0.0,
-                fuel_item_ids: Vec::new(),
-                fuel_efficiency: 1.0,
-                family: None,
-                accepts: None,
-            },
-        );
-        state.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"] =
-            json!({ "crude_oil": "10000000000" });
-        let mut vein = state.parse_entity(2).unwrap();
-        vein["resourceId"] = json!("crude_oil");
-        vein["extractorBuildingId"] = json!("oil_extractor");
-        vein["outputs"] = json!({ "crude_oil": 0 });
-        vein.as_object_mut()
-            .unwrap()
-            .remove("resourceDepletionRemainder");
-        state.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
-        state.rebuild_indexes().unwrap();
+    fn macro_v10_finite_fluid_vein_applies_research_and_accepts_legacy_remainder() {
+        for level in [0, 1, 9, 10] {
+            let mut state = productive_quantum_macro_fixture(15.0, "finite");
+            state.base_value_mut()["endgame"]["infiniteResearch"]["vein_utilization"]["level"] =
+                json!(level);
+            let catalog = Arc::make_mut(&mut state.catalog);
+            catalog.items.insert(
+                "crude_oil".to_owned(),
+                ItemDefinition {
+                    id: "crude_oil".to_owned(),
+                    name: "crude_oil".to_owned(),
+                    kind: "fluid".to_owned(),
+                    fuel_energy_mj: 0.0,
+                },
+            );
+            catalog.buildings.insert(
+                "oil_extractor".to_owned(),
+                BuildingDefinition {
+                    id: "oil_extractor".to_owned(),
+                    kind: "miner".to_owned(),
+                    speed: 1.0,
+                    input_capacity: 0.0,
+                    output_capacity: 1_000_000.0,
+                    power_demand_kw: 1.0,
+                    power_generation_kw: 0.0,
+                    power_charge_kw: 0.0,
+                    energy_capacity_mj: 0.0,
+                    fuel_item_ids: Vec::new(),
+                    fuel_efficiency: 1.0,
+                    family: None,
+                    accepts: None,
+                },
+            );
+            state.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"] =
+                json!({ "crude_oil": "10000000000" });
+            let mut vein = state.parse_entity(2).unwrap();
+            vein["resourceId"] = json!("crude_oil");
+            vein["extractorBuildingId"] = json!("oil_extractor");
+            vein["outputs"] = json!({ "crude_oil": 0 });
+            vein.as_object_mut()
+                .unwrap()
+                .remove("resourceDepletionRemainder");
+            state.replace_entity_raw(2, serde_json::to_string(&vein).unwrap().into());
+            state.rebuild_indexes().unwrap();
 
-        let revision = state.revision;
-        let result =
-            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 60.0, 4.0)).unwrap();
-        assert!(result.supported, "reason={:?}", result.reason);
-        let produced = proof_counter(
-            state.base_value()["totalProduced"].get("crude_oil"),
-            "totalProduced.crude_oil",
-        )
-        .unwrap();
-        assert!(produced > 0);
-        let final_vein = state.parse_entity(2).unwrap();
-        assert_eq!(
-            proof_counter(final_vein.get("resourceRemaining"), "fluid.remaining").unwrap(),
-            1_000_000 - produced
-        );
-        assert_eq!(
-            proof_counter(
-                final_vein.get("resourceDepletionRemainder"),
-                "fluid.remainder",
+            let revision = state.revision;
+            let result =
+                advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 60.0, 4.0))
+                    .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            let produced = proof_counter(
+                state.base_value()["totalProduced"].get("crude_oil"),
+                "totalProduced.crude_oil",
             )
-            .unwrap(),
-            0
-        );
+            .unwrap();
+            assert!(produced > 0);
+            let final_vein = state.parse_entity(2).unwrap();
+            let remaining =
+                proof_counter(final_vein.get("resourceRemaining"), "fluid.remaining").unwrap();
+            let remainder = if level >= 10 {
+                0
+            } else {
+                proof_counter(
+                    final_vein.get("resourceDepletionRemainder"),
+                    "fluid.remainder",
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                (1_000_000 - remaining) * 10 + remainder,
+                produced * (10 - level),
+                "level={level}"
+            );
+        }
     }
 
     #[test]

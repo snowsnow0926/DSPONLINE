@@ -376,7 +376,7 @@ fn resource_reserve(
         return Some(Value::Null);
     }
     let resource_id = entity.get("resourceId")?.as_str()?;
-    let item = catalog.items.get(resource_id)?;
+    catalog.items.get(resource_id)?;
     let planet_id = entity.get("planetId")?.as_str()?;
     let ocean_type = base
         .get("galaxy")
@@ -391,7 +391,7 @@ fn resource_reserve(
         .and_then(|settings| settings.get("resourceMode"))
         .and_then(Value::as_str)
         == Some("infinite")
-        || (item.kind == "solid" && level >= 10.0)
+        || level >= 10.0
         || (resource_id == "water" && ocean_type == "water")
         || (resource_id == "sulfuric_acid" && ocean_type == "sulfuric-acid");
     if infinite {
@@ -417,11 +417,7 @@ fn resource_reserve(
     } else {
         0.0
     };
-    let consumption_tenths = if item.kind == "solid" {
-        (10.0 - level.min(10.0)).max(0.0).floor()
-    } else {
-        10.0
-    };
+    let consumption_tenths = (10.0 - level.min(10.0)).max(0.0).floor();
     let remainder = finite_nonnegative(entity.get("resourceDepletionRemainder"))
         .unwrap_or(0.0)
         .floor()
@@ -1138,6 +1134,52 @@ mod tests {
             registry_fingerprint,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn fluid_reserve_presentation_honors_utilization_and_fractional_depletion() {
+        let mut catalog = catalog(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        catalog.items.insert(
+            "crude_oil".to_owned(),
+            ItemDefinition {
+                id: "crude_oil".to_owned(),
+                name: "crude_oil".to_owned(),
+                kind: "fluid".to_owned(),
+                fuel_energy_mj: 0.0,
+            },
+        );
+        let mut base = json!({
+            "settings": { "resourceMode": "finite" },
+            "endgame": { "infiniteResearch": { "vein_utilization": { "level": 9 } } },
+            "galaxy": { "profiles": { "home": { "oceanType": "none" } } }
+        });
+        let mut entity = json!({"kind":"vein", "resourceId":"crude_oil", "planetId":"home",
+            "resourceCapacity":100, "resourceRemaining":1, "resourceDepletionRemainder":9});
+        let snapshot = resource_reserve(
+            base.as_object().unwrap(),
+            entity.as_object().unwrap(),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(snapshot["infinite"], false);
+        assert_eq!(snapshot["exhausted"], false);
+        entity["resourceRemaining"] = json!(0);
+        let snapshot = resource_reserve(
+            base.as_object().unwrap(),
+            entity.as_object().unwrap(),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(snapshot["exhausted"], true);
+        base["endgame"]["infiniteResearch"]["vein_utilization"]["level"] = json!(10);
+        let snapshot = resource_reserve(
+            base.as_object().unwrap(),
+            entity.as_object().unwrap(),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(snapshot["infinite"], true);
+        assert_eq!(snapshot["exhausted"], false);
     }
 
     #[test]

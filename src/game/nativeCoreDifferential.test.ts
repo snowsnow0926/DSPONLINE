@@ -2659,6 +2659,32 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
   }, 30_000);
 
+  it.each([1, 9, 10])("matches all finite fluid and solid reserves at utilization Lv.%i", async (level) => {
+    const initial = finiteMiningState();
+    initial.galaxy.profiles.home.oceanType = "none";
+    initial.endgame.infiniteResearch.vein_utilization.level = level;
+    const acid = structuredClone(initial.entities.find(e => e.id === "vein_water")!);
+    acid.id = "finite-acid"; acid.resourceId = "sulfuric_acid"; acid.outputs = {};
+    initial.entities.push(acid);
+    for (const vein of initial.entities.filter(e => e.kind === "vein")) {
+      vein.resourceRemaining = 3; vein.resourceCapacity = 3; vein.resourceDepletionRemainder = 7;
+    }
+    const checkpoint = await seed(initial, 174);
+    for (const seconds of [1, 10, 30]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const advanced = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds } });
+      expect(advanced.supported, advanced.reason).toBe(true);
+      const projection = await client.request({ operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.map(entity => entity.id), beltIds: [], baseFields: [] });
+      expect(projection.entities).toEqual(rendererProjectedEntities(expected.entities));
+      expect(advanced.summary.canonicalFields).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 30_000);
+
   it("matches finite research completion, queue activation, rewards, and sprayed labs", async () => {
     const initial = finiteResearchState();
     const checkpoint = await seed(initial, 175);

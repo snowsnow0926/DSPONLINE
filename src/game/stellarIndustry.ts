@@ -384,8 +384,7 @@ export function getPlanetIndustrySummaries(game: GameState, routes = getStellarR
     const veins = entities.filter((entity) => getResourceReserveSnapshot(game, entity)?.infinite === false);
     const reserveRemaining = veins.reduce((sum, vein) => sum + (getResourceReserveSnapshot(game, vein)?.remaining ?? 0), 0);
     const miningPerMinute = veins.reduce((sum, vein) => sum + Math.max(0, vein.productionRate), 0);
-    const depletionPerMinute = veins.reduce((sum, vein) => sum + Math.max(0, vein.productionRate) *
-      (vein.resourceId && ITEMS[vein.resourceId].kind === "solid" ? getVeinConsumptionMultiplier(game) : 1), 0);
+    const depletionPerMinute = miningPerMinute * getVeinConsumptionMultiplier(game);
     const depletedVeins = veins.filter((vein) => getResourceReserveSnapshot(game, vein)?.exhausted).length;
     const detectedRole = detectedPlanetRole(game, planet.id);
     const recommendedRole = getRecommendedPlanetRole(game, planet.id);

@@ -1222,7 +1222,7 @@ function* migrateGameSteps(value: unknown, contentPackRegistry: ContentPackRegis
             : generatedReserve || 1,
         )
         : undefined,
-      resourceDepletionRemainder: resourceId && ITEMS[resourceId].kind === "solid"
+      resourceDepletionRemainder: resourceId
         ? saved.version >= 37 ? Math.min(9, nonNegativeInteger(entity.resourceDepletionRemainder)) : 0
         : undefined,
       recipeId: energyExchanger

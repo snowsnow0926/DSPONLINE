@@ -623,7 +623,7 @@ function makeVein(id: string, planetId: PlanetId, resourceId: ItemId, x: number,
     routingCursor: 0,
     utilization: 0,
     productionRate: 0,
-    ...(ITEMS[resourceId].kind === "solid" ? { resourceDepletionRemainder: 0 } : {}),
+    resourceDepletionRemainder: 0,
   };
 }
 
@@ -914,8 +914,7 @@ export function getVeinConsumptionMultiplier(state: GameState): number {
     VEIN_DEPLETION_SCALE;
 }
 
-function getVeinConsumptionTenths(state: GameState, resourceId: ItemId): number {
-  if (ITEMS[resourceId].kind !== "solid") return VEIN_DEPLETION_SCALE;
+function getVeinConsumptionTenths(state: GameState): number {
   return Math.max(0, VEIN_DEPLETION_SCALE - Math.min(10, getInfiniteResearchLevel(state, "vein_utilization")));
 }
 
@@ -942,7 +941,7 @@ function consumeFiniteVeinReserve(entity: FactoryEntity, amount: number, consump
 function isVeinInfiniteForState(state: GameState, entity: FactoryEntity): boolean {
   if (!entity.resourceId) return false;
   return isInfiniteResource(entity.resourceId, entity.planetId, state.settings.resourceMode, state.galaxy) ||
-    getVeinConsumptionTenths(state, entity.resourceId) === 0;
+    getVeinConsumptionTenths(state) === 0;
 }
 
 export function getLogisticsSpeedMultiplier(state: GameState): number {
@@ -5472,7 +5471,7 @@ function runMiners(
     const current = Math.floor((entity.outputs[entity.resourceId] ?? 0) + EPSILON);
     const free = Math.max(0, capacity - current) + outputCapacityCredit(credits, entity, entity.resourceId);
     const finite = !isVeinInfiniteForState(state, entity);
-    const consumptionTenths = getVeinConsumptionTenths(state, entity.resourceId);
+    const consumptionTenths = getVeinConsumptionTenths(state);
     const outputAllowance = finite ? getFiniteVeinOutputAllowance(entity, consumptionTenths) : Number.POSITIVE_INFINITY;
     if (free < 1 || powerFactor <= EPSILON || outputAllowance < 1) {
       entity.progress = 0;
@@ -9167,7 +9166,7 @@ export function manualMine(state: GameState, entityId: string, amount = 1): Game
   const capacity = getManualMiningOutputCapacity(next, entity);
   const current = Math.floor((entity.outputs[entity.resourceId] ?? 0) + EPSILON);
   const finite = !isVeinInfiniteForState(next, entity);
-  const consumptionTenths = getVeinConsumptionTenths(next, entity.resourceId);
+  const consumptionTenths = getVeinConsumptionTenths(next);
   const outputAllowance = finite ? getFiniteVeinOutputAllowance(entity, consumptionTenths) : Number.POSITIVE_INFINITY;
   const mined = Math.max(0, Math.floor(Math.min(amount, capacity - current, outputAllowance)));
   entity.outputs[entity.resourceId] = current + mined;
@@ -16383,7 +16382,7 @@ export function getResourceReserveSnapshot(state: GameState, entity: FactoryEnti
   const remainingRatio = capacity > 0 ? Math.max(0, Math.min(1, remaining / capacity)) : 0;
   return {
     infinite: false,
-    exhausted: getFiniteVeinOutputAllowance(entity, getVeinConsumptionTenths(state, entity.resourceId)) < 1,
+    exhausted: getFiniteVeinOutputAllowance(entity, getVeinConsumptionTenths(state)) < 1,
     remaining,
     capacity,
     remainingRatio,

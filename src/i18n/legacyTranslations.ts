@@ -467,6 +467,8 @@ const UI_EN: TranslationMap = {
   "资源剩余": "Resource remaining",
   "无限": "Infinite",
   "矿脉极限利用": "Vein Utilization",
+  "提高全部资源采集速度，并逐级降低所有资源点的储量消耗，最终实现无损采集。": "Increase all resource collection speeds while progressively reducing reserve depletion until extraction becomes lossless.",
+  "每级全部资源采集速度 +10%、资源点储量消耗 -10%；Lv.10 起固体矿、水、硫酸、原油等全部资源点无限": "Each level: all resource collection speeds +10% and reserve depletion -10%. At Lv.10, all deposits, including ores, water, sulfuric acid and crude oil, become inexhaustible.",
   "提高固体采矿速度并逐级降低矿脉消耗，最终实现无损开采。": "Increase solid mining speed while progressively reducing vein depletion until extraction becomes lossless.",
   "每级固体采矿速度 +10%、矿脉消耗 -10%；Lv.10 起固体矿脉无限": "Each level: solid mining speed +10% and vein depletion -10%; solid veins become infinite at Lv.10",
   "离线节点": "Offline Node",

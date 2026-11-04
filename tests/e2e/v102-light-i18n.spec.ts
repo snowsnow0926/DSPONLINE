@@ -3,8 +3,8 @@ import { selectSettingsCategory } from "./settings-helpers";
 
 const RELEASE_NOTE_ID = "2026-10-29-v1.3.5";
 
-async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
-  await page.addInitScript(({ releaseNoteId, mobileUi }) => {
+async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next", lockedPlanets = false) {
+  await page.addInitScript(({ releaseNoteId, mobileUi, lockedPlanets }) => {
     const base = { planetId: "home", minerCount: 0, routingCursor: 0, progress: 0.38, utilization: 0, productionRate: 0, inputs: {}, outputs: {} };
     const state = {
       version: 34,
@@ -21,6 +21,7 @@ async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "nex
       planetTrays: { home: { iron_ore: 1000, copper_ore: 1000, stone: 1000 } },
       planetTrayItemLimits: { home: 1_000_000 },
       totalProduced: {},
+      ...(lockedPlanets ? { exploration: { unlockedSystemIds: ["helios"], colonizedPlanetIds: ["home"], surveyProgressBySystem: { helios: 1 }, missions: [] } } : {}),
       research: { selectedTechId: null, pausedTechId: null, queuedTechIds: [], progressByTech: {}, completedTechIds: ["electromagnetism"] },
       settings: { theme: "light", fontScale: 1, simulationSpeed: 1, autosaveIntervalSeconds: 30 },
       paused: true,
@@ -30,7 +31,7 @@ async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "nex
     window.localStorage.setItem("dsp-idle-network.locale.v1", "en");
     window.localStorage.setItem("dsp-idle-network.mobile-ui.v1", mobileUi);
     window.localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state }));
-  }, { releaseNoteId: RELEASE_NOTE_ID, mobileUi });
+  }, { releaseNoteId: RELEASE_NOTE_ID, mobileUi, lockedPlanets });
 }
 
 async function closeOnboarding(page: Page) {
@@ -101,6 +102,28 @@ test("English light factory and lazy workspaces stay readable on desktop", async
   expect(await visibleHanStrings(codex)).toEqual([]);
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/v102-english-light-desktop.png", fullPage: true });
+});
+
+test("light factory fabrication and minimap controls keep opaque readable surfaces", async ({ page }) => {
+  await seedEnglishFactory(page, "legacy", true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?factory=1&lang=en&mobileUi=legacy");
+  await closeOnboarding(page);
+  await page.getByRole("button", { name: "Basic Manufacturing", exact: true }).first().click();
+  for (const selector of [".fabricator-row", ".fabricator-mode", ".fabricator-view", ".planet-navigator > button.locked", ".canvas-minimap-toggle"]) {
+    const surface = page.locator(selector).first();
+    await expect(surface).toBeVisible();
+    expect(luminance(await surface.evaluate(element => getComputedStyle(element).backgroundColor)), selector).toBeGreaterThan(205);
+  }
+  const toggle = page.locator(".canvas-minimap-toggle");
+  await toggle.hover();
+  expect(luminance(await toggle.evaluate(element => getComputedStyle(element).backgroundColor))).toBeGreaterThan(205);
+  await toggle.focus();
+  await page.screenshot({ path: "artifacts/qa/current-light-factory-controls.png", fullPage: true });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  for (const selector of [".fabricator-view", ".canvas-minimap-toggle"]) {
+    await expect.poll(async () => luminance(await page.locator(selector).evaluate(element => getComputedStyle(element).backgroundColor))).toBeLessThan(80);
+  }
 });
 
 test("English light release notes are localized and persist dismissal", async ({ page }) => {

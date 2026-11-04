@@ -1047,6 +1047,25 @@ html[data-locale="en"] :is(.mobile-next-topbar strong, .mobile-next-sheet__handl
 }
 
 /* Fabrication names and states must retain text contrast on the light surface. */
+html[data-theme="light"] .fabricator-view {
+  border-color: var(--line);
+  background: var(--surface-soft);
+}
+
+html[data-theme="light"] .canvas-minimap-toggle {
+  border-color: var(--line-strong);
+  background: var(--theme-surface-translucent);
+  color: var(--text-soft);
+  box-shadow: 0 3px 10px var(--theme-shadow);
+}
+
+html[data-theme="light"] .canvas-minimap-toggle:hover,
+html[data-theme="light"] .canvas-minimap-toggle:focus-visible {
+  border-color: var(--theme-accent-border);
+  background: var(--theme-selection-bg);
+  color: var(--cyan-deep);
+}
+
 html[data-theme="light"] :is(.fabricator-row, .construction-item, .construction-item-shell .construction-item) {
   border-color: var(--line);
   background: var(--surface-raised);

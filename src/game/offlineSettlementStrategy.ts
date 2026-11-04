@@ -25,9 +25,9 @@ export function normalizeOfflineSettlementPreference(value: unknown): OfflineSet
 }
 
 export function readOfflineSettlementPreference(storage?: Pick<Storage, "getItem">): OfflineSettlementPreference {
-  const target = storage ?? (typeof window === "undefined" ? undefined : window.localStorage);
-  if (!target) return "ask";
   try {
+    const target = storage ?? (typeof window === "undefined" ? undefined : window.localStorage);
+    if (!target) return "ask";
     const value = target.getItem(OFFLINE_SETTLEMENT_PREFERENCE_KEY);
     if (value !== null) return normalizeOfflineSettlementPreference(value);
     return target.getItem(LEGACY_OFFLINE_APPROXIMATION_KEY) === "false" ? "exact" : "ask";

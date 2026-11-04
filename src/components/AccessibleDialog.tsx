@@ -86,6 +86,7 @@ interface ModalStackEntry {
   backgroundElements: () => HTMLElement[];
   interactionRoots: () => HTMLElement[];
   returnTarget: HTMLElement | null;
+  inheritedReturnFocusRefs: RefObject<HTMLElement | null>[];
   sequence: number;
 }
 
@@ -165,7 +166,7 @@ function focusWithoutScrolling(element: HTMLElement | null): boolean {
   try {
     element.focus({ preventScroll: true });
   } catch {
-    element.focus();
+    try { element.focus(); } catch { return false; }
   }
   return element.ownerDocument.activeElement === element;
 }
@@ -272,20 +273,27 @@ function refreshDocumentIsolation(ownerDocument: Document): void {
   else documentInertElements.delete(ownerDocument);
 }
 
-function registerModal(entry: Omit<ModalStackEntry, "sequence">): ModalStackEntry {
-  const registered = { ...entry, sequence: ++modalSequence };
+function registerModal(entry: Omit<ModalStackEntry, "sequence" | "inheritedReturnFocusRefs">): ModalStackEntry {
+  const registered = { ...entry, inheritedReturnFocusRefs: [], sequence: ++modalSequence };
   modalStack.push(registered);
   refreshDocumentIsolation(entry.ownerDocument);
   return registered;
 }
 
-function unregisterModal(token: symbol): void {
+function unregisterModal(token: symbol, returnFocusRef: RefObject<HTMLElement | null> | undefined): void {
   const index = modalStack.findIndex((entry) => entry.token === token);
   if (index < 0) return;
   const [entry] = modalStack.splice(index, 1);
   for (const remaining of modalStack) {
     if (remaining.ownerDocument === entry.ownerDocument && remaining.returnTarget && entry.surface.contains(remaining.returnTarget)) {
       remaining.returnTarget = entry.returnTarget;
+      // A surviving child must follow its removed parent's live opener too.
+      // Keep refs rather than a DOM snapshot so later layout changes still work.
+      remaining.inheritedReturnFocusRefs = [...new Set([
+        ...remaining.inheritedReturnFocusRefs,
+        ...(returnFocusRef ? [returnFocusRef] : []),
+        ...entry.inheritedReturnFocusRefs,
+      ])];
     }
   }
   refreshDocumentIsolation(entry.ownerDocument);
@@ -500,13 +508,23 @@ export function useAccessibleModalSurface({
       if (externalCloseEventName) ownerDocument.defaultView?.removeEventListener(externalCloseEventName, onExternalClose, true);
       // React may remove the portal DOM before running this layout cleanup.
       const wasTop = topModal(ownerDocument, token)?.token === token;
-      unregisterModal(token);
+      unregisterModal(token, latestRef.current.returnFocusRef);
       unlockDocumentScroll(ownerDocument);
       lastFocusedInsideRef.current = null;
-      const restoredReturnTarget = stackEntry.returnTarget;
-      if (wasTop && !focusWithoutScrolling(restoredReturnTarget)) {
-        const remaining = topModal(ownerDocument);
-        if (remaining) focusWithoutScrolling(getTabbableElements(remaining.surface)[0] ?? remaining.surface);
+      if (wasTop) {
+        // Responsive layouts may replace the opener while this dialog is open.
+        // Prefer the live explicit ref, retaining the captured/cascaded target
+        // when that ref is gone or cannot receive focus.
+        const returnTargets = new Set([
+          latestRef.current.returnFocusRef?.current,
+          ...stackEntry.inheritedReturnFocusRefs.map((ref) => ref.current),
+          stackEntry.returnTarget,
+        ]);
+        const restored = [...returnTargets].some((target) => target && !surface.contains(target) && focusWithoutScrolling(target));
+        if (!restored) {
+          const remaining = topModal(ownerDocument);
+          if (remaining) focusWithoutScrolling(getTabbableElements(remaining.surface)[0] ?? remaining.surface);
+        }
       }
     };
   }, [boundaryRef, externalCloseEventName, lifecycleKey, open, surfaceRef]);

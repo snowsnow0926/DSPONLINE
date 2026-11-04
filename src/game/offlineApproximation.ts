@@ -535,7 +535,11 @@ function readPreference(storage: Pick<Storage, "getItem"> | undefined): boolean 
 }
 
 export function readOfflineApproximationEnabled(): boolean {
-  return typeof window === "undefined" ? OFFLINE_APPROXIMATION_DEFAULT_ENABLED : readPreference(window.localStorage);
+  try {
+    return typeof window === "undefined" ? OFFLINE_APPROXIMATION_DEFAULT_ENABLED : readPreference(window.localStorage);
+  } catch {
+    return OFFLINE_APPROXIMATION_DEFAULT_ENABLED;
+  }
 }
 
 export function writeOfflineApproximationEnabled(enabled: boolean): void {

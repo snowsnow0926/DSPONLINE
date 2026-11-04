@@ -20,21 +20,30 @@ function parseProgress(raw: string | null): string[] | null {
  * A legacy key is copied only when the current revision does not exist, so
  * rerunning the migration can never overwrite newer player progress.
  */
-export function readTutorialProgress(storage: Pick<Storage, "getItem" | "setItem">): Set<string> {
-  const current = parseProgress(storage.getItem(TUTORIAL_PROGRESS_KEY));
-  if (current) return new Set(current);
-  for (const legacyKey of LEGACY_TUTORIAL_PROGRESS_KEYS) {
-    const legacy = parseProgress(storage.getItem(legacyKey));
-    if (!legacy) continue;
-    storage.setItem(TUTORIAL_PROGRESS_KEY, JSON.stringify(legacy));
-    return new Set(legacy);
+export function readTutorialProgress(storage?: Pick<Storage, "getItem" | "setItem">): Set<string> {
+  try {
+    const target = storage ?? (typeof window === "undefined" ? undefined : window.localStorage);
+    if (!target) return new Set();
+    const current = parseProgress(target.getItem(TUTORIAL_PROGRESS_KEY));
+    if (current) return new Set(current);
+    for (const legacyKey of LEGACY_TUTORIAL_PROGRESS_KEYS) {
+      const legacy = parseProgress(target.getItem(legacyKey));
+      if (!legacy) continue;
+      try { target.setItem(TUTORIAL_PROGRESS_KEY, JSON.stringify(legacy)); } catch { /* The legacy progress remains readable. */ }
+      return new Set(legacy);
+    }
+  } catch {
+    // Tutorial completion is optional device UI state, never a game save.
   }
   return new Set();
 }
 
 export function writeTutorialProgress(
-  storage: Pick<Storage, "setItem">,
+  storage: Pick<Storage, "setItem"> | undefined,
   completed: Iterable<string>,
 ): void {
-  storage.setItem(TUTORIAL_PROGRESS_KEY, JSON.stringify([...new Set(completed)]));
+  try {
+    const target = storage ?? (typeof window === "undefined" ? undefined : window.localStorage);
+    target?.setItem(TUTORIAL_PROGRESS_KEY, JSON.stringify([...new Set(completed)]));
+  } catch { /* Optional device progress must not prevent opening the tutorial. */ }
 }

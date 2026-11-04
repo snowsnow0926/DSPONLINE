@@ -63,11 +63,16 @@ export function planMulticoreSimulation(
 
 export function readMulticoreSimulationOptions(): MulticoreSimulationOptions {
   if (typeof window === "undefined" || !import.meta.env.DEV) return {};
-  const enabled = window.localStorage.getItem(MULTICORE_FLAG) === "true";
-  const requestedWorkers = Number.parseInt(window.localStorage.getItem(`${MULTICORE_FLAG}.workers`) ?? "4", 10);
-  const benchmarkSpeedup = Number.parseFloat(window.localStorage.getItem(`${MULTICORE_FLAG}.speedup`) ?? "0");
-  const completeSimulationProof = window.localStorage.getItem(`${MULTICORE_FLAG}.proof`) === "true";
-  return { enabled, requestedWorkers, benchmarkSpeedup, completeSimulationProof };
+  try {
+    const storage = window.localStorage;
+    const enabled = storage.getItem(MULTICORE_FLAG) === "true";
+    const requestedWorkers = Number.parseInt(storage.getItem(`${MULTICORE_FLAG}.workers`) ?? "4", 10);
+    const benchmarkSpeedup = Number.parseFloat(storage.getItem(`${MULTICORE_FLAG}.speedup`) ?? "0");
+    const completeSimulationProof = storage.getItem(`${MULTICORE_FLAG}.proof`) === "true";
+    return { enabled, requestedWorkers, benchmarkSpeedup, completeSimulationProof };
+  } catch {
+    return {};
+  }
 }
 
 export interface PlanetPhaseWorkerRequest {

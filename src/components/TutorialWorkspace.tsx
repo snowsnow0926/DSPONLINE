@@ -54,9 +54,9 @@ function TutorialVisual({ mobile }: { mobile: boolean }) {
 export function TutorialWorkspace({ open, mobile, initialSectionId, onClose }: { open: boolean; mobile?: boolean; initialSectionId?: string; onClose: () => void }) {
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState(initialSectionId && SECTIONS.some((section) => section.id === initialSectionId) ? initialSectionId : SECTIONS[0].id);
-  const [completed, setCompleted] = useState<Set<string>>(() => readTutorialProgress(localStorage));
+  const [completed, setCompleted] = useState<Set<string>>(() => readTutorialProgress());
   useEffect(() => {
-    writeTutorialProgress(localStorage, completed);
+    writeTutorialProgress(undefined, completed);
   }, [completed]);
   useEffect(() => {
     if (initialSectionId && SECTIONS.some((section) => section.id === initialSectionId)) setActiveId(initialSectionId);

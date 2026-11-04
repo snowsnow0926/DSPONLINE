@@ -18,18 +18,20 @@ export function normalizeInspectorLayoutPreference(value: unknown): InspectorLay
   return { version: 1, order, collapsed };
 }
 
-export function readInspectorLayoutPreference(storage: Pick<Storage, "getItem"> = localStorage): InspectorLayoutPreferenceV1 {
+export function readInspectorLayoutPreference(storage?: Pick<Storage, "getItem">): InspectorLayoutPreferenceV1 {
   try {
-    const raw = storage.getItem(INSPECTOR_LAYOUT_STORAGE_KEY);
+    const target = storage ?? (typeof window === "undefined" ? undefined : window.localStorage);
+    const raw = target?.getItem(INSPECTOR_LAYOUT_STORAGE_KEY);
     return normalizeInspectorLayoutPreference(raw ? JSON.parse(raw) : null);
   } catch {
     return normalizeInspectorLayoutPreference(null);
   }
 }
 
-export function writeInspectorLayoutPreference(preference: InspectorLayoutPreferenceV1, storage: Pick<Storage, "setItem"> = localStorage): void {
+export function writeInspectorLayoutPreference(preference: InspectorLayoutPreferenceV1, storage?: Pick<Storage, "setItem">): void {
   try {
-    storage.setItem(INSPECTOR_LAYOUT_STORAGE_KEY, JSON.stringify(normalizeInspectorLayoutPreference(preference)));
+    const target = storage ?? (typeof window === "undefined" ? undefined : window.localStorage);
+    target?.setItem(INSPECTOR_LAYOUT_STORAGE_KEY, JSON.stringify(normalizeInspectorLayoutPreference(preference)));
   } catch {
     // A UI preference must never interrupt gameplay when storage is unavailable.
   }

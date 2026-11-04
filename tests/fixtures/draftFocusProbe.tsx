@@ -29,6 +29,7 @@ function DraftFocusProbe() {
   Object.assign(window, { __draftFocusReview: {
     select: setSelected, setSensitive, setNotesOpen, closeOuter: () => setOuterOpen(false),
     readNotes: () => readStableTextDraft("review-notes"),
+    readRegion: (id: string) => readStableTextDraft(`canvas-region-name:${id}`),
     readPrivate: () => readStableTextDraft("review-private"),
     clearNotes: () => { clearStableTextDraft("review-notes"); setNotesOpen(false); },
   } });

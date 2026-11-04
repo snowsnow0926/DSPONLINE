@@ -45,6 +45,7 @@ for (const device of [
       await expect(page.getByTestId("commits")).toHaveText("[]");
       await name.fill("乙区域名称"); await name.press("Tab");
       await expect(page.getByTestId("commits")).toHaveText('[{"id":"b","name":"乙区域名称"}]');
+      expect(await page.evaluate(() => window.__draftFocusReview.readRegion("b"))).toBeNull();
       await page.evaluate(() => window.__draftFocusReview.select("a"));
       await expect(name).toHaveValue("甲区域未确认中文");
     });
@@ -94,6 +95,9 @@ for (const device of [
 }
 
 test("denied localStorage preferences keep the existing IndexedDB save and disabled autosave intact", async ({ page }) => {
+  // Three separate application boots share one low-priority worker. Startup
+  // readiness gets its own bounded wait; save-content assertions stay exact.
+  test.setTimeout(180_000);
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
@@ -113,10 +117,12 @@ test("denied localStorage preferences keep the existing IndexedDB save and disab
   });
   await page.route("**/api/**", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"isolated storage review"}' }));
   await page.goto("/");
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
   const ore = page.locator('.tray-row[title="拿取铁矿石"] strong');
   await expect(ore).toHaveText("42");
   await page.evaluate(() => sessionStorage.setItem("review-deny-preferences", "1"));
   await page.reload();
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
   await expect(ore).toHaveText("42");
   const denied = await page.evaluate(async () => {
     const { readOfflineSettlementPreference } = await import("/src/game/offlineSettlementStrategy.ts");
@@ -138,6 +144,7 @@ test("denied localStorage preferences keep the existing IndexedDB save and disab
   await tutorial.getByRole("button", { name: "关闭新手教程", exact: true }).click();
   await page.evaluate(() => sessionStorage.removeItem("review-deny-preferences"));
   await page.reload();
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
   await expect(ore).toHaveText("42");
   expect(errors).toEqual([]);
 });

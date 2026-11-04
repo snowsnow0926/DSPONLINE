@@ -16103,6 +16103,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     playTone(passed ? "confirm" : "alert");
   }, [playTone]);
 
+  const clearModValidation = useCallback(() => setModValidation(null), []);
   const validateMod = useCallback((raw: string) => {
     const result = parseContentPack(raw, getContentPackValidationContext(contentPackRegistry));
     setModValidation(result);
@@ -24660,6 +24661,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onOpenReleaseNotes={onOpenReleaseNotes}
             onOpenTutorial={(sectionId) => { setTutorialSectionId(sectionId); setTutorialOpen(true); }}
             onValidateMod={validateMod}
+            onClearModValidation={clearModValidation}
             onExportModTemplate={downloadModTemplate}
             onRegisterContentPack={registerValidatedContentPack}
             onSetContentPackEnabled={toggleRegisteredContentPack}

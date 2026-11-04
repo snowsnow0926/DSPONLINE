@@ -186,6 +186,7 @@ interface OperationsWorkspaceProps {
   onOpenReleaseNotes: () => void;
   onOpenTutorial: (sectionId?: string) => void;
   onValidateMod: (raw: string) => void;
+  onClearModValidation: () => void;
   onExportModTemplate: () => void;
   onRegisterContentPack: () => void;
   onSetContentPackEnabled: (packId: string, enabled: boolean) => void;
@@ -968,13 +969,14 @@ function SavesPanel({
   onDeleteSnapshot,
   onDeleteSnapshots,
   onValidateMod,
+  onClearModValidation,
   onExportModTemplate,
 }: Pick<OperationsWorkspaceProps,
-  "game" | "slots" | "snapshots" | "importPreview" | "modValidation" | "onManualSave" | "onExport" | "onImport" | "onConfirmImport" | "onConfirmImportRescue" | "importRescueArmed" | "onCancelImport" | "onSaveSlot" | "onLoadSlot" | "onDeleteSlot" | "onCreateSnapshot" | "onAddSecondUnipolarVein" | "unipolarExpansionBusy" | "onLoadSnapshot" | "onDeleteSnapshot" | "onDeleteSnapshots" | "onValidateMod" | "onExportModTemplate">) {
+  "game" | "slots" | "snapshots" | "importPreview" | "modValidation" | "onManualSave" | "onExport" | "onImport" | "onConfirmImport" | "onConfirmImportRescue" | "importRescueArmed" | "onCancelImport" | "onSaveSlot" | "onLoadSlot" | "onDeleteSlot" | "onCreateSnapshot" | "onAddSecondUnipolarVein" | "unipolarExpansionBusy" | "onLoadSnapshot" | "onDeleteSnapshot" | "onDeleteSnapshots" | "onValidateMod" | "onClearModValidation" | "onExportModTemplate">) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modInputRef = useRef<HTMLInputElement>(null);
   const saveImport = useFileImport({ read: readSaveFileBytes, onImport, onStart: onCancelImport });
-  const modImport = useFileImport({ read: (file) => file.text(), onImport: onValidateMod });
+  const modImport = useFileImport({ read: (file) => file.text(), onImport: onValidateMod, onStart: onClearModValidation });
   const [deleteRequest, setDeleteRequest] = useState<(SaveDeleteTarget & ({ kind: "slot"; slotId: SaveSlotId } | { kind: "snapshot"; snapshotId: string } | { kind: "snapshots"; snapshotIds: string[] } | { kind: "managed-storage"; keys: string[] })) | null>(null);
   const [selectedSnapshotIds, setSelectedSnapshotIds] = useState<string[]>([]);
   const [selectedStorageKeys, setSelectedStorageKeys] = useState<string[]>([]);
@@ -1141,6 +1143,7 @@ function ContentPacksPanel({
   registry,
   validation,
   onValidate,
+  onClearValidation,
   onExportTemplate,
   onRegister,
   onSetEnabled,
@@ -1150,13 +1153,14 @@ function ContentPacksPanel({
   registry: ContentPackRegistry;
   validation: ModValidationResult | null;
   onValidate: (raw: string) => void;
+  onClearValidation: () => void;
   onExportTemplate: () => void;
   onRegister: () => void;
   onSetEnabled: (packId: string, enabled: boolean) => void;
   onRemove: (packId: string) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const fileImport = useFileImport({ read: (file) => file.text(), onImport: onValidate });
+  const fileImport = useFileImport({ read: (file) => file.text(), onImport: onValidate, onStart: onClearValidation });
   const packs = Object.values(registry.packs).sort((left, right) => left.manifest.name.localeCompare(right.manifest.name, "zh-CN"));
   return (
     <div className="operations-panel content-pack-manager">
@@ -1372,7 +1376,7 @@ export function OperationsWorkspace(props: OperationsWorkspaceProps) {
         {props.tab === "settings" ? <WindowsNativePerformancePolicySetting /> : null}
         {props.tab === "performance" ? <PerformancePanel game={props.game} snapshot={props.performanceMonitor} onStart={props.onStartPerformanceMonitor} onStop={props.onStopPerformanceMonitor} onClear={props.onClearPerformanceMonitor} onExport={props.onExportPerformanceMonitor} /> : null}
         {props.tab === "saves" ? <SavesPanel {...props} /> : null}
-        {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} /> : null}
+        {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onClearValidation={props.onClearModValidation} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} /> : null}
         {props.tab === "support" ? <SupportPanel game={props.game} report={props.performanceReport} /> : null}
       </div>
     </WorkspaceFrame>

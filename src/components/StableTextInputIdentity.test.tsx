@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { act, StrictMode } from "react";
+import { act, StrictMode, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StableTextArea, StableTextInput, clearStableTextDraft, readStableTextDraft, updateStableTextDraft } from "./StableTextInput";
@@ -119,6 +119,27 @@ describe("text draft ownership changes", () => {
       nativeValue(field, "已提交并清除的草稿", false);
       act(() => field.blur());
       expect(readStableTextDraft(id)).toBeNull();
+    });
+
+    it(`${kind} keeps a submitted draft cleared when the parent acknowledges the new value`, () => {
+      const id = `${kind}:parent-ack-clear`; ids.add(id);
+      function Parent() {
+        const [value, setValue] = useState("原始名称");
+        const onBlur = () => clearStableTextDraft(id);
+        return <>{kind === "input"
+          ? <StableTextInput draftId={id} value={value} onValueChange={setValue} commitOnBlur onBlur={onBlur} />
+          : <StableTextArea draftId={id} value={value} onValueChange={setValue} onBlur={onBlur} />}<output>{value}</output></>;
+      }
+      act(() => root.render(<Parent />));
+      const field = host.querySelector<Field>("input, textarea")!;
+      act(() => { field.focus(); field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })); });
+      nativeValue(field, "已提交名称", false);
+      act(() => field.blur());
+      expect(host.querySelector("output")!.textContent).toBe("已提交名称");
+      expect(field.value).toBe("已提交名称");
+      expect(readStableTextDraft(id)).toBeNull();
+      act(() => root.render(<div>closed editor</div>));
+      expect(render(kind, id, "后来同步的名称").value).toBe("后来同步的名称");
     });
   }
 

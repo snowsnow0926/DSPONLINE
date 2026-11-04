@@ -73,3 +73,40 @@ test("content-pack read failures show a retryable error instead of an unhandled 
   await expect(input).toHaveValue("");
   expect(errors).toEqual([]);
 });
+
+for (const origin of ["saves", "packs"] as const) {
+  test(`clears stale content-pack validation after a failed ${origin} selection across tabs`, async ({ page }) => {
+    await page.addInitScript(() => {
+      const read = File.prototype.text;
+      File.prototype.text = function () {
+        return this.name === "unreadable-pack.json"
+          ? Promise.reject(new DOMException("文件当前不可读取", "NotReadableError"))
+          : read.call(this);
+      };
+    });
+    const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+    const operations = await openSaves(page);
+    if (origin === "packs") await operations.getByRole("tab", { name: "内容包", exact: true }).click();
+    const input = operations.getByLabel(origin === "packs" ? "选择要注册的内容包" : "选择内容包文件", { exact: true });
+    const valid = { name: "old-pack.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ formatVersion: 2, id: "review_previous_pack", name: "旧校验内容包", version: "1.0.0" })) };
+    await input.setInputFiles(valid);
+    const preview = operations.locator(".content-pack-registration, .content-pack-result");
+    await expect(preview).toContainText("旧校验内容包");
+    if (origin === "packs") await expect(operations.getByRole("button", { name: "注册并启用", exact: true })).toBeEnabled();
+    else await expect(preview).toContainText("内容包校验通过");
+    await input.setInputFiles({ name: "unreadable-pack.json", mimeType: "application/json", buffer: Buffer.from("{}") });
+    await expect(operations.getByRole("alert").filter({ hasText: "文件当前不可读取" })).toBeVisible();
+    await expect(preview).toHaveCount(0);
+    await operations.getByRole("tab", { name: origin === "packs" ? "存档" : "内容包", exact: true }).click();
+    await expect(preview).toHaveCount(0);
+    await expect(operations.getByRole("button", { name: "注册并启用", exact: true })).toHaveCount(0);
+    await operations.getByRole("tab", { name: origin === "packs" ? "内容包" : "存档", exact: true }).click();
+    await expect(preview).toHaveCount(0);
+    await expect(input).toHaveValue("");
+    // Failure invalidates the old candidate without disabling a later retry.
+    await input.setInputFiles(valid);
+    await expect(preview).toContainText("旧校验内容包");
+    await expect(page.locator('.tray-row[title="拿取铁矿石"] strong')).toHaveText("42");
+    expect(errors).toEqual([]);
+  });
+}

@@ -142,7 +142,9 @@ const StableTextInputSession = forwardRef<HTMLInputElement, StableTextInputProps
     latestExternalRef.current = value;
     if (value !== previousExternal && !composingRef.current) {
       setDraft(value);
-      rememberDraft(value);
+      lastStoredDraftRef.current = value;
+      // A parent's acknowledgement must not recreate a just-cleared draft.
+      if (!sensitive && volatileDrafts.has(draftId)) volatileDrafts.set(draftId, value);
       if (inputRef.current && inputRef.current.value !== value) inputRef.current.value = value;
     }
   }, [value]);
@@ -234,7 +236,8 @@ const StableTextAreaSession = forwardRef<HTMLTextAreaElement, StableTextAreaProp
     latestExternalRef.current = value;
     if (value !== previousExternal && !composingRef.current) {
       setDraft(value);
-      rememberDraft(value);
+      lastStoredDraftRef.current = value;
+      if (!sensitive && volatileDrafts.has(draftId)) volatileDrafts.set(draftId, value);
       if (areaRef.current && areaRef.current.value !== value) areaRef.current.value = value;
     }
   }, [value]);

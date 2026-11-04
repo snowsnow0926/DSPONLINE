@@ -40,7 +40,9 @@ test("IME confirmation does not run a command and the following Enter still exec
   await expect(palette.getByRole("option", { name: /打开科技树/ })).toBeVisible();
   await input.press("Enter");
   await expect(palette).toHaveCount(0);
-  await expect(page.getByRole("dialog", { name: /科技树/ })).toBeVisible();
+  // A cold Vite workspace transform can exceed 15s on the deliberately Idle,
+  // single-core review worker. Keep both Enter assertions; allow module mount.
+  await expect(page.getByRole("dialog", { name: /科技树/ })).toBeVisible({ timeout: 60_000 });
 });
 
 test("IME candidate arrows do not change command selection", async ({ page }) => {

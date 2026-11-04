@@ -7604,6 +7604,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
   }, [nativePlayerAuthorityClock, readNativeAuthorityRuntimeObservation, refreshNativeAuthorityPersistenceBoundary]);
 
+  const reportTemporaryStorageFailure = useCallback((
+    kind: RuntimePersistenceKind,
+    message = appMessage(appLocale, "localSaveTemporarySaveFailure"),
+  ): SaveGameResult => {
+    if (kind !== "autosave" && kind !== "lifecycle" && !durablePrimarySaveInFlightRef.current && verifiedPrimarySaveInFlightDepthRef.current === 0) {
+      const id = ++runtimePersistenceProgressIdRef.current;
+      setRuntimePersistenceProgress({ id, kind, phase: "failed", startedAt: performance.now(), message });
+      window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === id ? null : current), 8_000);
+    }
+    return { success: false, code: "unavailable", message };
+  }, [appLocale]);
+
   const persistPrimarySave = useCallback(async (
     state?: GameState,
     kind: RuntimePersistenceKind = "other",
@@ -7626,17 +7638,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const volatileExport = getLocalSaveBackend() === "memory" ? options.captureVolatileExport : undefined;
     if (getLocalSaveBackend() === "memory" && (!volatileExport ||
       durableSimulationRuntimeEnabled && durableRecoveryLifecycleRef.current === "active")) {
-      const failure: SaveGameResult = {
-        success: false,
-        code: "unavailable",
-        message: appMessage(appLocale, volatileExport ? "localSaveTemporaryExportUnavailable" : "localSaveTemporarySaveFailure"),
-      };
-      if (kind !== "autosave" && kind !== "lifecycle" && !durablePrimarySaveInFlightRef.current && verifiedPrimarySaveInFlightDepthRef.current === 0) {
-        const id = ++runtimePersistenceProgressIdRef.current;
-        setRuntimePersistenceProgress({ id, kind, phase: "failed", startedAt: performance.now(), message: failure.message });
-        window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === id ? null : current), 8_000);
-      }
-      return failure;
+      return reportTemporaryStorageFailure(kind,
+        appMessage(appLocale, volatileExport ? "localSaveTemporaryExportUnavailable" : "localSaveTemporarySaveFailure"));
     }
     // Exactly one full checkpoint may own memory at a time. Timers coalesce;
     // explicit actions get a visible conflict and can be retried after the
@@ -7987,7 +7990,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       }
     }
   }, [appLocale, createAuthoritativeCheckpointOverlay, durableSimulationRuntimeEnabled, issueLegacyJavaScriptAuthorityLease, largeSaveAutosavePolicy.largeSave, legacyJavaScriptAuthorityLeaseIsCurrent, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, persistNativeAuthorityCheckpoint, readNativeAuthorityPersistenceBoundary,
-    performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativePersistenceCheckpoint,
+    performanceMonitor.isActive, performanceMonitor.recordSave, reportTemporaryStorageFailure, requestAuthoritativePersistenceCheckpoint,
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
   persistPrimarySaveRef.current = persistPrimarySave;
 
@@ -15944,6 +15947,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return;
     }
+    if (getLocalSaveBackend() === "memory") {
+      setNotice(reportTemporaryStorageFailure("manual").message);
+      playTone("alert");
+      return;
+    }
     const checkpoint = await requestAuthoritativeSimulationCheckpoint();
     if (lifecycleExitStartedRef.current) {
       setNotice("页面正在退出，槽位保存未执行");
@@ -15957,7 +15965,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     refreshSaveData();
     setNotice(result.message);
     playTone(result.success ? "confirm" : "alert");
-  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportTemporaryStorageFailure, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
 
   const loadFromSlot = useCallback(async (slotId: SaveSlotId) => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
@@ -16002,6 +16010,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return;
     }
+    if (getLocalSaveBackend() === "memory") {
+      setNotice(reportTemporaryStorageFailure("manual").message);
+      playTone("alert");
+      return;
+    }
     const checkpoint = await requestAuthoritativeSimulationCheckpoint();
     if (lifecycleExitStartedRef.current) {
       setNotice("页面正在退出，快照未创建");
@@ -16015,7 +16028,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     refreshSaveData();
     setNotice(snapshot ? "手动快照已创建" : "快照创建失败：本地存储空间不足");
     playTone(snapshot ? "confirm" : "alert");
-  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportTemporaryStorageFailure, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
 
   const addSecondUnipolarVein = useCallback(async () => {
     if (readNativeAuthorityPersistenceBoundary().protected) {

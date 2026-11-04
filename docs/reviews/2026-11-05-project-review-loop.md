@@ -72,6 +72,8 @@ CDP 触屏事件在构建网页复现长按设备菜单出现后，松手产生�
 | 新增触控布局 | 补丁前 2 失败，补丁后 2 通过；两视口各五档字号 | `focused-browser-12.json`、`focused-browser-13.json` |
 | 最终定向网页 | 23 通过、0 跳过/失败/flaky；11 项新增专项 + 11 项手机导航 + 1 项无障碍，不累加此前轮数 | `focused-browser-14.json` |
 | 最终截图 | 桌面/横屏/竖屏、深浅色、150%，6 组 / 12 图通过并逐张核对；页面无实质异常、无文档横向溢出 | `visual-02/visual-summary.json` |
+| 干净构建与冻结 | 运行 `db18a5764a5a` 的 Web 构建/预算/原生边界通过；198 文件 / 16 Worker 冻结和逐文件摘要核对通过，启动 gzip 182,288 B 仅作预算指标 | `final-build-16`、`clean-freeze-proof.json`、`clean-build-binding-proof.json` |
+| 干净成品抽查 | 5/5：损坏 gzip 清理旧预览、输入法确认、横/竖屏五字号布局及真实触摸松手/取消；不累加到前述 23 项 | `focused-browser-17.json` |
 
 低占用网页配置为单 worker、测试进程单核心/Idle，单项可见性等待 10 秒、普通用例总限时 90 秒。桌面综合用例包含 **53 个工作区/视口组合**；只有设置 `DSP_E2E_LOW_RESOURCE=1` 时总预算从 180 秒变为 360 秒，普通运行仍为 180 秒，几何与可操作断言保持。第 11 轮约五分钟完成；不能把这种资源配置下的验收耗时用作正常游玩性能指标或声称标准发布矩阵已通过。
 
@@ -99,10 +101,11 @@ CDP 触屏事件在构建网页复现长按设备菜单出现后，松手产生�
 | 目标平台 | 网页优先；共用 React 界面兼顾 Android/Windows，未制作本轮新安装器 |
 | 数据兼容 | GameState 47 / envelope 2 / cloud 8 / SQLite 3；无迁移或生产写操作，存档及自动备份停用设置保持 |
 | 主要改动 | 文本输入/弹窗键盘、命令面板及其 CSS、三个本地文件入口和共用读取 hook、三类手势及画布事件转发、相应测试与原生清单行号 |
-| Commit SHA | unknown：干净提交和构建后补入，本页不把 dirty 开发包标成可发布成品 |
-| Artifact / manifest / hash | unknown：将在同目录保留干净 Web 构建及 `clean-freeze-proof.json`；原始证据均在 `artifacts/review-loop-20261105/` |
+| Commit SHA | `db18a5764a5ab9dba7415936488d5c024f5d6cb4`；干净运行构建 ID `1.3.7+db18a5764a5a`，本页后续收尾提交仅修改文档 |
+| Artifact | `artifacts/review-loop-20261105/clean-web-db18a5764a5a`；198 文件 / 16 Worker，与实际抽查的 dist 全部逐文件一致 |
+| Manifest / aggregate SHA-256 | `artifacts/review-loop-20261105/clean-web-db18a5764a5a-manifest.json`；`f383954b2f6c2fdb9faf89b291753a5dcfe1002a82e9218c7468eed4fa634c09`；清洁 Git 身份及清单验证通过，`published: false` |
 | 发布目标与版本 | 未指定新版本/发布目标；源码版本仍 1.3.7，本轮不操作生产或下载页 |
 | 未验证项 | 全项目正式发布矩阵、真实百 MB 新对照、Rust 全量、原生安装器/实体手机系统输入法与低配长时；不得从旧 1.3.7 发布继承为本轮新通过 |
 | 风险与回退 | 本批只影响本地候选；正式发布前必须重新封装和执行相应发布资格。无数据结构变化，开发代码可单独撤回；生产不包含本批，不进行线上回滚 |
 
-本地原始证据：`artifacts/review-loop-20261105/`。最后一轮的源文件身份记录为 `validated-source-14.json`；逻辑源码与单元检查第 09 轮相同，后续 CSS 增补由最终定向网页和截图验证覆盖。开发交接不等于发布授权或整版资格。
+本地原始证据：`artifacts/review-loop-20261105/`。最后一轮的源文件身份记录为 `validated-source-14.json`；逻辑源码与单元检查第 09 轮相同，后续 CSS 增补由最终定向网页和截图验证覆盖。`clean-build-binding-proof.json` 另核对实际用于抽查的 198 个 dist 文件与冻结成品逐文件摘要一致，且最终 QA 源码身份保持。开发交接不等于发布授权或整版资格。

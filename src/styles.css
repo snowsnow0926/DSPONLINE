@@ -7712,7 +7712,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 
 .handcraft-search > label {
   display: grid;
-  height: 31px;
+  min-height: 31px;
   grid-template-columns: 27px minmax(0, 1fr);
   align-items: center;
   border: 1px solid var(--line-strong);
@@ -7743,6 +7743,8 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 .fabricator-search-history {
   position: absolute;
   z-index: 8;
+  display: flex;
+  flex-direction: column;
   top: calc(100% + 4px);
   right: 0;
   left: 0;
@@ -7753,8 +7755,14 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   box-shadow: 0 10px 24px rgba(3, 7, 5, 0.46);
 }
 
+.fabricator-search-history[data-placement="above"] {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
 .fabricator-search-history > header {
   display: grid;
+  flex-shrink: 0;
   min-height: 27px;
   grid-template-columns: 17px minmax(0, 1fr) 24px;
   align-items: center;
@@ -7787,6 +7795,9 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 
 .fabricator-search-history-options {
   display: grid;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 3px;
 }
 

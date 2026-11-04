@@ -1927,8 +1927,12 @@ test("basic fabrication handcrafts unlocked material recipes in a compact grid",
   await handcraftSearch.press("Escape");
 
   await page.locator(".tray-row").filter({ hasText: "磁线圈" }).locator(".item-reference--tray").first().hover();
-  await expect(page.locator(".item-hover-card")).toContainText("磁铁 ×2 + 铜块 ×1");
-  await expect(page.locator(".item-hover-card")).toContainText("用途");
+  // The previous hover card has a 220 ms close grace period. Inspect the
+  // requested item rather than requiring all transient cards to be unique.
+  const coilDetails = page.getByRole("dialog", { name: "磁线圈快捷操作", exact: true });
+  await expect(coilDetails).toBeVisible();
+  await expect(coilDetails).toContainText("磁铁 ×2 + 铜块 ×1");
+  await expect(coilDetails).toContainText("用途");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByLabel("打开检查器").click();
   await expect(page.locator(".inspector-panel")).toBeVisible();

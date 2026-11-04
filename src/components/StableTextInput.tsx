@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useRef, useState, type InputHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type InputHTMLAttributes, type TextareaHTMLAttributes } from "react";
 
 const volatileDrafts = new Map<string, string>();
 
@@ -26,6 +26,8 @@ export const StableTextInput = forwardRef<HTMLInputElement, Omit<InputHTMLAttrib
   value: string;
   onValueChange: (value: string) => void;
 }>(function StableTextInput({ draftId, sensitive = false, commitOnBlur = false, value, onValueChange, onBlur, onFocus, ...props }, forwardedRef) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useImperativeHandle(forwardedRef, () => inputRef.current!, []);
   const restoredDraftRef = useRef<string | null | undefined>(undefined);
   if (restoredDraftRef.current === undefined) {
     restoredDraftRef.current = sensitive ? null : volatileDrafts.get(draftId) ?? null;
@@ -35,14 +37,17 @@ export const StableTextInput = forwardRef<HTMLInputElement, Omit<InputHTMLAttrib
   const focusedRef = useRef(false);
   const latestExternalRef = useRef(value);
   const initializedFromDraftRef = useRef(restoredDraftRef.current !== null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previousExternal = latestExternalRef.current;
     latestExternalRef.current = value;
     if (initializedFromDraftRef.current) {
       initializedFromDraftRef.current = false;
       return;
     }
-    if (!composingRef.current && (!focusedRef.current || value !== previousExternal)) setDraft(value);
+    if (!composingRef.current && (!focusedRef.current || value !== previousExternal)) {
+      setDraft(value);
+      if (inputRef.current && inputRef.current.value !== value) inputRef.current.value = value;
+    }
   }, [value]);
   useEffect(() => {
     if (!sensitive) volatileDrafts.set(draftId, draft);
@@ -55,9 +60,12 @@ export const StableTextInput = forwardRef<HTMLInputElement, Omit<InputHTMLAttrib
     restoredDraftRef.current = null;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   return <input
-    ref={forwardedRef}
+    ref={inputRef}
     {...props}
-    value={draft}
+    // Keep the native pre-edit buffer outside React's controlled-value restore.
+    // Mobile IMEs can update it before input; a simulation render in that gap
+    // must not overwrite it. Explicit external changes synchronize above.
+    defaultValue={draft}
     onFocus={(event) => { focusedRef.current = true; onFocus?.(event); }}
     onChange={(event) => {
       const next = event.currentTarget.value;
@@ -94,6 +102,8 @@ export const StableTextArea = forwardRef<HTMLTextAreaElement, Omit<TextareaHTMLA
   value: string;
   onValueChange: (value: string) => void;
 }>(function StableTextArea({ draftId, sensitive = false, value, onValueChange, onBlur, onFocus, ...props }, forwardedRef) {
+  const areaRef = useRef<HTMLTextAreaElement>(null);
+  useImperativeHandle(forwardedRef, () => areaRef.current!, []);
   const restoredDraftRef = useRef<string | null | undefined>(undefined);
   if (restoredDraftRef.current === undefined) {
     restoredDraftRef.current = sensitive ? null : volatileDrafts.get(draftId) ?? null;
@@ -103,14 +113,17 @@ export const StableTextArea = forwardRef<HTMLTextAreaElement, Omit<TextareaHTMLA
   const focusedRef = useRef(false);
   const latestExternalRef = useRef(value);
   const initializedFromDraftRef = useRef(restoredDraftRef.current !== null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previousExternal = latestExternalRef.current;
     latestExternalRef.current = value;
     if (initializedFromDraftRef.current) {
       initializedFromDraftRef.current = false;
       return;
     }
-    if (!composingRef.current && (!focusedRef.current || value !== previousExternal)) setDraft(value);
+    if (!composingRef.current && (!focusedRef.current || value !== previousExternal)) {
+      setDraft(value);
+      if (areaRef.current && areaRef.current.value !== value) areaRef.current.value = value;
+    }
   }, [value]);
   useEffect(() => {
     if (!sensitive) volatileDrafts.set(draftId, draft);
@@ -126,9 +139,9 @@ export const StableTextArea = forwardRef<HTMLTextAreaElement, Omit<TextareaHTMLA
     onValueChange(next);
   };
   return <textarea
-    ref={forwardedRef}
+    ref={areaRef}
     {...props}
-    value={draft}
+    defaultValue={draft}
     onFocus={(event) => { focusedRef.current = true; onFocus?.(event); }}
     onChange={(event) => {
       const next = event.currentTarget.value;

@@ -62,7 +62,7 @@ import {
   Zap,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useHorizontalPan } from "../hooks/useHorizontalPan";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { ItemCatalogPicker, RecipeCatalogPicker } from "./CatalogPicker";
@@ -2119,9 +2119,11 @@ function Fabricator({ game, focusItemId, onCraft, onCraftItem, onQueueCraftItem,
   const [query, setQuery] = useState("");
   const [searchHistory, setSearchHistory] = useState<FabricatorSearchHistory>(loadFabricatorSearchHistory);
   const [searchHistoryOpen, setSearchHistoryOpen] = useState(false);
+  const [searchHistoryLayout, setSearchHistoryLayout] = useState({ above: false, maxHeight: 240 });
   const [batches, setBatches] = useState(1);
   const [quantityTargetId, setQuantityTargetId] = useState<string | null>(null);
   const [focusedHandcraftItemId, setFocusedHandcraftItemId] = useState<ItemId | null>(null);
+  const searchRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const term = query.trim().toLocaleLowerCase("zh-CN");
   const handcraftRecipes = useMemo(() => Object.values(RECIPES).filter((recipe) => {
@@ -2143,6 +2145,44 @@ function Fabricator({ game, focusItemId, onCraft, onCraftItem, onQueueCraftItem,
     getRecursiveHandcraftPlan(game, recipe.id, batches),
   ])), [handcraftRecipes, game.research.completedTechIds, game.tray, game.portableFleet, batches]);
   const recentSearches = searchHistory[mode];
+  useLayoutEffect(() => {
+    if (!searchHistoryOpen || recentSearches.length === 0) return;
+    const search = searchRef.current;
+    const panel = search?.closest<HTMLElement>(".inspector-panel");
+    if (!search || !panel) return;
+    const update = () => {
+      const anchor = search.getBoundingClientRect();
+      const clip = panel.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      const contentTop = clip.top + panel.clientTop + (parseFloat(window.getComputedStyle(panel).paddingTop) || 0);
+      const top = Math.max(contentTop, viewport?.offsetTop ?? 0);
+      const bottom = Math.min(clip.bottom, (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight));
+      const above = Math.max(0, anchor.top - top - 4);
+      const below = Math.max(0, bottom - anchor.bottom - 4);
+      const openAbove = below < 180 && above > below;
+      const maxHeight = Math.floor(openAbove ? above : below);
+      setSearchHistoryLayout((current) => current.above === openAbove && current.maxHeight === maxHeight
+        ? current : { above: openAbove, maxHeight });
+    };
+    let frame = 0;
+    const schedule = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(update);
+    };
+    // Fit inside the actual scrolling panel, including the mobile nav/keyboard.
+    update();
+    window.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("scroll", schedule);
+    panel.addEventListener("scroll", schedule, { passive: true });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", schedule);
+      window.visualViewport?.removeEventListener("resize", schedule);
+      window.visualViewport?.removeEventListener("scroll", schedule);
+      panel.removeEventListener("scroll", schedule);
+    };
+  }, [searchHistoryOpen, recentSearches.length, game.settings.fontScale]);
   const quantityConstruction = constructionDefinitions.find((definition) => definition.buildingId === quantityTargetId) ?? constructionDefinitions[0];
   const quantityRecipe = handcraftRecipes.find((recipe) => recipe.id === quantityTargetId) ?? handcraftRecipes[0];
   const quantityTargetName = mode === "construction"
@@ -2212,6 +2252,7 @@ function Fabricator({ game, focusItemId, onCraft, onCraftItem, onQueueCraftItem,
         <div className="handcraft-tools">
             <div
               className="handcraft-search"
+              ref={searchRef}
               onBlur={(event) => {
                 if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
                 rememberSearch(mode, query);
@@ -2239,7 +2280,7 @@ function Fabricator({ game, focusItemId, onCraft, onCraftItem, onQueueCraftItem,
                 placeholder={mode === "items" ? "搜索物品、原料或设备" : "搜索建筑或材料"}
                 aria-label={mode === "items" ? "搜索手工配方" : "搜索建筑制造"}
               /></label>
-              {searchHistoryOpen && recentSearches.length > 0 ? <div className="fabricator-search-history" id={searchHistoryId} aria-label={mode === "items" ? "物品手工最近搜索" : "建筑制造最近搜索"}>
+              {searchHistoryOpen && recentSearches.length > 0 ? <div className="fabricator-search-history" id={searchHistoryId} data-placement={searchHistoryLayout.above ? "above" : "below"} style={{ maxHeight: searchHistoryLayout.maxHeight }} aria-label={mode === "items" ? "物品手工最近搜索" : "建筑制造最近搜索"}>
                 <header><History size={12} /><span>最近搜索</span><button type="button" onClick={clearSearchHistory} title="清除最近搜索" aria-label={mode === "items" ? "清除物品手工搜索历史" : "清除建筑制造搜索历史"}><Trash2 size={12} /></button></header>
                 <div className="fabricator-search-history-options">
                   {recentSearches.map((entry) => <button type="button" key={entry} onClick={() => useRecentSearch(entry)} title={`搜索${entry}`}><History size={11} /><span>{entry}</span></button>)}

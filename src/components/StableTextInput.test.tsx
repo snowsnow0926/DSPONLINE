@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { act } from "react";
+import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -66,6 +66,32 @@ describe("StableTextInput", () => {
     clearStableTextDraft("ime");
   });
 
+  it("keeps the native IME buffer when a parent refresh precedes the input event", () => {
+    const changes: string[] = [];
+    const render = () => root.render(<StableTextInput
+      draftId="ime-before-input"
+      value=""
+      onValueChange={(value) => changes.push(value)}
+    />);
+    act(render);
+    const input = host.querySelector("input")!;
+    act(() => {
+      input.focus();
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      // Some mobile IMEs expose the pre-edit buffer before dispatching input.
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "dian");
+      input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "dian" }));
+    });
+    act(render);
+    expect(input.value).toBe("dian");
+    expect(document.activeElement).toBe(input);
+    expect(changes).toEqual([]);
+    composingValue(input, "电路板");
+    expect(input.value).toBe("电路板");
+    expect(changes).toEqual(["电路板"]);
+    clearStableTextDraft("ime-before-input");
+  });
+
   it("survives a responsive remount in the same page without persistent storage", () => {
     act(() => root.unmount());
     host.remove();
@@ -122,6 +148,44 @@ describe("StableTextInput", () => {
     act(() => root.render(<TextAreaHarness draftId="planet-notes" />));
     expect(host.querySelector("textarea")!.value).toBe("绿糖出口");
     clearStableTextDraft("planet-notes");
+  });
+
+  it("keeps the textarea native pre-edit buffer and selection across refreshes", () => {
+    const ref = createRef<HTMLTextAreaElement>();
+    const changes: string[] = [];
+    const render = () => root.render(<StableTextArea ref={ref} draftId="area-before-input" value="" onValueChange={(value) => changes.push(value)} />);
+    act(render);
+    const area = host.querySelector("textarea")!;
+    expect(ref.current).toBe(area);
+    act(() => {
+      area.focus();
+      area.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, "量子物流备注");
+      area.setSelectionRange(2, 4);
+      area.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "物流" }));
+    });
+    act(render);
+    expect(area.value).toBe("量子物流备注");
+    expect([area.selectionStart, area.selectionEnd]).toEqual([2, 4]);
+    expect(changes).toEqual([]);
+    act(() => area.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "物流" })));
+    expect(changes).toEqual(["量子物流备注"]);
+    clearStableTextDraft("area-before-input");
+  });
+
+  it("forwards the native input ref and applies external history choices and clears", () => {
+    const ref = createRef<HTMLInputElement>();
+    const render = (value: string) => root.render(<StableTextInput ref={ref} draftId="external-history" value={value} onValueChange={() => undefined} />);
+    act(() => render("磁线圈"));
+    const input = host.querySelector("input")!;
+    expect(ref.current).toBe(input);
+    act(() => ref.current!.focus());
+    act(() => render("电路板"));
+    expect(input.value).toBe("电路板");
+    act(() => render(""));
+    expect(input.value).toBe("");
+    expect(document.activeElement).toBe(input);
+    clearStableTextDraft("external-history");
   });
 
   it("survives parent refresh, viewport events, blur and a late compositionend", () => {

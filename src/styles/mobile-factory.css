@@ -648,6 +648,7 @@ html:not([data-native-ui-scale])[data-ui-font-scale="200"] .game-shell[data-mobi
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-build-grid--focused { grid-template-columns: minmax(0, min(320px, 100%)); }
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-build-grid--fleet .mobile-build-card { grid-column: span 4; }
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"][data-mobile-overlay="inspector"][data-mobile-sheet-snap="full"] .inspector-panel { top: var(--mobile-next-topbar-height); right: 0; left: auto; width: min(760px, 92vw); padding-top: var(--mobile-next-sheet-header-height); }
+.game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .handcraft-tools { grid-template-columns: minmax(0, 1fr) minmax(220px, .8fr); align-items: end; }
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-placement-bar,
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-mode-status { right: 10px; left: auto; width: min(720px, calc(100vw - 20px)); }
 .game-shell[data-mobile-shell="true"][data-compact-layout="compact-landscape"] .mobile-selection-context { right: 10px; left: auto; width: min(520px, calc(100vw - 20px)); }

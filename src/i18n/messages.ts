@@ -53,6 +53,26 @@ const messages = {
     "zh-CN": "本地存档连接已更新",
     en: "Local save connection changed",
   },
+  localSaveTemporaryTitle: {
+    "zh-CN": "当前为临时运行",
+    en: "This session is temporary",
+  },
+  localSaveTemporaryDetail: {
+    "zh-CN": "当前浏览器无法保存到本机。刷新或关闭页面会丢失本次进度，请先从存档页面导出当前进度。",
+    en: "This browser cannot save locally. Reloading or closing this page will lose this session's progress. Export it from the Saves tab first.",
+  },
+  localSaveTemporarySaveFailure: {
+    "zh-CN": "当前浏览器无法保存到本机，当前进度尚未保存。请先导出当前进度。",
+    en: "Local saving is unavailable; your current progress has not been saved. Export it first.",
+  },
+  localSaveTemporaryExportReady: {
+    "zh-CN": "临时进度导出快照已生成，尚未保存到本机。",
+    en: "The temporary progress is ready for export; it has not been saved locally.",
+  },
+  localSaveTemporaryExportUnavailable: {
+    "zh-CN": "当前恢复会话无法生成独立导出，请先安全结束恢复会话。",
+    en: "This recovery session cannot produce a separate export. Safely finish recovery first.",
+  },
   localSaveUnavailableDetail: {
     "zh-CN": "另一个页面已升级本地存储。请刷新本页后继续，当前页面不会写入旧连接。",
     en: "Another page upgraded local storage. Reload this tab to continue; this page will not write through the old connection.",

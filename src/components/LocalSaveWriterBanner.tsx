@@ -5,6 +5,7 @@ import { appMessage } from "../i18n/messages";
 import { requestCurrentTabTakeover } from "../game/localSaveTakeover";
 import {
   getLocalSaveWriterStatus,
+  getLocalSaveBackend,
   getLocalSaveConflicts,
   resolveLocalSaveConflictDetailed,
   subscribeLocalSaveWriterStatus,
@@ -31,12 +32,13 @@ export function LocalSaveWriterBanner() {
 
   useEffect(() => subscribeLocalSaveWriterStatus(setStatus), []);
   useEffect(() => { if (status.role === "conflict") refreshConflict(); }, [refreshConflict, status.role]);
-  if (status.role !== "secondary" && status.role !== "conflict" && status.role !== "unavailable" && !conflictSummary && !resolutionMessage) return null;
+  const temporary = __APP_PLATFORM__ === "web" && status.role === "primary" && getLocalSaveBackend() === "memory";
+  if (status.role !== "secondary" && status.role !== "conflict" && status.role !== "unavailable" && !conflictSummary && !resolutionMessage && !temporary) return null;
 
   const conflict = status.role === "conflict" || conflictSummary !== null || resolutionMessage !== null;
   const unavailable = status.role === "unavailable";
-  const title = appMessage(locale, conflict ? "localSaveConflictTitle" : unavailable ? "localSaveUnavailableTitle" : "localSaveSecondaryTitle");
-  const detail = appMessage(locale, conflict ? "localSaveConflictDetail" : unavailable ? "localSaveUnavailableDetail" : "localSaveSecondaryDetail");
+  const title = appMessage(locale, conflict ? "localSaveConflictTitle" : temporary ? "localSaveTemporaryTitle" : unavailable ? "localSaveUnavailableTitle" : "localSaveSecondaryTitle");
+  const detail = appMessage(locale, conflict ? "localSaveConflictDetail" : temporary ? "localSaveTemporaryDetail" : unavailable ? "localSaveUnavailableDetail" : "localSaveSecondaryDetail");
   const canTakeOver = status.role === "secondary";
   const resolveConflict = (resolution: "candidate" | "persisted") => {
     if (!conflictSummary || takingOver) return;
@@ -70,8 +72,8 @@ export function LocalSaveWriterBanner() {
     });
   };
   return (
-    <aside className={`local-save-writer-banner local-save-writer-banner--${conflict ? "conflict" : status.role}`} role="alert" aria-live="assertive">
-      {conflict ? <AlertTriangle size={19} /> : <LockKeyhole size={19} />}
+    <aside className={`local-save-writer-banner local-save-writer-banner--${conflict ? "conflict" : temporary ? "temporary" : status.role}`} role="alert" aria-live="assertive">
+      {conflict || temporary ? <AlertTriangle size={19} /> : <LockKeyhole size={19} />}
       <span><strong>{title}</strong><small>{detail}{status.conflictId ? ` · ${status.conflictId}` : ""}</small>{conflictSummary ? <small>
         {locale === "en" ? "Current" : "当前"}: {conflictSummary.persisted.savedAt ? new Date(conflictSummary.persisted.savedAt).toLocaleString(locale) : conflictSummary.persisted.missing ? (locale === "en" ? "empty (keeping it leaves no main save)" : "空（保留后没有主存档）") : "--"}
         {" · "}{locale === "en" ? "Candidate" : "候选"}: {conflictSummary.candidate.savedAt ? new Date(conflictSummary.candidate.savedAt).toLocaleString(locale) : conflictSummary.candidate.deleted ? (locale === "en" ? "delete request" : "删除请求") : "--"}

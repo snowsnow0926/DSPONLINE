@@ -907,6 +907,7 @@ import { useProductionRefreshPreference } from "./hooks/useProductionRefreshPref
 import { usePlayerPresence } from "./hooks/usePlayerPresence";
 import { useSwipeDismiss } from "./hooks/useSwipeDismiss";
 import { useAppLocale } from "./i18n/locale";
+import { appMessage } from "./i18n/messages";
 import { createAutomaticRefreshState, resolveProductionRefreshInterval, updateAutomaticRefreshState } from "./game/productionRefresh";
 import { getCanvasLod, shouldAutoOptimizeDenseCanvas, shouldVirtualizeCanvas, type CanvasLod } from "./game/canvasPerformance";
 import {
@@ -7606,6 +7607,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const persistPrimarySave = useCallback(async (
     state?: GameState,
     kind: RuntimePersistenceKind = "other",
+    options: { captureVolatileExport?: (raw: string) => void } = {},
   ): Promise<SaveGameResult> => {
     if (lifecycleExitStartedRef.current) {
       return { success: false, message: "页面正在退出，已保留当前恢复边界", code: "conflict" };
@@ -7620,6 +7622,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         };
       }
       return persistNativeAuthorityCheckpoint(kind);
+    }
+    const volatileExport = getLocalSaveBackend() === "memory" ? options.captureVolatileExport : undefined;
+    if (getLocalSaveBackend() === "memory" && (!volatileExport ||
+      durableSimulationRuntimeEnabled && durableRecoveryLifecycleRef.current === "active")) {
+      const failure: SaveGameResult = {
+        success: false,
+        code: "unavailable",
+        message: appMessage(appLocale, volatileExport ? "localSaveTemporaryExportUnavailable" : "localSaveTemporarySaveFailure"),
+      };
+      if (kind !== "autosave" && kind !== "lifecycle" && !durablePrimarySaveInFlightRef.current && verifiedPrimarySaveInFlightDepthRef.current === 0) {
+        const id = ++runtimePersistenceProgressIdRef.current;
+        setRuntimePersistenceProgress({ id, kind, phase: "failed", startedAt: performance.now(), message: failure.message });
+        window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === id ? null : current), 8_000);
+      }
+      return failure;
     }
     // Exactly one full checkpoint may own memory at a time. Timers coalesce;
     // explicit actions get a visible conflict and can be retried after the
@@ -7801,6 +7818,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         return failure;
       }
       recordRuntimeTransitionPhase("save-authoritative-checkpoint", startedAt, performance.now() - startedAt, { kind });
+      if (volatileExport) {
+        // Emergency export still owns the normal exact checkpoint and memory
+        // barrier, but never commits a primary, backup, journal or proof to disk.
+        const exported = await serializeEnvelopeInWorker(saveState);
+        if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，临时导出已取消");
+        if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
+        volatileExport(exported.raw);
+        setRuntimePersistenceProgress({ id: progressId, kind, phase: "complete", startedAt, message: appMessage(appLocale, "localSaveTemporaryExportReady") });
+        window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 2_000);
+        return { success: true, message: appMessage(appLocale, "localSaveTemporaryExportReady"), bytes: exported.verification.byteLength };
+      }
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在准备分块检查点…" });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "serialize-write-readback" });
       let chunkedAutosaveCommitted = false;
@@ -7958,7 +7986,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         }
       }
     }
-  }, [createAuthoritativeCheckpointOverlay, durableSimulationRuntimeEnabled, issueLegacyJavaScriptAuthorityLease, largeSaveAutosavePolicy.largeSave, legacyJavaScriptAuthorityLeaseIsCurrent, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, persistNativeAuthorityCheckpoint, readNativeAuthorityPersistenceBoundary,
+  }, [appLocale, createAuthoritativeCheckpointOverlay, durableSimulationRuntimeEnabled, issueLegacyJavaScriptAuthorityLease, largeSaveAutosavePolicy.largeSave, legacyJavaScriptAuthorityLeaseIsCurrent, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, persistNativeAuthorityCheckpoint, readNativeAuthorityPersistenceBoundary,
     performanceMonitor.isActive, performanceMonitor.recordSave, requestAuthoritativePersistenceCheckpoint,
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
   persistPrimarySaveRef.current = persistPrimarySave;
@@ -15626,10 +15654,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           ? "native-json" as const
           : "native-json-recovery-warning" as const;
       }
-      const saved = await persistPrimarySave(undefined, "manual");
+      let volatileExportRaw: string | undefined;
+      const saved = await persistPrimarySave(undefined, "manual", { captureVolatileExport: (raw) => { volatileExportRaw = raw; } });
       if (!saved.success) throw new Error(saved.message);
       const mode = gameRef.current.mode;
-      const raw = await readLocalSavePayload(mode === "speedrun" ? `${SAVE_KEY}.speedrun` : SAVE_KEY);
+      const raw = volatileExportRaw ?? await readLocalSavePayload(mode === "speedrun" ? `${SAVE_KEY}.speedrun` : SAVE_KEY);
       if (!raw) throw new Error("刚刚保存的本地主存档无法读取");
       const compressed = await compressSaveTextToGzipBlob(raw);
       const date = new Date().toISOString().slice(0, 10);

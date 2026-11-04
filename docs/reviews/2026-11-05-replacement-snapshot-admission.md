@@ -29,7 +29,17 @@
 
 ## 成品交接
 
-运行提交、干净构建、摘要和成品抽查在实际完成后记录；当前源码验证不等于已发布。
+| 字段 | 实际结果 |
+| --- | --- |
+| 运行提交 / 分支 | `e67fbffc0d7c72951cd94aa1c8ceb79fa72ead04` / `codex/review-loop-20261105` |
+| 干净构建 | `replacement-clean-build-62` 的 Web、启动预算、原生 13 App bindings / 12 专用组件与覆盖清单通过；startup gzip 182,345 B 为预算值，不是玩法提速测试 |
+| Build ID / 冻结目录 | `1.3.7+e67fbffc0d7c` / `artifacts/review-storage-drafts-20261105/clean-web-e67fbffc0d7c` |
+| 清单 | `artifacts/review-storage-drafts-20261105/clean-web-e67fbffc0d7c-manifest.json`，198 文件 / 16 Worker；干净 Git 身份与逐文件校验通过 |
+| Aggregate SHA-256 | `f9e172491da53c6a8f22e61ccfaf068fdc765c8fb52fad3d183b3279519e6daf` |
+| 成品保存/替换 | `replacement-frozen-63` **4/4 通过**：槽位、快照、云恢复和救援；后两条均含失败不替换、原档导出、正常重试与真正回滚 |
+| 成品临时导出 | `replacement-primary-frozen-64` **1/1 通过**：临时保存明确失败、当前进度可下载、恢复权限后原档/科研/蓝图/自动保存 0 保持 |
+| 范围 | 上述 4+1 条直接服务冻结成品、预先核对清单，不在浏览器导入源码；0 跳过 / 失败 / flaky，0 页面异常。全部反例和中间失败保留 |
+| 发布 | `published: false`，没有新版本/安装器或生产操作；此后的文档提交不改变运行成品 |
 
 ## 继续范围
 

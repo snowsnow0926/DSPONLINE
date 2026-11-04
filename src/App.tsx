@@ -7604,7 +7604,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
   }, [nativePlayerAuthorityClock, readNativeAuthorityRuntimeObservation, refreshNativeAuthorityPersistenceBoundary]);
 
-  const reportTemporaryStorageFailure = useCallback((
+  const reportUnavailableLocalSave = useCallback((
     kind: RuntimePersistenceKind,
     message = appMessage(appLocale, "localSaveTemporarySaveFailure"),
   ): SaveGameResult => {
@@ -7638,7 +7638,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const volatileExport = getLocalSaveBackend() === "memory" ? options.captureVolatileExport : undefined;
     if (getLocalSaveBackend() === "memory" && (!volatileExport ||
       durableSimulationRuntimeEnabled && durableRecoveryLifecycleRef.current === "active")) {
-      return reportTemporaryStorageFailure(kind,
+      return reportUnavailableLocalSave(kind,
         appMessage(appLocale, volatileExport ? "localSaveTemporaryExportUnavailable" : "localSaveTemporarySaveFailure"));
     }
     // Exactly one full checkpoint may own memory at a time. Timers coalesce;
@@ -7990,7 +7990,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       }
     }
   }, [appLocale, createAuthoritativeCheckpointOverlay, durableSimulationRuntimeEnabled, issueLegacyJavaScriptAuthorityLease, largeSaveAutosavePolicy.largeSave, legacyJavaScriptAuthorityLeaseIsCurrent, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, persistNativeAuthorityCheckpoint, readNativeAuthorityPersistenceBoundary,
-    performanceMonitor.isActive, performanceMonitor.recordSave, reportTemporaryStorageFailure, requestAuthoritativePersistenceCheckpoint,
+    performanceMonitor.isActive, performanceMonitor.recordSave, reportUnavailableLocalSave, requestAuthoritativePersistenceCheckpoint,
     requestAuthoritativeSimulationCheckpoint, persistDurablePrimaryCheckpoint, saveVerifiedPrimaryCheckpoint, stateWithSimulationDebt]);
   persistPrimarySaveRef.current = persistPrimarySave;
 
@@ -15853,8 +15853,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }).then(async () => {
       const rescueCheckpoint = await requestAuthoritativeSimulationCheckpoint();
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，救援未执行");
-      await saveGameSnapshotVerified(rescueCheckpoint, "救援外部存档前");
+      const snapshot = await saveGameSnapshotVerified(rescueCheckpoint, "救援外部存档前");
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，救援未执行");
+      if (!snapshot) {
+        const failure = reportUnavailableLocalSave("other", appMessage(appLocale, "localSaveRescueSnapshotFailure"));
+        setNotice(failure.message);
+        playTone("alert");
+        return;
+      }
       const result = await persistPrimarySave(repaired.inspection.state!);
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，救援未执行");
       if (!result.success) {
@@ -15878,7 +15884,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice(error instanceof Error ? `原始存档备份失败：${error.message}` : "原始存档备份失败，未执行救援");
       playTone("alert");
     });
-  }, [importPreview, importRescueArmed, pendingImportRaw, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
+  }, [appLocale, importPreview, importRescueArmed, pendingImportRaw, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportUnavailableLocalSave, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
   const restoreCloudSave = useCallback(async (raw: string): Promise<{ success: boolean; message: string }> => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
@@ -15910,8 +15916,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     const cloudCheckpoint = await requestAuthoritativeSimulationCheckpoint();
     if (lifecycleExitStartedRef.current) return { success: false, message: "页面正在退出，云存档恢复未执行" };
-    await saveGameSnapshotVerified(cloudCheckpoint, "恢复云存档前");
+    const snapshot = await saveGameSnapshotVerified(cloudCheckpoint, "恢复云存档前");
     if (lifecycleExitStartedRef.current) return { success: false, message: "页面正在退出，云存档恢复未执行" };
+    if (!snapshot) {
+      const failure = reportUnavailableLocalSave("other", appMessage(appLocale, "localSaveCloudSnapshotFailure"));
+      playTone("alert");
+      return failure;
+    }
     const result = await persistPrimarySave(inspection.state);
     if (lifecycleExitStartedRef.current) return { success: false, message: "页面正在退出，云存档恢复未执行" };
     if (!result.success) {
@@ -15926,7 +15937,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     refreshSaveData();
     playTone("complete");
     return { success: true, message: "云存档已恢复，原工厂已保留为本地快照" };
-  }, [persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
+  }, [appLocale, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportUnavailableLocalSave, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
   const takeAuxiliaryCheckpointTransfer = useCallback((state: GameState) => {
     const checkpoint = latestAuthoritativeCheckpointTransferRef.current;
@@ -15948,7 +15959,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     if (getLocalSaveBackend() === "memory") {
-      setNotice(reportTemporaryStorageFailure("manual").message);
+      setNotice(reportUnavailableLocalSave("manual").message);
       playTone("alert");
       return;
     }
@@ -15965,7 +15976,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     refreshSaveData();
     setNotice(result.message);
     playTone(result.success ? "confirm" : "alert");
-  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportTemporaryStorageFailure, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportUnavailableLocalSave, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
 
   const loadFromSlot = useCallback(async (slotId: SaveSlotId) => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
@@ -16011,7 +16022,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     if (getLocalSaveBackend() === "memory") {
-      setNotice(reportTemporaryStorageFailure("manual").message);
+      setNotice(reportUnavailableLocalSave("manual").message);
       playTone("alert");
       return;
     }
@@ -16028,7 +16039,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     refreshSaveData();
     setNotice(snapshot ? "手动快照已创建" : "快照创建失败：本地存储空间不足");
     playTone(snapshot ? "confirm" : "alert");
-  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportTemporaryStorageFailure, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
+  }, [playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportUnavailableLocalSave, requestAuthoritativeSimulationCheckpoint, takeAuxiliaryCheckpointTransfer]);
 
   const addSecondUnipolarVein = useCallback(async () => {
     if (readNativeAuthorityPersistenceBoundary().protected) {

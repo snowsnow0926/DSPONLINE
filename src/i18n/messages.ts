@@ -73,6 +73,14 @@ const messages = {
     "zh-CN": "当前恢复会话无法生成独立导出，请先安全结束恢复会话。",
     en: "This recovery session cannot produce a separate export. Safely finish recovery first.",
   },
+  localSaveRescueSnapshotFailure: {
+    "zh-CN": "救援前恢复快照创建失败，原工厂尚未替换。请检查本地存储后重试。",
+    en: "The recovery snapshot before rescue could not be saved. Your factory has not been replaced. Check local storage and retry.",
+  },
+  localSaveCloudSnapshotFailure: {
+    "zh-CN": "云存档恢复前快照创建失败，原工厂尚未替换。请检查本地存储后重试。",
+    en: "The recovery snapshot before cloud restore could not be saved. Your factory has not been replaced. Check local storage and retry.",
+  },
   localSaveUnavailableDetail: {
     "zh-CN": "另一个页面已升级本地存储。请刷新本页后继续，当前页面不会写入旧连接。",
     en: "Another page upgraded local storage. Reload this tab to continue; this page will not write through the old connection.",

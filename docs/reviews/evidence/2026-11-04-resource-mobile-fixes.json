@@ -202,7 +202,7 @@
     ],
     "actualWindowsInstallerRun": false
   },
-  "buildPending": true,
+  "buildPending": false,
   "artifacts": {
     "unit-full-01.json": "dfba792fcbab67ee5a0445ca4b01692acfda6e42d4452fc02d2a80e105dbed56",
     "native-release-recheck.json": "e812b422f7c7f4bb60bf368c56fcc7f902c30a1aa3914c54781983963e29ef82",
@@ -214,12 +214,59 @@
     "browser-combined.json": "ef694fb0a3797787dcc401b4c490140476909230c12ff1f0d658a1ff4f8c2efd",
     "ui-final-01.json": "8bd1da3945525979608486beb9de0431dab5871a140e1b633d87e5f5c295638e",
     "typecheck-02.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "current-light-inspection.json": "cdcd43364350ecc80071daf4f4cfb14dafdaa47600cd85b4a43ecc77bd4897a9"
+    "current-light-inspection.json": "cdcd43364350ecc80071daf4f4cfb14dafdaa47600cd85b4a43ecc77bd4897a9",
+    "web-manifest.json": "d5f82e8f4369815146ed5b344631b8773b108226ac24c96eac911fa09ba805b3",
+    "freeze-proof.json": "5304213b8ee9d7a355c14c0a44d3c284e63d36e0437798311156b704e2ecc39d",
+    "build-02-exit.json": "8055acc7292bf4220f6a037df92929f049ea3291209b6f5e7ee938c02cb2eee4",
+    "build-web-02.log": "9680d8429139675df8543cce415e5ee033fe69aaf9db7aa8612b65d332bfe362",
+    "manifest-verify.log": "c4268aac3d34d88daf1cd853edabf6b0bd981ced70b3ff483da1a3bf387a48d0"
   },
   "screenshots": {
     "artifacts/qa/recipe-catalog-portrait-2-top.png": "b8298a02a193b8f88f40be9478974257b647b85a211c68f6287095fb53859a88",
     "artifacts/qa/recipe-catalog-landscape-2-top.png": "3f779ed997b5f59c0e90023b24353381cabadbc4eb4c6791c09f6799212673ff",
     "artifacts/qa/recipe-catalog-desktop-1-top.png": "8cd626e3e463fa9733e3164ddbc4ac653a714d967c90185a8dcdf7a2b62c9e82",
     "artifacts/qa/current-light-factory-controls.png": "4111ed11c24e838b746e3156bf213fd42b180c1c8da254f1e605f2fda3b53da2"
+  },
+  "build": {
+    "ok": true,
+    "runtimeCommit": "0a9715cf9ec16e49d16d1c980de1f7c5b569e5d4",
+    "buildId": "1.3.5+0a9715cf9ec1",
+    "files": 198,
+    "workerJsFiles": 16,
+    "aggregateSha256": "1437d2f184f9422dcdfd73794b9a7e0064344a64693f5e552e42f070b9336b01",
+    "manifestSha256": "d5f82e8f4369815146ed5b344631b8773b108226ac24c96eac911fa09ba805b3",
+    "frozenPath": "D:\\GameDev\\Worktrees\\DSPidle2\\resource-use-mobile-cards-20261104\\artifacts\\resource-mobile-fixes-20261104/web-dist",
+    "compiledNativeHost": {
+      "sha256": "b6cb2be91d181b6fc686d2a0760057381a5a6ab00933c44c98d044bca65c2748",
+      "bytes": 17868288,
+      "profile": "release optimized, same tested source; no Windows installer produced"
+    },
+    "productionPublished": false,
+    "windowsHostFixtureFailures": 2
+  },
+  "buildGate": {
+    "sourceHead": "0a9715cf9ec16e49d16d1c980de1f7c5b569e5d4",
+    "exitCode": 0,
+    "at": "2026-11-04T18:43:45.3103856+08:00",
+    "cleanAfter": true,
+    "nodeHeapMiB": 2048
+  },
+  "buildMemory": {
+    "firstAttempt": {
+      "constrainedHeapMiB": 1024,
+      "exitCode": 134,
+      "sourceHead": "0a9715cf9ec16e49d16d1c980de1f7c5b569e5d4",
+      "cleanAfter": true,
+      "at": "2026-11-04T18:41:56.4394672+08:00"
+    },
+    "firstFailure": "Intentional 1024 MiB Node heap limit was too small for type compilation; not a game runtime/system OOM.",
+    "successfulAttempt": {
+      "previousFailure": "1 GiB type compiler heap cap, not runtime or system exhaustion",
+      "nodeHeapMiB": 2048,
+      "freeGiB": 9.977550506591797,
+      "at": "2026-11-04T18:43:00.0635389+08:00",
+      "sourceOnly": true,
+      "sourceHead": "0a9715cf9ec16e49d16d1c980de1f7c5b569e5d4"
+    }
   }
 }

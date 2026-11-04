@@ -1,7 +1,7 @@
 import { useCallback, useLayoutEffect, useRef, type HTMLAttributes, type PointerEvent as ReactPointerEvent } from "react";
 
 type LongPressBindings<T extends HTMLElement> = Pick<HTMLAttributes<T>,
-  "onPointerDownCapture" | "onPointerMoveCapture" | "onPointerUpCapture" | "onPointerCancelCapture">;
+  "onPointerDownCapture" | "onPointerMoveCapture" | "onPointerUpCapture" | "onPointerCancelCapture" | "onLostPointerCaptureCapture" | "onClickCapture">;
 
 interface LongPressOptions<T extends HTMLElement> {
   delayMs?: number;
@@ -9,7 +9,8 @@ interface LongPressOptions<T extends HTMLElement> {
   disabled?: boolean;
   resetKey?: string | number;
   getTarget: (event: ReactPointerEvent<T>) => string | null;
-  onLongPress: (targetId: string, point: { x: number; y: number }) => void;
+  /** Return false when the caller already handles the trailing click. */
+  onLongPress: (targetId: string, point: { x: number; y: number }) => void | boolean;
 }
 
 export function useLongPress<T extends HTMLElement>({
@@ -21,6 +22,7 @@ export function useLongPress<T extends HTMLElement>({
   onLongPress,
 }: LongPressOptions<T>): LongPressBindings<T> {
   const activePointersRef = useRef(new Set<number>());
+  const completedPressRef = useRef<{ pointerId: number; x: number; y: number; expiresAt: number | null } | null>(null);
   const gestureRef = useRef<{
     pointerId: number;
     targetId: string;
@@ -39,6 +41,7 @@ export function useLongPress<T extends HTMLElement>({
   const cancelAll = useCallback(() => {
     cancel();
     activePointersRef.current.clear();
+    completedPressRef.current = null;
   }, [cancel]);
 
   useLayoutEffect(() => {
@@ -49,6 +52,7 @@ export function useLongPress<T extends HTMLElement>({
   return {
     onPointerDownCapture: (event) => {
       const pointerEvent = event as ReactPointerEvent<T>;
+      completedPressRef.current = null;
       if (disabled) {
         cancelAll();
         return;
@@ -72,7 +76,9 @@ export function useLongPress<T extends HTMLElement>({
       gesture.timer = window.setTimeout(() => {
         if (gestureRef.current !== gesture) return;
         gestureRef.current = null;
-        onLongPress(targetId, { x: gesture.x, y: gesture.y });
+        if (onLongPress(targetId, { x: gesture.x, y: gesture.y }) !== false) {
+          completedPressRef.current = { pointerId: gesture.pointerId, x: gesture.x, y: gesture.y, expiresAt: null };
+        }
         if (navigator.vibrate) navigator.vibrate(16);
       }, delayMs);
       gestureRef.current = gesture;
@@ -87,13 +93,42 @@ export function useLongPress<T extends HTMLElement>({
     },
     onPointerUpCapture: (event) => {
       const pointerId = (event as ReactPointerEvent<T>).pointerId;
+      if (completedPressRef.current?.pointerId === pointerId) completedPressRef.current.expiresAt = performance.now() + 500;
       activePointersRef.current.delete(pointerId);
       cancel(pointerId);
     },
     onPointerCancelCapture: (event) => {
       const pointerId = (event as ReactPointerEvent<T>).pointerId;
+      if (completedPressRef.current?.pointerId === pointerId) completedPressRef.current = null;
       activePointersRef.current.delete(pointerId);
       cancel(pointerId);
+    },
+    onLostPointerCaptureCapture: (event) => {
+      const pointerId = (event as ReactPointerEvent<T>).pointerId;
+      // React Flow can transfer implicit touch capture from a node to an
+      // ancestor in this surface. That is still the same active gesture.
+      let ancestor = event.target instanceof Element ? event.target : null;
+      while (ancestor && event.currentTarget.contains(ancestor)) {
+        if (ancestor.hasPointerCapture?.(pointerId)) return;
+        ancestor = ancestor.parentElement;
+      }
+      activePointersRef.current.delete(pointerId);
+      cancel(pointerId);
+    },
+    onClickCapture: (event) => {
+      const completed = completedPressRef.current;
+      if (!completed || event.detail === 0) return;
+      if (completed.expiresAt !== null && performance.now() > completed.expiresAt) {
+        completedPressRef.current = null;
+        return;
+      }
+      const matchesPointer = "pointerId" in event.nativeEvent
+        ? event.nativeEvent.pointerId === completed.pointerId
+        : Math.hypot(event.clientX - completed.x, event.clientY - completed.y) <= movementTolerance;
+      if (!matchesPointer) return;
+      completedPressRef.current = null;
+      event.preventDefault();
+      event.stopPropagation();
     },
   };
 }

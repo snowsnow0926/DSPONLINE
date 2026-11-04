@@ -37,6 +37,78 @@ describe("useLongPress", () => {
     vi.useRealTimers();
   });
 
+  it("cancels a lost pointer before the menu opens and allows a later long press", () => {
+    const onLongPress = vi.fn();
+    function Harness() {
+      return <div {...useLongPress<HTMLDivElement>({ delayMs: 100, getTarget: () => "entity", onLongPress })} />;
+    }
+    act(() => root.render(<Harness />));
+    const target = host.firstElementChild!;
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 1)));
+    act(() => target.dispatchEvent(pointerEvent("lostpointercapture", 1)));
+    act(() => vi.advanceTimersByTime(150));
+    expect(onLongPress).not.toHaveBeenCalled();
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 2)));
+    act(() => vi.advanceTimersByTime(100));
+    expect(onLongPress).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a long press when touch capture moves from its child to this surface", () => {
+    const onLongPress = vi.fn();
+    function Harness() {
+      return <div {...useLongPress<HTMLDivElement>({ delayMs: 100, getTarget: () => "entity", onLongPress })}><span>node</span></div>;
+    }
+    act(() => root.render(<Harness />));
+    const surface = host.firstElementChild as HTMLElement;
+    surface.hasPointerCapture = (id) => id === 1;
+    act(() => surface.firstElementChild!.dispatchEvent(pointerEvent("pointerdown", 1)));
+    act(() => surface.firstElementChild!.dispatchEvent(pointerEvent("lostpointercapture", 1)));
+    act(() => vi.advanceTimersByTime(100));
+    expect(onLongPress).toHaveBeenCalledOnce();
+  });
+
+  it("consumes the release click after a long hold but preserves the next ordinary tap", () => {
+    const click = vi.fn();
+    function Harness() {
+      const bindings = useLongPress<HTMLDivElement>({ delayMs: 100, getTarget: () => "entity", onLongPress: () => undefined });
+      return <div onClick={click}><div data-target {...bindings} /></div>;
+    }
+    act(() => root.render(<Harness />));
+    const target = host.querySelector("[data-target]")!;
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 1)));
+    act(() => vi.advanceTimersByTime(1500));
+    act(() => target.dispatchEvent(pointerEvent("pointerup", 1)));
+    const release = new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1, clientX: 12, clientY: 18 });
+    act(() => target.dispatchEvent(release));
+    expect(release.defaultPrevented).toBe(true);
+    expect(click).not.toHaveBeenCalled();
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 2)));
+    act(() => target.dispatchEvent(pointerEvent("pointerup", 2)));
+    act(() => target.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, clientX: 12, clientY: 18 })));
+    expect(click).toHaveBeenCalledOnce();
+  });
+
+  it("keeps keyboard activation and caller-owned port click handling", () => {
+    const click = vi.fn();
+    function Harness({ callerOwnsClick = false }: { callerOwnsClick?: boolean }) {
+      const bindings = useLongPress<HTMLDivElement>({ delayMs: 100, getTarget: () => "port", onLongPress: () => callerOwnsClick ? false : undefined });
+      return <div onClick={click}><div data-target {...bindings} /></div>;
+    }
+    act(() => root.render(<Harness />));
+    const target = host.querySelector("[data-target]")!;
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 1)));
+    act(() => vi.advanceTimersByTime(100));
+    act(() => target.dispatchEvent(pointerEvent("pointerup", 1)));
+    act(() => target.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 })));
+    expect(click).toHaveBeenCalledOnce();
+    act(() => root.render(<Harness callerOwnsClick />));
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 2)));
+    act(() => vi.advanceTimersByTime(100));
+    act(() => target.dispatchEvent(pointerEvent("pointerup", 2)));
+    act(() => target.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, clientX: 12, clientY: 18 })));
+    expect(click).toHaveBeenCalledTimes(2);
+  });
+
   it("cancels the old timer and active pointer when a native route reset arrives", () => {
     const onLongPress = vi.fn();
     function Harness({ resetKey, revision, disabled = false }: { resetKey: string; revision: number; disabled?: boolean }) {

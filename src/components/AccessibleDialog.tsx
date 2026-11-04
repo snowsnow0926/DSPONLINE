@@ -430,8 +430,8 @@ export function useAccessibleModalSurface({
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isTopModal(token, ownerDocument)) return;
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === "Escape") {
-        if (event.isComposing) return;
         event.preventDefault();
         event.stopImmediatePropagation();
         if (latestRef.current.riskPolicy === "dismissible" && !event.repeat && !escapeRequested) {

@@ -2,7 +2,7 @@ import { useRef, useState, type HTMLAttributes, type PointerEvent as ReactPointe
 import { alignToDevicePixel } from "../game/displayPixels";
 
 type SwipeDismissBindings<T extends HTMLElement> = Pick<HTMLAttributes<T>,
-  "onPointerDown" | "onPointerMove" | "onPointerUp" | "onPointerCancel">;
+  "onPointerDown" | "onPointerMove" | "onPointerUp" | "onPointerCancel" | "onLostPointerCapture">;
 
 interface SwipeDismissOptions {
   axis: "x" | "y";
@@ -25,11 +25,11 @@ export function useSwipeDismiss<T extends HTMLElement>({ axis, direction, thresh
   const finish = (event: ReactPointerEvent<T>, cancelled = false) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     const distance = axis === "x" ? event.clientX - drag.start : event.clientY - drag.start;
     dragRef.current = null;
     setDragging(false);
     setOffset(0);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     if (!cancelled && distance * direction >= threshold) {
       suppressClickRef.current = true;
       event.preventDefault();
@@ -66,6 +66,9 @@ export function useSwipeDismiss<T extends HTMLElement>({ axis, direction, thresh
       },
       onPointerUp: (event) => finish(event as ReactPointerEvent<T>),
       onPointerCancel: (event) => finish(event as ReactPointerEvent<T>, true),
+      onLostPointerCapture: (event) => {
+        if (event.target === event.currentTarget) finish(event as ReactPointerEvent<T>, true);
+      },
     },
   };
 }

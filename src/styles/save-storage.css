@@ -1,3 +1,20 @@
+.file-import-feedback {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-soft);
+  font-size: calc(12px * var(--ui-font-scale, 1));
+  overflow-wrap: anywhere;
+}
+.file-import-feedback > svg { flex: 0 0 auto; color: var(--cyan); }
+.file-import-feedback[role="alert"] > svg { color: var(--coral); }
+.file-import-feedback > span { min-width: 0; }
+
 .save-snapshot-row {
   grid-template-columns: 20px 24px minmax(0, 1fr) 26px 26px;
 }

@@ -68,6 +68,18 @@ afterEach(() => {
 });
 
 describe("AccessibleDialog", () => {
+  it("leaves IME Escape and Tab events to native editing before handling ordinary dialog keys", () => {
+    const close = vi.fn();
+    render(<AccessibleDialog open title="输入法候选" onRequestClose={close}><input aria-label="中文名称" /></AccessibleDialog>);
+    for (const options of [{ isComposing: true }, { keyCode: 229 }]) {
+      expect(keydown("Escape", options).defaultPrevented).toBe(false);
+      expect(keydown("Tab", options).defaultPrevented).toBe(false);
+    }
+    expect(close).not.toHaveBeenCalled();
+    expect(keydown("Escape").defaultPrevented).toBe(true);
+    expect(close).toHaveBeenCalledExactlyOnceWith("escape");
+  });
+
   it("closes a dialog opened from body focus without forcing a body style query", () => {
     expect(document.activeElement).toBe(document.body);
     render(<AccessibleDialog open title="页面焦点" onRequestClose={() => undefined}>

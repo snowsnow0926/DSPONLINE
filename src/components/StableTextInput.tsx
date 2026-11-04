@@ -25,7 +25,7 @@ export const StableTextInput = forwardRef<HTMLInputElement, Omit<InputHTMLAttrib
   commitOnBlur?: boolean;
   value: string;
   onValueChange: (value: string) => void;
-}>(function StableTextInput({ draftId, sensitive = false, commitOnBlur = false, value, onValueChange, onBlur, onFocus, ...props }, forwardedRef) {
+}>(function StableTextInput({ draftId, sensitive = false, commitOnBlur = false, value, onValueChange, onBlur, onFocus, onKeyDown, ...props }, forwardedRef) {
   const inputRef = useRef<HTMLInputElement>(null);
   useImperativeHandle(forwardedRef, () => inputRef.current!, []);
   const restoredDraftRef = useRef<string | null | undefined>(undefined);
@@ -67,6 +67,16 @@ export const StableTextInput = forwardRef<HTMLInputElement, Omit<InputHTMLAttrib
     // must not overwrite it. Explicit external changes synchronize above.
     defaultValue={draft}
     onFocus={(event) => { focusedRef.current = true; onFocus?.(event); }}
+    onKeyDown={(event) => {
+      // Candidate confirmation/navigation belongs to the IME, including the
+      // legacy 229 event emitted after compositionend by some input methods.
+      // Leave native editing intact while keeping application shortcuts out.
+      if (composingRef.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+        event.stopPropagation();
+        return;
+      }
+      onKeyDown?.(event);
+    }}
     onChange={(event) => {
       const next = event.currentTarget.value;
       setDraft(next);
@@ -101,7 +111,7 @@ export const StableTextArea = forwardRef<HTMLTextAreaElement, Omit<TextareaHTMLA
   sensitive?: boolean;
   value: string;
   onValueChange: (value: string) => void;
-}>(function StableTextArea({ draftId, sensitive = false, value, onValueChange, onBlur, onFocus, ...props }, forwardedRef) {
+}>(function StableTextArea({ draftId, sensitive = false, value, onValueChange, onBlur, onFocus, onKeyDown, ...props }, forwardedRef) {
   const areaRef = useRef<HTMLTextAreaElement>(null);
   useImperativeHandle(forwardedRef, () => areaRef.current!, []);
   const restoredDraftRef = useRef<string | null | undefined>(undefined);
@@ -143,6 +153,13 @@ export const StableTextArea = forwardRef<HTMLTextAreaElement, Omit<TextareaHTMLA
     {...props}
     defaultValue={draft}
     onFocus={(event) => { focusedRef.current = true; onFocus?.(event); }}
+    onKeyDown={(event) => {
+      if (composingRef.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+        event.stopPropagation();
+        return;
+      }
+      onKeyDown?.(event);
+    }}
     onChange={(event) => {
       const next = event.currentTarget.value;
       setDraft(next);

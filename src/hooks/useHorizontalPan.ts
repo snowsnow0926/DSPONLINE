@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type HTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 
 type HorizontalPanBindings<T extends HTMLElement> = Pick<HTMLAttributes<T>,
-  "onKeyDown" | "onPointerDown" | "onPointerMove" | "onPointerUp" | "onPointerCancel" | "onContextMenu">;
+  "onKeyDown" | "onPointerDown" | "onPointerMove" | "onPointerUp" | "onPointerCancel" | "onLostPointerCapture" | "onContextMenu">;
 
 /** Convert a vertical wheel gesture to horizontal motion without leaking it to the page. */
 export function horizontalWheelDelta(deltaX: number, deltaY: number, deltaMode = 0, pagePixels = 800): number {
@@ -72,9 +72,9 @@ export function useHorizontalPan<T extends HTMLElement>(options: { wheelMode?: "
   const finishPan = (event: ReactPointerEvent<T>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     dragRef.current = null;
     setIsPanning(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
   return {
@@ -116,6 +116,9 @@ export function useHorizontalPan<T extends HTMLElement>(options: { wheelMode?: "
       },
       onPointerUp: (event) => finishPan(event as ReactPointerEvent<T>),
       onPointerCancel: (event) => finishPan(event as ReactPointerEvent<T>),
+      onLostPointerCapture: (event) => {
+        if (event.target === event.currentTarget) finishPan(event as ReactPointerEvent<T>);
+      },
       onContextMenu: (event) => event.preventDefault(),
     },
   };

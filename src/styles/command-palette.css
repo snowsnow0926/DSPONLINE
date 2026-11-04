@@ -15,7 +15,7 @@
   display: grid;
   width: min(620px, calc(100vw - 28px));
   max-height: min(680px, calc(100vh - 112px));
-  grid-template-rows: 54px 48px minmax(0, 1fr) 34px;
+  grid-template-rows: minmax(54px, max-content) minmax(48px, max-content) minmax(0, 1fr) minmax(34px, max-content);
   overflow: hidden;
   border: 1px solid #49635b;
   border-radius: 7px;
@@ -83,7 +83,7 @@
 
 @media (max-width: 760px) {
   .command-palette-backdrop { align-items: end; padding: 0; }
-  .command-palette { width: 100%; max-height: min(78vh, 620px); grid-template-rows: 54px 48px minmax(0, 1fr); border-right: 0; border-bottom: 0; border-left: 0; border-radius: 7px 7px 0 0; }
+  .command-palette { width: 100%; max-height: min(78vh, 620px); grid-template-rows: minmax(54px, max-content) minmax(48px, max-content) minmax(0, 1fr); border-right: 0; border-bottom: 0; border-left: 0; border-radius: 7px 7px 0 0; }
   .command-palette > footer { display: none; }
 }
 

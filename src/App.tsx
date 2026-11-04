@@ -2163,6 +2163,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [mobilePanel, setMobilePanel] = useState<"resources" | "inspector" | null>(null);
   const [mobilePanelStage, setMobilePanelStage] = useState<"half" | "full">("half");
   const [mobileActionEntityId, setMobileActionEntityId] = useState<string | null>(null);
+  const mobileActionBackdropPressRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const [mobileCanvasMode, setMobileCanvasMode] = useState<MobileCanvasMode>("browse");
   const [mobileContinuousPlacement, setMobileContinuousPlacement] = useState(false);
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
@@ -17910,13 +17911,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return element?.dataset.id ?? null;
     },
     onLongPress: (targetId) => {
-      if (nativeFactoryProjectionPendingRef.current) return;
+      if (nativeFactoryProjectionPendingRef.current) return false;
       const connectionTarget = decodeLongPressConnectionTarget(targetId);
       if (connectionTarget) {
         const element = [...document.querySelectorAll<HTMLElement>(".factory-canvas .react-flow__handle.source")]
           .find((candidate) => candidate.dataset.nodeid === connectionTarget.nodeId && candidate.dataset.handleid === connectionTarget.handleId);
         const handle = getConnectionHandleTarget(element ?? null);
-        if (!handle) return;
+        if (!handle) return false;
         // Mobile browsers commonly synthesize a click immediately after a
         // completed long press. Consume it so it cannot restart/cancel the
         // source that was just selected for continuous connection mode.
@@ -17927,16 +17928,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         }, 350);
         activateBatchConnectionMode();
         const draft = beginConnectionDraft({ nodeId: handle.nodeId, handleId: handle.handleId, handleType: "source" });
-        if (!draft) return;
+        if (!draft) return false;
         startClickConnectionPreview(draft, handle);
         setMobileActionEntityId(null);
         setMobilePanel(null);
         setNotice("已从输出接口进入连续拉线：继续点选多个兼容输入，再使用底部按钮确认");
-        return;
+        return false;
       }
       setSelectedEntityIds([targetId]);
       setSelectedBeltId(null);
       setSelectedBeltIds([]);
+      mobileActionBackdropPressRef.current = null;
       setMobileActionEntityId(targetId);
       setMobilePanel(null);
     },
@@ -22846,7 +22848,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               if (endCanvasMultiTouch(event)) return;
               finishRegionPointer(event, true);
             }}
-            onLostPointerCaptureCapture={() => stopCanvasPointerMotion()}
+            onLostPointerCaptureCapture={(event) => {
+              longPressBindings.onLostPointerCaptureCapture?.(event);
+              stopCanvasPointerMotion();
+            }}
           onFocusCapture={(event) => {
             const node = event.target instanceof Element ? event.target.closest<HTMLElement>(".react-flow__node[data-id]") : null;
             if (node?.dataset.id) setFocusedNodeId(node.dataset.id);
@@ -22861,6 +22866,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               event.stopPropagation();
               return;
             }
+            longPressBindings.onClickCapture?.(event);
+            if (event.defaultPrevented) return;
             if (!placement && !blueprintPlacementId && clickConnectionPreviewRef.current &&
               completeClickConnectionAtPoint(event.clientX, event.clientY, batchConnectionModeRef.current || event.ctrlKey || event.shiftKey)) {
               event.preventDefault();
@@ -24698,7 +24705,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         }}
         {...mobilePanelSwipe.bindings}
       ><i /></button> : null}
-      {mobileActionEntity && !nativePlayerAuthorityOwnsRuntime ? <div className="mobile-action-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setMobileActionEntityId(null); }}>
+      {mobileActionEntity && !nativePlayerAuthorityOwnsRuntime ? <div className="mobile-action-backdrop" role="presentation"
+        onPointerDown={(event) => {
+          mobileActionBackdropPressRef.current = event.target === event.currentTarget && event.button === 0
+            ? { pointerId: event.pointerId, x: event.clientX, y: event.clientY } : null;
+        }}
+        onPointerUp={(event) => {
+          // A held touch can end on the newly mounted backdrop. Dismiss only
+          // when this press also started here, as for the shared dialog.
+          const press = mobileActionBackdropPressRef.current;
+          mobileActionBackdropPressRef.current = null;
+          if (press && press.pointerId === event.pointerId && event.target === event.currentTarget
+            && Math.hypot(event.clientX - press.x, event.clientY - press.y) <= 10) setMobileActionEntityId(null);
+        }}
+        onPointerCancel={() => { mobileActionBackdropPressRef.current = null; }}>
         <section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="设备快捷操作">
           <header><span><small>长按快捷操作</small><strong>{mobileActionEntity.buildingId ? getBuilding(mobileActionEntity.buildingId).name : mobileActionEntity.resourceId ? ITEMS[mobileActionEntity.resourceId].name : mobileActionEntity.id}</strong></span><button type="button" onClick={() => setMobileActionEntityId(null)} aria-label="关闭快捷操作"><X size={16} /></button></header>
           <div>

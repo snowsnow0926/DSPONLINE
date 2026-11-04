@@ -1,6 +1,18 @@
 import type { AppLocale } from "./locale";
 
 const messages = {
+  saveImportReading: {
+    "zh-CN": "正在读取并检查存档文件…",
+    en: "Reading and checking the save file…",
+  },
+  contentPackImportReading: {
+    "zh-CN": "正在读取并检查内容包…",
+    en: "Reading and checking the content pack…",
+  },
+  fileImportReadFailed: {
+    "zh-CN": "文件读取失败",
+    en: "Could not read the file",
+  },
   localSaveSecondaryTitle: {
     "zh-CN": "本页面为只读",
     en: "This tab is read-only",

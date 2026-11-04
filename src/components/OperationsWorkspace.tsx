@@ -73,6 +73,8 @@ import { pwaUpdateStatusCopy } from "../pwaStatusCopy";
 import { getCurrentReleaseNotes } from "../i18n/releaseNotes";
 import { SaveDeleteDialog, type SaveDeleteTarget } from "./SaveDeleteDialog";
 import { useAppLocale } from "../i18n/locale";
+import { appMessage, type AppMessageKey } from "../i18n/messages";
+import { useFileImport, type FileImportStatus } from "../hooks/useFileImport";
 import { useGameDialog } from "./GameDialogProvider";
 import { LogisticsManagementPanel, type LogisticsManagementPanelProps } from "./LogisticsManagementPanel";
 import { WorkspaceFrame } from "./WorkspaceFrame";
@@ -932,6 +934,17 @@ function integrityLabel(status: SaveIntegrityStatus): string {
   return "损坏"
 }
 
+function FileImportFeedback({ status, readingKey }: { status: FileImportStatus; readingKey: AppMessageKey }) {
+  const { locale } = useAppLocale();
+  if (!status) return null;
+  return <p className="file-import-feedback" role={status.kind === "reading" ? "status" : "alert"}>
+    {status.kind === "reading" ? <FileCheck2 size={16} aria-hidden="true" /> : <AlertTriangle size={16} aria-hidden="true" />}
+    <span>{status.kind === "reading"
+      ? appMessage(locale, readingKey)
+      : <>{appMessage(locale, "fileImportReadFailed")}{status.detail ? `：${status.detail}` : ""}</>}</span>
+  </p>;
+}
+
 function SavesPanel({
   game,
   slots,
@@ -960,6 +973,8 @@ function SavesPanel({
   "game" | "slots" | "snapshots" | "importPreview" | "modValidation" | "onManualSave" | "onExport" | "onImport" | "onConfirmImport" | "onConfirmImportRescue" | "importRescueArmed" | "onCancelImport" | "onSaveSlot" | "onLoadSlot" | "onDeleteSlot" | "onCreateSnapshot" | "onAddSecondUnipolarVein" | "unipolarExpansionBusy" | "onLoadSnapshot" | "onDeleteSnapshot" | "onDeleteSnapshots" | "onValidateMod" | "onExportModTemplate">) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modInputRef = useRef<HTMLInputElement>(null);
+  const saveImport = useFileImport({ read: readSaveFileBytes, onImport, onStart: onCancelImport });
+  const modImport = useFileImport({ read: (file) => file.text(), onImport: onValidateMod });
   const [deleteRequest, setDeleteRequest] = useState<(SaveDeleteTarget & ({ kind: "slot"; slotId: SaveSlotId } | { kind: "snapshot"; snapshotId: string } | { kind: "snapshots"; snapshotIds: string[] } | { kind: "managed-storage"; keys: string[] })) | null>(null);
   const [selectedSnapshotIds, setSelectedSnapshotIds] = useState<string[]>([]);
   const [selectedStorageKeys, setSelectedStorageKeys] = useState<string[]>([]);
@@ -1010,19 +1025,17 @@ function SavesPanel({
         <button type="button" onClick={onManualSave}><Save size={15} /><span>立即保存</span></button>
         <button type="button" onClick={onCreateSnapshot}><History size={15} /><span>创建快照</span></button>
         <button type="button" onClick={onExport}><Download size={15} /><span>导出压缩存档</span></button>
-        <button type="button" onClick={() => fileInputRef.current?.click()}><Upload size={15} /><span>导入存档</span></button>
+        <button type="button" disabled={saveImport.status?.kind === "reading"} onClick={() => fileInputRef.current?.click()}><Upload size={15} /><span>导入存档</span></button>
         <input
           ref={fileInputRef}
           type="file"
           accept="application/json,application/gzip,.json,.json.gz,.gz"
           aria-label="选择要导入的存档文件"
-          onChange={async (event) => {
-            const file = event.target.files?.[0];
-            if (file) onImport(await readSaveFileBytes(file));
-            event.target.value = "";
-          }}
+          disabled={saveImport.status?.kind === "reading"}
+          onChange={saveImport.onChange}
         />
       </section>
+      <FileImportFeedback status={saveImport.status} readingKey="saveImportReading" />
       <section className="save-resource-integrity-tool" aria-label="单极磁石矿脉扩容工具">
         <header><div><ShieldCheck size={14} /><strong>单极磁石矿脉扩容</strong></div><small>{unipolarStatus}</small></header>
         <p>仅为恰好拥有 1 个规范矿脉的普通存档新增 1 个矿脉；总数硬上限为 2。操作会先创建恢复快照，不会写入矿物缓存、托盘、累计产量或排行榜。</p>
@@ -1106,9 +1119,10 @@ function SavesPanel({
       </section> : null}
       <section className="content-pack-section">
         <header><div><FileCheck2 size={14} /><strong>内容包校验</strong></div><small>只读检查，不会修改核心目录</small></header>
-        <div className="content-pack-actions"><button type="button" onClick={() => modInputRef.current?.click()}><Upload size={14} />选择内容包 JSON</button><button type="button" onClick={onExportModTemplate}><Download size={14} />导出模板</button></div>
-        <input ref={modInputRef} type="file" accept="application/json,.json" aria-label="选择内容包文件" onChange={async (event) => { const file = event.target.files?.[0]; if (file) onValidateMod(await file.text()); event.target.value = ""; }} />
-        {modValidation ? <div className={`content-pack-result${modValidation.valid ? " content-pack-result--valid" : " content-pack-result--invalid"}`}><strong>{modValidation.valid ? "内容包校验通过" : "内容包存在问题"}</strong><span>{modValidation.manifest?.name ?? "未识别内容包"} · 物品 {modValidation.counts.items} · 配方 {modValidation.counts.recipes} · 科技 {modValidation.counts.technologies}</span>{modValidation.issues.slice(0, 3).map((issue) => <small key={`${issue.code}-${issue.path}`}>{issue.severity === "error" ? "错误" : "提示"}：{issue.message}</small>)}</div> : null}
+        <div className="content-pack-actions"><button type="button" disabled={modImport.status?.kind === "reading"} onClick={() => modInputRef.current?.click()}><Upload size={14} />选择内容包 JSON</button><button type="button" onClick={onExportModTemplate}><Download size={14} />导出模板</button></div>
+        <input ref={modInputRef} type="file" accept="application/json,.json" aria-label="选择内容包文件" disabled={modImport.status?.kind === "reading"} onChange={modImport.onChange} />
+        <FileImportFeedback status={modImport.status} readingKey="contentPackImportReading" />
+        {modValidation && modImport.status === null ? <div className={`content-pack-result${modValidation.valid ? " content-pack-result--valid" : " content-pack-result--invalid"}`}><strong>{modValidation.valid ? "内容包校验通过" : "内容包存在问题"}</strong><span>{modValidation.manifest?.name ?? "未识别内容包"} · 物品 {modValidation.counts.items} · 配方 {modValidation.counts.recipes} · 科技 {modValidation.counts.technologies}</span>{modValidation.issues.slice(0, 3).map((issue) => <small key={`${issue.code}-${issue.path}`}>{issue.severity === "error" ? "错误" : "提示"}：{issue.message}</small>)}</div> : null}
       </section>
       <SaveDeleteDialog target={deleteRequest} onCancel={() => setDeleteRequest(null)} onDelete={() => {
         if (!deleteRequest) return;
@@ -1142,6 +1156,7 @@ function ContentPacksPanel({
   onRemove: (packId: string) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileImport = useFileImport({ read: (file) => file.text(), onImport: onValidate });
   const packs = Object.values(registry.packs).sort((left, right) => left.manifest.name.localeCompare(right.manifest.name, "zh-CN"));
   return (
     <div className="operations-panel content-pack-manager">
@@ -1155,15 +1170,12 @@ function ContentPacksPanel({
           <small>通过校验后可以直接写入本地注册表，并按依赖版本启用。</small>
         </div>
         <div className="content-pack-actions">
-          <button type="button" onClick={() => fileInputRef.current?.click()}><Upload size={14} />选择 JSON</button>
+          <button type="button" disabled={fileImport.status?.kind === "reading"} onClick={() => fileInputRef.current?.click()}><Upload size={14} />选择 JSON</button>
           <button type="button" onClick={onExportTemplate}><Download size={14} />导出模板</button>
         </div>
-        <input ref={fileInputRef} type="file" accept="application/json,.json" aria-label="选择要注册的内容包" onChange={async (event) => {
-          const file = event.target.files?.[0];
-          if (file) onValidate(await file.text());
-          event.target.value = "";
-        }} />
-        {validation ? <div className={`content-pack-registration${validation.valid ? " content-pack-registration--valid" : " content-pack-registration--invalid"}`}>
+        <input ref={fileInputRef} type="file" accept="application/json,.json" aria-label="选择要注册的内容包" disabled={fileImport.status?.kind === "reading"} onChange={fileImport.onChange} />
+        <FileImportFeedback status={fileImport.status} readingKey="contentPackImportReading" />
+        {validation && fileImport.status === null ? <div className={`content-pack-registration${validation.valid ? " content-pack-registration--valid" : " content-pack-registration--invalid"}`}>
           <div><FileCheck2 size={15} /><span><strong>{validation.manifest?.name ?? "未识别内容包"}</strong><small>{validation.manifest?.id ?? "--"} · v{validation.manifest?.version ?? "--"}</small></span></div>
           <p>{validation.valid ? `物品 ${validation.counts.items} · 建筑 ${validation.counts.buildings} · 配方 ${validation.counts.recipes} · 科技 ${validation.counts.technologies}` : validation.issues.find((issue) => issue.severity === "error")?.message ?? "内容包格式无效"}</p>
           {validation.manifest?.dependencies?.length ? <span className="content-pack-preview-deps">依赖 {validation.manifest.dependencies.join(" · ")}</span> : null}

@@ -5,6 +5,10 @@ const RELEASE_NOTE_ID = "2026-11-04-v1.3.7";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
+    // A reload must exercise the existing save, not write a different primary
+    // behind the app's writer lease and trigger a real conflict warning.
+    const fixtureKey = "dsp-idle-network.test.v142-fixture-installed";
+    if (sessionStorage.getItem(fixtureKey) === "1") return;
     const entityBase = {
       planetId: "home",
       minerCount: 0,
@@ -59,6 +63,7 @@ function uiReviewFixture() {
     localStorage.setItem("dsp-idle-network.release-notes.seen.v1", releaseNoteId);
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state }));
+    sessionStorage.setItem(fixtureKey, "1");
   };
 }
 
@@ -193,7 +198,9 @@ function contrastRatio(foreground: [number, number, number, number], background:
 }
 
 test("all desktop workspaces use dynamic header and dock safe areas at every font scale", async ({ page }) => {
-  test.setTimeout(180_000);
+  // This is 53 workspace/viewport combinations, not a latency benchmark.
+  // Serialized Idle runs need more total time; every geometry check stays.
+  test.setTimeout(process.env.DSP_E2E_LOW_RESOURCE === "1" ? 360_000 : 180_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFactory(page);
   const workspaces = [

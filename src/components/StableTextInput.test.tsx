@@ -236,4 +236,32 @@ describe("StableTextInput", () => {
     expect(changes).toEqual(["新名称"]);
     clearStableTextDraft("blur-commit");
   });
+
+  for (const multiline of [false, true]) {
+    it(`leaves IME keys to native editing without running ${multiline ? "textarea" : "input"} actions or parent shortcuts`, () => {
+      const called: string[] = [];
+      const Component = multiline ? StableTextArea : StableTextInput;
+      const draftId = `keyboard-composition-${multiline}`;
+      act(() => root.render(<div onKeyDown={() => called.push("parent")}>
+        <Component draftId={draftId} value="" onValueChange={() => undefined} onKeyDown={() => called.push("action")} />
+      </div>));
+      const input = host.querySelector("input, textarea")!;
+      act(() => input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })));
+      for (const key of ["Enter", "ArrowDown", "ArrowUp", "Escape", "Tab"]) {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        act(() => input.dispatchEvent(event));
+        expect(event.defaultPrevented).toBe(false);
+      }
+      act(() => input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true })));
+      for (const options of [{ isComposing: true }, { keyCode: 229 }]) {
+        const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...options });
+        act(() => input.dispatchEvent(event));
+        expect(event.defaultPrevented).toBe(false);
+      }
+      expect(called).toEqual([]);
+      act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+      expect(called).toEqual(["action", "parent"]);
+      clearStableTextDraft(draftId);
+    });
+  }
 });

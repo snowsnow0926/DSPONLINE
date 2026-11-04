@@ -1,5 +1,5 @@
 import { BarChart3, BookOpen, Check, Command, Factory, Flag, FlaskConical, Focus, Gauge, Globe2, Map, PackageOpen, Pause, Play, Search, Settings2, Telescope, WandSparkles, Wrench, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ITEMS, getBuilding, getPlanet } from "../game/content";
 import type {
   CommandPaletteEntitySearchReadModel,
@@ -71,6 +71,9 @@ function OpenCommandPalette({
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const activeOptionRef = useRef<HTMLButtonElement>(null);
+  const revealActiveRef = useRef(true);
   const nativeAuthority = entitySearchMode === "native";
   const close = () => {
     clearStableTextDraft(COMMAND_PALETTE_DRAFT_ID);
@@ -227,6 +230,18 @@ function OpenCommandPalette({
   }, [filtered.length]);
 
   const activeCommand = filtered[activeIndex];
+  const revealActiveOption = useCallback(() => {
+    if (!revealActiveRef.current) return;
+    const list = listRef.current;
+    const option = activeOptionRef.current;
+    if (!list || !option) return;
+    const viewport = list.getBoundingClientRect();
+    const row = option.getBoundingClientRect();
+    const top = viewport.top + list.clientTop;
+    if (row.top < top || row.height > list.clientHeight) list.scrollTop += row.top - top;
+    else if (row.bottom > top + list.clientHeight) list.scrollTop += row.bottom - top - list.clientHeight;
+  }, []);
+  useLayoutEffect(revealActiveOption, [activeCommand?.id, query, revealActiveOption]);
   return (
     <AccessibleDialog
       open
@@ -242,13 +257,13 @@ function OpenCommandPalette({
           <div className="command-palette-title"><i><Command size={17} /></i><span><strong>命令面板</strong><small>搜索设备、工作区、设置或物品</small></span></div>
           <button type="button" onClick={close} title="关闭命令面板" aria-label="关闭命令面板"><X size={16} /></button>
         </header>
-        <label className="command-palette-search"><Search size={16} /><StableTextInput draftId={COMMAND_PALETTE_DRAFT_ID} ref={inputRef} role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="command-palette-results" aria-activedescendant={activeCommand ? `command-palette-option-${activeCommand.id.replace(/[^a-zA-Z0-9_-]/g, "-")}` : undefined} value={query} onValueChange={(value) => { setQuery(value); setActiveIndex(0); if (entitySearchMode === "native") onEntitySearchRequest?.(value, 0); }} onKeyDown={(event) => {
-          if (event.key === "ArrowDown") { event.preventDefault(); setActiveIndex((index) => Math.min(index + 1, Math.max(0, filtered.length - 1))); }
-          else if (event.key === "ArrowUp") { event.preventDefault(); setActiveIndex((index) => Math.max(0, index - 1)); }
+        <label className="command-palette-search"><Search size={16} /><StableTextInput draftId={COMMAND_PALETTE_DRAFT_ID} ref={inputRef} role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="command-palette-results" aria-activedescendant={activeCommand ? `command-palette-option-${activeCommand.id.replace(/[^a-zA-Z0-9_-]/g, "-")}` : undefined} value={query} onValueChange={(value) => { revealActiveRef.current = true; setQuery(value); setActiveIndex(0); if (entitySearchMode === "native") onEntitySearchRequest?.(value, 0); }} onKeyDown={(event) => {
+          if (event.key === "ArrowDown") { event.preventDefault(); revealActiveRef.current = true; revealActiveOption(); setActiveIndex((index) => Math.min(index + 1, Math.max(0, filtered.length - 1))); }
+          else if (event.key === "ArrowUp") { event.preventDefault(); revealActiveRef.current = true; revealActiveOption(); setActiveIndex((index) => Math.max(0, index - 1)); }
           else if (event.key === "Enter") { event.preventDefault(); filtered[activeIndex]?.run(); }
         }} placeholder="输入设备、物品、工作区或动作" aria-label="搜索命令" autoComplete="off" /><kbd>Esc</kbd></label>
-        <div id="command-palette-results" className="command-palette-list" role="listbox" aria-label="命令结果">
-          {filtered.map((command, index) => <button id={`command-palette-option-${command.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`} type="button" role="option" aria-selected={index === activeIndex} className={index === activeIndex ? "active" : ""} key={command.id} onMouseEnter={() => setActiveIndex(index)} onClick={command.run}><i>{command.icon}</i><span><strong>{command.label}</strong><small>{command.detail}</small></span>{index === activeIndex ? <Check size={14} /> : null}</button>)}
+        <div ref={listRef} id="command-palette-results" className="command-palette-list" role="listbox" aria-label="命令结果">
+          {filtered.map((command, index) => <button ref={index === activeIndex ? activeOptionRef : undefined} id={`command-palette-option-${command.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`} type="button" role="option" aria-selected={index === activeIndex} className={index === activeIndex ? "active" : ""} key={command.id} onMouseEnter={() => { revealActiveRef.current = false; setActiveIndex(index); }} onClick={command.run}><i>{command.icon}</i><span><strong>{command.label}</strong><small>{command.detail}</small></span>{index === activeIndex ? <Check size={14} /> : null}</button>)}
           {nativeSearchMessage ? <div className="command-palette-search-status" data-status={nativeEntitySearchStatus}>{nativeSearchMessage}</div> : null}
           {!nativeSearchMessage && filtered.length === 0 ? <div className="command-palette-empty">没有匹配的命令或物品</div> : null}
           {entitySearchMode === "native" && nativeEntitySearchStatus === "ready" &&

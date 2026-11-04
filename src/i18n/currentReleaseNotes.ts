@@ -1,6 +1,6 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-11-04-v1.3.6";
+export const CURRENT_RELEASE_ID = "2026-11-04-v1.3.7";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
@@ -8,22 +8,22 @@ export function getCurrentReleaseNotes(locale: AppLocale) {
   return {
     id: CURRENT_RELEASE_ID,
     date: en ? "November 4, 2026" : "2026年11月4日",
-    version: "1.3.6",
-    title: en ? "Resource Utilization and Mobile Display Fixes" : "全资源减耗与手机显示修复",
+    version: "1.3.7",
+    title: en ? "Stable Search Input and Mobile Search Fixes" : "搜索输入与手机搜索修复",
     summary: en
-      ? "Infinite resource-utilization research now protects all natural deposits, including liquids. Mobile recipe cards and remaining light-theme controls are easier to read. Existing saves and backup preferences are preserved."
-      : "无限科技的储量减耗现已覆盖水、硫酸、原油等全部天然资源；修复手机配方卡片裁切和两处亮色主题残留，保留现有存档与备份偏好。",
+      ? "Keep search text while the factory refreshes and make recent searches easier to use in landscape. Existing saves and backup preferences are preserved."
+      : "修复打字时搜索内容自动消失，以及横屏最近搜索被底部导航遮挡的问题，保留现有存档与备份偏好。",
     items: [
-      { id: "v136-all-resources", title: en ? "Resource depletion research covers liquids too" : "储量减耗覆盖全部原矿",
-        description: en ? "Each research level reduces natural reserve depletion by 10%, including water, sulfuric acid, crude oil and rare deposits. Level 10 and above stop reserve depletion; previously exhausted deposits can produce again." : "每级减少 10% 天然储量消耗，水、硫酸、原油及稀有矿等全部资源点均生效。10 级及以上不再扣储量，已经枯竭的资源点也可继续采集。" },
-      { id: "v136-consistent-settlement", title: en ? "Consistent settlement and reloading" : "实时、离线与重载一致",
-        description: en ? "Realtime, offline and native calculations share the same depletion rule. Fractional liquid depletion progress survives saving and reloading. Recipes, fuel and construction still consume real inventory." : "实时、离线和原生计算使用一致的减耗规则，流体的储量扣除余数可以保存重载；生产配方、燃料与施工仍正常消耗库存材料。" },
-      { id: "v136-mobile-recipes", title: en ? "Readable mobile recipe cards" : "修复手机配方卡片裁切",
-        description: en ? "Recipe rows grow with their contents. Ingredient counts, larger fonts and portrait or landscape layouts no longer compress the cards or cut off materials." : "配方卡片随内容自然增高，材料自动换行；修复数量被裁切、字号放大和横竖屏切换时卡片挤压的问题。" },
-      { id: "v136-light-controls", title: en ? "Finish two light-theme controls" : "补齐亮色主题控件",
-        description: en ? "The fabricator frame and minimap switch now follow the light theme, including hover and keyboard focus." : "制造面板外框和小地图开关随亮色主题显示，鼠标悬停与键盘焦点状态一并修复。" },
-      { id: "v136-compatibility", title: en ? "Continue with existing saves" : "现有存档可直接继续",
-        description: en ? "GameState v47 and save envelope v2 remain compatible. Existing factories, inventories and backup preferences are preserved." : "保持 GameState v47 与存档 envelope v2 兼容，现有工厂、库存及备份偏好保留。" },
+      { id: "v137-ime-input", title: en ? "Keep search text while typing" : "修复搜索打字消失",
+        description: en ? "Chinese input stays in the search field while the factory refreshes, even before you confirm a word. Your cursor and selection stay in place." : "中文输入法还在拼字时，工厂刷新不再清空输入内容，光标和选中文字一并保留。" },
+      { id: "v137-input-actions", title: en ? "Search actions keep working" : "保留正常搜索操作",
+        description: en ? "Confirming text, typing English, clearing the field and selecting a recent search continue to work. Other shared text fields receive the same input protection." : "确认汉字、英文输入、清空搜索和选择历史词继续正常使用，共用文本框同步获得输入保护。" },
+      { id: "v137-search-history", title: en ? "Recent searches stay within reach" : "横屏历史搜索可见可点",
+        description: en ? "Recent searches open above or below the field to fit the visible panel. Longer lists scroll so the bottom navigation does not hide their buttons." : "最近搜索根据可用空间向上或向下展开，长列表可以滚动，避免选项和清除按钮被底部导航挡住。" },
+      { id: "v137-landscape-layout", title: en ? "More room in landscape" : "横屏制造布局更紧凑",
+        description: en ? "Search and batch controls sit side by side in landscape, leaving more room for recipe results and keeping touch controls inside their frames." : "横屏时搜索与批次数量并排显示，为配方结果留出空间，手机输入框随内容自然增高。" },
+      { id: "v137-compatibility", title: en ? "Continue with existing saves" : "现有存档可直接继续",
+        description: en ? "Existing factories, inventories, research and backup preferences are preserved. Continue with your current save after updating." : "现有工厂、物资、科技和备份偏好保持不变，升级后可以继续游玩。" },
     ],
   } as const;
 }

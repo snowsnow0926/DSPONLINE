@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-11-04-v1.3.6";
+const RELEASE_NOTE_ID = "2026-11-04-v1.3.7";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next", lockedPlanets = false) {
   await page.addInitScript(({ releaseNoteId, mobileUi, lockedPlanets }) => {
@@ -133,19 +133,19 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en&releaseNotesTest=1");
-  const dialog = page.getByRole("dialog", { name: "Resource Utilization and Mobile Display Fixes" });
+  const dialog = page.getByRole("dialog", { name: "Stable Search Input and Mobile Search Fixes" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.3.6");
-  await expect(dialog).toContainText("Resource depletion research covers liquids too");
-  await expect(dialog).toContainText("Consistent settlement and reloading");
-  await expect(dialog).toContainText("Readable mobile recipe cards");
-  await expect(dialog).toContainText("Finish two light-theme controls");
+  await expect(dialog).toContainText("1.3.7");
+  await expect(dialog).toContainText("Keep search text while typing");
+  await expect(dialog).toContainText("Search actions keep working");
+  await expect(dialog).toContainText("Recent searches stay within reach");
+  await expect(dialog).toContainText("More room in landscape");
   await expect(dialog).toContainText("Continue with existing saves");
-  await expect(dialog).toContainText("GameState v47 and save envelope v2 remain compatible.");
+  await expect(dialog).toContainText("Existing factories, inventories, research and backup preferences are preserved.");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-04-v1.3.6");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-04-v1.3.7");
 });
 
 test("English light primary workspaces use opaque light surfaces", async ({ page }) => {

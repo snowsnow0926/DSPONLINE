@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-11-04-v1.3.6";
+const RELEASE_NOTE_ID = "2026-11-04-v1.3.7";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,13 +520,13 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "全资源减耗与手机显示修复");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.6");
+  await expect(dialog).toHaveAttribute("aria-label", "搜索输入与手机搜索修复");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.7");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("储量减耗覆盖全部原矿");
-  await expect(dialog).toContainText("实时、离线与重载一致");
-  await expect(dialog).toContainText("修复手机配方卡片裁切");
-  await expect(dialog).toContainText("补齐亮色主题控件");
+  await expect(dialog).toContainText("修复搜索打字消失");
+  await expect(dialog).toContainText("保留正常搜索操作");
+  await expect(dialog).toContainText("横屏历史搜索可见可点");
+  await expect(dialog).toContainText("横屏制造布局更紧凑");
   await expect(dialog).toContainText("现有存档可直接继续");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();

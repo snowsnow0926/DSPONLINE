@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-10-29-v1.3.5";
+const RELEASE_NOTE_ID = "2026-11-04-v1.3.6";
 
 async function installMenuPreferences(page: Page): Promise<void> {
   await page.addInitScript((releaseNoteId) => {

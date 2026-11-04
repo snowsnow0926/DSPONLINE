@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-10-29-v1.3.5");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-04-v1.3.6");
     }
   });
 }
@@ -1602,14 +1602,14 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "巨构制造与工厂计算优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.5");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "全资源减耗与手机显示修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.6");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(releaseNotes).toContainText("原料齐备时制造更轻");
-  await expect(releaseNotes).toContainText("减少制造批次重复计算");
-  await expect(releaseNotes).toContainText("优化量子供料计算");
-  await expect(releaseNotes).toContainText("优化大工厂供电统计");
-  await expect(releaseNotes).toContainText("保留存档与材料规则");
+  await expect(releaseNotes).toContainText("储量减耗覆盖全部原矿");
+  await expect(releaseNotes).toContainText("实时、离线与重载一致");
+  await expect(releaseNotes).toContainText("修复手机配方卡片裁切");
+  await expect(releaseNotes).toContainText("补齐亮色主题控件");
+  await expect(releaseNotes).toContainText("现有存档可直接继续");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1635,8 +1635,8 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "巨构制造与工厂计算优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.5");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "全资源减耗与手机显示修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.6");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-1440.png", fullPage: true });
 
@@ -1675,15 +1675,15 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-10-29-v1.3.5");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-04-v1.3.6");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
-  await page.getByRole("button", { name: "查看2026年10月29日版本更新记录" }).click();
+  await page.getByRole("button", { name: "查看2026年11月4日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "巨构制造与工厂计算优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.5");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "全资源减耗与手机显示修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.6");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
@@ -1694,8 +1694,8 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "巨构制造与工厂计算优化");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.5");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "全资源减耗与手机显示修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.6");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);

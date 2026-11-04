@@ -1,29 +1,29 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-10-29-v1.3.5";
+export const CURRENT_RELEASE_ID = "2026-11-04-v1.3.6";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const en = locale === "en";
   return {
     id: CURRENT_RELEASE_ID,
-    date: en ? "October 29, 2026" : "2026年10月29日",
-    version: "1.3.5",
-    title: en ? "Construction and Factory Computation Improvements" : "巨构制造与工厂计算优化",
+    date: en ? "November 4, 2026" : "2026年11月4日",
+    version: "1.3.6",
+    title: en ? "Resource Utilization and Mobile Display Fixes" : "全资源减耗与手机显示修复",
     summary: en
-      ? "Reduce repeated recipe planning, material checks and power calculations in large factories. Existing saves, advanced recipe priorities and backup preferences are preserved."
-      : "减少终局大工厂反复规划配方、检查材料和统计供电的计算开销，保留现有存档、高级配方优先级和备份偏好。",
+      ? "Infinite resource-utilization research now protects all natural deposits, including liquids. Mobile recipe cards and remaining light-theme controls are easier to read. Existing saves and backup preferences are preserved."
+      : "无限科技的储量减耗现已覆盖水、硫酸、原油等全部天然资源；修复手机配方卡片裁切和两处亮色主题残留，保留现有存档与备份偏好。",
     items: [
-      { id: "v135-stocked-planning", title: en ? "Lighter crafting when materials are ready" : "原料齐备时制造更轻",
-        description: en ? "Use a shorter planning path when the required materials are already available. Missing materials still use the complete recursive search and advanced recipe priorities." : "所需材料已经备齐时减少重复展开与临时分配；缺料时继续完整递归搜索，保留高级配方优先。" },
-      { id: "v135-batch-planning", title: en ? "Less repeated batch planning" : "减少制造批次重复计算",
-        description: en ? "Reuse checks within the current construction batch and read live stock again before spending materials." : "同一制造批次复用任务检查和供料轮数，实际扣料前仍重新核对实时库存。" },
-      { id: "v135-quantum-context", title: en ? "Lean quantum supply calculations" : "优化量子供料计算",
-        description: en ? "Reuse recipe and research context during quantum demand prediction while continuing to read live inventory and reserved materials." : "量子需求预测复用配方与科技上下文，库存和预留材料仍实时读取。" },
-      { id: "v135-power-views", title: en ? "Lean large-factory power statistics" : "优化大工厂供电统计",
-        description: en ? "Reduce repeated scans of construction centers, power plants and stored energy while preserving calculation order and results." : "减少制造中心、发电设施和储能数据的重复遍历，保持原有计算顺序与结果。" },
-      { id: "v135-compatibility", title: en ? "Existing saves and material rules preserved" : "保留存档与材料规则",
-        description: en ? "GameState v47 remains compatible. Inventories, advanced recipes, quantum sourcing and backup preferences are preserved. Extreme memory use and conservation-mode startup still need further work." : "旧存档可直接继续，库存、高级配方、量子取料与备份偏好保持。极端内存占用和守恒模式启动等待仍需继续优化。" },
+      { id: "v136-all-resources", title: en ? "Resource depletion research covers liquids too" : "储量减耗覆盖全部原矿",
+        description: en ? "Each research level reduces natural reserve depletion by 10%, including water, sulfuric acid, crude oil and rare deposits. Level 10 and above stop reserve depletion; previously exhausted deposits can produce again." : "每级减少 10% 天然储量消耗，水、硫酸、原油及稀有矿等全部资源点均生效。10 级及以上不再扣储量，已经枯竭的资源点也可继续采集。" },
+      { id: "v136-consistent-settlement", title: en ? "Consistent settlement and reloading" : "实时、离线与重载一致",
+        description: en ? "Realtime, offline and native calculations share the same depletion rule. Fractional liquid depletion progress survives saving and reloading. Recipes, fuel and construction still consume real inventory." : "实时、离线和原生计算使用一致的减耗规则，流体的储量扣除余数可以保存重载；生产配方、燃料与施工仍正常消耗库存材料。" },
+      { id: "v136-mobile-recipes", title: en ? "Readable mobile recipe cards" : "修复手机配方卡片裁切",
+        description: en ? "Recipe rows grow with their contents. Ingredient counts, larger fonts and portrait or landscape layouts no longer compress the cards or cut off materials." : "配方卡片随内容自然增高，材料自动换行；修复数量被裁切、字号放大和横竖屏切换时卡片挤压的问题。" },
+      { id: "v136-light-controls", title: en ? "Finish two light-theme controls" : "补齐亮色主题控件",
+        description: en ? "The fabricator frame and minimap switch now follow the light theme, including hover and keyboard focus." : "制造面板外框和小地图开关随亮色主题显示，鼠标悬停与键盘焦点状态一并修复。" },
+      { id: "v136-compatibility", title: en ? "Continue with existing saves" : "现有存档可直接继续",
+        description: en ? "GameState v47 and save envelope v2 remain compatible. Existing factories, inventories and backup preferences are preserved." : "保持 GameState v47 与存档 envelope v2 兼容，现有工厂、库存及备份偏好保留。" },
     ],
   } as const;
 }

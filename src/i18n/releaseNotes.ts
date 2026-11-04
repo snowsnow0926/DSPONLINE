@@ -7,6 +7,7 @@ export { getReleaseNotes131 } from "./releaseNotes131";
 export { getReleaseNotes132 } from "./releaseNotes132";
 export { getReleaseNotes133 } from "./releaseNotes133";
 export { getReleaseNotes134 } from "./releaseNotes134";
+export { getReleaseNotes135 } from "./releaseNotes135";
 
 export interface LocalizedReleaseNoteRecord {
   id: string;

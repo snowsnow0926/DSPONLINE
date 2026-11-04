@@ -1,0 +1,1134 @@
+{
+  "version": "1.3.6",
+  "runtimeSha": "187ae5bd4d2eefcaf6f1192b51193c04cea54293",
+  "buildId": "1.3.6+187ae5bd4d2e",
+  "observedAtUtc": "2026-11-04T13:18:54.754630+00:00",
+  "qualification": {
+    "readyForReleasePreflight": true,
+    "runtimeSha": "187ae5bd4d2eefcaf6f1192b51193c04cea54293",
+    "version": "1.3.6",
+    "buildId": "1.3.6+187ae5bd4d2e",
+    "gitClean": true,
+    "unit": {
+      "passed": 3812,
+      "skipped": 38,
+      "failed": 0
+    },
+    "rust": {
+      "passed": 1347,
+      "failed": 0,
+      "ignored": 3
+    },
+    "server": {
+      "passed": 415,
+      "skipped": 2,
+      "failed": 0
+    },
+    "operations": {
+      "passed": 60,
+      "skipped": 6,
+      "failed": 0
+    },
+    "nativeTools": {
+      "passed": 634,
+      "skipped": 2,
+      "failed": 0
+    },
+    "browser": {
+      "e2e": {
+        "passed": 528,
+        "skipped": 34,
+        "failed": 0,
+        "flaky": 0
+      },
+      "pwa": {
+        "passed": 1,
+        "skipped": 0,
+        "failed": 0,
+        "flaky": 0
+      },
+      "durable": {
+        "passed": 21,
+        "skipped": 22,
+        "failed": 0,
+        "flaky": 0
+      }
+    },
+    "webPreviousVersionSaveUpgrade": true,
+    "androidUpgradeAndColdReopen": true,
+    "windowsUpgradeAndColdReopen": true,
+    "nativeArtifactsReady": true,
+    "physicalAndroidTested": false,
+    "systemWindowsInstallerUpgradeTested": false,
+    "productionPublished": false
+  },
+  "webArtifact": {
+    "runtimeSha": "187ae5bd4d2eefcaf6f1192b51193c04cea54293",
+    "releaseId": "1.3.6-187ae5bd4d2e",
+    "buildId": "1.3.6+187ae5bd4d2e",
+    "fileCount": 198,
+    "workerCount": 16,
+    "aggregateSha256": "31ff9a7e4f8dc835d12b059df680fc630b2e4e64c20ab58e63dfa69b5a3ff9c1",
+    "manifestSha256": "b5ed566db0d7ab49bd5a2c0ad52f8adebc1149db67e590c5666889309dacc70d",
+    "archive": "web-1.3.6-187ae5bd4d2e.tar.gz",
+    "archiveBytes": 2359834,
+    "archiveSha256": "007419ec230d297e665a3e7f71ff9f4a92c9179246ddfbcfce49fc86d40b937d",
+    "archiveMembersVerified": true,
+    "productionPublished": false
+  },
+  "nativeArtifacts": {
+    "readyForPublication": true,
+    "version": "1.3.6",
+    "sourceSha": "187ae5bd4d2eefcaf6f1192b51193c04cea54293",
+    "buildId": "1.3.6+187ae5bd4d2e",
+    "androidLongTermSignature": true,
+    "androidUpgrade": "1.3.5 to 1.3.6",
+    "windowsSignature": "NotSigned",
+    "windowsUpgrade": "1.3.5 to 1.3.6",
+    "windowsSavedBodyPreserved": true,
+    "installerPayloadFilesVerified": 77,
+    "rustTests": {
+      "passed": 1347,
+      "failed": 0,
+      "ignored": 3
+    },
+    "nativeTests": {
+      "passed": 634,
+      "skipped": 2,
+      "failed": 0
+    },
+    "artifacts": [
+      {
+        "name": "dsp-idle-1.3.6-1003006.apk",
+        "size": 5836739,
+        "sha256": "31d5fd67c7eca0bff464d35fef39555464b1585a72cbc35bbd5198cd6029fcc6"
+      },
+      {
+        "name": "dsp-idle-1.3.6-1003006.aab",
+        "size": 5626096,
+        "sha256": "4df654d737bfdbdbe9b1b4f71b973fdaf8665ab716691fba4e6e946237e8975b"
+      },
+      {
+        "name": "dsp-idle-1.3.6-x64-setup.exe",
+        "size": 108087967,
+        "sha256": "738d2a88eb2321ae59863d80a2818ab8747af6d06c01dd2de49b5df94fcdd477"
+      }
+    ],
+    "physicalAndroidTested": false,
+    "actualWindowsInstallerUpgradeTested": false,
+    "harnessNotes": "Rust safety tests use a parent-created NTFS junction factory with unchanged safety assertions. Android waits/scroll retries and the unconfirmed old return dialog are retained; final saved progress and cold reopen passed."
+  },
+  "webPublicVerification": {
+    "pwaInstallWindowSeconds": 600,
+    "pwaInstallElapsedMs": 281739,
+    "compressedTransport": true,
+    "twentySecondIdleTimeout": true,
+    "largeAssetDeadlineSeconds": 180,
+    "physicalEgress": true,
+    "strictTls": true,
+    "normalNodeAttemptTimedOut": true,
+    "publicWeb": "1.3.6-187ae5bd4d2e",
+    "filesVerified": 198,
+    "allSizesAndSha256Match": true,
+    "cacheHeadersVerified": true,
+    "wwwCanonicalRedirect": true,
+    "publicHealth": true,
+    "publicReadyWritable": true,
+    "backupState": "disabled",
+    "previous": "1.3.5-7d62d4625603",
+    "previousFilesVerified": 198,
+    "previousHtmlByteExact": true,
+    "previousWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "currentCacheBeforeAfterSha256": "46ca31954b8bc0bcd0a6c1657615fa5a53a6b675eb6a5b00e0039196324e3bb9",
+    "fallbackCacheIsolation": true,
+    "offlineCurrentReopen": true,
+    "browserProductionApiBlocked": true,
+    "blockedApiRequests": 20,
+    "productionPlayerWrites": false
+  },
+  "webHttpCompletedPhase": {
+    "phase": "HTTP assertions completed before the initial PWA-control wait timed out",
+    "sourceScriptSha256": "7c0521eda9df51d49bee840ae9727d13691f9724add3c6e31c103c54756e18e9",
+    "sourceNetworkHelperSha256": "9b5c5b0dfa90f611a0f3769d8eca6bf494884653a706c2320b19968e502f4b86",
+    "publicWeb": "1.3.6-187ae5bd4d2e",
+    "filesVerified": 198,
+    "previousFilesVerified": 198,
+    "allSizesAndSha256Match": true,
+    "cacheHeadersVerified": true,
+    "wwwCanonicalRedirect": true,
+    "publicHealth": true,
+    "publicReadyWritable": true,
+    "backupState": "disabled",
+    "previous": "1.3.5-7d62d4625603",
+    "previousHtmlByteExact": true,
+    "previousWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "physicalEgress": true,
+    "strictTls": true,
+    "proofBasis": "The same-artifact run reached line 53 only after all awaited current/previous file, checksum, cache, redirect, readiness and worker assertions had completed; no HTTP assertion was skipped. This is a recovered completed phase, not a repeated new full HTTP run."
+  },
+  "publicPwaInitialInstallMs": 265719,
+  "publicPwaInstallSamples": [
+    {
+      "elapsedMs": 3,
+      "cacheEntries": 0,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 5017,
+      "cacheEntries": 6,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 10032,
+      "cacheEntries": 9,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 15035,
+      "cacheEntries": 9,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 20040,
+      "cacheEntries": 10,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 25053,
+      "cacheEntries": 15,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 30062,
+      "cacheEntries": 25,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 35067,
+      "cacheEntries": 28,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 40077,
+      "cacheEntries": 28,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 45088,
+      "cacheEntries": 29,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 50107,
+      "cacheEntries": 35,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 55123,
+      "cacheEntries": 48,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 60142,
+      "cacheEntries": 62,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 65156,
+      "cacheEntries": 73,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 70164,
+      "cacheEntries": 73,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 75176,
+      "cacheEntries": 73,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 80192,
+      "cacheEntries": 79,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 85209,
+      "cacheEntries": 91,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 90220,
+      "cacheEntries": 100,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 95235,
+      "cacheEntries": 100,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 100251,
+      "cacheEntries": 100,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 105263,
+      "cacheEntries": 100,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 110277,
+      "cacheEntries": 100,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 115291,
+      "cacheEntries": 100,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 120308,
+      "cacheEntries": 100,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 125323,
+      "cacheEntries": 100,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 130332,
+      "cacheEntries": 105,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 135352,
+      "cacheEntries": 112,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 140372,
+      "cacheEntries": 123,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 145383,
+      "cacheEntries": 131,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 150392,
+      "cacheEntries": 139,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 155406,
+      "cacheEntries": 140,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 160419,
+      "cacheEntries": 145,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 165429,
+      "cacheEntries": 146,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 170443,
+      "cacheEntries": 146,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 175459,
+      "cacheEntries": 148,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 180474,
+      "cacheEntries": 148,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 185485,
+      "cacheEntries": 149,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 190502,
+      "cacheEntries": 150,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 195520,
+      "cacheEntries": 150,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 200536,
+      "cacheEntries": 155,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 205548,
+      "cacheEntries": 164,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 210559,
+      "cacheEntries": 166,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 215567,
+      "cacheEntries": 176,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 220583,
+      "cacheEntries": 182,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 225601,
+      "cacheEntries": 183,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 230612,
+      "cacheEntries": 184,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 235632,
+      "cacheEntries": 184,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 240652,
+      "cacheEntries": 185,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 245665,
+      "cacheEntries": 186,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 250675,
+      "cacheEntries": 187,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 255687,
+      "cacheEntries": 188,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 260709,
+      "cacheEntries": 190,
+      "controller": null,
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "waiting": false,
+          "installing": true
+        }
+      ]
+    },
+    {
+      "elapsedMs": 265719,
+      "cacheEntries": 190,
+      "controller": "https://dsponline.cn/sw.js?v=1.3.6%2B187ae5bd4d2e&route=root&base=%2F",
+      "registrations": [
+        {
+          "scope": "https://dsponline.cn/",
+          "active": "https://dsponline.cn/sw.js?v=1.3.6%2B187ae5bd4d2e&route=root&base=%2F",
+          "waiting": false,
+          "installing": false
+        }
+      ]
+    }
+  ],
+  "downloadPlan": {
+    "releaseId": "download-site-1.3.6-187ae5bd4d2e",
+    "sourceSha": "187ae5bd4d2eefcaf6f1192b51193c04cea54293",
+    "expectedPrevious": "download-site-1.3.5-7d62d4625603",
+    "archiveBytes": 113689615,
+    "archiveSha256": "41f1d2180ad117d03e1bfc4198048d1f370af3fbfdf38e78da97c9cc042e4ec9",
+    "manifestSha256": "359bb2af45e0148ca295f1e943a14a9d2bb247f884a59c79c933bf187e7a29c8",
+    "aggregateSha256": "562d1317dbdb89d6717b06e3ff7e25c8a6712796e94199d820c73a6faf2e3898",
+    "finalFileCount": 17,
+    "deltaFileCount": 9,
+    "retainedOldFileCount": 8
+  },
+  "downloadPublicHttp": {
+    "ok": true,
+    "version": "1.3.6",
+    "files": [
+      {
+        "path": "downloads/android/dsp-idle-1.2.7-1002007.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.2.8-1002008.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.2.9-1002009.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.3.5-1003005.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.3.6-1003006.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "new binary range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/stable.json",
+        "status": 200,
+        "bytes": 541,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.2.6-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.2.6-x64-setup.exe.blockmap",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe.blockmap",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.6-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "new binary range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.6-x64-setup.exe.blockmap",
+        "status": 200,
+        "bytes": 116207,
+        "verification": "full SHA-256",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/latest.yml",
+        "status": 200,
+        "bytes": 353,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      },
+      {
+        "path": "downloads/desktop/stable/release.json",
+        "status": 200,
+        "bytes": 615,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      },
+      {
+        "path": "icon.svg",
+        "status": 200,
+        "bytes": 349,
+        "verification": "full SHA-256",
+        "cache": "max-age=604800, public, max-age=604800"
+      },
+      {
+        "path": "index.html",
+        "status": 200,
+        "bytes": 5581,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      },
+      {
+        "path": "version.json",
+        "status": 200,
+        "bytes": 109,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      }
+    ],
+    "redirects": [
+      {
+        "path": "/downloads/android/stable.json",
+        "status": 200,
+        "correctDestination": true
+      },
+      {
+        "path": "/downloads/desktop/stable/latest.yml",
+        "status": 200,
+        "correctDestination": true
+      },
+      {
+        "path": "/downloads/android/dsp-idle-1.3.6-1003006.apk",
+        "status": 206,
+        "correctDestination": true
+      },
+      {
+        "path": "/downloads/desktop/stable/dsp-idle-1.3.6-x64-setup.exe",
+        "status": 206,
+        "correctDestination": true
+      }
+    ],
+    "gameHealth": [
+      {
+        "path": "/version.json",
+        "status": 200
+      },
+      {
+        "path": "/api/health",
+        "status": 200
+      },
+      {
+        "path": "/api/ready",
+        "status": 200
+      }
+    ],
+    "verifiedAt": "2026-11-04T12:57:58.026Z"
+  },
+  "downloadPublicBinaries": {
+    "ok": true,
+    "files": [
+      {
+        "path": "downloads/android/dsp-idle-1.3.6-1003006.apk",
+        "bytes": 5836739,
+        "sha256": "31d5fd67c7eca0bff464d35fef39555464b1585a72cbc35bbd5198cd6029fcc6",
+        "strictTls": true,
+        "physicalEgress": true
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.6-x64-setup.exe",
+        "bytes": 108087967,
+        "sha256": "738d2a88eb2321ae59863d80a2818ab8747af6d06c01dd2de49b5df94fcdd477",
+        "strictTls": true,
+        "physicalEgress": true
+      }
+    ]
+  },
+  "downloadPostflight": {
+    "checkedAt": "2026-11-04T20:59:04.200173+08:00",
+    "current": "download-site-1.3.6-187ae5bd4d2e",
+    "previous": "download-site-1.3.5-7d62d4625603",
+    "filesVerified": 17,
+    "aggregateSha256": "562d1317dbdb89d6717b06e3ff7e25c8a6712796e94199d820c73a6faf2e3898",
+    "web": "1.2.9-0521eb63f179",
+    "api": "api-1.2.6-df828869e276",
+    "services": {
+      "nginx": {
+        "MainPID": "1852183",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      },
+      "dsp-idle-api-active.service": {
+        "MainPID": "1243306",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      },
+      "dsp-idle-api-handoff-proxy.service": {
+        "MainPID": "1243305",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      }
+    },
+    "nginxConfigUnchanged": true,
+    "nginxSha256": "d6bc345bb54b6be202e9d1567e3fa14f03ddae201b37357fa30d1d423ebf45f0",
+    "certificateUnchanged": true,
+    "certificateSha256": "fb7969caf7e90fea685deafc75a0154134c46c1c49a5b4c0d1ca5163e8030a73",
+    "certificateNotAfter": "Jan 27 11:44:18 2027 GMT",
+    "certificateRenewalTimer": "active",
+    "diskAvailableBytes": 21748412416,
+    "productionWritten": false
+  },
+  "hongKongPostflight": {
+    "checkedAt": "2026-11-04T21:10:11.391154+08:00",
+    "web": "1.3.6-187ae5bd4d2e",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "generation": 60,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "healthOk": true,
+    "readyWritable": true,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "apiService": {
+      "MainPID": "3517864",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "proxyService": {
+      "MainPID": "3465101",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "nginxSha256": "daf0438b32640119d1706c2c52824bf377dcd3722d94f9fbb536ff7d3946bfcb",
+    "databaseDevice": 64770,
+    "databaseInode": 663062,
+    "databaseBytes": 7859703808,
+    "diskAvailableBytes": 14894772224,
+    "diskAvailableRatio": 0.20166489684886657,
+    "currentMainPayloadCounts": {
+      "available": true,
+      "checkedAt": 1793797756997,
+      "checked": 2032,
+      "resolvable": 2030,
+      "unresolvable": 2,
+      "invalidMetadata": 0,
+      "orphanedMetadata": 0,
+      "missingPayloadRows": 2,
+      "invalidPayloadRows": 0,
+      "metadataMismatches": 0,
+      "missingBlobs": 0,
+      "blobMetadataMismatches": 0,
+      "legacyDirectRows": 0
+    }
+  },
+  "logArchive": {
+    "operation": "lossless-closed-system-journal-archive",
+    "release": "1.3.6-187ae5bd4d2e",
+    "archiveVerifiedByteExact": true,
+    "archiveSha256": "108fb614f70eb780fb9b729b09506c0ca2b81237420603cb58834324aeedc136",
+    "archiveBytes": 272273033,
+    "sourceFiles": 31,
+    "sourceLogicalBytes": 1426063360,
+    "sourceAllocatedBytes": 1247854592,
+    "sourceDuplicatesPruned": false,
+    "activeAndCurrentDayJournalsPreserved": true,
+    "diskAvailableBytesBefore": 13840556032,
+    "diskAvailableBytesAfter": 13568081920,
+    "diskAvailableRatioAfter": 0.18370242926071156,
+    "apiAndProxyProcessesUnchanged": true,
+    "databaseIdentityPreserved": true,
+    "backupState": "disabled",
+    "databaseAndBackupFilesTouched": false
+  },
+  "logPrune": {
+    "archivedLogDuplicatesPruned": true,
+    "archiveVerifiedByteExact": true,
+    "archiveSha256": "108fb614f70eb780fb9b729b09506c0ca2b81237420603cb58834324aeedc136",
+    "journalFiles": 31,
+    "rebuildableAptCacheBytesRemoved": 117231616,
+    "diskAvailableBytesBefore": 13567475712,
+    "diskAvailableBytesAfter": 14932561920,
+    "diskAvailableRatioAfter": 0.20217654315209171,
+    "existingSaveBackupsPreserved": true,
+    "databaseIdentityPreserved": true,
+    "apiAndProxyProcessesUnchanged": true,
+    "backupState": "disabled",
+    "activeAndCurrentDayJournalsPreserved": true
+  },
+  "playerDataWritesPerformed": false,
+  "schemaOrDatabaseMigrationPerformed": false,
+  "automaticBackupSettingsChanged": false,
+  "physicalAndroidTested": false,
+  "systemWindowsInstallerUpgradeTested": false,
+  "privateSaveBenchmarkNewlyRun": false
+}

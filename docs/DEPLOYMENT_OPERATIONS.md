@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **当前基线（2026-11-04，1.3.6）**：香港 Web current/previous `1.3.6-187ae5bd4d2e` / `1.3.5-7d62d4625603`；API `api-1.3.0-4c8d0c13a714`、green/4322，generation/proxy 60/202，forward、无 pending，API/代理未重启。备份 disabled、异地 timer inactive。上一稳定入口为不可变 1.3.5；Nginx SHA `daf0438b32640119d1706c2c52824bf377dcd3722d94f9fbb536ff7d3946bfcb`，根 Web 回退须先恢复独立 Nginx 原件解除 1.3.5 worker 拒绝，不回滚数据。新上海只更新下载 current/previous 为 `download-site-1.3.6-187ae5bd4d2e` / `download-site-1.3.5-7d62d4625603`，游戏/API 未动；17 件验证、旧文件保留。日志无损归档净回收约 1.09 GB，数据库和现有备份保留。[精确指针、摘要及恢复步骤](./releases/1.3.6.md)。
+
 > **香港当前基线（2026-10-28 13:36:12 +08:00，1.3.4）**：Web `1.3.4-61fb10311cb9`；直接回退及 `/canary/previous/` 为 `1.3.3-a0fd77efc399`。API `api-1.3.0-4c8d0c13a714`、green/4322，API/代理未重启，generation/proxy 58/202，无 pending；备份 disabled、异地 timer inactive。198 件当前/197 件回退公网核验与缓存隔离通过，Nginx SHA `143372138894e0668169036f2329281a223c37111028d5558ff1027d44b84340`。根网页回退先恢复独立 Nginx 备份解除 1.3.3 worker 拒绝，不回滚数据库。以下为历史记录。[备份与步骤](./releases/1.3.4.md)。
 
 > **香港当前基线（2026-10-27，1.3.3）**：Web `1.3.3-a0fd77efc399`，直接回退及 `/canary/previous/` 为 `1.3.2-34f3dd45e467`；API `api-1.3.0-4c8d0c13a714`，green/4322，API/代理 PID 和重启数保持，generation/proxy 57/202，无 pending，备份 disabled、异地 timer inactive。197 件公网哈希与公开回退隔离通过，最终 Nginx SHA `bf1921582d5c6dd4516eaf3d75b0690d76cf09599529eadc42debc9295578621`。根 Web 回退前先恢复独立 Nginx 备份、解除旧 worker 拒绝，不回滚数据库。[配置、证据及步骤](./releases/1.3.3.md)。

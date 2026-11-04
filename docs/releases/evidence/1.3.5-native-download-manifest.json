@@ -1,0 +1,95 @@
+{
+  "formatVersion": 1,
+  "releaseId": "download-site-1.3.5-7d62d4625603",
+  "appVersion": "1.3.5",
+  "buildId": "1.3.5+7d62d4625603",
+  "git": {
+    "sha": "7d62d462560375cbcdb0816bb7844167a0df5391",
+    "clean": true
+  },
+  "fileCount": 14,
+  "aggregateSha256": "9a8253fa532c1c5c17a3cbb66a96eccef7f147f7805ba1247c41ebbbc6e6e48c",
+  "files": [
+    {
+      "path": "downloads/android/dsp-idle-1.2.7-1002007.apk",
+      "size": 5665693,
+      "sha256": "9e50cfe453cdc49d475bdfb23f6adb2204639bfae64820215b7c64835e4ff180"
+    },
+    {
+      "path": "downloads/android/dsp-idle-1.2.8-1002008.apk",
+      "size": 5666004,
+      "sha256": "3b975902e6fdc6560c4f4755824faf08acdad828ebbd01bfb9845f2036d5d8cf"
+    },
+    {
+      "path": "downloads/android/dsp-idle-1.2.9-1002009.apk",
+      "size": 5672736,
+      "sha256": "06d0043a542faab0f7e3e2be2fad18b7d2da43c672e66da88ccf7255fe953bf7"
+    },
+    {
+      "path": "downloads/android/dsp-idle-1.3.5-1003005.apk",
+      "size": 5835756,
+      "sha256": "e3b88864e6cb14774cf28396d5e5b489f3797df9f3c19239128cceecbbb9e32d"
+    },
+    {
+      "path": "downloads/android/stable.json",
+      "size": 538,
+      "sha256": "31ed577c5c57bcf9215423ecf793e34aec772b576c3ccd4be7452dc6b2c5b762"
+    },
+    {
+      "path": "downloads/desktop/stable/dsp-idle-1.2.6-x64-setup.exe",
+      "size": 105326865,
+      "sha256": "eb5eaa5934167f0925a5489549a24e1d2a70d72ee0ccaafb79375165b9b5b534"
+    },
+    {
+      "path": "downloads/desktop/stable/dsp-idle-1.2.6-x64-setup.exe.blockmap",
+      "size": 113029,
+      "sha256": "95147d45e2582d25646fd86b8c3c7c0834aee2929d25271265dfbbf0532caf8b"
+    },
+    {
+      "path": "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe",
+      "size": 108090645,
+      "sha256": "ca76d8a4f89e4225d53d590ae26bdc23c9e27ba4f427fb744ec3b078dd752131"
+    },
+    {
+      "path": "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe.blockmap",
+      "size": 116490,
+      "sha256": "40a652556fbb5897c14746afa00b974b38818d8e4689726f1dcdc191bfcc19b2"
+    },
+    {
+      "path": "downloads/desktop/stable/latest.yml",
+      "size": 353,
+      "sha256": "da8e47ae5285b99c88a040ec40962f143b0570f8e76f50abb4aeecc636f697ef"
+    },
+    {
+      "path": "downloads/desktop/stable/release.json",
+      "size": 615,
+      "sha256": "28639d03bec49ce2d7510510753144cd3362b09af544db5f1059d1c4a2431fe8"
+    },
+    {
+      "path": "icon.svg",
+      "size": 349,
+      "sha256": "88e9b11cfebf7e5815bb6d635522c6c8df3ee1b649361997a4ef34318d53f3c3"
+    },
+    {
+      "path": "index.html",
+      "size": 5721,
+      "sha256": "786e778f6c983499a4b8ba3367d7e770c991ad5cf18f80134e4c534b0dec8c55"
+    },
+    {
+      "path": "version.json",
+      "size": 109,
+      "sha256": "683d90649904c0248b48ea46581f3df18308a5dc1550848880172853f75bf78d"
+    }
+  ],
+  "deltaPaths": [
+    "downloads/android/dsp-idle-1.3.5-1003005.apk",
+    "downloads/android/stable.json",
+    "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe",
+    "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe.blockmap",
+    "downloads/desktop/stable/latest.yml",
+    "downloads/desktop/stable/release.json",
+    "icon.svg",
+    "index.html",
+    "version.json"
+  ]
+}

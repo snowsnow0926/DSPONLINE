@@ -1,0 +1,408 @@
+{
+  "version": "1.3.5",
+  "observedAt": "2026-10-29T19:06:49+08:00",
+  "runtimeSha": "7d62d462560375cbcdb0816bb7844167a0df5391",
+  "releaseId": "1.3.5-7d62d4625603",
+  "buildId": "1.3.5+7d62d4625603",
+  "scope": "Hong Kong static Web only",
+  "acceptedGameplayBaseline": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+  "protectedSourceFiles": 1219,
+  "unit": {
+    "passed": 3795,
+    "skipped": 38,
+    "failed": 0
+  },
+  "browser": {
+    "e2e": {
+      "startTime": "2026-10-29T10:46:38.406Z",
+      "duration": 913592.417,
+      "expected": 524,
+      "skipped": 34,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "pwa": {
+      "startTime": "2026-10-29T11:01:59.131Z",
+      "duration": 8832.569,
+      "expected": 1,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durable": {
+      "startTime": "2026-10-29T11:02:14.801Z",
+      "duration": 53220.994,
+      "expected": 21,
+      "skipped": 22,
+      "unexpected": 0,
+      "flaky": 0
+    }
+  },
+  "nodeTests": {
+    "server": {
+      "tests": [
+        413,
+        4
+      ],
+      "pass": [
+        411,
+        4
+      ],
+      "fail": [
+        0,
+        0
+      ],
+      "skipped": [
+        2,
+        0
+      ],
+      "cancelled": [
+        0,
+        0
+      ]
+    },
+    "ops": {
+      "tests": [
+        66
+      ],
+      "pass": [
+        60
+      ],
+      "fail": [
+        0
+      ],
+      "skipped": [
+        6
+      ],
+      "cancelled": [
+        0
+      ]
+    },
+    "native": {
+      "tests": [
+        636
+      ],
+      "pass": [
+        634
+      ],
+      "fail": [
+        0
+      ],
+      "skipped": [
+        2
+      ],
+      "cancelled": [
+        0
+      ]
+    }
+  },
+  "freeze": {
+    "runtimeSha": "7d62d462560375cbcdb0816bb7844167a0df5391",
+    "releaseId": "1.3.5-7d62d4625603",
+    "buildId": "1.3.5+7d62d4625603",
+    "fileCount": 198,
+    "workerCount": 16,
+    "workers": {
+      "authoritativeSavePersistence": "0c3205e0fb9f67b03329d05f5d528bc318651731f326dd12d105571e69cf03bd",
+      "canonicalTerminalOwner": "bacb250c07e1679964f11a18922bb845885adc1d12948f337e2a1f4189051c11",
+      "canvasBeltRender": "db59115bf059fe1cfacc964b65c9d4f94066b56466f669c380ddd60e3c4586e6",
+      "chunkedSaveJournal": "c94c3f9cea08611b8b0fb911e552eb507c41236d27213d378c88ae8b1c162f9d",
+      "localSaveCatalog": "e95f2553a39c479548e143623a9552b1dd640c6bee7159db72198cf5dfe227b5",
+      "multicoreSimulation": "76bedaf3a1c5d26705acd319f516a4429a11e95b75220e9f76429e393b284c59",
+      "offlineSimulation": "ae5dc4fc1499309b88b3116e2a3a8102de0ad13a8b9efc8c3f26f7864d35d629",
+      "pureIdleCheckpointOwner": "a77cdfd22f9798be44cbcae11ee814952d5fbaa8b7e0af4f10064adfcf72ff70",
+      "pureIdleMacro": "90d9a0142105c06885978e42199e7ac9508abad947cad9ae46e289b318762ba6",
+      "save": "03561e912b6bbde766bf60ce30d66ba54c8165efaa22a6124db83ab291cd6fdb",
+      "saveInspection": "a0fb70c29576403d6ce2d2040ad7903658c6e1de5464cbf8775c14c06984d99b",
+      "saveSummary": "069a0f11d42e0050fa54766a9a65417ded3f16fcbec98351bd336dae6474a0be",
+      "simulation": "538b6c65be72ea0aed2d05f1ce741037c24b8b8ddee10d792d5a6093f05a469c",
+      "simulationRuntimeRecoveryPersistence": "f374c8969ca81fd470a2a136fd916500e1f99057337a18be5b0e4d0cacb8190e",
+      "snapshotSaveRewrap": "3068c3f90cf76fb10016621946be64fdfe311ea816813e8a08937bfdb38437db",
+      "statistics": "e8b8b478977b72aff3f48709dbca76c2c936e2835cb73b48526e90fd0f437612"
+    },
+    "protectedSourceCount": 1219,
+    "gameplayByteExactAcceptedBaseline": "8c54cd02fd93b397a6d72d30208a9881191059f1",
+    "aggregateSha256": "fa81d349a9e7d503867677a8312cf66b427165ce929a046d4d78c6e9e1c1827d",
+    "manifestSha256": "c72669e0d43ee539b7d010f7f49e3734fdb6bf891b397302789ba9c1fe4c63a9",
+    "archive": "web-1.3.5-7d62d4625603.tar.gz",
+    "archiveBytes": 2357645,
+    "archiveSha256": "3a7c1ece50286428cf47c3b8792119f552afbefe0a3a2eff9ea18f5d71c542fa",
+    "archiveMembersVerified": true
+  },
+  "productionPublished": true,
+  "upgrade": {
+    "oldBuild": "1.3.4+61fb10311cb9",
+    "newBuild": "1.3.5+7d62d4625603",
+    "fixture": "public synthetic paused v47, autosave disabled",
+    "bytes": 119402,
+    "sha256": "7b0b442c12e5345d67f6228d59c47816eb3f17a12ded9439c6280b054d55f395",
+    "oldPrimaryByteIdentical": true,
+    "newPrimaryByteIdentical": true,
+    "offlinePrimaryByteIdentical": true,
+    "offlineReopen": true,
+    "productionApiCalled": false
+  },
+  "preflight": {
+    "preflight": true,
+    "checkedAt": "2026-10-29T11:03:56.327263+00:00",
+    "web": "1.3.4-61fb10311cb9",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "webVersion": "1.3.4",
+    "webBuildId": "1.3.4+61fb10311cb9",
+    "stateCurrent": {
+      "webReleaseId": "1.3.4-61fb10311cb9",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "statePrevious": {
+      "webReleaseId": "1.3.3-a0fd77efc399",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "generation": 58,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "healthOk": true,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "readyWritable": true,
+    "currentMainPayloadCounts": {
+      "available": true,
+      "checkedAt": 1793271699899,
+      "checked": 1813,
+      "resolvable": 1811,
+      "unresolvable": 2,
+      "invalidMetadata": 0,
+      "orphanedMetadata": 0,
+      "missingPayloadRows": 2,
+      "invalidPayloadRows": 0,
+      "metadataMismatches": 0,
+      "missingBlobs": 0,
+      "blobMetadataMismatches": 0,
+      "legacyDirectRows": 0
+    },
+    "apiService": {
+      "MainPID": "3517864",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "proxyService": {
+      "MainPID": "3465101",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "nginxValid": true,
+    "nginxSha256": "143372138894e0668169036f2329281a223c37111028d5558ff1027d44b84340",
+    "fallbackRoutes": [
+      "/canary/1.0.37-853ecdb12795/",
+      "/canary/1.0.43-fceca3eda51c/",
+      "/canary/1.0.46-d5b60dc3b7d6/",
+      "/canary/1.0.47-aab581cf0c78/",
+      "/canary/1.1.1-da53958b860c/",
+      "/canary/1.1.3-f35d60a22223/",
+      "/canary/1.1.4-7dbc149a016c/",
+      "/canary/1.1.5-a92c0d3157f3/",
+      "/canary/1.1.6-4f6d24f8c709/",
+      "/canary/1.1.8-c53497b050c4/",
+      "/canary/1.1.9-c3f4eff6cb5a/",
+      "/canary/1.2.2-8b9c93e13270/",
+      "/canary/1.2.3-25aeeb34e501/",
+      "/canary/1.2.4-3154f8cf4479/",
+      "/canary/1.2.5-0a1c6629ced1/",
+      "/canary/1.2.6-df828869e276/",
+      "/canary/1.2.7-dab2ff5066b7/",
+      "/canary/1.2.7-fccaa35e6b41/",
+      "/canary/1.2.9-0521eb63f179/",
+      "/canary/1.3.0-e8c44f8d7160/",
+      "/canary/1.3.1-9af159f1b38e/",
+      "/canary/1.3.2-34f3dd45e467/",
+      "/canary/1.3.3-a0fd77efc399/"
+    ],
+    "diskAvailableBytes": 14862962688,
+    "diskAvailableRatio": 0.2012342177690003,
+    "databaseDevice": 64770,
+    "databaseInode": 663062,
+    "databaseBytes": 7125438464,
+    "serverDataWritten": false,
+    "switchToolPresent": true,
+    "apiContractHashes": {
+      "save-field-contract.mjs": "de2bc80390ff002d59a558fd8ed9c5bbc43d7a799449a13e35f56cc5968a7e2c",
+      "cloud-transfer-contract.json": "f9632bc7d78574ebe2c978ea1f9c81d9093f0f382d743e9fcfa717e4c9466fa0"
+    },
+    "targetReleaseExists": false,
+    "targetBackupExists": false,
+    "httpsVersionValid": true
+  },
+  "postflight": {
+    "postflight": true,
+    "checkedAt": "2026-10-29T11:06:49.735516+00:00",
+    "web": "1.3.5-7d62d4625603",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "webVersion": "1.3.5",
+    "webBuildId": "1.3.5+7d62d4625603",
+    "stateCurrent": {
+      "webReleaseId": "1.3.5-7d62d4625603",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "statePrevious": {
+      "webReleaseId": "1.3.4-61fb10311cb9",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "generation": 59,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "healthOk": true,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "readyWritable": true,
+    "currentMainPayloadCounts": {
+      "available": true,
+      "checkedAt": 1793271998659,
+      "checked": 1813,
+      "resolvable": 1811,
+      "unresolvable": 2,
+      "invalidMetadata": 0,
+      "orphanedMetadata": 0,
+      "missingPayloadRows": 2,
+      "invalidPayloadRows": 0,
+      "metadataMismatches": 0,
+      "missingBlobs": 0,
+      "blobMetadataMismatches": 0,
+      "legacyDirectRows": 0
+    },
+    "apiService": {
+      "MainPID": "3517864",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "proxyService": {
+      "MainPID": "3465101",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "nginxValid": true,
+    "nginxSha256": "def8331e05eae90b5a75f8d17d9e6434d76250903893e91f97c7320870b2c431",
+    "fallbackRoutes": [
+      "/canary/1.0.37-853ecdb12795/",
+      "/canary/1.0.43-fceca3eda51c/",
+      "/canary/1.0.46-d5b60dc3b7d6/",
+      "/canary/1.0.47-aab581cf0c78/",
+      "/canary/1.1.1-da53958b860c/",
+      "/canary/1.1.3-f35d60a22223/",
+      "/canary/1.1.4-7dbc149a016c/",
+      "/canary/1.1.5-a92c0d3157f3/",
+      "/canary/1.1.6-4f6d24f8c709/",
+      "/canary/1.1.8-c53497b050c4/",
+      "/canary/1.1.9-c3f4eff6cb5a/",
+      "/canary/1.2.2-8b9c93e13270/",
+      "/canary/1.2.3-25aeeb34e501/",
+      "/canary/1.2.4-3154f8cf4479/",
+      "/canary/1.2.5-0a1c6629ced1/",
+      "/canary/1.2.6-df828869e276/",
+      "/canary/1.2.7-dab2ff5066b7/",
+      "/canary/1.2.7-fccaa35e6b41/",
+      "/canary/1.2.9-0521eb63f179/",
+      "/canary/1.3.0-e8c44f8d7160/",
+      "/canary/1.3.1-9af159f1b38e/",
+      "/canary/1.3.2-34f3dd45e467/",
+      "/canary/1.3.3-a0fd77efc399/",
+      "/canary/1.3.4-61fb10311cb9/"
+    ],
+    "diskAvailableBytes": 14839451648,
+    "diskAvailableRatio": 0.20091589457579498,
+    "databaseDevice": 64770,
+    "databaseInode": 663062,
+    "databaseBytes": 7125438464,
+    "serverDataWritten": false
+  },
+  "switch": {
+    "published": true,
+    "web": "1.3.5-7d62d4625603",
+    "rollback": "1.3.4-61fb10311cb9",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "apiProcessUnchanged": true,
+    "proxyProcessUnchanged": true,
+    "databaseIdentityPreserved": true,
+    "backupState": "disabled",
+    "generation": 59,
+    "buildId": "1.3.5+7d62d4625603",
+    "ready": true
+  },
+  "staging": {
+    "staged": true,
+    "filesVerified": 198,
+    "release": "1.3.5-7d62d4625603",
+    "currentUnchanged": true,
+    "configurationBackupVerified": true,
+    "rollbackFilesVerified": 198,
+    "databaseCopied": false
+  },
+  "observation": {
+    "samples": 12,
+    "windowSeconds": 55,
+    "allHealthy": true,
+    "backupDisabled": true,
+    "sameApiProcess": true,
+    "sameProxyProcess": true,
+    "web": "1.3.5-7d62d4625603",
+    "diskAvailableRatio": 0.20093497178458636
+  },
+  "fallback": {
+    "published": true,
+    "previousWeb": "1.3.4-61fb10311cb9",
+    "rootWeb": "1.3.5-7d62d4625603",
+    "nginxSha256": "def8331e05eae90b5a75f8d17d9e6434d76250903893e91f97c7320870b2c431",
+    "previousHtmlByteExact": true,
+    "oldWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "backup": "/var/backups/dsp-idle/1.3.5-7d62d4625603/fallback/original-app.conf"
+  },
+  "public": {
+    "publicWeb": "1.3.5-7d62d4625603",
+    "filesVerified": 198,
+    "allSizesAndSha256Match": true,
+    "cacheHeadersVerified": true,
+    "wwwCanonicalRedirect": true,
+    "publicHealth": true,
+    "publicReadyWritable": true,
+    "backupState": "disabled",
+    "previous": "1.3.4-61fb10311cb9",
+    "previousFilesVerified": 198,
+    "previousHtmlByteExact": true,
+    "previousWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "currentCacheBeforeAfterSha256": "2aab121623c05194bd9e912d238d784edee3f171a7e4bdc576eb454abd23e163",
+    "fallbackCacheIsolation": true,
+    "offlineCurrentReopen": true,
+    "browserProductionApiBlocked": true,
+    "blockedApiRequests": 9,
+    "productionPlayerWrites": false
+  },
+  "productionSaveMutation": false,
+  "nativeMetadataOnly": {
+    "versionName": "1.3.5",
+    "versionCode": 1003005,
+    "nativePublished": false
+  },
+  "qualificationCorrection": {
+    "priorRuntime": "494c2872c1f59dd6efe2a9dcc465d0682fc63c31",
+    "nativePassed": 611,
+    "nativeFailed": 23,
+    "nativeSkipped": 2,
+    "cause": "native-version.properties remained at 1.3.4; synchronized to 1.3.5 and reran full matrix"
+  },
+  "notRun": [
+    "full Rust suite",
+    "native packaging/signing/device checks",
+    "new private large-save performance timing",
+    "long-running low-memory qualification"
+  ]
+}

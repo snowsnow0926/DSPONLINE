@@ -76,7 +76,8 @@ test("running simulation that advances during return receives one final cleanup 
     const NativeWorker = window.Worker;
     const saveWorkers = new WeakSet<Worker>();
     const factoryWorkers = new WeakSet<Worker>();
-    const probe = { active: false, delayedMessages: 0 };
+    const advances = new WeakMap<Worker, Map<number, number>>();
+    const probe = { active: false, delayedMessages: 0, acknowledgedAdvanceSeconds: 0 };
     Object.assign(window, { __v143ReturnDelay: probe });
     const nativePost = NativeWorker.prototype.postMessage;
     const WrappedWorker = new Proxy(NativeWorker, {
@@ -84,12 +85,27 @@ test("running simulation that advances during return receives one final cleanup 
         const worker = Reflect.construct(target, args) as Worker;
         const name = (args[1] as WorkerOptions | undefined)?.name;
         if (String(args[0]).includes("save.worker")) saveWorkers.add(worker);
-        if (name === "factory-simulation") factoryWorkers.add(worker);
+        if (name === "factory-simulation") {
+          factoryWorkers.add(worker);
+          const pending = new Map<number, number>();
+          advances.set(worker, pending);
+          worker.addEventListener("message", (event: MessageEvent<{ id?: number }>) => {
+            const seconds = pending.get(event.data.id ?? -1);
+            if (seconds === undefined) return;
+            pending.delete(event.data.id!);
+            probe.acknowledgedAdvanceSeconds += seconds;
+          });
+        }
         return worker;
       },
     });
     NativeWorker.prototype.postMessage = function (message: unknown, transferOrOptions?: Transferable[] | StructuredSerializeOptions) {
       const post = () => nativePost.call(this, message, transferOrOptions as Transferable[]);
+      const request = message as { id?: number; kind?: string; simulationSeconds?: number } | null;
+      if (factoryWorkers.has(this) && request?.kind === "advance" &&
+          typeof request.id === "number" && (request.simulationSeconds ?? 0) > 0) {
+        advances.get(this)?.set(request.id, request.simulationSeconds!);
+      }
       const checkpoint = factoryWorkers.has(this) && (message as { kind?: string } | null)?.kind === "checkpoint";
       if (probe.active && (saveWorkers.has(this) || checkpoint)) {
         probe.delayedMessages += 1;
@@ -102,8 +118,15 @@ test("running simulation that advances during return receives one final cleanup 
   });
   await openFactory(page);
   const before = await saveBaselineWhilePaused(page);
+  const initialAdvanceSeconds = await page.evaluate(() =>
+    (window as typeof window & { __v143ReturnDelay: { acknowledgedAdvanceSeconds: number } }).__v143ReturnDelay.acknowledgedAdvanceSeconds);
   await page.getByLabel("继续模拟").click();
   await expect(page.getByLabel("暂停模拟")).toBeVisible();
+  // The button changes before the scheduler's first post-resume tick. Prove
+  // that the Worker actually advanced before testing its delayed return save.
+  await expect.poll(() => page.evaluate(() =>
+    (window as typeof window & { __v143ReturnDelay: { acknowledgedAdvanceSeconds: number } }).__v143ReturnDelay.acknowledgedAdvanceSeconds))
+    .toBeGreaterThan(initialAdvanceSeconds);
 
   await page.evaluate(() => {
     (window as typeof window & { __v143ReturnDelay: { active: boolean } }).__v143ReturnDelay.active = true;

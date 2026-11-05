@@ -1604,12 +1604,14 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "存档保护与操作体验更新");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.8");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(releaseNotes).toContainText("修复搜索打字消失");
-  await expect(releaseNotes).toContainText("保留正常搜索操作");
-  await expect(releaseNotes).toContainText("横屏历史搜索可见可点");
-  await expect(releaseNotes).toContainText("横屏制造布局更紧凑");
-  await expect(releaseNotes).toContainText("现有存档可直接继续");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(releaseNotes).toContainText("保存状态更准确");
+  await expect(releaseNotes).toContainText("恢复前保留旧进度");
+  await expect(releaseNotes).toContainText("取消与换档更安全");
+  await expect(releaseNotes).toContainText("中文输入与名称草稿保护");
+  await expect(releaseNotes).toContainText("菜单与手机手势更顺手");
+  await expect(releaseNotes).toContainText("客户端更新保护补丁");
+  await expect(releaseNotes).toContainText("大字号与浅色界面更清楚");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1637,7 +1639,7 @@ test("dated release notes appear once and remain available from both settings sc
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
   await expect(releaseNotes).toHaveAttribute("aria-label", "存档保护与操作体验更新");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.8");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1680,11 +1682,11 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
-  await page.getByRole("button", { name: "查看2026年11月4日版本更新记录" }).click();
+  await page.getByRole("button", { name: "查看2026年11月5日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "存档保护与操作体验更新");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.8");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1696,7 +1698,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "存档保护与操作体验更新");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.8");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-844x390.png", fullPage: true });

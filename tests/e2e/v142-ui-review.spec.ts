@@ -529,12 +529,14 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveAttribute("aria-label", "存档保护与操作体验更新");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.8");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("修复搜索打字消失");
-  await expect(dialog).toContainText("保留正常搜索操作");
-  await expect(dialog).toContainText("横屏历史搜索可见可点");
-  await expect(dialog).toContainText("横屏制造布局更紧凑");
-  await expect(dialog).toContainText("现有存档可直接继续");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(dialog).toContainText("保存状态更准确");
+  await expect(dialog).toContainText("恢复前保留旧进度");
+  await expect(dialog).toContainText("取消与换档更安全");
+  await expect(dialog).toContainText("中文输入与名称草稿保护");
+  await expect(dialog).toContainText("菜单与手机手势更顺手");
+  await expect(dialog).toContainText("客户端更新保护补丁");
+  await expect(dialog).toContainText("大字号与浅色界面更清楚");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

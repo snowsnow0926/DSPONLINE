@@ -65,7 +65,7 @@ import { WorkspaceFrame } from "./WorkspaceFrame";
 import { cloudSaveCapacityDetails, type CloudSaveCapacityDetails } from "../game/cloudSaveCapacity";
 import { cloudSyncStatusFromUpload, writeCloudSyncStatus } from "../game/cloudSyncStatus";
 import { exportTextFile } from "../game/fileExport";
-import { getPrimaryLocalSaveRevision } from "../game/localSaveStore";
+import { getLocalSaveBackend, getPrimaryLocalSaveRevision } from "../game/localSaveStore";
 import {
   canContinueLegacyAuthorityAsyncLease,
   createLegacyAuthorityAsyncLeaseFence,
@@ -637,6 +637,10 @@ export function GalaxyWorkspace({
 
   const downloadManualCloudSlot = async (slot: Exclude<CloudSaveSlot, "main">) => {
     if (cloudSession.status !== "authenticated" || !cloudSession.user) return;
+    if (getLocalSaveBackend() === "memory") {
+      setCloudMessage(appMessage(locale, "localSaveCloudRestoreUnavailable"));
+      return;
+    }
     const remote = cloudSession.cloudSaves?.[slot] ?? null;
     if (!remote) return;
     const localPayload = await exportGameSlotFromPersistence(Number(slot) as SaveSlotId, game.mode);
@@ -747,6 +751,10 @@ export function GalaxyWorkspace({
 
   const useCloudConflictVersion = async () => {
     if (!cloudConflict || cloudSession.status !== "authenticated" || !cloudSession.user) return;
+    if (cloudConflict.slot !== "main" && getLocalSaveBackend() === "memory") {
+      setCloudMessage(appMessage(locale, "localSaveCloudRestoreUnavailable"));
+      return;
+    }
     const userId = cloudSession.user.id;
     setCloudBusy(true);
     try {

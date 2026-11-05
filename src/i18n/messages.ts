@@ -65,6 +65,10 @@ const messages = {
     "zh-CN": "当前浏览器无法保存到本机，当前进度尚未保存。请先导出当前进度。",
     en: "Local saving is unavailable; your current progress has not been saved. Export it first.",
   },
+  localSaveCloudRestoreUnavailable: {
+    "zh-CN": "当前浏览器无法保存到本机，云存档尚未恢复到本机。请恢复浏览器存储权限后重试，云端原档未改变。",
+    en: "This browser cannot save locally, so the cloud save has not been restored to this device. Restore browser storage access and retry. The cloud copy is unchanged.",
+  },
   localSaveTemporaryExportReady: {
     "zh-CN": "临时进度导出快照已生成，尚未保存到本机。",
     en: "The temporary progress is ready for export; it has not been saved locally.",

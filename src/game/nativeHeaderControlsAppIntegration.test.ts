@@ -17,7 +17,7 @@ describe("native header controls App integration", () => {
   it("exposes migrated Operations, Galaxy and Campaign destinations plus durable native pause", () => {
     expect(panels).toMatch(/<button[^>]*header-settings-command/);
     expect(panels).not.toMatch(/!nativeAuthority \? <button[^>]*header-settings-command/);
-    expect(panels).toMatch(/<button type="button" role="menuitem" onClick=\{\(\) => runOverflowAction\(onOpenSettings\)\}/);
+    expect(panels).toMatch(/<button type="button" role="menuitem"[^>]*onClick=\{\(\) => runOverflowAction\(onOpenSettings\)\}/);
     expect(panels).not.toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "galaxy"/);
     expect(panels).not.toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "campaign"/);
     expect(panels).toMatch(/<button[^>]*activeWorkspace === "galaxy"/);

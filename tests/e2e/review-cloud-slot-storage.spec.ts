@@ -136,7 +136,7 @@ test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} 
         const status = feedbackTarget;
         await status.evaluate((element) => element.scrollIntoView({ block: "start" }));
         await expect.poll(() => status.evaluate((element) => {
-          const outer = element.closest('[role="dialog"]')!.getBoundingClientRect();
+          const outer = element.closest('[role="dialog"], [role="alertdialog"]')!.getBoundingClientRect();
           const bounds = element.getBoundingClientRect();
           const warning = document.querySelector(".local-save-writer-banner--temporary")!.getBoundingClientRect();
           const covered = bounds.left < warning.right && bounds.right > warning.left && bounds.top < warning.bottom && bounds.bottom > warning.top;

@@ -59,7 +59,7 @@ async function installCloudAccount(
     window.localStorage.clear();
     window.sessionStorage.clear();
     window.localStorage.setItem("dsp-idle-network.cloud-token.v1", "synthetic-legacy-import-token");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-04-v1.3.7");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-05-v1.3.8");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     window.localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, completedEvents: [], skipped: true }));
     window.localStorage.setItem("dsp-idle-network.menu-settings.v1", JSON.stringify({ fontScale: 2 }));

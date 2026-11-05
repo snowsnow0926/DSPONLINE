@@ -107,7 +107,7 @@ test("denied localStorage preferences keep the existing IndexedDB save and disab
     }
     if (sessionStorage.getItem("review-save-seeded") === "1") return;
     sessionStorage.setItem("review-save-seeded", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-04-v1.3.7");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-05-v1.3.8");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state: {
       version: 47, entities: [], belts: [], construction: {}, tray: { iron_ore: 42 }, paused: true,

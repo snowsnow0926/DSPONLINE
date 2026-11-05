@@ -1,29 +1,31 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-11-04-v1.3.7";
+export const CURRENT_RELEASE_ID = "2026-11-05-v1.3.8";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const en = locale === "en";
   return {
     id: CURRENT_RELEASE_ID,
-    date: en ? "November 4, 2026" : "2026年11月4日",
-    version: "1.3.7",
-    title: en ? "Stable Search Input and Mobile Search Fixes" : "搜索输入与手机搜索修复",
+    date: en ? "November 5, 2026" : "2026年11月5日",
+    version: "1.3.8",
+    title: en ? "Save Protection and Interaction Improvements" : "存档保护与操作体验更新",
     summary: en
-      ? "Keep search text while the factory refreshes and make recent searches easier to use in landscape. Existing saves and backup preferences are preserved."
-      : "修复打字时搜索内容自动消失，以及横屏最近搜索被底部导航遮挡的问题，保留现有存档与备份偏好。",
+      ? "Safer save recovery and cloud slots, clearer save feedback, reliable text drafts, and smoother keyboard, touch and large-text interfaces. Existing saves and backup preferences are preserved."
+      : "补齐存档恢复和云槽位保护，明确保存状态，改善中文输入、名称草稿、菜单手势、大字号与浅色界面，保留现有存档和备份偏好。",
     items: [
-      { id: "v137-ime-input", title: en ? "Keep search text while typing" : "修复搜索打字消失",
-        description: en ? "Chinese input stays in the search field while the factory refreshes, even before you confirm a word. Your cursor and selection stay in place." : "中文输入法还在拼字时，工厂刷新不再清空输入内容，光标和选中文字一并保留。" },
-      { id: "v137-input-actions", title: en ? "Search actions keep working" : "保留正常搜索操作",
-        description: en ? "Confirming text, typing English, clearing the field and selecting a recent search continue to work. Other shared text fields receive the same input protection." : "确认汉字、英文输入、清空搜索和选择历史词继续正常使用，共用文本框同步获得输入保护。" },
-      { id: "v137-search-history", title: en ? "Recent searches stay within reach" : "横屏历史搜索可见可点",
-        description: en ? "Recent searches open above or below the field to fit the visible panel. Longer lists scroll so the bottom navigation does not hide their buttons." : "最近搜索根据可用空间向上或向下展开，长列表可以滚动，避免选项和清除按钮被底部导航挡住。" },
-      { id: "v137-landscape-layout", title: en ? "More room in landscape" : "横屏制造布局更紧凑",
-        description: en ? "Search and batch controls sit side by side in landscape, leaving more room for recipe results and keeping touch controls inside their frames." : "横屏时搜索与批次数量并排显示，为配方结果留出空间，手机输入框随内容自然增高。" },
-      { id: "v137-compatibility", title: en ? "Continue with existing saves" : "现有存档可直接继续",
-        description: en ? "Existing factories, inventories, research and backup preferences are preserved. Continue with your current save after updating." : "现有工厂、物资、科技和备份偏好保持不变，升级后可以继续游玩。" },
+      { id: "v138-save-feedback", title: en ? "Accurate save feedback" : "保存状态更准确",
+        description: en ? "When browser storage is unavailable, the game clearly reports that progress has not been saved. Temporary sessions can still export their current progress." : "浏览器存储不可用时，明确提示当前进度尚未保存；临时运行仍可导出进度文件，不再把内存中的临时记录显示为保存成功。" },
+      { id: "v138-recovery-points", title: en ? "Recovery points before replacement" : "恢复前保留旧进度",
+        description: en ? "Cloud recovery and save rescue require a verified recovery point before replacing progress. Manual cloud slots preserve the actual old slot and reject data for a different target." : "云恢复和坏档救援先确认恢复点保存成功，再替换进度；手动云槽位保留真正被覆盖的旧槽位，拒绝写入其他位置的存档。" },
+      { id: "v138-cancel-import", title: en ? "Safe cancellation and factory switching" : "取消与换档更安全",
+        description: en ? "Cancelled or outdated imports and restores cannot overwrite a later factory. Failed file reads remove stale previews, and repeated confirmation starts one preparation." : "取消操作或切换工厂后，旧导入、救援和云恢复不会再覆盖后来选择的工厂；文件读取失败清除旧预览，重复确认只准备一次。" },
+      { id: "v138-ime-drafts", title: en ? "Reliable Chinese input and drafts" : "中文输入与名称草稿保护",
+        description: en ? "Confirming an IME word does not execute game commands. Editing text and selection survive responsive layout changes, while blueprint and region drafts stay with their own factory." : "输入法回车选字不会误执行游戏命令；同一编辑器横竖屏切换保留文字和选区，蓝图与区域名称草稿不会串到另一座工厂。" },
+      { id: "v138-menu-gestures", title: en ? "Better menus and touch gestures" : "菜单与手机手势更顺手",
+        description: en ? "Arrow keys, Tab, Escape and Space work within menus without toggling the simulation by accident. Closing windows restores the opener, and long-press menus remain open after release." : "菜单方向键、Tab、Esc 和空格各自处理当前操作，不误开关模拟；关闭窗口回到原入口，手机长按松手后菜单继续显示，打断的手势正确收尾。" },
+      { id: "v138-responsive-theme", title: en ? "Readable large text and light theme" : "大字号与浅色界面更清楚",
+        description: en ? "Compact menus and search results remain reachable. Large-text desktop metrics scroll within the header, and cloud recovery cards use readable light surfaces. Existing factories, inventories, research and backup preferences are preserved." : "紧凑菜单和搜索结果可滚动到达；桌面大字号指标在头栏内横向查看，浅色云恢复页面文字更清晰。现有工厂、物资、科技和备份偏好保持不变。" },
     ],
   } as const;
 }

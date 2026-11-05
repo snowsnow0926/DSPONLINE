@@ -72,31 +72,41 @@ test("paused double-click return commits one revision and keeps the true previou
 });
 
 test("running simulation that advances during return receives one final cleanup save", async ({ page }) => {
-  await openFactory(page);
-  const before = await saveBaselineWhilePaused(page);
-  await page.getByLabel("继续模拟").click();
-  await expect(page.getByLabel("暂停模拟")).toBeVisible();
-
-  await page.evaluate(() => {
+  await page.addInitScript(() => {
     const NativeWorker = window.Worker;
-    const delayedWorkers = new WeakSet<Worker>();
-    const NativePostMessage = NativeWorker.prototype.postMessage;
+    const saveWorkers = new WeakSet<Worker>();
+    const factoryWorkers = new WeakSet<Worker>();
+    const probe = { active: false, delayedMessages: 0 };
+    Object.assign(window, { __v143ReturnDelay: probe });
+    const nativePost = NativeWorker.prototype.postMessage;
     const WrappedWorker = new Proxy(NativeWorker, {
       construct(target, args) {
         const worker = Reflect.construct(target, args) as Worker;
-        if (String(args[0]).includes("save.worker")) delayedWorkers.add(worker);
+        const name = (args[1] as WorkerOptions | undefined)?.name;
+        if (String(args[0]).includes("save.worker")) saveWorkers.add(worker);
+        if (name === "factory-simulation") factoryWorkers.add(worker);
         return worker;
       },
     });
     NativeWorker.prototype.postMessage = function (message: unknown, transferOrOptions?: Transferable[] | StructuredSerializeOptions) {
-      const post = () => NativePostMessage.call(this, message, transferOrOptions as Transferable[]);
-      if (delayedWorkers.has(this)) {
+      const post = () => nativePost.call(this, message, transferOrOptions as Transferable[]);
+      const checkpoint = factoryWorkers.has(this) && (message as { kind?: string } | null)?.kind === "checkpoint";
+      if (probe.active && (saveWorkers.has(this) || checkpoint)) {
+        probe.delayedMessages += 1;
         window.setTimeout(post, 700);
         return;
       }
       post();
     } as typeof Worker.prototype.postMessage;
     Object.defineProperty(window, "Worker", { configurable: true, writable: true, value: WrappedWorker });
+  });
+  await openFactory(page);
+  const before = await saveBaselineWhilePaused(page);
+  await page.getByLabel("继续模拟").click();
+  await expect(page.getByLabel("暂停模拟")).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as typeof window & { __v143ReturnDelay: { active: boolean } }).__v143ReturnDelay.active = true;
   });
 
   await page.getByTitle("保存并返回主菜单").click();
@@ -113,6 +123,7 @@ test("running simulation that advances during return receives one final cleanup 
       backupElapsed: JSON.parse(backup).state.elapsedSeconds as number,
       primaryPending: JSON.parse(raw).state.timeWarp.pendingSimulationSeconds as number,
       backupPending: JSON.parse(backup).state.timeWarp.pendingSimulationSeconds as number,
+      delayedMessages: (window as typeof window & { __v143ReturnDelay: { delayedMessages: number } }).__v143ReturnDelay.delayedMessages,
     };
   }, { saveKey: SAVE_KEY, backupKey: BACKUP_KEY });
 
@@ -120,6 +131,7 @@ test("running simulation that advances during return receives one final cleanup 
   // payload is coalesced behind the delayed save Worker. The important
   // invariant is that at least one final cleanup save lands and the return
   // save contains the wall time accumulated behind the barrier.
+  expect(after.delayedMessages).toBeGreaterThan(0);
   expect(after.revision).toBeGreaterThan(before.revision);
   expect(after.revision).toBeLessThanOrEqual(before.revision + 2);
   // 1.0.44 holds a Worker checkpoint barrier during the verified write.

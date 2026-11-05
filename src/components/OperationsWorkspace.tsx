@@ -1059,7 +1059,7 @@ function SavesPanel({
           <span><small>科技</small><strong>{importPreview.summary?.completedTechCount ?? 0}</strong></span>
         </div>
         {importPreview.issues.length > 0 ? <ul>{importPreview.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : null}
-        <footer><button type="button" onClick={onCancelImport}>取消</button>{importPreview.valid ? <button className="primary" type="button" disabled={importRescuePending} onClick={onConfirmImport}><ShieldCheck size={14} />确认导入</button> : importPreview.repairable ? <button className={importRescueArmed ? "danger" : "primary"} type="button" disabled={importRescuePending} onClick={onConfirmImportRescue}><ShieldCheck size={14} />{importRescueArmed ? "再次确认并救援" : "救援此存档"}</button> : <button type="button" disabled>无法导入</button>}</footer>
+        <footer><button type="button" onClick={onCancelImport}>取消</button>{importPreview.valid ? <button className="primary" type="button" disabled={importRescuePending} onClick={onConfirmImport}><ShieldCheck size={14} />确认导入</button> : importPreview.repairable ? <button className={importRescueArmed ? "danger" : "primary"} type="button" disabled={importRescuePending} onClick={onConfirmImportRescue}><ShieldCheck size={14} />{importRescuePending ? appMessage(locale, "saveImportRescueWorking") : importRescueArmed ? "再次确认并救援" : "救援此存档"}</button> : <button type="button" disabled>无法导入</button>}</footer>
       </section> : null}
       <div className="save-slot-list">
         {([1, 2, 3] as SaveSlotId[]).map((slotId) => {

@@ -3,7 +3,12 @@ import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
 async function openSaves(page: Page) {
-  await page.getByLabel("打开设置", { exact: true }).click();
+  const direct = page.getByLabel("打开设置", { exact: true });
+  if (await direct.isVisible()) await direct.click();
+  else {
+    await page.getByRole("button", { name: "更多工作区", exact: true }).click();
+    await page.getByRole("menuitem", { name: "设置", exact: true }).click();
+  }
   const panel = page.getByRole("dialog", { name: "运营中心", exact: true });
   await panel.getByRole("tab", { name: "存档", exact: true }).click();
   return panel;
@@ -81,7 +86,8 @@ test("cancelled rescue keeps the original factory when its earlier snapshot comp
   expect((await backup).suggestedFilename()).toContain("rescue-backup");
   await expect.poll(() => page.evaluate(() => (window as unknown as { __rescueGate: { pending: boolean } }).__rescueGate.pending), { timeout: 60_000 }).toBe(true);
   await expect(panel.locator(".operations-saves")).toHaveAttribute("aria-busy", "true");
-  await expect(preview.getByRole("button", { name: "再次确认并救援", exact: true })).toBeDisabled();
+  await expect(preview.getByRole("button", { name: "正在准备救援…", exact: true })).toBeDisabled();
+  expect((await page.locator(".game-notice").allTextContents()).join(";")).not.toMatch(/二次确认|存档已验证完成/);
   await expect(panel.getByRole("button", { name: "导入存档", exact: true })).toBeDisabled();
   expect(backups).toHaveLength(1);
   const views = touch ? [
@@ -106,6 +112,23 @@ test("cancelled rescue keeps the original factory when its earlier snapshot comp
       }), { message: `${view.name} ${scale}%` }).toBe(true);
       if (scale === 150) for (const theme of ["dark", "light"]) {
         await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+        const contrast = await preview.locator(".save-preview-metrics strong").evaluateAll((values) => values.map((value) => {
+          const luminance = (color: string) => {
+            const rgb = (color.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number).map((value) => {
+              const channel = value / 255;
+              return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+            });
+            return .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2];
+          };
+          const color = getComputedStyle(value).color;
+          const background = getComputedStyle(value.closest("span")!).backgroundColor;
+          const textLuminance = luminance(color), backgroundLuminance = luminance(background);
+          return { color, background, ratio: (Math.max(textLuminance, backgroundLuminance) + .05) / (Math.min(textLuminance, backgroundLuminance) + .05) };
+        }));
+        await testInfo.attach(`${view.name}-${theme}-metric-contrast`, { body: JSON.stringify(contrast), contentType: "application/json" });
+        expect(contrast).toHaveLength(4);
+        for (const metric of contrast) expect(metric.ratio).toBeGreaterThanOrEqual(4.5);
+        await preview.locator(".save-preview-metrics").scrollIntoViewIfNeeded();
         await page.screenshot({ path: `artifacts/review-rescue-lifetime-20261105/${process.env.DSP_REVIEW_CHECK_NAME || "review"}-${view.name}-${theme}.png`, animations: "disabled" });
       }
     }

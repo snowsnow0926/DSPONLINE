@@ -85,6 +85,10 @@ const messages = {
     "zh-CN": "已取消存档救援，原工厂不会被替换。",
     en: "Save rescue cancelled. Your factory will not be replaced.",
   },
+  saveImportRescueWorking: {
+    "zh-CN": "正在准备救援…",
+    en: "Preparing rescue…",
+  },
   saveImportRescueFailed: {
     "zh-CN": "存档救援失败，原候选已保留供重试",
     en: "Save rescue failed. The candidate is available to retry",

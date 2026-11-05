@@ -19826,7 +19826,7 @@ html[data-ui-font-scale="200"] .operations-settings .setting-row > span {
   gap: 3px;
   padding: 7px;
   border: 1px solid var(--line);
-  background: #131d19;
+  background: var(--surface);
 }
 
 .save-preview-metrics small {

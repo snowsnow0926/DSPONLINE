@@ -16,6 +16,11 @@ test("star map resets one planet only after three confirmations", async ({ page 
     window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-05-v1.3.8");
     window.localStorage.setItem("dsp-idle-network.save.v1", rawSave);
   }, { rawSave });
+  const offlineReport = page.getByRole("dialog", { name: "离线结算报告", exact: true });
+  await page.addLocatorHandler(offlineReport, async () => {
+    await offlineReport.getByRole("button", { name: "确认结算", exact: true }).click();
+    await expect(offlineReport).toBeHidden();
+  });
   await page.goto("/");
 
   await expect(page.locator(".factory-node:not(.vein-node)")).toHaveCount(1);

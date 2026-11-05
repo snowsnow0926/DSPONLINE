@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 
 const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
 
@@ -47,7 +48,7 @@ async function seedOrphanedBudget(page: Page, pendingWallSeconds: number, pendin
 }
 
 test("an orphaned time-warp budget is converted to one ordinary offline interval before fast settlement", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installMenuPreferences(page);
   await seedOrphanedBudget(page, 60, 720, 3_600);
   await page.goto("/?menu=1&storageMigration=production");
@@ -91,7 +92,7 @@ test("an orphaned time-warp budget is converted to one ordinary offline interval
 });
 
 test("an unavailable recovery journal offers explicit checkpoint recovery and preserves the source when cancelled", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installMenuPreferences(page);
   const original = await seedOrphanedBudget(page, 75, 900, 0);
   await page.addInitScript(() => {

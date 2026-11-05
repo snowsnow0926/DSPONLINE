@@ -1,11 +1,12 @@
 import { expect, test } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 
 for (const failureMode of ["denied-access", "read-only-quota", "healthy"] as const) {
 test(`temporary storage warns only when needed, keeps export usable, and preserves the original durable save (${failureMode})`, async ({ page }, testInfo) => {
-  test.setTimeout(180_000);
+  test.setTimeout(workflowTimeoutMs(180_000));
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript((mode) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");

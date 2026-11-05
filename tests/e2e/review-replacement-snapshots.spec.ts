@@ -1,9 +1,10 @@
 import { expect, test } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
 test("rescue replacement requires a verified recovery snapshot before changing the current factory", async ({ page }, testInfo) => {
-  test.setTimeout(240_000);
+  test.setTimeout(workflowTimeoutMs(240_000));
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {

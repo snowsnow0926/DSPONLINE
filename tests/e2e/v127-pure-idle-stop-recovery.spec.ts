@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 import { resolveDurableSimulationRuntimeEnabled } from "../../src/game/runtimePersistenceMode";
@@ -414,7 +415,7 @@ async function stopWithFailure(page: Page): Promise<void> {
 
 for (const failures of [1, 2]) {
   test(`recovered pure idle retries ${failures} failed primary saves using one frozen terminal result`, async ({ page }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(workflowTimeoutMs(90_000));
     await installProbe(page);
     const seeded = await seedRecoverableRun(page, failures === 2);
     await openRecovery(page, seeded);
@@ -488,7 +489,7 @@ test("terminal save retry skips the obsolete checkpoint and ordinary simulation 
   await page.addLocatorHandler(page.getByRole("dialog", { name: "离线结算报告", exact: true }), async report => {
     await report.getByRole("button", { name: "关闭离线结算报告", exact: true }).click();
   });
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   test.skip(durableMode, "The decoded-state retry belongs to the default runtime");
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
@@ -529,7 +530,7 @@ test("terminal save retry skips the obsolete checkpoint and ordinary simulation 
 });
 
 test("reload after a failed stop keeps the frozen journal recoverable and commits its time once", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
   await openRecovery(page, seeded);
@@ -564,7 +565,7 @@ test("reload after a failed stop keeps the frozen journal recoverable and commit
 });
 
 test("a failed journal marker after primary commit only retries recovery closeout and blocks checkpoint rollback", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   await seedRecoverableRun(page, true);
   await openRecovery(page);
@@ -607,7 +608,7 @@ test("a failed journal marker after primary commit only retries recovery closeou
 });
 
 test("background stop retries reuse the complete candidate and frozen ordinary-offline wall interval", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true, true);
   await page.evaluate(() => sessionStorage.setItem("v127-stop-fail-next-boot", "1"));
@@ -643,7 +644,7 @@ test("background stop retries reuse the complete candidate and frozen ordinary-o
 });
 
 test("explicitly abandoning a failed terminal candidate starts a new run with a fresh result", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
   await openRecovery(page, seeded);
@@ -685,7 +686,7 @@ test("explicitly abandoning a failed terminal candidate starts a new run with a 
 });
 
 test("cancel while the finalized journal acknowledgement is pending never saves the cancelled candidate", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
   await openRecovery(page, seeded);
@@ -720,7 +721,7 @@ test("cancel while the finalized journal acknowledgement is pending never saves 
 
 test("an in-flight durable primary commit cannot be cancelled or rolled back", async ({ page }, testInfo) => {
   test.skip(!durableMode, "The explicit durable mode owns this persistence Worker.");
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
   await openRecovery(page, seeded);
@@ -759,7 +760,7 @@ test("an in-flight durable primary commit cannot be cancelled or rolled back", a
 });
 
 test("a failed cancellation marker blocks the pending save and visibly requires recovery", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
   await openRecovery(page, seeded);
@@ -794,7 +795,7 @@ test("a failed cancellation marker blocks the pending save and visibly requires 
 
 test("cancelling bounded terminal delivery cannot later write its completed candidate", async ({ page }) => {
   test.skip(durableMode, "This mode keeps the terminal envelope outside the UI decoder.");
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true, false, false, true);
   await openRecovery(page, seeded);
@@ -821,7 +822,7 @@ test("cancelling bounded terminal delivery cannot later write its completed cand
 
 test("cancelling after canonical delivery reclaims its idle Worker and preserves the primary", async ({ page }) => {
   test.skip(durableMode, "Canonical decoding belongs to the default coordinator.");
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true, false, false, true);
   await openRecovery(page, seeded);
@@ -847,7 +848,7 @@ test("cancelling after canonical delivery reclaims its idle Worker and preserves
 
 test("memory admission failure releases the canonical Worker and retries from the complete UI candidate", async ({ page }) => {
   test.skip(durableMode, "Canonical decoding belongs to the default coordinator.");
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true, false, false, true);
   await openRecovery(page, seeded);
@@ -876,7 +877,7 @@ test("memory admission failure releases the canonical Worker and retries from th
 
 test("a cancelled journal operation drains before a new stop can safely start", async ({ page }) => {
   test.skip(durableMode, "Canonical decoding belongs to the default coordinator.");
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page, true);
   const seeded = await seedRecoverableRun(page, true, false, false, true);
   await openRecovery(page, seeded);
@@ -907,7 +908,7 @@ test("a cancelled journal operation drains before a new stop can safely start", 
 
 test("large canonical owner retries the same settlement after a failed primary write", async ({ page }) => {
   test.skip(durableMode, "Chunked canonical-state delivery belongs to the default coordinator.");
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true, false, false, true);
   await openRecovery(page, seeded);
@@ -938,7 +939,7 @@ test("large canonical owner retries the same settlement after a failed primary w
 
 test("owner proof failure then a fallback chunk crash keep one frozen settlement for retry", async ({ page }) => {
   test.skip(durableMode, "Chunked canonical-state delivery belongs to the default coordinator.");
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true, false, false, true);
   await openRecovery(page, seeded);
@@ -972,7 +973,7 @@ test("owner proof failure then a fallback chunk crash keep one frozen settlement
 
 test("canonical decoder crash preserves the original primary and frozen target for recalculation", async ({ page }) => {
   test.skip(durableMode, "Canonical decoding belongs to the default coordinator.");
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true, false, false, true);
   await openRecovery(page, seeded);
@@ -999,7 +1000,7 @@ test("canonical decoder crash preserves the original primary and frozen target f
 });
 
 test("failed-stop recovery export downloads a diagnostic without mutating storage and fits both mobile orientations", async ({ page }, testInfo) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installProbe(page);
   const seeded = await seedRecoverableRun(page, true);
   await openRecovery(page, seeded);
@@ -1040,7 +1041,7 @@ test("failed-stop recovery export downloads a diagnostic without mutating storag
 });
 
 test("legacy startup retains an ordinary offline report without hiding the active pure-idle controls", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   test.skip(durableMode, "The durable menu delegates the journal interval directly; this case targets the default synchronous loader returning both dialogs.");
   await page.setViewportSize({ width: 390, height: 844 });
   await installProbe(page);

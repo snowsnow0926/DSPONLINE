@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { localSaveCatalogRecordKey, serializeLocalSaveCatalog } from "../../src/game/localSaveCatalog";
 import { buildLocalSaveCatalog } from "../../src/game/localSaveCatalogBuild";
 
@@ -110,7 +111,7 @@ async function installColdReadInstrumentation(page: Page): Promise<void> {
 }
 
 test("catalog-backed current and 2x cold menus never hydrate or parse payload strings", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(workflowTimeoutMs(120_000));
   await page.goto("/?menu=1&storageMigration=production");
   await expect(page.locator(".start-menu")).toBeVisible();
   // Repeated cold opens represent an existing player who has acknowledged
@@ -155,7 +156,7 @@ test("catalog-backed current and 2x cold menus never hydrate or parse payload st
 });
 
 test("legacy 35 MiB indexing parses one payload off-main and writes a bound small catalog", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await page.goto("/?menu=1&storageMigration=production");
   await expect(page.locator(".start-menu")).toBeVisible();
   await installColdReadInstrumentation(page);

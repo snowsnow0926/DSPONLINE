@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -37,7 +38,7 @@ for (const scenario of [
   { surface: "galaxy", mismatch: "none", local: "invalid" },
   { surface: "menu", mismatch: "none", local: "invalid" },
 ] as const) test(`cloud download namespace ${scenario.surface} ${scenario.mismatch} ${scenario.local} preserves durable targets`, async ({ page }, testInfo) => {
-  test.setTimeout(180_000);
+  test.setTimeout(workflowTimeoutMs(180_000));
   page.setDefaultTimeout(30_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const errors: string[] = [], writes: string[] = [];
@@ -77,7 +78,7 @@ for (const scenario of [
     return fulfill({ error: "disposable namespace route unavailable" }, 404);
   });
   await page.goto("/");
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   await openSaves(page);
   const original = await exportEnvelope(page);
   expect(original.state.tray.iron_ore).toBe(42);
@@ -100,10 +101,10 @@ for (const scenario of [
   payload = JSON.stringify(remote);
   await page.goto(scenario.surface === "menu" ? "/?menu=1" : "/");
   if (scenario.surface === "menu") {
-    await expect(page.locator(".start-menu")).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator(".start-menu")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
     await page.getByRole("button", { name: "登录与云存档", exact: true }).click();
   } else {
-    await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
     await page.getByLabel("打开银河网络", { exact: true }).click();
     await page.getByRole("dialog", { name: "银河网络", exact: true }).getByRole("tab", { name: "云存档", exact: true }).click();
   }
@@ -131,7 +132,7 @@ for (const scenario of [
     await page.getByLabel("关闭银河网络", { exact: true }).click();
   } else {
     await page.goto("/");
-    await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   }
   await openSaves(page);
   const preserved = await exportEnvelope(page);

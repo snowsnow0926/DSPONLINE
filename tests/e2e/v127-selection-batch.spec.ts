@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { startupTimeoutMs } from "./startup-timeout";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
 test.use({ hasTouch: true });
@@ -398,7 +398,7 @@ test("a mobile long press on an output port enters continuous connection without
 
 for (const candidateCount of [6, 10, 50, 100] as const) {
   test(`mobile continuous candidates stay stable at ${candidateCount} entries`, async ({ page }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(workflowTimeoutMs(120_000));
     const pageErrors: string[] = [];
     const runtimeConsoleErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));

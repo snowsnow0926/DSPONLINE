@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -31,7 +32,7 @@ for (const scenario of [
   { access: "read-only", action: "conflict", slot: "1" },
 ] as const) {
 test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} local storage and retries durably`, async ({ page }, testInfo) => {
-  test.setTimeout(300_000);
+  test.setTimeout(workflowTimeoutMs(300_000));
   page.setDefaultTimeout(30_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const errors: string[] = [], writes: string[] = [];
@@ -84,7 +85,7 @@ test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} 
     return fulfill({ error: "isolated cloud slot route unavailable" }, 404);
   });
   await page.goto("/");
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   await openSaves(page);
   const original = await exportedEnvelope(page);
   const remote = JSON.parse(JSON.stringify(original));
@@ -99,7 +100,7 @@ test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} 
   payload = JSON.stringify(remote);
   await page.evaluate(() => sessionStorage.setItem("cloud-slot-blocked", "1"));
   await page.reload();
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   const notes = page.getByRole("button", { name: "关闭版本更新记录", exact: true });
   if (await notes.isVisible()) await notes.click();
   const pause = page.getByRole("button", { name: "暂停模拟", exact: true });
@@ -165,7 +166,7 @@ test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} 
   if (await conflict.isVisible()) await conflict.getByRole("button", { name: "稍后处理", exact: true }).click();
   await page.evaluate(() => sessionStorage.removeItem("cloud-slot-blocked"));
   await page.reload();
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   let saves = await openSaves(page);
   let preserved = await exportedEnvelope(page);
   const preservedMainOre = preserved.state.tray.iron_ore;
@@ -193,7 +194,7 @@ test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} 
   await saves.getByLabel(`载入槽位 ${scenario.slot}`, { exact: true }).click();
   await expect(page.locator('.tray-row[title="拿取铁矿石"] strong')).toHaveText("99", { timeout: 60_000 });
   await page.reload();
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   await openSaves(page);
   const retry = await exportedEnvelope(page);
   expect(retry.state.tray.iron_ore).toBe(99);

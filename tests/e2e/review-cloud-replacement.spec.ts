@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -131,7 +132,7 @@ test("cloud replacement requires a verified recovery snapshot and retries safely
 
 for (const scenario of ["switch", "repeat"] as const) {
 test(scenario === "switch" ? "an earlier cloud restore cannot replace a factory subsequently loaded from a slot" : "cloud restore confirmation starts only one asynchronous preparation", async ({ page }, testInfo) => {
-  test.setTimeout(240_000);
+  test.setTimeout(workflowTimeoutMs(240_000));
   page.setDefaultTimeout(30_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const errors: string[] = [];

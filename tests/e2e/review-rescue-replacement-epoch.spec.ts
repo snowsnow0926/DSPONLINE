@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -20,7 +21,7 @@ async function exportedEnvelope(page: Page) {
 
 for (const mode of ["rescue", "import"] as const) {
 test(`an earlier ${mode} cannot replace a factory subsequently loaded from a slot`, async ({ page }, testInfo) => {
-  test.setTimeout(240_000);
+  test.setTimeout(workflowTimeoutMs(240_000));
   page.setDefaultTimeout(30_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const errors: string[] = [];

@@ -1,4 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { expect, test, type Page } from "@playwright/test";
 
 const BLOCKING_IMPACTS = new Set(["serious", "critical"]);
@@ -54,7 +55,7 @@ async function seedSyntheticFactory(page: Page) {
 }
 
 test("critical player surfaces have no blocking axe violations and expose stable dialog semantics", async ({ page, browser }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(workflowTimeoutMs(120_000));
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/?menu=1");
   await closeReleaseNotes(page);

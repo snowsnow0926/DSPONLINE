@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
 const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
@@ -151,7 +152,7 @@ test("English light release notes are localized and persist dismissal", async ({
 });
 
 test("English light primary workspaces use opaque light surfaces", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await seedEnglishFactory(page, "legacy");
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/?factory=1&lang=en&mobileUi=legacy");

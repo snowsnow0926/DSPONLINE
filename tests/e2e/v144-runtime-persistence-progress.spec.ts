@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { startupTimeoutMs } from "./startup-timeout";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 
 test("default save protection rejects edits without pausing a running autosave", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
   await page.addLocatorHandler(offlineReport, async () => {
     await offlineReport.getByRole("button", { name: "确认结算" }).click({ force: true });
@@ -103,7 +103,7 @@ test("default save protection rejects edits without pausing a running autosave",
 });
 
 test("manual, autosave, and return publish ordered non-blocking persistence phases", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   const state = createInitialState(44_145);
   state.paused = true;
   state.settings.autosaveIntervalSeconds = 30;

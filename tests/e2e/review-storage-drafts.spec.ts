@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 
 async function openProbe(page: Page) {
   await page.route("**/__draft_focus_probe__", (route) => route.fulfill({ contentType: "text/html", body: '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div></body></html>' }));
@@ -97,7 +98,7 @@ for (const device of [
 test("denied localStorage preferences keep the existing IndexedDB save and disabled autosave intact", async ({ page }) => {
   // Three separate application boots share one low-priority worker. Startup
   // readiness gets its own bounded wait; save-content assertions stay exact.
-  test.setTimeout(180_000);
+  test.setTimeout(workflowTimeoutMs(180_000));
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");

@@ -1,4 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { createBlueprint, createInitialState, placeBuilding } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
@@ -653,7 +654,7 @@ test("hover expansion promotes a count marker out of overlap hiding", async ({ p
 });
 
 test("full plus all cards uses a uniform emergency stage without disabling interaction expansion", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await seedCanvas(page, {
     count: 1_200,
     exactStack: 1_200,
@@ -677,7 +678,7 @@ test("full plus all cards uses a uniform emergency stage without disabling inter
 });
 
 test("count marker and canvas controls stay usable across target phone sizes and font scales", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await page.addInitScript((key) => window.localStorage.setItem(key, "next"), MOBILE_UI_KEY);
   await seedCanvas(page, {
     count: 50,
@@ -849,7 +850,7 @@ test("fixed medium follows the current viewport and keeps hover expansion indepe
 });
 
 test("an exact 50-card stack paints one leader and glow while retaining hidden edge geometry", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await seedCanvas(page, { count: 50, exactStack: 50 });
   const shell = page.locator(".game-shell");
   await expect.poll(async () => Number(await shell.getAttribute("data-canvas-stack-hidden-count"))).toBe(49);
@@ -994,7 +995,7 @@ test("auto detail keeps a 500-visible paused canvas static across continue and p
 });
 
 test("a 4213-visible exact stack derives linearly with bounded heavy DOM", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await seedCanvas(page, { count: 4_213, exactStack: 4_213 });
   const shell = page.locator(".game-shell");
   const canvas = page.locator(".factory-canvas");
@@ -1043,7 +1044,7 @@ test("disabling Canvas belts restores exact-stack React Flow endpoint proxies", 
 });
 
 test("multi-drag shares the exact-overlap policy and preserves relative layout", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await seedCanvas(page, { count: 3, blueprint: true, spacingX: 340 });
   const first = page.locator('.react-flow__node[data-id="anonymous-node-0"]');
   const second = page.locator('.react-flow__node[data-id="anonymous-node-1"]');
@@ -1091,7 +1092,7 @@ test("multi-drag shares the exact-overlap policy and preserves relative layout",
 });
 
 test("bulk selection keeps a 500-node drag compact except for its primary interaction target", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await seedCanvas(page, { count: 500 });
   await page.getByLabel("框选模式").click();
   const pane = page.locator(".react-flow__pane");
@@ -1118,7 +1119,7 @@ test("bulk selection keeps a 500-node drag compact except for its primary intera
 });
 
 test("compact commit boundary applies live connection geometry without a reload", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await seedCanvas(page, { count: 500 });
   const shell = page.locator(".game-shell");
   await expect(shell).toHaveAttribute("data-canvas-detail-stage", "compact");
@@ -1185,7 +1186,7 @@ test("blueprint exact overlap is rejected by default and explicit opt-in covers 
 
 test("production preview records three identical pan/zoom runs for auto, full and expand-all", async ({ page }) => {
   test.skip(process.env.DSP_E2E_USE_PREVIEW !== "1", "frame budgets are measured against the production preview build");
-  test.setTimeout(180_000);
+  test.setTimeout(workflowTimeoutMs(180_000));
   await seedCanvas(page, { count: 500, detail: "auto" });
   const shell = page.locator(".game-shell");
   await page.locator(".react-flow__controls-fitview").click();

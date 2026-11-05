@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { buildLocalSaveCatalog } from "../../src/game/localSaveCatalogBuild";
 import { localSaveCatalogRecordKey, serializeLocalSaveCatalog } from "../../src/game/localSaveCatalog";
 import { LOCAL_SAVE_WRITER_LEASE_KEY, localSaveRevisionKey } from "../../src/game/localSaveCoordination";
@@ -1083,7 +1084,7 @@ test("persistence Worker prefers gzip for raw checkpoint bytes and preserves exa
 });
 
 test("one simulated hour coalesces passive WAL below 8 MiB with zero transfer-checkpoint writes", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await openBarePage(page);
   const primary = primaryFixture(1_786_377_650_000, 1, "hourly-wal");
   await seedPrimaryAndLease(page, primary);
@@ -1197,7 +1198,7 @@ test("one simulated hour coalesces passive WAL below 8 MiB with zero transfer-ch
 });
 
 test("Worker-safe current/2x transfer checkpoints detach UI buffers and fit local IndexedDB quota", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(workflowTimeoutMs(120_000));
   await openBarePage(page);
   const primary = primaryFixture(1_786_377_660_000, 1, "worker-binary");
   await seedPrimaryAndLease(page, primary);

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { expect, test } from "@playwright/test";
 import { computeSaveStateChecksum } from "../../src/game/saveEnvelopeIntegrity";
 
@@ -134,7 +135,7 @@ const realFixturePath = process.env.DSP_CONSTRUCTION_STABILITY_SAVE;
 
 test("real construction-center save keeps committing sixty one-second Worker slices", async ({ page }) => {
   test.skip(!realFixturePath, "Set DSP_CONSTRUCTION_STABILITY_SAVE to run the player-save acceptance test.");
-  test.setTimeout(180_000);
+  test.setTimeout(workflowTimeoutMs(180_000));
   const raw = await readFile(realFixturePath!, "utf8");
   await page.goto("/");
   const result = await page.evaluate(async (fixtureRaw) => {

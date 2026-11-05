@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 
 const MEBIBYTE = 1024 * 1024;
 const STARTUP_BUDGET = Object.freeze({
@@ -21,7 +22,7 @@ declare global {
 }
 
 test("Chinese main-menu startup stays inside long-task and heap budgets", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await page.addInitScript(() => {
     const memory = () => (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize ?? 0;
     const sample: StartupSample = {

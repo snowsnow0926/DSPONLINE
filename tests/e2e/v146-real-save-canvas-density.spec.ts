@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
 // Opt-in local acceptance coverage. Player saves are never checked into the
@@ -452,7 +453,7 @@ test.describe("real save canvas density acceptance", () => {
   });
 
   test("a reused real-save stack marker keeps its latest interaction handler", async ({ page }) => {
-    test.setTimeout(180_000);
+    test.setTimeout(workflowTimeoutMs(180_000));
     await page.setViewportSize({ width: 1440, height: 900 });
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -480,7 +481,7 @@ test.describe("real save canvas density acceptance", () => {
   });
 
   test("selected and hovered real-save recipe cards stay painted above nearby nodes", async ({ page }) => {
-    test.setTimeout(240_000);
+    test.setTimeout(workflowTimeoutMs(240_000));
     await page.setViewportSize({ width: 1440, height: 900 });
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -509,7 +510,7 @@ test.describe("real save canvas density acceptance", () => {
   });
 
   test("real-save canvas stays interactive through autosave and a live virtualized pan", async ({ page }) => {
-    test.setTimeout(240_000);
+    test.setTimeout(workflowTimeoutMs(240_000));
     await page.setViewportSize({ width: 1440, height: 900 });
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));

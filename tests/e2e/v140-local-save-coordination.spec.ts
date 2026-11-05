@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
 const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
@@ -571,7 +572,7 @@ test("an explicit takeover fences an active writer, verifies the chosen tab, and
 });
 
 test("a single writer can commit a runtime-generated 35 MiB save after its own lease expires", async ({ page }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(workflowTimeoutMs(180_000));
   await preparePage(page);
   const result = await page.evaluate(async ({ saveKey }) => {
     const engine = await import("/src/game/engine.ts");

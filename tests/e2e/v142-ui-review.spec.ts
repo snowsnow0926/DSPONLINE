@@ -1,4 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
@@ -334,7 +335,7 @@ test("semantic text colors meet 4.5 to 1 in light and dark themes", async ({ pag
 });
 
 test("axe passes representative dark, light, 200 percent and mobile workspaces", async ({ page }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(workflowTimeoutMs(240_000));
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFactory(page);
   for (const theme of ["dark", "light"] as const) {
@@ -367,7 +368,7 @@ test("axe passes representative dark, light, 200 percent and mobile workspaces",
 });
 
 test("200 percent mobile layouts keep full labels, 44px targets and scrollable action bars", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(workflowTimeoutMs(120_000));
   await page.setViewportSize({ width: 390, height: 844 });
   await openFactory(page, "/?mobileUi=next", 2);
 
@@ -434,7 +435,7 @@ test("200 percent mobile layouts keep full labels, 44px targets and scrollable a
 });
 
 test("high-scale controls do not geometrically overlap in representative workspaces", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(workflowTimeoutMs(120_000));
   await page.setViewportSize({ width: 960, height: 540 });
   await openFactory(page, "/", 2);
   await runCommand(page, "生产统计", /打开生产统计/);
@@ -459,7 +460,7 @@ test("high-scale controls do not geometrically overlap in representative workspa
 });
 
 test("real text fields preserve Chinese composition through responsive events and isolate passwords", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(workflowTimeoutMs(120_000));
   await page.setViewportSize({ width: 390, height: 844 });
   await openFactory(page, "/?mobileUi=next");
 

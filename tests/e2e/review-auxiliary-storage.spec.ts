@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -26,7 +27,7 @@ async function exportedSummary(page: Page) {
 
 for (const action of ["slot", "snapshot"] as const) {
   test(`auxiliary writes report unavailable and keep original ${action} intact in temporary storage`, async ({ page }, testInfo) => {
-    test.setTimeout(180_000);
+    test.setTimeout(workflowTimeoutMs(180_000));
     const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
     await page.addInitScript(() => {
       sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");

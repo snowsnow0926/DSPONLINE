@@ -1,8 +1,9 @@
 import { expect, test } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 test.use({ hasTouch: true, isMobile: true });
 
 test("temporary warning keeps navigation clear across orientation, themes and font scales", async ({ page }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(workflowTimeoutMs(180_000));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");

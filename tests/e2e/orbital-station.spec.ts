@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { createInitialState, placeBuilding } from "../../src/game/engine";
 
 const RELEASE_NOTE_ID = "2026-08-14-v1.0.42";
@@ -287,7 +288,7 @@ test("ordinary source-restricted contracts can be completed from confirmed quant
 });
 
 test("returning from the station canvas preserves factory drag, selection, and connection interaction", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   const pageErrors: string[] = [];
   const reactFlowWarnings: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -380,7 +381,7 @@ test("returning from the station canvas preserves factory drag, selection, and c
 });
 
 test("station workspace stays contained at both required desktop viewports", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installOperationalStationSave(page);
   await page.setViewportSize({ width: 1366, height: 768 });
   await page.goto("/");
@@ -398,7 +399,7 @@ test("station workspace stays contained at both required desktop viewports", asy
 });
 
 test("next mobile shell reaches the station and unwinds decoration detail before the factory", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await installOperationalStationSave(page);
   for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
     await page.setViewportSize(viewport);

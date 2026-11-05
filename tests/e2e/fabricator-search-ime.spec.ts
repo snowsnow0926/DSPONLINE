@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 
@@ -69,7 +70,7 @@ for (const screen of [
   test.describe(screen.name, () => {
     test.use({ viewport: screen.viewport, hasTouch: screen.mobile, isMobile: screen.mobile });
     test("fabricator search preserves native IME text through running simulation and keyboard resize", async ({ page }) => {
-      test.setTimeout(90_000);
+      test.setTimeout(workflowTimeoutMs(90_000));
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
       const input = await openFabricator(page, screen.mobile);

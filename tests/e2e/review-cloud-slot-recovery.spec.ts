@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -30,7 +31,7 @@ for (const { denySnapshot, backend } of [
   { denySnapshot: true, backend: "local-storage" },
   { denySnapshot: false, backend: "indexeddb" },
 ] as const) test(`cloud slot conflict ${denySnapshot ? "refuses replacement if the promised recovery point fails" : "keeps the actual prior slot as a usable recovery point"} with ${backend}`, async ({ page }, testInfo) => {
-  test.setTimeout(240_000);
+  test.setTimeout(workflowTimeoutMs(240_000));
   page.setDefaultTimeout(30_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const errors: string[] = [], writes: string[] = [];

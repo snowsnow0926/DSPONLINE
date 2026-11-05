@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -84,7 +85,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("durable finalize failure rebuilds the simulation Worker in-page and resume remains usable", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await page.addInitScript(() => {
     const tracker = { finalizeFailures: 1, injected: false };
     (window as typeof window & { __v146DurableRecoveryTracker?: typeof tracker }).__v146DurableRecoveryTracker = tracker;
@@ -144,7 +145,7 @@ test("durable finalize failure rebuilds the simulation Worker in-page and resume
 });
 
 test("a recovery-head retry keeps verified T1 state after a second persistence Worker failure", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await page.addInitScript(() => {
     const tracker = { armFinalize: false, finalizeInjected: false, initializeInjected: false };
     (window as typeof window & { __v146RecoveryHeadRetryTracker?: typeof tracker }).__v146RecoveryHeadRetryTracker = tracker;
@@ -220,7 +221,7 @@ test("a recovery-head retry keeps verified T1 state after a second persistence W
 });
 
 test("a verified T1 whose recovery-head rollover fails repairs itself after the save lock releases", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await page.addInitScript(() => {
     const tracker = { armInitialize: false, initializeInjected: false };
     (window as typeof window & { __v146PostT1RepairTracker?: typeof tracker }).__v146PostT1RepairTracker = tracker;
@@ -301,7 +302,7 @@ test("a verified T1 whose recovery-head rollover fails repairs itself after the 
 });
 
 test("a running autosave resumes after a verified T1 recovery-head repair", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await page.addInitScript(() => {
     const tracker = { armInitialize: false, initializeInjected: false };
     (window as typeof window & { __v146AutosaveRepairTracker?: typeof tracker }).__v146AutosaveRepairTracker = tracker;
@@ -357,7 +358,7 @@ test("a running autosave resumes after a verified T1 recovery-head repair", asyn
 });
 
 test("experimental save edits stay durable when the primary write fails", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await page.addInitScript(() => {
     localStorage.setItem("dsp-idle-network.save.allow-edits-during-save.v1", "true");
     const runtime = window as typeof window & {
@@ -480,7 +481,7 @@ test("experimental save edits stay durable when the primary write fails", async 
 });
 
 test("running and paused UI commands drain through WAL before pagehide without promoting an emergency primary", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await page.goto("/?menu=1");
   await page.getByRole("button", { name: /开始游戏/ }).click();
   const shell = page.locator(".game-shell");
@@ -562,7 +563,7 @@ test("running and paused UI commands drain through WAL before pagehide without p
 });
 
 test("undo, redo, viewport and galactic activity edits survive immediate pagehide/reload", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   const activity = {
     enabled: true,
     status: "active",

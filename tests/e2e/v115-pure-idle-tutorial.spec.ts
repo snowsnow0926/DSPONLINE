@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -74,7 +75,7 @@ test("settings opens the complete tutorial and keeps independent reading progres
 });
 
 test("time warp starts a blocking pure-idle page and can stop safely", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await page.addInitScript(() => {
     (window as typeof window & { __DSP_RUNTIME_TRANSITIONS__?: unknown }).__DSP_RUNTIME_TRANSITIONS__ = {
       enabled: true,

@@ -1,5 +1,5 @@
 import { expect, test, type Browser, type Locator, type Page } from "@playwright/test";
-import { startupTimeoutMs } from "./startup-timeout";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 import { selectSettingsCategory } from "./settings-helpers";
@@ -2253,7 +2253,7 @@ test("memory auto-pause defaults off and preserves an explicit device opt-in", a
 });
 
 test("disabled memory guard does not rewind after a critical simulation backlog", async ({ page }) => {
-  test.setTimeout(75_000);
+  test.setTimeout(workflowTimeoutMs(75_000));
   await page.addInitScript(() => {
     window.localStorage.setItem("dsp-idle-network.ui.memory-auto-pause.v1", "false");
     const NativeWorker = window.Worker;

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 
 const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
 
@@ -142,7 +143,7 @@ test("micro black hole operation intent survives Worker, IndexedDB, export, and 
 });
 
 test("paused normal save can add exactly one second unipolar vein after snapshot and double confirmation", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await page.goto("/?menu=1");
   const seeded = await page.evaluate(async () => {
     const engine = await import("/src/game/engine.ts");
@@ -282,7 +283,7 @@ async function sampleInteraction(page: Page, label: string, action: () => Promis
 }
 
 test("bounded canvas matrix covers paused/running pan, zoom, selections, inspector, 200% desktop and mobile", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(workflowTimeoutMs(90_000));
   await page.addInitScript(seedDenseCanvas(), RELEASE_NOTE_ID);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { gunzipSync } from "node:zlib";
 import { expect, test } from "@playwright/test";
 import { createSyntheticCloudSave } from "./fixtures/syntheticCloudSave";
@@ -45,7 +46,7 @@ test("cloud upload preparation keeps a large save off the main thread", async ({
 });
 
 test("cloud upload preparation can skip offline settlement without changing the saved factory", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(workflowTimeoutMs(120_000));
   await page.goto("/?menu=1");
   const raw = FIXTURE ? readFileSync(FIXTURE, "utf8") : createSyntheticCloudSave({ targetBytes: 8 * 1024 * 1024 });
   const fixture = JSON.parse(raw) as { savedAt?: number };
@@ -77,7 +78,7 @@ test("cloud upload preparation can skip offline settlement without changing the 
 });
 
 test("browser upload sends real gzip bodies for 1 MB, 2 MB and 7 MB saves", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(workflowTimeoutMs(120_000));
   const raw = FIXTURE ? readFileSync(FIXTURE, "utf8") : createSyntheticCloudSave({ targetBytes: 7 * 1024 * 1024 });
   const fixture = JSON.parse(raw) as { formatVersion: number; savedAt?: number; state: Record<string, unknown> };
   const checksum = (formatVersion: number, state: unknown) => {

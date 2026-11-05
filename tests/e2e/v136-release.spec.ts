@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
 const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
@@ -140,7 +141,7 @@ test("default new-belt lanes validate, persist on the device, and stay out of Ga
 });
 
 test("belt-lane controls fit desktop, classic/new mobile, portrait/landscape, and all font scales", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(workflowTimeoutMs(120_000));
   const configurations = [
     ["desktop", { width: 1440, height: 900 }],
     ["legacy", { width: 390, height: 844 }],
@@ -196,7 +197,7 @@ test("dense planets auto-enable Canvas hit testing without extreme mode and prom
 });
 
 test("automatic dense mode falls back to complete React Flow edges when Canvas is unavailable", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await page.addInitScript(denseFactorySeed({ canvasFailure: true }), { releaseNoteId: RELEASE_NOTE_ID, canvasFailure: true });
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");

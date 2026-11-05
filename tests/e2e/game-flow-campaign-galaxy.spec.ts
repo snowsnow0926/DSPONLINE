@@ -1,5 +1,5 @@
 import { expect, test, type Browser, type Locator, type Page } from "@playwright/test";
-import { startupTimeoutMs } from "./startup-timeout";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 import { selectSettingsCategory } from "./settings-helpers";
@@ -1908,7 +1908,7 @@ test("star map yields immediately to every primary workspace on desktop and mobi
 });
 
 test("all font scales keep the header and both construction-dock modes inside desktop and phone viewports", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(workflowTimeoutMs(60_000));
   await page.setViewportSize({ width: 1440, height: 900 });
   await freshGame(page);
   await dismissOnboarding(page);

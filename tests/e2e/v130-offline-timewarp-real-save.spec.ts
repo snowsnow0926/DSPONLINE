@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { expect, test } from "@playwright/test";
 
 const fixturePath = process.env.DSP_REAL_OFFLINE_TIME_WARP_FIXTURE;
@@ -28,7 +29,7 @@ test.describe("1.2.3 real-save offline and pure-idle workers", () => {
     // not the production operation, and can crash Chromium after the first
     // successful result. Keep this gate representative and give the large-save
     // classifier's 90-second transactional deadline room to finish.
-    test.setTimeout(180_000);
+    test.setTimeout(workflowTimeoutMs(180_000));
     await page.goto(harnessPath);
     const result = await page.evaluate(async () => {
       const loadModule = new Function("specifier", "return import(specifier)") as
@@ -148,7 +149,7 @@ test.describe("1.2.3 real-save offline and pure-idle workers", () => {
   });
 
   test("8x, 12x and 16x slices stay under the endgame Worker watchdog and terminate promptly", async ({ page }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(workflowTimeoutMs(90_000));
     await page.goto(harnessPath);
     const result = await page.evaluate(async () => {
       const loadModule = new Function("specifier", "return import(specifier)") as

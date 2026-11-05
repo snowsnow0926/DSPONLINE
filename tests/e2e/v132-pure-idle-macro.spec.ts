@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { createHash } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { expect, test } from "@playwright/test";
@@ -283,7 +284,7 @@ test.describe("1.2.3 pure-idle macro recovery", () => {
   });
 
   test("rebuilds a killed macro Worker from its unchanged checkpoint and finalizes a valid save", async ({ page }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(workflowTimeoutMs(90_000));
     const result = await page.evaluate(async () => {
       const benchmark = await import("/src/game/benchmark.ts");
       const contentPacks = await import("/src/game/contentPacks.ts");

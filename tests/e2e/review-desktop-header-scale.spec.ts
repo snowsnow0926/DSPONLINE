@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 
 test("desktop header keeps metric text inside the shell at all supported font scales", async ({ page }, testInfo) => {
-  test.setTimeout(180_000);
+  test.setTimeout(workflowTimeoutMs(180_000));
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {

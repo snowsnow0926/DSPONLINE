@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -28,7 +29,7 @@ for (const { denySnapshot, backend } of [
   { denySnapshot: true, backend: "local-storage" },
   { denySnapshot: false, backend: "indexeddb" },
 ] as const) test(`direct cloud slot download ${denySnapshot ? "refuses replacement if recovery fails" : "keeps the prior slot when the latest revision changes"} with ${backend}`, async ({ page }, testInfo) => {
-  test.setTimeout(240_000);
+  test.setTimeout(workflowTimeoutMs(240_000));
   page.setDefaultTimeout(30_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const errors: string[] = [], writes: string[] = [];
@@ -78,7 +79,7 @@ for (const { denySnapshot, backend } of [
     return fulfill({ error: "isolated slot recovery route unavailable" }, 404);
   });
   await page.goto("/");
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   let saves = await openSaves(page);
   const backendLabel = saves.locator(".save-storage-usage > header > small");
   await expect(backendLabel).toHaveText(backend === "indexeddb" ? "IndexedDB" : "兼容存储");
@@ -92,7 +93,7 @@ for (const { denySnapshot, backend } of [
   stateChecksum = remote.checksum = checksum(remote.formatVersion, remote.state);
   payload = JSON.stringify(remote);
   await page.reload();
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   await page.getByLabel("打开银河网络", { exact: true }).click();
   const galaxy = page.getByRole("dialog", { name: "银河网络", exact: true });
   await galaxy.getByRole("tab", { name: "云存档", exact: true }).click();
@@ -110,7 +111,7 @@ for (const { denySnapshot, backend } of [
   advertisedChecksum = actualLocal.checksum;
   await conflict.getByRole("button", { name: "稍后处理", exact: true }).click();
   await page.reload();
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   await page.getByLabel("打开银河网络", { exact: true }).click();
   await galaxy.getByRole("tab", { name: "云存档", exact: true }).click();
   const row = galaxy.locator('[data-cloud-slot="1"]');
@@ -150,7 +151,7 @@ for (const { denySnapshot, backend } of [
   await saves.getByLabel("载入槽位 1", { exact: true }).click();
   await expect.poll(() => page.locator('.tray-row[title="拿取铁矿石"] strong').textContent(), { timeout: 60_000 }).toMatch(/^(88|99)$/);
   await page.reload();
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   saves = await openSaves(page);
   const replaced = await exportedEnvelope(page);
   expect.soft(replaced.state.tray.iron_ore).toBe(denySnapshot ? 88 : 99);
@@ -161,7 +162,7 @@ for (const { denySnapshot, backend } of [
     await saves.locator(".save-snapshot-row").filter({ hasText: /恢复.*云.*槽位/ }).getByRole("button", { name: /^回滚到快照 / }).click();
     await expect(page.locator('.tray-row[title="拿取铁矿石"] strong')).toHaveText("88", { timeout: 60_000 });
     await page.reload();
-    await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
     await openSaves(page);
     const rollback = await exportedEnvelope(page);
     expect(rollback.state.tray.iron_ore).toBe(88);
@@ -191,7 +192,7 @@ for (const { denySnapshot, backend } of [
     await saves.locator(".save-snapshot-row").filter({ hasText: /恢复.*云.*槽位/ }).getByRole("button", { name: /^回滚到快照 / }).click();
     await expect(page.locator('.tray-row[title="拿取铁矿石"] strong')).toHaveText("88", { timeout: 60_000 });
     await page.reload();
-    await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
     await openSaves(page);
     const rollback = await exportedEnvelope(page);
     expect(rollback.state.tray.iron_ore).toBe(88);

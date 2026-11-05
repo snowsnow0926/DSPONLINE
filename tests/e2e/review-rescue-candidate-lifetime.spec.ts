@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -28,7 +29,7 @@ for (const touch of [false, true]) {
 test.describe(touch ? "phone" : "desktop", () => {
 test.use({ viewport: touch ? { width: 390, height: 844 } : { width: 1440, height: 900 }, hasTouch: touch, isMobile: touch });
 test("cancelled rescue keeps the original factory when its earlier snapshot completes", async ({ page }, testInfo) => {
-  test.setTimeout(240_000);
+  test.setTimeout(workflowTimeoutMs(240_000));
   page.setDefaultTimeout(30_000);
   const errors: string[] = [];
   const backups: string[] = [];

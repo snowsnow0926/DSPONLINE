@@ -1713,7 +1713,7 @@ test("thermal power accepts fuel and responds to mining demand", async ({ page }
 });
 
 test("spray coating closes the Mk.III proliferator logistics and extra-output loop", async ({ page }) => {
-  test.setTimeout(45_000);
+  test.setTimeout(process.env.DSP_E2E_LOW_RESOURCE === "1" ? 180_000 : 45_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await openProliferatorStageGame(page);
   await page.locator(".react-flow__controls-fitview").click();

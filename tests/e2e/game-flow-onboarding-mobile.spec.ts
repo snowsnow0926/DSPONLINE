@@ -1568,10 +1568,14 @@ test("manual mining feeds a powered smelter", async ({ page }) => {
   const ironVein = page.locator(".vein-node").filter({ hasText: "铁矿石" });
   const mineButton = ironVein.getByTitle("长按采集铁矿石");
   await mineButton.hover();
-  await page.mouse.down();
-  await page.waitForTimeout(850);
-  await page.mouse.up();
-  await expect(page.locator(".campaign-reward-token")).toContainText("传送带 Mk.I");
+  await Promise.all([
+    expect(page.locator(".campaign-reward-token")).toContainText("传送带 Mk.I"),
+    (async () => {
+      await page.mouse.down();
+      await page.waitForTimeout(850);
+      await page.mouse.up();
+    })(),
+  ]);
   await page.screenshot({ path: "artifacts/qa/campaign-reward-flight-1560.png", fullPage: true });
 
   await mineButton.hover();

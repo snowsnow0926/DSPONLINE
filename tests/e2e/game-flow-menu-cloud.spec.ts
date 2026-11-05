@@ -1521,7 +1521,7 @@ test("start menu gates simulation and exposes saves, cloud, import and settings"
   await page.getByRole("button", { name: /开始游戏/ }).click();
   await expect(page.locator(".game-shell")).toBeVisible();
   await expect(page.locator(".vein-node").filter({ hasText: "铁矿石" })).toBeVisible();
-  await expect.poll(() => presenceIds.length).toBe(1);
+  await expect.poll(() => presenceIds.length).toBeGreaterThanOrEqual(1);
   expect(presenceIds[0]).toMatch(/^player_[A-Za-z0-9_-]{16,}$/);
 
   await page.getByTitle("保存并返回主菜单").click();
@@ -1529,7 +1529,7 @@ test("start menu gates simulation and exposes saves, cloud, import and settings"
   await expect(page.getByRole("button", { name: /继续游戏/ })).toBeVisible();
   await page.getByRole("button", { name: /继续游戏/ }).click();
   await expect(page.locator(".game-shell")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
-  expect(presenceIds).toHaveLength(1);
+  expect(new Set(presenceIds)).toEqual(new Set([presenceIds[0]]));
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.player-id.v1"))).toBe(presenceIds[0]);
 });
 

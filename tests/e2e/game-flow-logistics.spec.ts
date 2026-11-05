@@ -1572,8 +1572,10 @@ test("yellow matrix industry exposes remote resources, chemistry and three-color
   await water.click();
   await expect(water).toContainText("抽水站 ×1");
 
-  await page.getByTitle("切换到烬原 II").click();
-  await expect(page.locator(".planet-transition")).toContainText("烬原 II");
+  await Promise.all([
+    expect(page.locator(".planet-transition")).toContainText("烬原 II"),
+    page.getByTitle("切换到烬原 II").click(),
+  ]);
   await page.screenshot({ path: "artifacts/qa/planet-transition-1440.png", fullPage: true });
   await expect(page.locator(".vein-node").filter({ has: page.getByText("硅石", { exact: true }) })).toHaveCount(1);
   await expect(page.locator(".vein-node").filter({ has: page.getByText("钛石", { exact: true }) })).toHaveCount(1);

@@ -15860,7 +15860,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const operation = { generation: saveImportInspectionGenerationRef.current, committing: false };
     saveImportRescueRef.current = operation;
     setImportRescuePending(true);
-    setRuntimePersistenceProgress((current) => current?.phase === "committed" || current?.phase === "failed" ? null : current);
+    setRuntimePersistenceProgress((current) => current?.phase === "complete" || current?.phase === "failed" ? null : current);
     setNotice(null);
     const isCurrent = () => saveImportRescueRef.current === operation &&
       saveImportInspectionGenerationRef.current === operation.generation && !lifecycleExitStartedRef.current;

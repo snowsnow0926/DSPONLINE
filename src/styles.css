@@ -16344,7 +16344,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   display: grid;
 }
 
-.game-shell[data-compact-layout="medium"]:not([data-mobile-shell="true"]) .header-actions button {
+.game-shell[data-compact-layout="medium"]:not([data-mobile-shell="true"]) .header-actions > button {
   width: 44px;
   height: 44px;
 }

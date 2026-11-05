@@ -131,21 +131,40 @@ test("legacy overflow fits the compact viewport at every supported text scale", 
       await trigger.click();
       const menu = page.getByRole("menu");
       const last = menu.getByRole("menuitem").last();
-      await last.focus();
+      await menu.getByRole("menuitem").first().focus();
+      await page.keyboard.press("End");
+      await expect(last).toBeFocused();
       const sample = await last.evaluate((item) => {
         const bounds = item.getBoundingClientRect();
         const menu = item.closest('[role="menu"]')!;
         const outer = menu.getBoundingClientRect();
         const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+        const style = getComputedStyle(menu);
+        const contentWidth = menu.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+        const labels = Array.from(menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')).map((button) => {
+          const box = button.getBoundingClientRect();
+          const walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT);
+          let node: Node | null, fits = true;
+          while ((node = walker.nextNode())) {
+            if (!node.textContent?.trim()) continue;
+            const range = document.createRange(); range.selectNodeContents(node);
+            const text = range.getBoundingClientRect();
+            fits &&= text.left >= box.left - 1 && text.right <= box.right + 1 && text.top >= box.top - 1 && text.bottom <= box.bottom + 1;
+          }
+          return { text: button.textContent, width: box.width, fullWidth: box.width >= contentWidth - 1, fits };
+        });
         return { menuTop: outer.top, menuBottom: outer.bottom, itemBottom: bounds.bottom,
           fits: outer.top >= 0 && outer.bottom <= innerHeight && outer.left >= 0 && outer.right <= innerWidth,
           reachable: bounds.top >= 0 && bounds.bottom <= innerHeight && Boolean(hit && item.contains(hit)),
-          noHorizontalScroll: menu.scrollWidth <= menu.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth + 1 };
+          noHorizontalScroll: menu.scrollWidth <= menu.clientWidth + 1 && document.documentElement.scrollWidth <= window.innerWidth + 1,
+          labels };
       });
       samples.push({ ...viewport, scale, ...sample });
       expect.soft(sample.fits, `menu fits ${viewport.width}x${viewport.height} ${scale}%`).toBe(true);
       expect.soft(sample.reachable, `last action reachable ${viewport.width}x${viewport.height} ${scale}%`).toBe(true);
       expect.soft(sample.noHorizontalScroll).toBe(true);
+      expect.soft(sample.labels.every((label) => label.fullWidth), `full-width actions ${viewport.width}x${viewport.height} ${scale}%`).toBe(true);
+      expect.soft(sample.labels.every((label) => label.fits), `readable labels ${viewport.width}x${viewport.height} ${scale}%`).toBe(true);
       if (scale === 150) for (const theme of ["dark", "light"]) {
         await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
         await page.screenshot({ path: `artifacts/review-header-overflow-20261105/${process.env.DSP_REVIEW_CHECK_NAME || "review"}-${viewport.width}x${viewport.height}-${theme}.png`, animations: "disabled" });

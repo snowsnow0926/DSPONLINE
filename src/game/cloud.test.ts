@@ -391,6 +391,24 @@ describe("cloud save synchronization markers", () => {
     });
   });
 
+  it("rejects explicit cloud slot metadata before normalizing the requested target", async () => {
+    const raw = exportGame(createInitialState());
+    const cloudSave = { ...metadata(4, "wrong-slot", raw), slot: "2" as const, payload: raw };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ cloudSave }));
+    await expect(downloadCloudSave(undefined, "1")).rejects.toMatchObject({
+      status: 409,
+      payload: { code: "SAVE_SLOT_MISMATCH", expectedSlot: "1", receivedSlot: "2" },
+    });
+  });
+
+  it("still accepts old cloud metadata without a declared slot", async () => {
+    const raw = exportGame(createInitialState());
+    const cloudSave = { ...metadata(1, "legacy-slot", raw), payload: raw };
+    delete cloudSave.slot;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ cloudSave }));
+    await expect(downloadCloudSave()).resolves.toMatchObject({ slot: "main", mode: "normal", revision: 1 });
+  });
+
   it("reads once, re-saves, and uploads a legacy ordinary-building quantumTarget save", async () => {
     let state = createInitialState();
     state.construction.storage_mk1 = 1;

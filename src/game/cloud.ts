@@ -1544,6 +1544,13 @@ export async function downloadCloudSave(revision?: number, slot: CloudSaveSlot =
       receivedMode: payloadMode ?? metadataMode,
     });
   }
+  if (result.cloudSave.slot !== undefined && result.cloudSave.slot !== slot) {
+    throw new CloudApiError("云存档槽位与请求目标不匹配，已阻止恢复", 409, {
+      code: "SAVE_SLOT_MISMATCH",
+      expectedSlot: slot,
+      receivedSlot: result.cloudSave.slot,
+    });
+  }
   return { ...result.cloudSave, slot, mode };
 }
 

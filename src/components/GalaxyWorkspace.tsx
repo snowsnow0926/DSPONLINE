@@ -39,8 +39,7 @@ import { useAppLocale } from "../i18n/locale";
 import { appMessage } from "../i18n/messages";
 import { ACCOUNT_AVATARS, getActiveAccount, getGalacticThroughputSnapshot, type AccountProfileChanges, type AccountState } from "../game/account";
 import { CloudApiError, clearCloudSyncMarker, compareCloudSave, deleteCloudSave, describeCloudUploadError, downloadCloudSave, fetchCloudLeaderboard, fetchCloudLeaderboardMe, fetchCloudSaveHistory, fetchSpeedrunLeaderboard, loginCloudAccount, logoutCloudAccount, markCloudSaveSynchronized, refreshCloudSaveMetadata, registerCloudAccount, restoreCloudSaveRevision, resumeCloudSession, setCloudLeaderboardVisibility, submitCloudLeaderboard, submitSpeedrunResult, summarizeCloudPayload, uploadCloudSave, type CloudLeaderboardEntry, type CloudLeaderboardMe, type CloudLeaderboardMetricWindow, type CloudSave, type CloudSaveMetadata, type CloudSaveSlot, type CloudSession, type CloudSyncState, type CloudUploadDiagnostics, type CloudUploadStage, type SpeedrunLeaderboardEntry } from "../game/cloud";
-import { exportGame, exportGameSlotFromPersistence, getSaveSlotSummaries, inspectSave, saveGameSnapshotVerified, saveGameSlotVerified, type SaveSlotId } from "../game/storage";
-import { getMenuSlotSummaries } from "../game/savePreview";
+import { exportGame, exportGameSlotFromPersistence, getSaveSlotSummaries, inspectSave, saveGameSlotVerified, type SaveSlotId } from "../game/storage";
 import {
   LEADERBOARD_CATEGORIES,
   LEADERBOARD_SEASONS,
@@ -66,7 +65,8 @@ import { WorkspaceFrame } from "./WorkspaceFrame";
 import { cloudSaveCapacityDetails, type CloudSaveCapacityDetails } from "../game/cloudSaveCapacity";
 import { cloudSyncStatusFromUpload, writeCloudSyncStatus } from "../game/cloudSyncStatus";
 import { exportTextFile } from "../game/fileExport";
-import { getLocalSaveBackend, getPrimaryLocalSaveRevision, readLocalSavePayload } from "../game/localSaveStore";
+import { getLocalSaveBackend, getPrimaryLocalSaveRevision } from "../game/localSaveStore";
+import { cloudRestoreTargetIssue, preserveCloudRestoreSlot } from "./cloudSaveRecovery";
 import {
   canContinueLegacyAuthorityAsyncLease,
   createLegacyAuthorityAsyncLeaseFence,
@@ -150,16 +150,6 @@ function leaderboardStatusMessage(me: CloudLeaderboardMe | null): string | null 
   if (me.status === "hidden") return "当前账号已退出公开排行榜；云存档仍正常同步";
   if (me.status === "unavailable") return "服务器暂时无法生成当前账号成绩；玩家存档、云存档和生产数据不会因此被修改";
   return null;
-}
-
-async function preserveCloudConflictSlot(slotId: SaveSlotId, mode: "normal" | "speedrun"): Promise<boolean> {
-  // Back up the actual slot, without loading it into the running factory or
-  // applying offline progress. Keep its full state out of the later write's scope.
-  const key = getMenuSlotSummaries(mode).find((slot) => slot.slotId === slotId)?.key;
-  const raw = key ? await readLocalSavePayload(key) : null;
-  const previous = raw ? inspectSave(raw) : null;
-  if (!previous?.valid || !previous.state || previous.mode !== mode) return false;
-  return Boolean(await saveGameSnapshotVerified(previous.state, `恢复云端槽位 ${slotId} 前`));
 }
 
 export function GalaxyWorkspace({
@@ -674,8 +664,11 @@ export function GalaxyWorkspace({
       const save = await downloadCloudSave(undefined, slot, game.mode);
       if (!save) throw new Error(`云端槽位 ${slot} 为空`);
       const inspection = inspectSave(save.payload);
-      if (!inspection.valid || !inspection.state) throw new Error(inspection.issues[0] ?? "云存档格式无效");
-      if (inspection.mode !== game.mode) throw new Error("云端槽位模式与当前工厂不一致，已阻止写入");
+      const issue = cloudRestoreTargetIssue(inspection, save, game.mode, slot);
+      if (issue || !inspection.state) throw new Error(issue ?? "云存档格式无效");
+      if (!await preserveCloudRestoreSlot(game.mode, Number(slot) as SaveSlotId)) {
+        throw new Error(appMessage(locale, "localSaveCloudSlotSnapshotFailure"));
+      }
       const result = await saveGameSlotVerified(Number(slot) as SaveSlotId, inspection.state);
       if (!result.success) throw new Error(result.message);
       markCloudSaveSynchronized(cloudSession.user.id, save, save.payload, slot, game.mode);
@@ -782,9 +775,9 @@ export function GalaxyWorkspace({
         ? await onRestoreCloudSave(cloudSave.payload)
         : await (async () => {
             const inspection = inspectSave(cloudSave.payload);
-            if (!inspection.valid || !inspection.state) return { success: false, message: inspection.issues[0] ?? "云存档格式无效" };
-            if (inspection.mode !== game.mode) return { success: false, message: "冲突云存档模式与当前工厂不一致，已阻止恢复" };
-            if (!await preserveCloudConflictSlot(Number(cloudConflict.slot) as SaveSlotId, game.mode)) {
+            const issue = cloudRestoreTargetIssue(inspection, cloudSave, game.mode, cloudConflict.slot);
+            if (issue || !inspection.state) return { success: false, message: issue ?? "云存档格式无效" };
+            if (!await preserveCloudRestoreSlot(game.mode, Number(cloudConflict.slot) as SaveSlotId, true)) {
               return { success: false, message: appMessage(locale, "localSaveCloudSlotSnapshotFailure") };
             }
             const saved = await saveGameSlotVerified(Number(cloudConflict.slot) as SaveSlotId, inspection.state);

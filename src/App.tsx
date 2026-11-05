@@ -23,7 +23,7 @@ import {
   type OnSelectionChangeParams,
   type SnapGrid,
 } from "@xyflow/react";
-import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
+import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { Activity, AlertTriangle, ArrowUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Focus, Map as MapIcon, PanelRightClose, RefreshCw, Route, Satellite, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
 import { useCanvasKeyboardPan } from "./hooks/useCanvasKeyboardPan";
 import { enclosedCanvasRegionIds, moveCanvasSelection } from "./game/canvasRegionSelection";
@@ -2201,6 +2201,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [orbitalStationOpen, setOrbitalStationOpen] = useState(false);
   const [orbitalStationInitialTab, setOrbitalStationInitialTab] = useState<StationTab | undefined>();
   const [blueprintsOpen, setBlueprintsOpen] = useState(false);
+  const factoryDraftSessionId = useId();
+  const [factoryDraftScope, setFactoryDraftScope] = useState(0);
+  const factoryDraftScopeRef = useRef(0);
   const [nativeBlueprintSelectedId, setNativeBlueprintSelectedId] = useState<string | null>(null);
   const [nativeBlueprintLibraryCursor, setNativeBlueprintLibraryCursor] = useState(0);
   const [nativeBlueprintQueueCursor, setNativeBlueprintQueueCursor] = useState(0);
@@ -14847,6 +14850,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice("Windows 原生权威尚未安全交还控制权，已阻止替换当前工厂；Rust 工厂和旧 JavaScript 镜像均未改变");
       return false;
     }
+    // Fence old editor callbacks immediately, before React replaces their DOM.
+    factoryDraftScopeRef.current += 1;
+    setFactoryDraftScope(factoryDraftScopeRef.current);
     // A newly accepted factory also ends the scope of file candidates that
     // were inspected or prepared for the previous factory.
     saveImportInspectionGenerationRef.current += 1;
@@ -23340,6 +23346,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             <small>整批原子提交：任一线路非法或材料不足时全部不创建、全部不扣料。Ctrl/Shift 可临时保持连续拉线。</small>
           </section> : null}
           {factoryCanvasRegions.find((region) => region.id === selectedRegionId) ? <CanvasRegionEditor
+            draftScope={`${factoryDraftSessionId}:${factoryDraftScope}`}
             region={factoryCanvasRegions.find((region) => region.id === selectedRegionId)!}
             onSelectContents={nativePlayerAuthorityOwnsRuntime ? undefined : () => {
               const region = gameRef.current.canvasRegions.find((candidate) => candidate.id === selectedRegionId);
@@ -23368,6 +23375,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               setNotice(isEnglish ? `Selected region and ${ids.length} nodes` : `已选中区域与 ${ids.length} 个节点`);
             }}
             onChange={(changes) => {
+              if (factoryDraftScope !== factoryDraftScopeRef.current) return;
               if (nativePlayerAuthorityOwnsRuntime) {
                 const frame = nativeAuthoritativeFactoryWorkspaceFrame;
                 if (frame?.workspace) commitNativeWorkspaceAction({
@@ -23995,6 +24003,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         !nativeBlueprintRenameResolution ? <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}
+        draftScope={`${factoryDraftSessionId}:${factoryDraftScope}`}
         factoryHeadlineReadModel={factoryConstructionHeadlineReadModel}
         constructionReadModel={factoryConstructionWorkspaceReadModel}
         mobile={nextMobileShell}
@@ -24006,7 +24015,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           commitGame((current) => removeBlueprint(current, blueprintId));
           if (blueprintPlacementId === blueprintId) setBlueprintPlacementId(null);
         }}
-        onRename={(blueprintId, name) => commitGame((current) => renameBlueprint(current, blueprintId, name))}
+        onRename={(blueprintId, name) => {
+          if (factoryDraftScope !== factoryDraftScopeRef.current) return;
+          commitGame((current) => renameBlueprint(current, blueprintId, name));
+        }}
         onTransform={(blueprintId, rotation, mirror) => commitGame((current) => setBlueprintTransform(current, blueprintId, rotation, mirror))}
         onRecipeOverride={(blueprintId, sourceRecipeId, targetRecipeId) => commitGame((current) => setBlueprintRecipeOverride(current, blueprintId, sourceRecipeId, targetRecipeId))}
         onFundQueue={(entryId, scope) => commitGame((current) => fundConstructionQueueEntry(current, entryId, scope))}

@@ -167,17 +167,19 @@ export function CanvasRegionLayer({ regions, draft, selectedRegionId, resizePrev
   </>;
 }
 
-export function CanvasRegionEditor({ region, onChange, onRemove, onClose, onSelectContents }: {
+export function CanvasRegionEditor({ region, draftScope, onChange, onRemove, onClose, onSelectContents }: {
   region: CanvasRegion;
+  draftScope?: string;
   onChange: (changes: Partial<Pick<CanvasRegion, "name" | "fillColor" | "borderColor">>) => void;
   onRemove: () => void;
   onClose: () => void;
   onSelectContents?: () => void;
 }) {
+  const nameDraftId = `canvas-region-name:${region.id}${draftScope === undefined ? "" : `:factory-${draftScope}`}`;
   return (
     <section className="canvas-region-editor nodrag nopan" aria-label="生产区域设置">
       <Palette size={15} />
-      <label><span>区域名称</span><StableTextInput commitOnBlur draftId={`canvas-region-name:${region.id}`} value={region.name} onValueChange={(name) => onChange({ name })} maxLength={28} onBlur={() => clearStableTextDraft(`canvas-region-name:${region.id}`)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>
+      <label><span>区域名称</span><StableTextInput commitOnBlur draftId={nameDraftId} value={region.name} onValueChange={(name) => onChange({ name })} maxLength={28} onBlur={() => clearStableTextDraft(nameDraftId)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>
       <label className="canvas-region-editor__color"><span>背景</span><input type="color" value={region.fillColor} onInput={(event) => onChange({ fillColor: event.currentTarget.value })} /></label>
       <label className="canvas-region-editor__color"><span>边框</span><input type="color" value={region.borderColor} onInput={(event) => onChange({ borderColor: event.currentTarget.value })} /></label>
       {onSelectContents ? <button type="button" onClick={onSelectContents} title="选中区域与内部节点，拖动节点即可一起移动" aria-label="选中区域与内部节点"><BoxSelect size={16} /></button> : null}
@@ -470,9 +472,10 @@ function formatSimulationTime(seconds: number): string {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
-export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, constructionReadModel, onClose, onDeploy, onRemove, onRename, onTransform, onRecipeOverride, onFundQueue, onFundAllQueues, onCancelQueue, onExport, onImport, mobile = false, mobileSubview, onMobileOpenDetail }: {
+export function BlueprintWorkspace({ open, game, draftScope, factoryHeadlineReadModel, constructionReadModel, onClose, onDeploy, onRemove, onRename, onTransform, onRecipeOverride, onFundQueue, onFundAllQueues, onCancelQueue, onExport, onImport, mobile = false, mobileSubview, onMobileOpenDetail }: {
   open: boolean;
   game: GameState;
+  draftScope?: string;
   factoryHeadlineReadModel: FactoryConstructionHeadlineReadModel;
   constructionReadModel: FactoryConstructionWorkspaceReadModel;
   onClose: () => void;
@@ -578,6 +581,7 @@ export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, const
         {game.blueprints.length === 0 ? (
           <div className="blueprint-empty"><BoxSelect size={26} /><strong>蓝图库为空</strong><span>在画布中框选设备，再使用选区复制命令建立模板。</span></div>
         ) : visibleBlueprints.map((blueprint) => {
+          const nameDraftId = `blueprint-name:${blueprint.id}${draftScope === undefined ? "" : `:factory-${draftScope}`}`;
           const requirements = getBlueprintRequirements(blueprint);
           const fleet = getBlueprintFleetLoadPreview(game, blueprint.id);
           const deployable = canPlaceBlueprint(game, blueprint.id);
@@ -588,7 +592,7 @@ export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, const
             <article className={`blueprint-card${viewMode === "compact" && !detailBlueprintId ? " blueprint-card--compact" : ""}`} key={blueprint.id}>
               <header>
                 <i><Layers3 size={18} /></i>
-                <label><span>蓝图名称</span><StableTextInput commitOnBlur draftId={`blueprint-name:${blueprint.id}`} value={blueprint.name} onValueChange={(name) => onRename(blueprint.id, name)} aria-label={`${blueprint.name}名称`} onBlur={() => clearStableTextDraft(`blueprint-name:${blueprint.id}`)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>
+                <label><span>蓝图名称</span><StableTextInput commitOnBlur draftId={nameDraftId} value={blueprint.name} onValueChange={(name) => onRename(blueprint.id, name)} aria-label={`${blueprint.name}名称`} onBlur={() => clearStableTextDraft(nameDraftId)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>
                 <em>{blueprint.entities.length} 设备 · {blueprint.resourceAnchors?.length ?? 0} 资源锚点 · {blueprint.belts.length} 线路 · {blueprint.externalPorts?.length ?? 0} 外部端口</em>
               </header>
               <div className="blueprint-composition">

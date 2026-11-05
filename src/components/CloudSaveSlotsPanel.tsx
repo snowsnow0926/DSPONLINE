@@ -22,12 +22,12 @@ import {
   cloudRestoreTargetIssue,
   cloudSaveModeLabel,
   cloudSaveSlotLabel,
+  preserveCloudRestoreSlot,
 } from "./cloudSaveRecovery";
 import { AccessibleDialog } from "./AccessibleDialog";
 import "./cloud-save-recovery.css";
 
 const resolveMenuContinueSave = (mode: CloudSaveMode) => import("../game/savePreviewPayload").then((module) => module.resolveMenuContinueSave(mode));
-const readMenuSavePayload = (key: string) => import("../game/savePreviewPayload").then((module) => module.readMenuSavePayload(key));
 
 interface LocalCloudSlotSummary {
   slotId: SaveSlotId;
@@ -213,12 +213,10 @@ export function CloudSaveSlotsPanel({ mode = "normal", cloudSaves, cloudSavesByM
     const issue = cloudRestoreTargetIssue(inspection, cloudSave, action.mode, action.slot);
     if (issue || !inspection.state) throw new Error(issue ?? "云存档正文无效");
 
-    const localSlotKey = action.slot === "main"
-      ? null
-      : getMenuSlotSummaries(action.mode).find((entry) => entry.slotId === Number(action.slot))?.key ?? null;
-    const existingRaw = action.slot === "main"
-      ? (await resolveMenuContinueSave(action.mode))?.raw ?? null
-      : localSlotKey ? await readMenuSavePayload(localSlotKey) : null;
+    if (action.slot !== "main" && !await preserveCloudRestoreSlot(action.mode, Number(action.slot) as SaveSlotId)) {
+      throw new Error(appMessage(locale, "localSaveCloudSlotSnapshotFailure"));
+    }
+    const existingRaw = action.slot === "main" ? (await resolveMenuContinueSave(action.mode))?.raw ?? null : null;
     if (existingRaw) {
       const existingInspection = storage.inspectSave(existingRaw);
       if (!existingInspection.valid || !existingInspection.state || existingInspection.mode !== action.mode) {

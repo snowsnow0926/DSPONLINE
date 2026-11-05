@@ -24950,6 +24950,20 @@ html:not([data-native-ui-scale])[data-ui-font-scale="200"] .game-header {
   height: 100%;
 }
 
+html:not([data-native-ui-scale])[data-ui-font-scale="125"] .header-metrics,
+html:not([data-native-ui-scale])[data-ui-font-scale="150"] .header-metrics,
+html:not([data-native-ui-scale])[data-ui-font-scale="200"] .header-metrics {
+  min-height: 0;
+  grid-template-columns: repeat(4, minmax(max-content, 1fr));
+  overflow-x: auto;
+}
+
+html:not([data-native-ui-scale])[data-ui-font-scale="125"] .header-metrics strong,
+html:not([data-native-ui-scale])[data-ui-font-scale="150"] .header-metrics strong,
+html:not([data-native-ui-scale])[data-ui-font-scale="200"] .header-metrics strong {
+  white-space: nowrap;
+}
+
 html:not([data-native-ui-scale])[data-ui-font-scale="125"] .header-metrics > div,
 html:not([data-native-ui-scale])[data-ui-font-scale="150"] .header-metrics > div,
 html:not([data-native-ui-scale])[data-ui-font-scale="200"] .header-metrics > div {

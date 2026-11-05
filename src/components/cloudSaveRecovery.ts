@@ -46,3 +46,25 @@ export function cloudRestoreTargetIssue(
   }
   return null;
 }
+
+/** Preserve the actual manual slot, including when its normalized export is unavailable. */
+export async function preserveCloudRestoreSlot(
+  mode: CloudSaveMode,
+  slotId: 1 | 2 | 3,
+  requireExisting = false,
+): Promise<boolean> {
+  const { getLocalSaveCatalog, readLocalSavePayload } = await import("../game/localSaveStore");
+  const key = mode === "normal" ? `dsp-idle-network.slot.${slotId}` : `dsp-idle-network.slot.${mode}.${slotId}`;
+  const raw = await readLocalSavePayload(key);
+  // An unreadable/invalid catalog entry is still occupied. Never treat a
+  // missing validated export as permission to overwrite its durable record.
+  if (raw === null) return !requireExisting && getLocalSaveCatalog(key) === null;
+  const { inspectSave, saveGameSnapshotVerified } = await import("../game/storage");
+  const previous = inspectSave(raw);
+  if (!previous.valid || !previous.state || previous.mode !== mode) return false;
+  const declaredSlot = (JSON.parse(raw) as { slot?: unknown }).slot;
+  if (declaredSlot !== undefined && previous.slot !== slotId) return false;
+  // Older envelopes may omit slot. Preserve them without loading the factory
+  // or advancing offline time; do not retain this state in the later write.
+  return Boolean(await saveGameSnapshotVerified(previous.state, `恢复云端槽位 ${slotId} 前`));
+}

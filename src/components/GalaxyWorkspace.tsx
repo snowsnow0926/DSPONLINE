@@ -35,6 +35,8 @@ import {
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useAppLocale } from "../i18n/locale";
+import { appMessage } from "../i18n/messages";
 import { ACCOUNT_AVATARS, getActiveAccount, getGalacticThroughputSnapshot, type AccountProfileChanges, type AccountState } from "../game/account";
 import { CloudApiError, clearCloudSyncMarker, compareCloudSave, deleteCloudSave, describeCloudUploadError, downloadCloudSave, fetchCloudLeaderboard, fetchCloudLeaderboardMe, fetchCloudSaveHistory, fetchSpeedrunLeaderboard, loginCloudAccount, logoutCloudAccount, markCloudSaveSynchronized, refreshCloudSaveMetadata, registerCloudAccount, restoreCloudSaveRevision, resumeCloudSession, setCloudLeaderboardVisibility, submitCloudLeaderboard, submitSpeedrunResult, summarizeCloudPayload, uploadCloudSave, type CloudLeaderboardEntry, type CloudLeaderboardMe, type CloudLeaderboardMetricWindow, type CloudSave, type CloudSaveMetadata, type CloudSaveSlot, type CloudSession, type CloudSyncState, type CloudUploadDiagnostics, type CloudUploadStage, type SpeedrunLeaderboardEntry } from "../game/cloud";
 import { exportGame, exportGameSlotFromPersistence, getSaveSlotSummaries, inspectSave, saveGameSlotVerified, type SaveSlotId } from "../game/storage";
@@ -162,6 +164,7 @@ export function GalaxyWorkspace({
   onSwitchAccount,
   onRestoreCloudSave,
 }: GalaxyWorkspaceProps) {
+  const { locale } = useAppLocale();
   const [tab, setTab] = useState<GalaxyTab>("ranking");
   const [speedrunTarget, setSpeedrunTarget] = useState<SpeedrunTargetId>(SPEEDRUN_TARGET_IDS[0]);
   const [speedrunEntries, setSpeedrunEntries] = useState<SpeedrunLeaderboardEntry[]>([]);
@@ -181,6 +184,7 @@ export function GalaxyWorkspace({
   const [cloudBusy, setCloudBusy] = useState(false);
   const [cloudUploadActive, setCloudUploadActive] = useState(false);
   const cloudUploadAbortRef = useRef<AbortController | null>(null);
+  const cloudRestoreInFlightRef = useRef(false);
   const cloudLegacyAuthorityFenceRef = useRef(createLegacyAuthorityAsyncLeaseFence(
     nativeAuthorityReadOnly ? "native" : "javascript",
   ));
@@ -714,18 +718,30 @@ export function GalaxyWorkspace({
   };
 
   const restorePendingCloudSave = async () => {
-    if (!pendingCloudSave) return;
-    const result = await onRestoreCloudSave(pendingCloudSave.payload);
-    setCloudMessage(result.message);
-    if (result.success) {
-      if (cloudSession.status === "authenticated" && cloudSession.user) markCloudSaveSynchronized(cloudSession.user.id, pendingCloudSave, pendingCloudSave.payload, "main", game.mode);
-      writeCloudSyncStatus(cloudSyncStatusFromUpload(game.mode, "main", "restored", {
-        comparison: "synced",
-        cloud: pendingCloudSave,
-        lastSuccessfulSyncAt: Date.now(),
-        message: `已恢复并校验云端修订 ${pendingCloudSave.revision}，恢复前本地快照已保留`,
-      }));
-      setPendingCloudSave(null);
+    if (!pendingCloudSave || cloudRestoreInFlightRef.current) return;
+    const candidate = pendingCloudSave;
+    cloudRestoreInFlightRef.current = true;
+    setCloudBusy(true);
+    setPendingCloudSave(null);
+    setCloudMessage(appMessage(locale, "cloudRestoreWorking"));
+    try {
+      const result = await onRestoreCloudSave(candidate.payload);
+      setCloudMessage(result.message);
+      if (result.success) {
+        if (cloudSession.status === "authenticated" && cloudSession.user) markCloudSaveSynchronized(cloudSession.user.id, candidate, candidate.payload, "main", game.mode);
+        writeCloudSyncStatus(cloudSyncStatusFromUpload(game.mode, "main", "restored", {
+          comparison: "synced",
+          cloud: candidate,
+          lastSuccessfulSyncAt: Date.now(),
+          message: `已恢复并校验云端修订 ${candidate.revision}，恢复前本地快照已保留`,
+        }));
+      } else setPendingCloudSave(candidate);
+    } catch (error) {
+      setCloudMessage(`${appMessage(locale, "cloudRestoreFailed")}${error instanceof Error ? `: ${error.message}` : ""}`);
+      setPendingCloudSave(candidate);
+    } finally {
+      cloudRestoreInFlightRef.current = false;
+      setCloudBusy(false);
     }
   };
 

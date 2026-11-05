@@ -89,6 +89,18 @@ const messages = {
     "zh-CN": "正在准备救援…",
     en: "Preparing rescue…",
   },
+  cloudRestoreWorking: {
+    "zh-CN": "正在恢复云存档并准备回滚快照…",
+    en: "Restoring the cloud save and preparing a recovery snapshot…",
+  },
+  cloudRestoreSuperseded: {
+    "zh-CN": "工厂已切换或页面已关闭，先前的云恢复请求已结束。",
+    en: "The factory changed or the page closed. The earlier cloud restore request has ended.",
+  },
+  cloudRestoreFailed: {
+    "zh-CN": "云存档恢复失败，可重试当前候选",
+    en: "Cloud restore failed. You can retry this candidate",
+  },
   saveImportRescueFailed: {
     "zh-CN": "存档救援失败，原候选已保留供重试",
     en: "Save rescue failed. The candidate is available to retry",

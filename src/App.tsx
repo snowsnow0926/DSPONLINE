@@ -15590,6 +15590,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const saveSummaryRefreshIdRef = useRef(0);
   const saveImportCommitInFlightRef = useRef(false);
   const saveImportRescueRef = useRef<{ generation: number; committing: boolean } | null>(null);
+  const cloudRestoreRef = useRef<{ generation: number } | null>(null);
   const [importOperationPending, setImportOperationPending] = useState(false);
   useEffect(() => () => {
     saveImportInspectionGenerationRef.current += 1;
@@ -15715,7 +15716,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return;
     }
-    if (saveImportCommitInFlightRef.current || saveImportRescueRef.current) {
+    if (saveImportCommitInFlightRef.current || saveImportRescueRef.current || cloudRestoreRef.current) {
       setNotice(appMessage(appLocale, "saveImportOperationBusy"));
       return;
     }
@@ -15760,7 +15761,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [appLocale, playTone, readNativeAuthorityPersistenceBoundary]);
 
   const cancelImport = useCallback(() => {
-    if (saveImportCommitInFlightRef.current) {
+    if (saveImportCommitInFlightRef.current || cloudRestoreRef.current) {
       setNotice(appMessage(appLocale, "saveImportOperationBusy"));
       return;
     }
@@ -15780,7 +15781,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     const importedState = pendingImportState;
     const importedPreview = importPreview;
-    if (!importedState || !importedPreview || saveImportCommitInFlightRef.current || saveImportRescueRef.current) return;
+    if (!importedState || !importedPreview || saveImportCommitInFlightRef.current || saveImportRescueRef.current || cloudRestoreRef.current) return;
     if (importedState.mode !== gameRef.current.mode) {
       setNotice(`模式不匹配：当前是${gameRef.current.mode === "speedrun" ? "速通" : "普通"}模式，不能直接导入${importedState.mode === "speedrun" ? "速通" : "普通"}存档`);
       playTone("alert");
@@ -15841,7 +15842,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return;
     }
-    if (saveImportCommitInFlightRef.current || saveImportRescueRef.current) return;
+    if (saveImportCommitInFlightRef.current || saveImportRescueRef.current || cloudRestoreRef.current) return;
     if (!importPreview?.repairable || importPreview.valid || !pendingImportRaw) return;
     if (!importRescueArmed) {
       setImportRescueArmed(true);
@@ -15934,50 +15935,72 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return { success: false, message };
     }
-    const inspection = await inspectSaveInWorker(raw);
-    if (!inspection.valid || !inspection.state) {
-      if (inspection.repairable && inspection.state) {
-        setImportPreview(inspection);
-        setPendingImportRaw(raw);
-        setPendingImportState(null);
-        setImportRescueArmed(false);
-        setOperationsTab("saves");
-        setOperationsOpen(true);
-        return { success: false, message: "云存档校验失败，已转到存档管理的受控救援入口" };
+    if (saveImportCommitInFlightRef.current || saveImportRescueRef.current || cloudRestoreRef.current ||
+      durablePrimarySaveInFlightRef.current || verifiedPrimarySaveInFlightDepthRef.current > 0) {
+      return { success: false, message: appMessage(appLocale, "saveImportOperationBusy") };
+    }
+    const operation = { generation: ++saveImportInspectionGenerationRef.current };
+    cloudRestoreRef.current = operation;
+    setImportOperationPending(true);
+    setImportPreview(null);
+    setPendingImportRaw(null);
+    setPendingImportState(null);
+    setImportRescueArmed(false);
+    const isCurrent = () => cloudRestoreRef.current === operation &&
+      saveImportInspectionGenerationRef.current === operation.generation && !lifecycleExitStartedRef.current;
+    const superseded = () => ({ success: false, message: appMessage(appLocale, "cloudRestoreSuperseded") });
+    try {
+      const inspection = await inspectSaveInWorker(raw);
+      if (!isCurrent()) return superseded();
+      if (!inspection.valid || !inspection.state) {
+        if (inspection.repairable && inspection.state) {
+          setImportPreview(inspection);
+          setPendingImportRaw(raw);
+          setPendingImportState(null);
+          setImportRescueArmed(false);
+          setOperationsTab("saves");
+          setOperationsOpen(true);
+          return { success: false, message: "云存档校验失败，已转到存档管理的受控救援入口" };
+        }
+        playTone("alert");
+        return { success: false, message: `云存档无效：${inspection.issues[0] ?? "格式或版本无法识别"}` };
       }
-      playTone("alert");
-      return { success: false, message: `云存档无效：${inspection.issues[0] ?? "格式或版本无法识别"}` };
+      if (inspection.mode !== gameRef.current.mode) {
+        playTone("alert");
+        return {
+          success: false,
+          message: `云存档属于${inspection.mode === "speedrun" ? "速通" : "普通"}模式，不能覆盖当前${gameRef.current.mode === "speedrun" ? "速通" : "普通"}工厂`,
+        };
+      }
+      const cloudCheckpoint = await requestAuthoritativeSimulationCheckpoint();
+      if (!isCurrent()) return superseded();
+      const snapshot = await saveGameSnapshotVerified(cloudCheckpoint, "恢复云存档前");
+      if (!isCurrent()) return superseded();
+      if (!snapshot) {
+        const failure = reportUnavailableLocalSave("other", appMessage(appLocale, "localSaveCloudSnapshotFailure"));
+        playTone("alert");
+        return failure;
+      }
+      const result = await persistPrimarySave(inspection.state);
+      if (!isCurrent()) return superseded();
+      if (!result.success) {
+        playTone("alert");
+        return { success: false, message: result.message };
+      }
+      if (!restoreGame(inspection.state)) {
+        const message = nativeAuthorityReplacementBlockedMessage("cloud-restore");
+        playTone("alert");
+        return { success: false, message };
+      }
+      refreshSaveData();
+      playTone("complete");
+      return { success: true, message: "云存档已恢复，原工厂已保留为本地快照" };
+    } finally {
+      if (cloudRestoreRef.current === operation) {
+        cloudRestoreRef.current = null;
+        setImportOperationPending(false);
+      }
     }
-    if (inspection.mode !== gameRef.current.mode) {
-      playTone("alert");
-      return {
-        success: false,
-        message: `云存档属于${inspection.mode === "speedrun" ? "速通" : "普通"}模式，不能覆盖当前${gameRef.current.mode === "speedrun" ? "速通" : "普通"}工厂`,
-      };
-    }
-    const cloudCheckpoint = await requestAuthoritativeSimulationCheckpoint();
-    if (lifecycleExitStartedRef.current) return { success: false, message: "页面正在退出，云存档恢复未执行" };
-    const snapshot = await saveGameSnapshotVerified(cloudCheckpoint, "恢复云存档前");
-    if (lifecycleExitStartedRef.current) return { success: false, message: "页面正在退出，云存档恢复未执行" };
-    if (!snapshot) {
-      const failure = reportUnavailableLocalSave("other", appMessage(appLocale, "localSaveCloudSnapshotFailure"));
-      playTone("alert");
-      return failure;
-    }
-    const result = await persistPrimarySave(inspection.state);
-    if (lifecycleExitStartedRef.current) return { success: false, message: "页面正在退出，云存档恢复未执行" };
-    if (!result.success) {
-      playTone("alert");
-      return { success: false, message: result.message };
-    }
-    if (!restoreGame(inspection.state)) {
-      const message = nativeAuthorityReplacementBlockedMessage("cloud-restore");
-      playTone("alert");
-      return { success: false, message };
-    }
-    refreshSaveData();
-    playTone("complete");
-    return { success: true, message: "云存档已恢复，原工厂已保留为本地快照" };
   }, [appLocale, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportUnavailableLocalSave, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
   const takeAuxiliaryCheckpointTransfer = useCallback((state: GameState) => {

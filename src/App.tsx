@@ -2390,6 +2390,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [interactionBursts, setInteractionBursts] = useState<InteractionBurst[]>([]);
   const [ctrlHeld, setCtrlHeld] = useState(false);
   const gameRef = useRef(game);
+  const saveImportInspectionGenerationRef = useRef(0);
   // React bails out when setGame receives the already committed object. Keep
   // that identity explicit so the one-in-flight publisher does not wait for
   // an effect that a no-op state update can never trigger.
@@ -14846,6 +14847,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice("Windows 原生权威尚未安全交还控制权，已阻止替换当前工厂；Rust 工厂和旧 JavaScript 镜像均未改变");
       return false;
     }
+    // A newly accepted factory also ends the scope of file candidates that
+    // were inspected or prepared for the previous factory.
+    saveImportInspectionGenerationRef.current += 1;
+    setImportPreview(null);
+    setPendingImportState(null);
+    setPendingImportRaw(null);
+    setImportRescueArmed(false);
     onMiningStop();
     simulationWorkerRef.current?.terminate();
     simulationWorkerRef.current = null;
@@ -15580,10 +15588,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [commitGame]);
 
   const saveSummaryRefreshIdRef = useRef(0);
-  const saveImportInspectionGenerationRef = useRef(0);
   const saveImportCommitInFlightRef = useRef(false);
   const saveImportRescueRef = useRef<{ generation: number; committing: boolean } | null>(null);
-  const [importRescuePending, setImportRescuePending] = useState(false);
+  const [importOperationPending, setImportOperationPending] = useState(false);
   useEffect(() => () => {
     saveImportInspectionGenerationRef.current += 1;
   }, []);
@@ -15780,8 +15787,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     const generation = saveImportInspectionGenerationRef.current;
+    const isCurrent = () => generation === saveImportInspectionGenerationRef.current && !lifecycleExitStartedRef.current;
     const restoreImportPreview = (message: string) => {
-      if (generation !== saveImportInspectionGenerationRef.current || lifecycleExitStartedRef.current) return;
+      if (!isCurrent()) return;
       setImportPreview(importedPreview);
       setPendingImportState(importedState);
       setPendingImportRaw(null);
@@ -15790,31 +15798,24 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
     };
     saveImportCommitInFlightRef.current = true;
+    setImportOperationPending(true);
     setImportPreview(null);
     setPendingImportState(null);
     setPendingImportRaw(null);
     setImportRescueArmed(false);
-    setNotice("正在导入存档并创建回滚快照…");
+    setRuntimePersistenceProgress((current) => current?.phase === "complete" || current?.phase === "failed" ? null : current);
+    setNotice(null);
     try {
       const importCheckpoint = await requestAuthoritativeSimulationCheckpoint();
-      if (lifecycleExitStartedRef.current) {
-        setNotice("页面正在退出，导入未执行");
-        return;
-      }
+      if (!isCurrent()) return;
       const snapshot = await saveGameSnapshotVerified(importCheckpoint, "导入外部存档前");
-      if (lifecycleExitStartedRef.current) {
-        setNotice("页面正在退出，导入未执行");
-        return;
-      }
+      if (!isCurrent()) return;
       if (!snapshot) {
         restoreImportPreview("导入前回滚快照写入失败，原存档保持不变");
         return;
       }
       const result = await persistPrimarySave(importedState);
-      if (lifecycleExitStartedRef.current) {
-        setNotice("页面正在退出，导入未执行");
-        return;
-      }
+      if (!isCurrent()) return;
       if (!result.success) {
         restoreImportPreview(result.message);
         return;
@@ -15830,6 +15831,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       restoreImportPreview(error instanceof Error ? `存档导入失败：${error.message}` : "存档导入失败");
     } finally {
       saveImportCommitInFlightRef.current = false;
+      setImportOperationPending(false);
     }
   }, [importPreview, pendingImportState, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
@@ -15859,7 +15861,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     const operation = { generation: saveImportInspectionGenerationRef.current, committing: false };
     saveImportRescueRef.current = operation;
-    setImportRescuePending(true);
+    setImportOperationPending(true);
     setRuntimePersistenceProgress((current) => current?.phase === "complete" || current?.phase === "failed" ? null : current);
     setNotice(null);
     const isCurrent = () => saveImportRescueRef.current === operation &&
@@ -15921,7 +15923,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       if (saveImportRescueRef.current !== operation) return;
       saveImportRescueRef.current = null;
       if (operation.committing) saveImportCommitInFlightRef.current = false;
-      setImportRescuePending(false);
+      setImportOperationPending(false);
     });
   }, [appLocale, importPreview, importRescueArmed, pendingImportRaw, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportUnavailableLocalSave, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
@@ -24739,7 +24741,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onConfirmImport={confirmImport}
             onConfirmImportRescue={confirmImportRescue}
             importRescueArmed={importRescueArmed}
-            importRescuePending={importRescuePending}
+            importOperationPending={importOperationPending}
             onCancelImport={cancelImport}
             onSaveSlot={saveToSlot}
             onLoadSlot={loadFromSlot}

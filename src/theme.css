@@ -440,6 +440,47 @@ html[data-theme="light"] :is(
   color: var(--cyan-deep);
 }
 
+/* Cloud recovery surfaces also appear outside the in-game workspace. */
+html[data-theme="light"] :is(
+  .cloud-save-status-center,
+  .cloud-save-primary-recovery,
+  .cloud-save-recovery-history
+) {
+  background: var(--surface);
+  color: var(--text);
+}
+
+html[data-theme="light"] :is(
+  .cloud-save-primary-recovery dl > div,
+  .cloud-save-recovery-confirm-target,
+  .cloud-save-discovery-callout
+) {
+  background: var(--surface-raised);
+}
+
+html[data-theme="light"] .cloud-save-mode-selector button.active {
+  border-color: var(--theme-accent-border);
+  background: var(--theme-selection-bg);
+  color: var(--cyan-deep);
+}
+
+html[data-theme="light"] .cloud-save-recovery-status {
+  background: var(--theme-warning-bg);
+  color: var(--status-warning-text);
+}
+
+html[data-theme="light"] .cloud-save-recovery-status--ready {
+  background: var(--theme-success-bg);
+  color: var(--status-success-text);
+}
+
+html[data-theme="light"] .cloud-save-recovery-status--error {
+  background: var(--theme-danger-bg);
+  color: var(--coral);
+}
+
+html[data-theme="light"] .galaxy-cloud-view { background: var(--bg); }
+
 html[data-theme="light"] :is(.start-menu-warning, .start-menu-auth-development, .settings-buffer-error) {
   border-color: var(--theme-warning-border);
   background: var(--theme-warning-bg);

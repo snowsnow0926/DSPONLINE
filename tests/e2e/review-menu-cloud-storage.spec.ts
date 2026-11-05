@@ -141,6 +141,39 @@ test(`menu cloud ${scenario.slot} recovery reports unavailable with read-only st
         geometry.push({ ...viewport, scale });
         if (scale === 150) for (const theme of ["dark", "light"]) {
           await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+          const contrast = [];
+          for (const [name, target] of [
+            ["restore-feedback", feedbackTarget],
+            ["primary-title", panel.locator(".cloud-save-primary-recovery > header strong")],
+            ["sync-status", page.locator(".start-menu .cloud-save-status-center > header strong").first()],
+            ["selected-mode", panel.locator(".cloud-save-mode-selector button.active strong")],
+          ] as const) {
+            const sample = await target.evaluate((element) => {
+              const canvas = document.createElement("canvas"); canvas.width = 1; canvas.height = 1;
+              const context = canvas.getContext("2d")!;
+              const rgba = (color: string) => {
+                context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1);
+                return Array.from(context.getImageData(0, 0, 1, 1).data);
+              };
+              const foreground = getComputedStyle(element).color;
+              let background = "rgb(255, 255, 255)";
+              for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
+                const color = getComputedStyle(ancestor).backgroundColor;
+                if (rgba(color)[3] === 255) { background = color; break; }
+              }
+              const luminance = (color: string) => {
+                const [r, g, b] = rgba(color).slice(0, 3).map((value) => {
+                  const channel = value / 255; return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+                });
+                return .2126 * r + .7152 * g + .0722 * b;
+              };
+              const a = luminance(foreground), b = luminance(background);
+              return { foreground, background, ratio: (Math.max(a, b) + .05) / (Math.min(a, b) + .05) };
+            });
+            contrast.push({ name, ...sample });
+            expect.soft(sample.ratio, `${viewport.width} ${theme} ${name}`).toBeGreaterThanOrEqual(4.5);
+          }
+          await testInfo.attach(`menu-cloud-${viewport.width}-${theme}-contrast`, { body: JSON.stringify(contrast), contentType: "application/json" });
           await page.screenshot({ path: `artifacts/review-menu-cloud-storage-20261105/${process.env.DSP_REVIEW_CHECK_NAME || "review"}-${viewport.width}x${viewport.height}-${theme}.png`, animations: "disabled" });
         }
       }

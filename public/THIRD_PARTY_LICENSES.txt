@@ -1,7 +1,7 @@
 DSP Idle Network - Third-Party Runtime License Texts
 
 Generated from package-lock.json and server/package-lock.json.
-Inventory SHA-256: fb3ae2076faed2578adf70900a3734c62f4c7d50afffa29806f2353e6fb2603b
+Inventory SHA-256: b95593d67449122275a38f3f9d1aad8c6b470aeca456f208b3e1211823ae791e
 The original package license and notice text controls each component.
 
 ================================================================================
@@ -2294,7 +2294,7 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
-js-yaml@4.3.1
+js-yaml@4.3.2
 License: MIT
 Source: nodeca/js-yaml
 ================================================================================

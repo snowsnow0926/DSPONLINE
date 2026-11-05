@@ -141,6 +141,7 @@ test("English light release notes are localized and persist dismissal", async ({
   await expect(dialog).toContainText("Safe cancellation and factory switching");
   await expect(dialog).toContainText("Reliable Chinese input and drafts");
   await expect(dialog).toContainText("Better menus and touch gestures");
+  await expect(dialog).toContainText("Safer client updates");
   await expect(dialog).toContainText("Readable large text and light theme");
   await expect(dialog).toContainText("Existing factories, inventories, research and backup preferences are preserved.");
   expect(await visibleHanStrings(dialog)).toEqual([]);

@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { load: parseYaml } = require("js-yaml");
 const { STABLE_IDENTITY, selectCompleteDesktopReleaseOutput } = require("./performance-edition-identity.cjs");
 const { writeFixture, context } = require("../tests/fixtures/desktop-release.cjs");
 const { verifyDesktopBuildEvidence, EVIDENCE_FILE } = require("./desktop-artifact-evidence.cjs");
@@ -12,6 +13,18 @@ const { selectDesktopReleaseOutputFromEnvironment } = require("./select-desktop-
 
 const version = require("../package.json").version;
 const expected = Object.freeze({ version, sourceSha: "a".repeat(40), buildId: `${version}+${"a".repeat(12)}`, editionId: "stable-v1", channel: "stable" });
+
+test("updater YAML accepts the stable feed fields used by existing clients", () => {
+  const parsed = parseYaml(`version: ${version}\nfiles:\n  - url: dsp-idle-${version}-x64-setup.exe\n    sha512: public-fixture-digest\n    size: 108000000\npath: dsp-idle-${version}-x64-setup.exe\n`);
+  assert.equal(parsed.version, version);
+  assert.deepEqual(parsed.files, [{ url: `dsp-idle-${version}-x64-setup.exe`, sha512: "public-fixture-digest", size: 108000000 }]);
+  assert.equal(parsed.path, parsed.files[0].url);
+});
+
+test("updater YAML charges empty merge sources against the parsing budget", () => {
+  const input = "sources: &sources [{}, {}, {}, {}, {}, {}]\ntarget:\n  <<: *sources\n";
+  assert.throws(() => parseYaml(input, { maxTotalMergeKeys: 4 }), /maxTotalMergeKeys/);
+});
 
 for (const kind of ["empty", "malformed", "stale", "foreign-edition"]) {
   test(`release collection rejects ${kind} manifests without an installer`, (t) => {

@@ -54,13 +54,14 @@ describe("release notes history", () => {
     const english = getCurrentReleaseNotes("en");
     expect(chinese).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.3.8" });
     expect(english).toMatchObject({ id: CURRENT_RELEASE_NOTES.id, version: "1.3.8" });
-    expect(chinese.items).toHaveLength(6);
+    expect(chinese.items).toHaveLength(7);
     expect(chinese.items.map((item) => item.id)).toEqual(expect.arrayContaining([
       "v138-save-feedback",
       "v138-recovery-points",
       "v138-cancel-import",
       "v138-ime-drafts",
       "v138-menu-gestures",
+      "v138-update-safety",
       "v138-responsive-theme",
     ]));
     expect(english.items.map((item) => item.id)).toEqual(chinese.items.map((item) => item.id));

@@ -56,6 +56,11 @@ test("online Worker supplies stocked water despite an empty high-priority demand
 for (const [layout, viewport] of Object.entries({ desktop: { width: 1440, height: 900 }, portrait: { width: 390, height: 844 }, landscape: { width: 844, height: 390 } })) {
   for (const scale of [0.8, 1, 1.25, 1.5]) {
     test(`construction delivery explanation fits ${layout} at ${scale * 100}%`, async ({ page }, testInfo) => {
+      const offlineReport = page.getByRole("dialog", { name: "离线结算报告", exact: true });
+      await page.addLocatorHandler(offlineReport, async () => {
+        await offlineReport.getByRole("button", { name: "确认结算", exact: true }).click();
+        await expect(offlineReport).toBeHidden();
+      });
       await page.goto("/");
       const state = await page.evaluate(waterFactory);
       state.entities.find(e => e.id === "entity_2")!.quantumMode = "legacy";

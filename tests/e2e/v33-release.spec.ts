@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
 const REFRESH_PREFERENCE_KEY = "dsp-idle-network.production-refresh.v1";
@@ -24,8 +25,8 @@ async function enterDurableFactory(page: Page, path = "/?menu=1") {
   await expect(page.locator(".start-menu")).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "继续游戏" }).click();
   const shell = page.locator(".game-shell");
-  await expect(shell).toBeVisible({ timeout: 15_000 });
-  await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: 15_000 });
+  await expect(shell).toBeVisible({ timeout: startupTimeoutMs(15_000) });
+  await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: startupTimeoutMs(15_000) });
   await expect(shell).toHaveAttribute("data-primary-save-edit-lock", "false");
   return shell;
 }

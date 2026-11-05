@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
 test.use({ hasTouch: true });
@@ -66,7 +67,7 @@ async function seedFactory(page: Page, fixture: "smelters" | "storage-network" =
     database.close();
   }, [fixture, storageTargetCount]);
   await page.goto("/");
-  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
 }
 
 /**

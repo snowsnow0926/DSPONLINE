@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type Locator, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 import { selectSettingsCategory } from "./settings-helpers";
@@ -47,8 +48,8 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function freshGame(page: Page) {
   await page.goto("/");
   await expect(page.getByTitle("重置当前工厂")).toHaveCount(0);
-  await expect(page.getByText("DSP极简网络", { exact: true })).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator(".vein-node").filter({ hasText: "铁矿石" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("DSP极简网络", { exact: true })).toBeVisible({ timeout: startupTimeoutMs(15_000) });
+  await expect(page.locator(".vein-node").filter({ hasText: "铁矿石" })).toBeVisible({ timeout: startupTimeoutMs(15_000) });
 }
 
 async function freshDurableGame(page: Page) {
@@ -56,10 +57,10 @@ async function freshDurableGame(page: Page) {
   await expect(page.locator(".start-menu")).toBeVisible();
   await page.getByRole("button", { name: /开始游戏/ }).click();
   const shell = page.locator(".game-shell");
-  await expect(shell).toBeVisible({ timeout: 15_000 });
-  await expect(shell).toHaveAttribute("data-runtime-recovery", "active", { timeout: 15_000 });
+  await expect(shell).toBeVisible({ timeout: startupTimeoutMs(15_000) });
+  await expect(shell).toHaveAttribute("data-runtime-recovery", "active", { timeout: startupTimeoutMs(15_000) });
   await expect(shell).toHaveAttribute("data-primary-save-edit-lock", "false");
-  await expect(page.locator(".vein-node").filter({ hasText: "铁矿石" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".vein-node").filter({ hasText: "铁矿石" })).toBeVisible({ timeout: startupTimeoutMs(15_000) });
 }
 
 async function enableCoarsePointer(page: Page) {

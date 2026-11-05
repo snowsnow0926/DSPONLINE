@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 import { migrateGame, serializeEnvelope } from "../../src/game/storage";
 
 const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
@@ -80,8 +81,8 @@ async function openDurableFactory(page: Page, path = "/?menu=1") {
   await expect(page.locator(".start-menu")).toBeVisible();
   await page.getByRole("button", { name: "进入工厂", exact: true }).click();
   const shell = page.locator(".game-shell");
-  await expect(shell).toBeVisible({ timeout: 15_000 });
-  await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: 15_000 });
+  await expect(shell).toBeVisible({ timeout: startupTimeoutMs(15_000) });
+  await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: startupTimeoutMs(15_000) });
   await expect(page.locator(".factory-canvas")).toBeVisible();
 }
 

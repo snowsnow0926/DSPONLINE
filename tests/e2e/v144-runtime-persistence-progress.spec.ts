@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 
@@ -62,7 +63,7 @@ test("default save protection rejects edits without pausing a running autosave",
 
   await page.goto("/");
   const shell = page.locator(".game-shell");
-  await expect(shell).toBeVisible({ timeout: 15_000 });
+  await expect(shell).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable");
   await expect(shell).toHaveAttribute("data-simulation-worker", "active");
   await expect(shell).toHaveAttribute("data-simulation-paused", "false");
@@ -160,7 +161,7 @@ test("manual, autosave, and return publish ordered non-blocking persistence phas
 
   await page.goto("/");
   const shell = page.locator(".game-shell");
-  await expect(shell).toBeVisible({ timeout: 15_000 });
+  await expect(shell).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   await page.getByLabel("打开设置").click();
   const operations = page.getByRole("dialog", { name: "运营中心" });
   await operations.locator(".operations-tabs").getByRole("tab", { name: "存档" }).click();

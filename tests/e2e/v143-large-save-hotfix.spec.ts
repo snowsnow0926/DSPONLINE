@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
 const BACKUP_KEY = `${SAVE_KEY}.backup`;
@@ -14,8 +15,8 @@ test.beforeEach(async ({ page }) => {
 
 async function openFactory(page: Page) {
   await page.goto("/");
-  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator(".vein-node").filter({ hasText: "铁矿石" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
+  await expect(page.locator(".vein-node").filter({ hasText: "铁矿石" })).toBeVisible({ timeout: startupTimeoutMs(15_000) });
 }
 
 async function saveBaselineWhilePaused(page: Page) {

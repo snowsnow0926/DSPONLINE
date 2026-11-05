@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 
 const SNAPSHOT_KEY = "dsp-idle-network.save.v1.snapshot.manual.idb-migration";
 const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
@@ -112,7 +113,7 @@ test("verified primary saves use IndexedDB and selected snapshots can be managed
   await page.getByRole("button", { name: /开始游戏/ }).click();
   await expect(page.locator(".factory-canvas")).toBeVisible();
   const shell = page.locator(".game-shell");
-  await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: 15_000 });
+  await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: startupTimeoutMs(15_000) });
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.save.v1"))).toBeNull();
   await expect.poll(() => page.evaluate(async () => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -175,7 +176,7 @@ test("verified primary saves use IndexedDB and selected snapshots can be managed
   await expect(page.locator(".start-menu")).toBeVisible();
   await page.locator(".start-menu-primary").click();
   await expect(page.locator(".factory-canvas")).toBeVisible();
-  await expect(page.locator(".game-shell")).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: 15_000 });
+  await expect(page.locator(".game-shell")).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: startupTimeoutMs(15_000) });
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.local-save-coordination.v1.emergency-mirror.normal.payload"))).toBeNull();
 });
 

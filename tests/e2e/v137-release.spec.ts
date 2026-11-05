@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 import { injectOneConservativeDecision } from "./offline-decision-test-helpers";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
@@ -29,7 +30,7 @@ async function seedTechnologyFactory(page: Page, fontScale: 1 | 1.5 | 2, layout:
     await localStore.flushLocalSaveWrites();
   }, { fontScale, layout });
   await page.goto("/");
-  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   await page.getByLabel("打开科技树").click();
   await expect(page.getByRole("dialog", { name: "科技树" })).toBeVisible();
 }
@@ -220,7 +221,7 @@ test("the next mobile technology list keeps its independent vertical scrolling",
     window.localStorage.setItem("dsp-idle-network.mobile-ui.v1", "next");
   });
   await page.goto("/?mobileUi=next");
-  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   await page.getByRole("button", { name: "科研", exact: true }).click();
   const list = page.locator(".mobile-technology > .mobile-workspace-scroll");
   await expect(list).toBeVisible();
@@ -275,7 +276,7 @@ test("cancel keeps the pending interval and confirmed skip commits zero rewards"
   expect(await page.evaluate((key) => window.localStorage.getItem(key), SAVE_KEY)).toBe(sourceRaw);
   await skipConfirmation.getByRole("button", { name: "再次确认：收益为 0" }).click();
 
-  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   const report = page.getByRole("dialog", { name: "离线结算报告" });
   await expect(report).toBeVisible();
   await expect(report).toContainText("已确认跳过收益");
@@ -302,7 +303,7 @@ test("the recommended exact retry restarts from the unchanged original state", a
   expect(await page.evaluate((key) => window.localStorage.getItem(key), SAVE_KEY)).toBe(sourceRaw);
   await decision.getByRole("button", { name: /使用精确结算/ }).click();
 
-  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   const report = page.getByRole("dialog", { name: "离线结算报告" });
   await expect(report).toBeVisible();
   await expect(report).toContainText("精确结算");
@@ -353,7 +354,7 @@ async function seedStarMapBatchFactory(page: Page, fontScale: 1 | 1.5 | 2, mobil
     await localStore.flushLocalSaveWrites();
   }, { fontScale });
   await page.goto(mobile ? "/?mobileUi=next" : "/");
-  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   if (mobile) {
     await page.getByRole("button", { name: "更多", exact: true }).click();
     await page.getByRole("button", { name: /星图与星际工业/ }).click();

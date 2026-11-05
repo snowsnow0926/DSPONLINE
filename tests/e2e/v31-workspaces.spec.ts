@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
@@ -10,7 +11,7 @@ test.beforeEach(async ({ page }) => {
 async function openFactory(page: Page, viewport = { width: 1440, height: 900 }, query = "/") {
   await page.setViewportSize(viewport);
   await page.goto(query);
-  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   await expect(page.locator(".react-flow__pane")).toBeVisible({ timeout: 15_000 });
 }
 

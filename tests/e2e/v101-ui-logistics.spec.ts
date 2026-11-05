@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 import { getBuilding, getRecipe } from "../../src/game/content";
 import { createInitialState, placeBuilding, setEntityRecipe } from "../../src/game/engine";
 import { validateTimedPeriodicProgress, type TimedPeriodicProgressSample } from "../../src/game/periodicProgressValidation";
@@ -110,8 +111,8 @@ async function enterDurableGame(page: Page): Promise<void> {
   await expect(page.locator(".start-menu")).toBeVisible();
   await page.getByRole("button", { name: "进入工厂", exact: true }).click();
   const shell = page.locator(".game-shell");
-  await expect(shell).toBeVisible({ timeout: 15_000 });
-  await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: 15_000 });
+  await expect(shell).toBeVisible({ timeout: startupTimeoutMs(15_000) });
+  await expect(shell).toHaveAttribute("data-runtime-recovery", "unavailable", { timeout: startupTimeoutMs(15_000) });
   await expect(shell).toHaveAttribute("data-primary-save-edit-lock", "false");
   await dismissOnboarding(page);
   await expect(page.locator(".factory-canvas")).toBeVisible();

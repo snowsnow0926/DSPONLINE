@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { startupTimeoutMs } from "./startup-timeout";
 import { createHash } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -547,7 +548,7 @@ test("game runtime requeues a rejected slice exactly once across Pause and resum
 
   await page.goto("/");
   const shell = page.locator(".game-shell");
-  await expect(shell).toBeVisible({ timeout: 15_000 });
+  await expect(shell).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   await expect(shell).toHaveAttribute("data-simulation-worker", "active");
   await expect(page.getByLabel("暂停模拟")).toBeVisible();
   await page.evaluate(() => {
@@ -643,7 +644,7 @@ test("game runtime replays acknowledged slices after a Worker crash and remains 
 
   await page.goto("/");
   const shell = page.locator(".game-shell");
-  await expect(shell).toBeVisible({ timeout: 15_000 });
+  await expect(shell).toBeVisible({ timeout: startupTimeoutMs(15_000) });
   await expect(shell).toHaveAttribute("data-simulation-worker", "active");
   await expect.poll(() => page.evaluate(() => (
     window as typeof window & { __v144CrashTracker?: { injectedCrashes: number } }

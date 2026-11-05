@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
@@ -145,7 +146,7 @@ test("Dyson command bar stays reachable across desktop height and font gates", a
     await page.goto("/");
     // Vite's load event precedes the simulation Worker bootstrap. Apply the
     // font gate only after App has initialized its own font-scale effect.
-    await expect(page.locator(".react-flow__pane")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".react-flow__pane")).toBeVisible({ timeout: startupTimeoutMs(15_000) });
     await dismissOnboarding(page);
     await page.evaluate((fontScale) => {
       document.documentElement.dataset.uiFontScale = fontScale;

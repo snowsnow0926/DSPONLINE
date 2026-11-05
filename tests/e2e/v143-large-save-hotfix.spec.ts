@@ -24,7 +24,7 @@ async function saveBaselineWhilePaused(page: Page) {
   const operations = page.getByRole("dialog", { name: "运营中心" });
   await operations.locator(".operations-tabs").getByRole("tab", { name: "存档" }).click();
   await operations.getByRole("button", { name: "立即保存" }).click();
-  await expect(page.locator(".game-notice")).toContainText("主存档已保存");
+  await expect(page.locator(".game-notice")).toContainText(/主存档已保存|主存档未变化|存档已验证完成/);
   await operations.getByLabel("关闭运营中心").click();
   await expect(operations).toBeHidden();
   // Make the state different from the verified baseline, then keep it stable
@@ -37,7 +37,11 @@ async function saveBaselineWhilePaused(page: Page) {
     await store.flushLocalSaveWrites();
     const raw = await store.readPersistedLocalSaveValue(saveKey);
     if (!raw) throw new Error("baseline primary save is missing");
-    return { raw, revision: store.getPrimaryLocalSaveRevision() };
+    const storage = await import("/src/game/storage.ts");
+    if (!storage.inspectSave(raw).valid) throw new Error("baseline primary save is not verified");
+    const revision = store.getPrimaryLocalSaveRevision();
+    if (revision < 1) throw new Error("baseline primary has no coordinated revision");
+    return { raw, revision };
   }, { saveKey: SAVE_KEY });
 }
 

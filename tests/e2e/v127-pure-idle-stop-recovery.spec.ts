@@ -206,7 +206,7 @@ async function installProbe(page: Page, observeStopState = false): Promise<void>
 
   // Observe the real boot entry without mocking claim/readback or its result.
   if (observeStopState) await page.route("**/src/App.tsx*", async (route) => {
-    const response = await route.fetch();
+    const response = await route.fetch({ maxRetries: 2 });
     const source = await response.text();
     const boundary = "const pureIdleStoppingRef = useRef(false);";
     if (!source.includes(boundary)) throw new Error("stop lifecycle observation boundary changed");
@@ -214,7 +214,7 @@ async function installProbe(page: Page, observeStopState = false): Promise<void>
     await route.fulfill({ response, body });
   });
   await page.route("**/src/game/pureIdleRecovery.ts*", async (route) => {
-    const response = await route.fetch();
+    const response = await route.fetch({ maxRetries: 2 });
     const source = await response.text();
     const signature = /(async\s+function\s+claimPureIdleRecovery\s*\([\s\S]*?\)\s*\{)/;
     if (!signature.test(source)) throw new Error("pure-idle claim observation boundary changed");
@@ -234,7 +234,7 @@ async function installProbe(page: Page, observeStopState = false): Promise<void>
     await route.fulfill({ response, body });
   });
   await page.route("**/src/game/memoryBudget.ts*", async (route) => {
-    const response = await route.fetch();
+    const response = await route.fetch({ maxRetries: 2 });
     const source = await response.text();
     const boundary = "function evaluateMemoryGuard(";
     if (!source.includes(boundary)) throw new Error("terminal memory observation boundary changed");

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs } from "./startup-timeout";
 import { injectOneConservativeDecision } from "./offline-decision-test-helpers";
 
 const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
@@ -70,6 +71,9 @@ for (const scenario of [
   { name: "approximate", seconds: 120, label: "近似宏观结算（实验）", viewport: { width: 390, height: 844 } },
 ] as const) {
   test(`offline report renders the ${scenario.name} settlement state without overflow`, async ({ page }) => {
+    // Keep the intended six-second scenario independent of source boot time.
+    // Fixed wall time leaves timers and animation frames running normally.
+    if (scenario.name === "exact") await page.clock.setFixedTime(Date.now());
     await seedBatchSave(page, { offlineSeconds: scenario.seconds, bypassMenu: false });
     await page.setViewportSize(scenario.viewport);
     await page.goto("/?menu=1");
@@ -94,7 +98,7 @@ for (const scenario of [
     }
 
     const report = page.getByRole("dialog", { name: "离线结算报告" });
-    await expect(report).toBeVisible({ timeout: 20_000 });
+    await expect(report).toBeVisible({ timeout: startupTimeoutMs(20_000) });
     await expect(report.locator(".offline-report-method > header strong")).toHaveText(scenario.label);
     await expect(report.locator(".offline-report-method")).toContainText("精确校准");
     await expect(report.locator(".offline-report-method")).toContainText("宏观覆盖");

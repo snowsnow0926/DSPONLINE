@@ -236,6 +236,8 @@ test("the next mobile technology list keeps its independent vertical scrolling",
 });
 
 test("cancel keeps the pending interval and confirmed skip commits zero rewards", async ({ page }) => {
+  const fixtureNow = Date.now();
+  await page.clock.setFixedTime(fixtureNow);
   await seedOfflineMenu(page, 3_600);
   const sourceRaw = await page.evaluate((key) => window.localStorage.getItem(key), SAVE_KEY);
   await injectOneConservativeDecision(page);
@@ -254,6 +256,7 @@ test("cancel keeps the pending interval and confirmed skip commits zero rewards"
   expect(await page.evaluate((key) => window.localStorage.getItem(key), SAVE_KEY)).toBe(sourceRaw);
 
   await page.reload();
+  await page.clock.setFixedTime(fixtureNow + 3_000);
   await expect(page.locator(".start-menu")).toBeVisible();
   expect(await page.evaluate((key) => window.localStorage.getItem(key), SAVE_KEY)).toBe(sourceRaw);
 
@@ -266,6 +269,7 @@ test("cancel keeps the pending interval and confirmed skip commits zero rewards"
   await expect(page.locator(".start-menu")).toBeVisible();
   expect(await page.evaluate((key) => window.localStorage.getItem(key), SAVE_KEY)).toBe(sourceRaw);
 
+  await page.clock.setFixedTime(fixtureNow + 7_000);
   await injectOneConservativeDecision(page);
   await page.getByRole("button", { name: "继续游戏" }).first().click();
   await page.getByRole("dialog", { name: "选择离线结算方式" }).getByRole("button", { name: /快速结算（推荐）/ }).click();
@@ -283,10 +287,11 @@ test("cancel keeps the pending interval and confirmed skip commits zero rewards"
   await expect(report).toContainText("结算状态保守跳过");
   await expect(report).toContainText("实际提交 1 小时 0 分钟");
   const persisted = await page.evaluate((key) => JSON.parse(window.localStorage.getItem(key)!).state, SAVE_KEY);
-  // The pending interval includes slow-runner wall time across the deliberate
-  // reload/cancel cycle, but it must still be applied once from the original 42s.
+  // Advance seven controlled wall-clock seconds across reload/cancel while
+  // timers remain real. Apply that pending interval once from the original 42s.
   expect(persisted.elapsedSeconds).toBeGreaterThanOrEqual(3_642);
   expect(persisted.elapsedSeconds).toBeLessThan(3_652);
+  expect(persisted.elapsedSeconds).toBeCloseTo(42 + 3_600 + 7, 3);
   expect(persisted.totalProduced).toEqual({});
 });
 

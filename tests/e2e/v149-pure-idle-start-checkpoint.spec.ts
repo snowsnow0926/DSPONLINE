@@ -83,14 +83,14 @@ async function install(page: Page, injectQuota = false, lowerRetirementThreshold
   if (lowerRetirementThreshold) await page.route("**/src/game/authoritativeSavePersistenceClient.ts*", async route => {
     // Exercise the real drained-queue transition with a compact public fixture.
     // The private large-save qualification separately uses the 16 MiB default.
-    const response = await route.fetch(); const source = await response.text();
+    const response = await route.fetch({ maxRetries: 2 }); const source = await response.text();
     const boundary = "new AuthoritativeSavePersistenceClient()";
     if (source.split(boundary).length !== 2) throw new Error("Default persistence client boundary changed");
     await route.fulfill({ response, body: source.replace(boundary,
       "new AuthoritativeSavePersistenceClient({ largePayloadThresholdBytes: 1 })") });
   });
   await page.route("**/src/game/engine.ts*", async route => {
-    const response = await route.fetch(); const source = await response.text();
+    const response = await route.fetch({ maxRetries: 2 }); const source = await response.text();
     const boundary = "async function refreshTimeWarpPowerSnapshotChunked(";
     if (source.split(boundary).length !== 2) throw new Error("Startup private copy boundary changed");
     const body = source.replace(boundary, "async function observedRefreshTimeWarpPowerSnapshotChunked(") + `
@@ -115,7 +115,7 @@ async function install(page: Page, injectQuota = false, lowerRetirementThreshold
     await route.fulfill({ response, body });
   });
   await page.route("**/src/game/pureIdleRecovery.ts*", async route => {
-    const response = await route.fetch(); const source = await response.text();
+    const response = await route.fetch({ maxRetries: 2 }); const source = await response.text();
     const boundary = "async function createPureIdleRecovery(";
     if (!source.includes(boundary)) throw new Error("Startup recovery observation boundary changed");
     const body = source.replace(boundary, "async function observedCreatePureIdleRecovery(") + `

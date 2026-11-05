@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
@@ -30,7 +31,7 @@ for (const scenario of [
   { access: "read-only", action: "download", slot: "main" },
 ] as const) {
 test(`menu cloud ${scenario.slot} recovery reports unavailable with read-only storage and retries durably`, async ({ page }, testInfo) => {
-  test.setTimeout(300_000);
+  test.setTimeout(workflowTimeoutMs(300_000));
   page.setDefaultTimeout(30_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const errors: string[] = [], writes: string[] = [];
@@ -83,7 +84,7 @@ test(`menu cloud ${scenario.slot} recovery reports unavailable with read-only st
     return fulfill({ error: "isolated cloud slot route unavailable" }, 404);
   });
   await page.goto("/");
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   await openSaves(page);
   const original = await exportedEnvelope(page);
   const remote = JSON.parse(JSON.stringify(original));
@@ -188,7 +189,7 @@ test(`menu cloud ${scenario.slot} recovery reports unavailable with read-only st
   }
   await page.evaluate(() => sessionStorage.removeItem("cloud-slot-blocked"));
   await page.goto("/");
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   let saves = await openSaves(page);
   let preserved = await exportedEnvelope(page);
   const preservedMainOre = preserved.state.tray.iron_ore;
@@ -211,14 +212,14 @@ test(`menu cloud ${scenario.slot} recovery reports unavailable with read-only st
   await page.getByRole("alertdialog").getByRole("button", { name: /^确认(覆盖|恢复)$/ }).click();
   await expect(panel.getByRole("status")).toContainText("已恢复到本机", { timeout: 60_000 });
   await page.goto("/");
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   if (scenario.slot !== "main") {
     saves = await openSaves(page);
     await saves.getByLabel(`载入槽位 ${scenario.slot}`, { exact: true }).click();
   }
   await expect(page.locator('.tray-row[title="拿取铁矿石"] strong')).toHaveText("99", { timeout: 60_000 });
   await page.reload();
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   await openSaves(page);
   const retry = await exportedEnvelope(page);
   expect(retry.state.tray.iron_ore).toBe(99);

@@ -172,7 +172,8 @@ test("English light primary workspaces use opaque light surfaces", async ({ page
     await expect(workspace).toBeVisible();
     await page.waitForTimeout(350);
     expect(luminance(await workspace.evaluate((element) => getComputedStyle(element).backgroundColor))).toBeGreaterThan(205);
-    expect(await visibleHanStrings(workspace)).toEqual([]);
+    // Node availability is asynchronous; inspect the completed workspace state.
+    await expect.poll(() => visibleHanStrings(workspace)).toEqual([]);
     if (selector === ".star-map-workspace") {
       await workspace.getByRole("tab", { name: "Quantum Inventory" }).click();
       await expect(workspace.getByRole("region", { name: "Quantum-space Inventory" })).toBeVisible();

@@ -412,8 +412,10 @@ test("normal and speedrun slots keep independent coordinated revisions and tombs
     const storage = await import("/src/game/storage.ts");
     const engine = await import("/src/game/engine.ts");
     const normal = engine.createInitialState();
+    normal.paused = true;
     normal.elapsedSeconds = 111;
     const speedrun = engine.createSpeedrunInitialState(1_700_000_000_000, "v140-coordination-speedrun");
+    speedrun.paused = true;
     speedrun.elapsedSeconds = 222;
     const normalSave = await storage.saveGameSlotVerified(1, normal);
     const speedrunSave = await storage.saveGameSlotVerified(1, speedrun);

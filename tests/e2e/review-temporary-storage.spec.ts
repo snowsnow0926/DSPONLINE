@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { workflowTimeoutMs } from "./startup-timeout";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -38,7 +38,7 @@ test(`temporary storage warns only when needed, keeps export usable, and preserv
   }, failureMode);
   await page.route("**/api/**", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"isolated temporary-storage review"}' }));
   await page.goto("/");
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   const ore = page.locator('.tray-row[title="拿取铁矿石"] strong');
   await expect(ore).toHaveText("42");
   await expect(page.locator(".local-save-writer-banner--temporary")).toHaveCount(0);
@@ -57,7 +57,7 @@ test(`temporary storage warns only when needed, keeps export usable, and preserv
     sessionStorage.setItem("review-temporary-storage", "1");
   }, failureMode);
   await page.reload();
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   const releaseClose = page.getByRole("button", { name: "关闭版本更新记录" });
   if (await releaseClose.isVisible()) await releaseClose.click();
   const pause = page.getByRole("button", { name: "暂停模拟", exact: true });
@@ -95,7 +95,7 @@ test(`temporary storage warns only when needed, keeps export usable, and preserv
   expect(exported.state.tray.iron_ore ?? 0).toBe(Number(temporaryOreText));
   await page.evaluate(() => sessionStorage.removeItem("review-temporary-storage"));
   await page.reload();
-  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator(".factory-canvas")).toBeVisible({ timeout: startupTimeoutMs(60_000) });
   await expect(ore).toHaveText("42");
   const restored = await page.evaluate(async () => {
     const { loadGame } = await import("/src/game/storage.ts"); const game = loadGame().state;

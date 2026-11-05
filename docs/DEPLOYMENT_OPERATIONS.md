@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **当前基线（2026-11-06，1.3.8）**：香港 Web current/previous `1.3.8-8a52afce96ba` / `1.3.7-4daa203151e2`；API `api-1.3.0-4c8d0c13a714`、green/4322，generation/proxy 62/202，forward、无 pending，原进程/数据库身份保持，备份 disabled、异地 timer inactive。上一稳定入口为不可变 1.3.7，Nginx SHA `70cdb62040d36b76c6090da4dca57573382422fd461db9d9896cf24dce74579d`；根 Web 回退先恢复独立原件解除旧 worker 拒绝。新上海只切下载 current/previous 为 1.3.8 / 1.3.7，原游戏/API/证书保持，23 件检查通过。6 份关闭历史日志经完整可恢复归档后释放原件，存档及所有正式备份保留；最后可用约 20.073%。[精确指针、归档和回退](./releases/1.3.8.md)。
+
 > **当前基线（2026-11-05，1.3.7）**：香港 Web current/previous `1.3.7-4daa203151e2` / `1.3.6-187ae5bd4d2e`；API `api-1.3.0-4c8d0c13a714`、green/4322，generation/proxy 61/202，forward、无 pending，原进程及数据库身份保持。备份 disabled、异地 timer inactive。上一稳定入口为不可变 1.3.6，Nginx SHA `2a6a0eafa86fd05ce18e3f73200d116d7b5c2a13fe9967f9ac0ce0dd6441c113`；根 Web 回退先恢复独立原件解除旧 worker 拒绝，不回滚数据。新上海只切下载 current/previous 为 1.3.7 / 1.3.6，原游戏/API/证书未变，20 件验证。仅清理已核验正式副本的旧上传临时文件约 9.09 MiB，所有存档与正式备份保留。[精确指针和证据](./releases/1.3.7.md)。
 
 > **当前基线（2026-11-04，1.3.6）**：香港 Web current/previous `1.3.6-187ae5bd4d2e` / `1.3.5-7d62d4625603`；API `api-1.3.0-4c8d0c13a714`、green/4322，generation/proxy 60/202，forward、无 pending，API/代理未重启。备份 disabled、异地 timer inactive。上一稳定入口为不可变 1.3.5；Nginx SHA `daf0438b32640119d1706c2c52824bf377dcd3722d94f9fbb536ff7d3946bfcb`，根 Web 回退须先恢复独立 Nginx 原件解除 1.3.5 worker 拒绝，不回滚数据。新上海只更新下载 current/previous 为 `download-site-1.3.6-187ae5bd4d2e` / `download-site-1.3.5-7d62d4625603`，游戏/API 未动；17 件验证、旧文件保留。日志无损归档净回收约 1.09 GB，数据库和现有备份保留。[精确指针、摘要及恢复步骤](./releases/1.3.6.md)。

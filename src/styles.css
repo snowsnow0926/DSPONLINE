@@ -1468,6 +1468,12 @@ select:focus-visible {
   display: none;
 }
 
+.header-overflow-menu {
+  max-height: calc(100dvh - var(--mobile-header-height, var(--shell-header-height)) - env(safe-area-inset-bottom, 0px) - 8px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .header-actions button {
   display: grid;
   width: 36px;

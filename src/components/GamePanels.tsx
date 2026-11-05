@@ -64,6 +64,7 @@ import {
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useHorizontalPan } from "../hooks/useHorizontalPan";
+import { usePopupMenu } from "../hooks/usePopupMenu";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { ItemCatalogPicker, RecipeCatalogPicker } from "./CatalogPicker";
 import { StableTextInput } from "./CompositionSafeInput";
@@ -2928,7 +2929,8 @@ export function HeaderControls({
   showMobileUiSwitch?: boolean;
   onMobileUiSwitch?: () => void;
 }) {
-  const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowMenu = usePopupMenu();
+  const overflowOpen = overflowMenu.open;
   const nativeAuthority = game === null;
   const showConstructionCenter = constructionCenterVisible ?? Boolean(
     game?.entities.some((entity) => entity.buildingId === "construction_center"),
@@ -2937,8 +2939,7 @@ export function HeaderControls({
     ? game.metrics.powerFactor >= 0.999 ? "positive" : game.metrics.powerFactor > 0 ? "warning" : "negative"
     : "warning";
   const runOverflowAction = (action: () => void) => {
-    setOverflowOpen(false);
-    action();
+    overflowMenu.selectAction(action);
   };
   return (
     <header className="game-header">
@@ -2974,20 +2975,20 @@ export function HeaderControls({
         <button className={`header-action--overflowable${activeWorkspace === "technology" ? " active" : ""}`} type="button" onClick={onOpenTechnology} title={activeWorkspace === "technology" ? "科技树已打开，再次点击返回工厂" : "打开科技树"} aria-label={activeWorkspace === "technology" ? "科技树已打开，再次点击返回工厂" : "打开科技树"} aria-pressed={activeWorkspace === "technology"}><FlaskConical size={17} /></button>
         <button className="header-action--overflowable header-command-action" type="button" onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); onOpenCommandPalette(); }} title="打开命令面板（Ctrl/⌘+K）" aria-label="打开命令面板" aria-keyshortcuts="Control+K Meta+K"><Command size={17} /></button>
         {showMobileUiSwitch && onMobileUiSwitch ? <button className="header-mobile-ui-command" type="button" onClick={onMobileUiSwitch} title="体验新版手机界面" aria-label="体验新版手机界面"><Sparkles size={17} /></button> : null}
-        <button className="header-overflow-command" type="button" onClick={() => setOverflowOpen((open) => !open)} aria-expanded={overflowOpen} title="更多工作区" aria-label="更多工作区"><MoreHorizontal size={18} /></button>
-        {overflowOpen ? <div className="header-overflow-menu" role="menu">
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onReturnToMenu)}><House size={15} />主菜单</button>
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenSettings)}><Settings size={15} />设置</button>
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenGalaxy)}><Globe2 size={15} />银河网络</button>
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenCampaign)}><Flag size={15} />主线任务</button>
-          {showConstructionCenter ? <button type="button" role="menuitem" disabled={constructionCenterUnavailable} onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心{constructionCenterUnavailable ? "（当前不可用）" : ""}</button> : null}
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStarMap)}><Telescope size={15} />星图</button>
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStatistics)}><BarChart3 size={15} />生产统计</button>
-          <button type="button" role="menuitem" aria-pressed={activeWorkspace === "blueprints"} onClick={() => runOverflowAction(onOpenBlueprints)}><Layers3 size={15} />蓝图工作区</button>
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenRecipes)}><BookOpen size={15} />生产资料库</button>
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenTechnology)}><FlaskConical size={15} />科技树</button>
-          <button type="button" role="menuitem" aria-pressed={activeWorkspace === "dyson"} onClick={() => runOverflowAction(onOpenDysonPlanner)}><Orbit size={15} />戴森球规划</button>
-          {showMobileUiSwitch && onMobileUiSwitch ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onMobileUiSwitch)}><Sparkles size={15} />新版手机界面</button> : null}
+        <button ref={overflowMenu.triggerRef} id={overflowMenu.triggerId} className="header-overflow-command" type="button" onClick={overflowMenu.toggle} onKeyDown={overflowMenu.onTriggerKeyDown} aria-haspopup="menu" aria-controls={overflowOpen ? overflowMenu.menuId : undefined} aria-expanded={overflowOpen} title="更多工作区" aria-label="更多工作区"><MoreHorizontal size={18} /></button>
+        {overflowOpen ? <div ref={overflowMenu.menuRef} id={overflowMenu.menuId} className="header-overflow-menu" role="menu" aria-labelledby={overflowMenu.triggerId}>
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => runOverflowAction(onReturnToMenu)}><House size={15} />主菜单</button>
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => runOverflowAction(onOpenSettings)}><Settings size={15} />设置</button>
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => runOverflowAction(onOpenGalaxy)}><Globe2 size={15} />银河网络</button>
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => runOverflowAction(onOpenCampaign)}><Flag size={15} />主线任务</button>
+          {showConstructionCenter ? <button type="button" role="menuitem" tabIndex={-1} disabled={constructionCenterUnavailable} onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心{constructionCenterUnavailable ? "（当前不可用）" : ""}</button> : null}
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => runOverflowAction(onOpenStarMap)}><Telescope size={15} />星图</button>
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => runOverflowAction(onOpenStatistics)}><BarChart3 size={15} />生产统计</button>
+          <button type="button" role="menuitem" tabIndex={-1} aria-pressed={activeWorkspace === "blueprints"} onClick={() => runOverflowAction(onOpenBlueprints)}><Layers3 size={15} />蓝图工作区</button>
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => runOverflowAction(onOpenRecipes)}><BookOpen size={15} />生产资料库</button>
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => runOverflowAction(onOpenTechnology)}><FlaskConical size={15} />科技树</button>
+          <button type="button" role="menuitem" tabIndex={-1} aria-pressed={activeWorkspace === "dyson"} onClick={() => runOverflowAction(onOpenDysonPlanner)}><Orbit size={15} />戴森球规划</button>
+          {showMobileUiSwitch && onMobileUiSwitch ? <button type="button" role="menuitem" tabIndex={-1} onClick={() => runOverflowAction(onMobileUiSwitch)}><Sparkles size={15} />新版手机界面</button> : null}
         </div> : null}
         {game ? <button className={`mobile-toggle${game.cargo ? " mobile-toggle--cargo" : ""}`} type="button" onClick={onOpenResources} title={game.cargo ? "物资已拿起，打开物资托盘放下" : "物资托盘"} aria-label={game.cargo ? "物资已拿起，打开物资托盘" : "打开物资托盘"}><PackageOpen size={17} /></button> : null}
         <button className="mobile-toggle" type="button" onClick={onOpenInspector} title="检查器" aria-label="打开检查器"><PanelRight size={17} /></button>

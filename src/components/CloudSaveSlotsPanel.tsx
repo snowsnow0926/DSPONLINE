@@ -1,5 +1,8 @@
 import { CloudDownload, CloudUpload, HardDrive, History, LoaderCircle, RotateCcw, ShieldCheck, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useAppLocale } from "../i18n/locale";
+import { appMessage } from "../i18n/messages";
+import { getLocalSaveBackend } from "../game/localSaveStore";
 import {
   clearCloudSyncMarker,
   deleteCloudSave,
@@ -89,6 +92,7 @@ function localSummary(mode: CloudSaveMode, slot: CloudSaveSlot, currentMode: Clo
 }
 
 export function CloudSaveSlotsPanel({ mode = "normal", cloudSaves, cloudSavesByMode, localSlots, busySlot = null, uploadDisabled = false, onUpload, onDownload, onDelete }: CloudSaveSlotsPanelProps) {
+  const { locale } = useAppLocale();
   const rootRef = useRef<HTMLElement | null>(null);
   const confirmationCancelRef = useRef<HTMLButtonElement | null>(null);
   const discoveryRequestRef = useRef(0);
@@ -192,6 +196,9 @@ export function CloudSaveSlotsPanel({ mode = "normal", cloudSaves, cloudSavesByM
   };
 
   const restoreDownloadedSave = async (action: Extract<PendingCloudAction, { kind: "download" }>) => {
+    if (getLocalSaveBackend() === "memory") {
+      throw new Error(appMessage(locale, "localSaveCloudRestoreUnavailable"));
+    }
     const cloudSave = await downloadCloudSave(action.revision, action.slot, action.mode);
     if (!cloudSave) throw new Error(`${cloudSaveSlotLabel(action.mode, action.slot)}为空`);
     const storage = await import("../game/storage");

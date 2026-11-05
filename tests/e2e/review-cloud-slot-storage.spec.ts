@@ -88,6 +88,10 @@ test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} 
   await openSaves(page);
   const original = await exportedEnvelope(page);
   const remote = JSON.parse(JSON.stringify(original));
+  // Healthy retries need a real manual-slot envelope. A primary payload is
+  // intentionally refused by the namespace guard and has its own negative test.
+  remote.kind = "slot";
+  remote.slot = Number(scenario.slot);
   remote.state.tray.iron_ore = 99;
   remote.state.blueprints = [];
   remote.checksum = fixtureChecksum(remote.formatVersion, remote.state);

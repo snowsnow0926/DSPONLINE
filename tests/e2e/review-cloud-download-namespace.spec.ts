@@ -27,6 +27,7 @@ function checksum(formatVersion: number, state: unknown) {
 
 for (const scenario of [
   { surface: "galaxy", mismatch: "body-slot", local: "empty" },
+  { surface: "galaxy", mismatch: "body-main", local: "empty" },
   { surface: "galaxy", mismatch: "metadata-slot", local: "empty" },
   { surface: "galaxy", mismatch: "metadata-mode", local: "empty" },
   { surface: "galaxy", mismatch: "body-slot", local: "conflict" },
@@ -92,7 +93,8 @@ for (const scenario of [
     localStorage.setItem("dsp-idle-network.slot.2", otherRaw);
   }, { localRaw, otherRaw });
   const remote = structuredClone(original);
-  remote.kind = "slot"; remote.slot = scenario.mismatch === "body-slot" ? 2 : 1;
+  remote.kind = scenario.mismatch === "body-main" ? original.kind : "slot";
+  remote.slot = scenario.mismatch === "body-main" ? "main" : scenario.mismatch === "body-slot" ? 2 : 1;
   remote.state.tray.iron_ore = 99;
   remoteChecksum = remote.checksum = checksum(remote.formatVersion, remote.state);
   payload = JSON.stringify(remote);
@@ -115,9 +117,10 @@ for (const scenario of [
   const feedback = scenario.surface === "menu"
     ? page.getByRole("region", { name: "按模式管理云存档", exact: true }).getByRole("status")
     : page.locator(".galaxy-cloud-message");
-  await expect(feedback).toContainText(/阻止|取消|无法|已下载|已恢复|保留云端版本/, { timeout: 60_000 });
+  await expect(feedback).toContainText(/阻止|取消|无法|失败|已下载|已恢复|保留云端版本/, { timeout: 60_000 });
   const message = (await feedback.allTextContents()).join(";");
-  expect.soft(message).toMatch(/阻止|取消|无法/);
+  if (scenario.local === "invalid") expect.soft(message).toContain("回滚快照创建失败，原槽位保持不变");
+  else expect.soft(message).toMatch(/阻止|取消|无法/);
   const stored = await page.evaluate(() => ({ local: localStorage.getItem("dsp-idle-network.slot.1"), other: localStorage.getItem("dsp-idle-network.slot.2") }));
   expect.soft(stored.local).toBe(localRaw);
   expect(stored.other).toBe(otherRaw);

@@ -172,6 +172,7 @@ interface OperationsWorkspaceProps {
   onConfirmImport: () => void;
   onConfirmImportRescue: () => void;
   importRescueArmed: boolean;
+  importRescuePending?: boolean;
   onCancelImport: () => void;
   onSaveSlot: (slotId: SaveSlotId) => void;
   onLoadSlot: (slotId: SaveSlotId) => void;
@@ -958,6 +959,7 @@ function SavesPanel({
   onConfirmImport,
   onConfirmImportRescue,
   importRescueArmed,
+  importRescuePending = false,
   onCancelImport,
   onSaveSlot,
   onLoadSlot,
@@ -972,7 +974,8 @@ function SavesPanel({
   onClearModValidation,
   onExportModTemplate,
 }: Pick<OperationsWorkspaceProps,
-  "game" | "slots" | "snapshots" | "importPreview" | "modValidation" | "onManualSave" | "onExport" | "onImport" | "onConfirmImport" | "onConfirmImportRescue" | "importRescueArmed" | "onCancelImport" | "onSaveSlot" | "onLoadSlot" | "onDeleteSlot" | "onCreateSnapshot" | "onAddSecondUnipolarVein" | "unipolarExpansionBusy" | "onLoadSnapshot" | "onDeleteSnapshot" | "onDeleteSnapshots" | "onValidateMod" | "onClearModValidation" | "onExportModTemplate">) {
+  "game" | "slots" | "snapshots" | "importPreview" | "modValidation" | "onManualSave" | "onExport" | "onImport" | "onConfirmImport" | "onConfirmImportRescue" | "importRescueArmed" | "importRescuePending" | "onCancelImport" | "onSaveSlot" | "onLoadSlot" | "onDeleteSlot" | "onCreateSnapshot" | "onAddSecondUnipolarVein" | "unipolarExpansionBusy" | "onLoadSnapshot" | "onDeleteSnapshot" | "onDeleteSnapshots" | "onValidateMod" | "onClearModValidation" | "onExportModTemplate">) {
+  const { locale } = useAppLocale();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modInputRef = useRef<HTMLInputElement>(null);
   const saveImport = useFileImport({ read: readSaveFileBytes, onImport, onStart: onCancelImport });
@@ -1018,7 +1021,7 @@ function SavesPanel({
     setPersistenceRequestPending(false);
   };
   return (
-    <div className="operations-panel operations-saves">
+    <div className="operations-panel operations-saves" aria-busy={importRescuePending}>
       <header className="operations-section-header">
         <div><span>本地数据</span><strong>存档管理</strong></div>
         <span className="save-runtime"><Clock3 size={13} />运行 {formatRuntime(game.elapsedSeconds)}</span>
@@ -1027,17 +1030,18 @@ function SavesPanel({
         <button type="button" onClick={onManualSave}><Save size={15} /><span>立即保存</span></button>
         <button type="button" onClick={onCreateSnapshot}><History size={15} /><span>创建快照</span></button>
         <button type="button" onClick={onExport}><Download size={15} /><span>导出压缩存档</span></button>
-        <button type="button" disabled={saveImport.status?.kind === "reading"} onClick={() => fileInputRef.current?.click()}><Upload size={15} /><span>导入存档</span></button>
+        <button type="button" disabled={importRescuePending || saveImport.status?.kind === "reading"} onClick={() => fileInputRef.current?.click()}><Upload size={15} /><span>导入存档</span></button>
         <input
           ref={fileInputRef}
           type="file"
           accept="application/json,application/gzip,.json,.json.gz,.gz"
           aria-label="选择要导入的存档文件"
-          disabled={saveImport.status?.kind === "reading"}
+          disabled={importRescuePending || saveImport.status?.kind === "reading"}
           onChange={saveImport.onChange}
         />
       </section>
       <FileImportFeedback status={saveImport.status} readingKey="saveImportReading" />
+      {importRescuePending ? <p className="file-import-feedback" role="status"><FileCheck2 size={16} aria-hidden="true" /><span>{appMessage(locale, "saveImportOperationBusy")}</span></p> : null}
       <section className="save-resource-integrity-tool" aria-label="单极磁石矿脉扩容工具">
         <header><div><ShieldCheck size={14} /><strong>单极磁石矿脉扩容</strong></div><small>{unipolarStatus}</small></header>
         <p>仅为恰好拥有 1 个规范矿脉的普通存档新增 1 个矿脉；总数硬上限为 2。操作会先创建恢复快照，不会写入矿物缓存、托盘、累计产量或排行榜。</p>
@@ -1055,7 +1059,7 @@ function SavesPanel({
           <span><small>科技</small><strong>{importPreview.summary?.completedTechCount ?? 0}</strong></span>
         </div>
         {importPreview.issues.length > 0 ? <ul>{importPreview.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : null}
-        <footer><button type="button" onClick={onCancelImport}>取消</button>{importPreview.valid ? <button className="primary" type="button" onClick={onConfirmImport}><ShieldCheck size={14} />确认导入</button> : importPreview.repairable ? <button className={importRescueArmed ? "danger" : "primary"} type="button" onClick={onConfirmImportRescue}><ShieldCheck size={14} />{importRescueArmed ? "再次确认并救援" : "救援此存档"}</button> : <button type="button" disabled>无法导入</button>}</footer>
+        <footer><button type="button" onClick={onCancelImport}>取消</button>{importPreview.valid ? <button className="primary" type="button" disabled={importRescuePending} onClick={onConfirmImport}><ShieldCheck size={14} />确认导入</button> : importPreview.repairable ? <button className={importRescueArmed ? "danger" : "primary"} type="button" disabled={importRescuePending} onClick={onConfirmImportRescue}><ShieldCheck size={14} />{importRescueArmed ? "再次确认并救援" : "救援此存档"}</button> : <button type="button" disabled>无法导入</button>}</footer>
       </section> : null}
       <div className="save-slot-list">
         {([1, 2, 3] as SaveSlotId[]).map((slotId) => {

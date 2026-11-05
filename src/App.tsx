@@ -15582,6 +15582,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const saveSummaryRefreshIdRef = useRef(0);
   const saveImportInspectionGenerationRef = useRef(0);
   const saveImportCommitInFlightRef = useRef(false);
+  const saveImportRescueRef = useRef<{ generation: number; committing: boolean } | null>(null);
+  const [importRescuePending, setImportRescuePending] = useState(false);
+  useEffect(() => () => {
+    saveImportInspectionGenerationRef.current += 1;
+  }, []);
   const refreshSaveData = useCallback(async () => {
     const refreshId = ++saveSummaryRefreshIdRef.current;
     const summaries = await getSaveSummariesInWorker(gameRef.current.mode);
@@ -15703,8 +15708,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return;
     }
-    if (saveImportCommitInFlightRef.current) {
-      setNotice("当前存档正在导入，请等待写入完成");
+    if (saveImportCommitInFlightRef.current || saveImportRescueRef.current) {
+      setNotice(appMessage(appLocale, "saveImportOperationBusy"));
       return;
     }
     const generation = ++saveImportInspectionGenerationRef.current;
@@ -15745,15 +15750,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice(error instanceof Error ? `存档导入失败：${error.message}` : "存档导入失败：后台检查不可用");
       playTone("alert");
     }
-  }, [playTone, readNativeAuthorityPersistenceBoundary]);
+  }, [appLocale, playTone, readNativeAuthorityPersistenceBoundary]);
 
   const cancelImport = useCallback(() => {
+    if (saveImportCommitInFlightRef.current) {
+      setNotice(appMessage(appLocale, "saveImportOperationBusy"));
+      return;
+    }
     saveImportInspectionGenerationRef.current += 1;
     setImportPreview(null);
     setPendingImportState(null);
     setPendingImportRaw(null);
     setImportRescueArmed(false);
-  }, []);
+    if (saveImportRescueRef.current) setNotice(appMessage(appLocale, "saveImportRescueCancelled"));
+  }, [appLocale]);
 
   const confirmImport = useCallback(async () => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
@@ -15763,7 +15773,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     const importedState = pendingImportState;
     const importedPreview = importPreview;
-    if (!importedState || !importedPreview || saveImportCommitInFlightRef.current) return;
+    if (!importedState || !importedPreview || saveImportCommitInFlightRef.current || saveImportRescueRef.current) return;
     if (importedState.mode !== gameRef.current.mode) {
       setNotice(`模式不匹配：当前是${gameRef.current.mode === "speedrun" ? "速通" : "普通"}模式，不能直接导入${importedState.mode === "speedrun" ? "速通" : "普通"}存档`);
       playTone("alert");
@@ -15829,6 +15839,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return;
     }
+    if (saveImportCommitInFlightRef.current || saveImportRescueRef.current) return;
     if (!importPreview?.repairable || importPreview.valid || !pendingImportRaw) return;
     if (!importRescueArmed) {
       setImportRescueArmed(true);
@@ -15846,31 +15857,53 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return;
     }
+    const operation = { generation: saveImportInspectionGenerationRef.current, committing: false };
+    saveImportRescueRef.current = operation;
+    setImportRescuePending(true);
+    const isCurrent = () => saveImportRescueRef.current === operation &&
+      saveImportInspectionGenerationRef.current === operation.generation && !lifecycleExitStartedRef.current;
+    const restoreCandidate = (message: string) => {
+      if (!isCurrent()) return;
+      setImportPreview(importPreview);
+      setPendingImportState(null);
+      setPendingImportRaw(pendingImportRaw);
+      setImportRescueArmed(true);
+      setNotice(message);
+      playTone("alert");
+    };
     void exportTextFile({
       contents: pendingImportRaw,
       fileName: `dsp-idle-save-rescue-backup-${new Date().toISOString().slice(0, 10)}.json`,
       title: "备份救援前的原始异常存档",
     }).then(async () => {
+      if (!isCurrent()) return;
       const rescueCheckpoint = await requestAuthoritativeSimulationCheckpoint();
-      if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，救援未执行");
+      if (!isCurrent()) return;
       const snapshot = await saveGameSnapshotVerified(rescueCheckpoint, "救援外部存档前");
-      if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，救援未执行");
+      if (!isCurrent()) return;
       if (!snapshot) {
         const failure = reportUnavailableLocalSave("other", appMessage(appLocale, "localSaveRescueSnapshotFailure"));
         setNotice(failure.message);
         playTone("alert");
         return;
       }
+      // Once the primary write owns this candidate, finish its verified
+      // boundary. Before this point cancellation only invalidates the old
+      // candidate; its checkpoint/serializer still owns memory until settled.
+      operation.committing = true;
+      saveImportCommitInFlightRef.current = true;
+      setImportPreview(null);
+      setPendingImportState(null);
+      setPendingImportRaw(null);
+      setImportRescueArmed(false);
       const result = await persistPrimarySave(repaired.inspection.state!);
-      if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，救援未执行");
+      if (!isCurrent()) return;
       if (!result.success) {
-        setNotice(result.message);
-        playTone("alert");
+        restoreCandidate(result.message);
         return;
       }
       if (!restoreGame(repaired.inspection.state!)) {
-        setNotice(nativeAuthorityReplacementBlockedMessage("repair"));
-        playTone("alert");
+        restoreCandidate(nativeAuthorityReplacementBlockedMessage("repair"));
         return;
       }
       refreshSaveData();
@@ -15881,8 +15914,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice("存档救援完成，原始异常文件与当前工厂回滚快照均已保留");
       playTone("complete");
     }).catch((error) => {
-      setNotice(error instanceof Error ? `原始存档备份失败：${error.message}` : "原始存档备份失败，未执行救援");
-      playTone("alert");
+      restoreCandidate(`${appMessage(appLocale, "saveImportRescueFailed")}${error instanceof Error ? `: ${error.message}` : ""}`);
+    }).finally(() => {
+      if (saveImportRescueRef.current !== operation) return;
+      saveImportRescueRef.current = null;
+      if (operation.committing) saveImportCommitInFlightRef.current = false;
+      setImportRescuePending(false);
     });
   }, [appLocale, importPreview, importRescueArmed, pendingImportRaw, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, reportUnavailableLocalSave, requestAuthoritativeSimulationCheckpoint, restoreGame]);
 
@@ -24700,6 +24737,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onConfirmImport={confirmImport}
             onConfirmImportRescue={confirmImportRescue}
             importRescueArmed={importRescueArmed}
+            importRescuePending={importRescuePending}
             onCancelImport={cancelImport}
             onSaveSlot={saveToSlot}
             onLoadSlot={loadFromSlot}

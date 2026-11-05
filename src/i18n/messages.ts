@@ -77,6 +77,18 @@ const messages = {
     "zh-CN": "救援前恢复快照创建失败，原工厂尚未替换。请检查本地存储后重试。",
     en: "The recovery snapshot before rescue could not be saved. Your factory has not been replaced. Check local storage and retry.",
   },
+  saveImportOperationBusy: {
+    "zh-CN": "正在完成当前存档操作，请稍候再确认。",
+    en: "Finishing the current save operation. Please wait before confirming again.",
+  },
+  saveImportRescueCancelled: {
+    "zh-CN": "已取消存档救援，原工厂不会被替换。",
+    en: "Save rescue cancelled. Your factory will not be replaced.",
+  },
+  saveImportRescueFailed: {
+    "zh-CN": "存档救援失败，原候选已保留供重试",
+    en: "Save rescue failed. The candidate is available to retry",
+  },
   localSaveCloudSnapshotFailure: {
     "zh-CN": "云存档恢复前快照创建失败，原工厂尚未替换。请检查本地存储后重试。",
     en: "The recovery snapshot before cloud restore could not be saved. Your factory has not been replaced. Check local storage and retry.",

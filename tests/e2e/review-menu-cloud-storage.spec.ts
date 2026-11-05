@@ -108,6 +108,13 @@ test(`menu cloud ${scenario.slot} recovery reports unavailable with read-only st
   await page.getByRole("alertdialog").getByRole("button", { name: /^确认(覆盖|恢复)$/ }).click();
   const feedbackTarget = panel.getByRole("status");
   await expect(feedbackTarget).toBeVisible({ timeout: 60_000 });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect.poll(() => feedbackTarget.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const warning = document.querySelector(".local-save-writer-banner--temporary")!.getBoundingClientRect();
+    const covered = bounds.left < warning.right && bounds.right > warning.left && bounds.top < warning.bottom && bounds.bottom > warning.top;
+    return !covered && bounds.top >= 0 && bounds.bottom <= innerHeight && document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2) === element;
+  }), { message: "the restore failure must be visible before any manual scrolling" }).toBe(true);
   const feedback = (await feedbackTarget.allTextContents()).join(";");
   const localSummary = await row.locator("dd").first().textContent();
   await testInfo.attach("menu-cloud-temporary-outcome", { body: JSON.stringify({ ...scenario, feedback, localSummary, downloads, errors, writes }), contentType: "application/json" });
@@ -123,7 +130,7 @@ test(`menu cloud ${scenario.slot} recovery reports unavailable with read-only st
           document.documentElement.dataset.uiFontScale = String(scale);
           document.documentElement.style.setProperty("--ui-font-scale", String(scale / 100));
         }, scale);
-        await feedbackTarget.evaluate((element) => element.scrollIntoView({ block: "start" }));
+        await feedbackTarget.evaluate((element) => element.scrollIntoView({ block: "center" }));
         await expect.poll(() => feedbackTarget.evaluate((element) => {
           const bounds = element.getBoundingClientRect();
           const outer = element.closest(".start-menu")!.getBoundingClientRect();

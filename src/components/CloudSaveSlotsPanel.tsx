@@ -107,8 +107,15 @@ export function CloudSaveSlotsPanel({ mode = "normal", cloudSaves, cloudSavesByM
   const [historySlot, setHistorySlot] = useState<CloudSaveSlot | null>(null);
   const [history, setHistory] = useState<CloudSaveMetadata[]>([]);
   const [notice, setNotice] = useState<RecoveryNotice | null>(null);
+  const noticeRef = useRef<HTMLParagraphElement>(null);
   const [pendingAction, setPendingAction] = useState<PendingCloudAction | null>(null);
   const [cloudUserId, setCloudUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (recoverySurface && notice?.tone === "error") {
+      noticeRef.current?.scrollIntoView({ block: "center" });
+    }
+  }, [notice, recoverySurface]);
 
   useEffect(() => {
     setDiscoveredByMode((current) => ({
@@ -294,7 +301,7 @@ export function CloudSaveSlotsPanel({ mode = "normal", cloudSaves, cloudSavesByM
       </div> : null}
     </header>
     {recoverySurface && loadingMode ? <p className="cloud-save-recovery-status"><LoaderCircle size={14} />正在发现{cloudSaveModeLabel(loadingMode)}云存档…</p> : null}
-    {recoverySurface && notice ? <p className={`cloud-save-recovery-status cloud-save-recovery-status--${notice.tone}`} role="status">{notice.tone === "ready" ? <ShieldCheck size={14} /> : <HardDrive size={14} />}{notice.text}</p> : null}
+    {recoverySurface && notice ? <p ref={noticeRef} className={`cloud-save-recovery-status cloud-save-recovery-status--${notice.tone}`} role="status">{notice.tone === "ready" ? <ShieldCheck size={14} /> : <HardDrive size={14} />}{notice.text}</p> : null}
     {recoverySurface ? <section className="cloud-save-primary-recovery" data-cloud-slot="main">
       {(() => {
         const cloud = selectedSaves.main ?? null;

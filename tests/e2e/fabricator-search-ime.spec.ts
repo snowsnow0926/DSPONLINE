@@ -3,6 +3,11 @@ import { createInitialState } from "../../src/game/engine";
 import { serializeEnvelope } from "../../src/game/storage";
 
 async function openFabricator(page: Page, mobile: boolean) {
+  const offlineReport = page.getByRole("dialog", { name: "离线结算报告", exact: true });
+  await page.addLocatorHandler(offlineReport, async () => {
+    await offlineReport.getByRole("button", { name: "确认结算", exact: true }).click();
+    await expect(offlineReport).toBeHidden();
+  });
   const game = createInitialState();
   game.paused = false;
   game.settings.autosaveIntervalSeconds = 0;

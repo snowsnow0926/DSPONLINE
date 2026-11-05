@@ -1,11 +1,11 @@
 DSP Idle Network - Third-Party Runtime License Texts
 
 Generated from package-lock.json and server/package-lock.json.
-Inventory SHA-256: b95593d67449122275a38f3f9d1aad8c6b470aeca456f208b3e1211823ae791e
+Inventory SHA-256: ebfa9d1c93f6ab1a469805a5381ca370461b5e1d83e9a0112a78188579866055
 The original package license and notice text controls each component.
 
 ================================================================================
-@capacitor/android@8.4.2
+@capacitor/android@8.4.3
 License: MIT
 Source: https://github.com/ionic-team/capacitor
 ================================================================================
@@ -1630,7 +1630,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ================================================================================
-electron@43.1.1
+electron@43.8.1
 License: MIT
 Source: https://github.com/electron/electron
 ================================================================================

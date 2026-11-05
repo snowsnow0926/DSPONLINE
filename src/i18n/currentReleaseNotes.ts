@@ -25,7 +25,7 @@ export function getCurrentReleaseNotes(locale: AppLocale) {
       { id: "v138-menu-gestures", title: en ? "Better menus and touch gestures" : "菜单与手机手势更顺手",
         description: en ? "Arrow keys, Tab, Escape and Space work within menus without toggling the simulation by accident. Closing windows restores the opener, and long-press menus remain open after release." : "菜单方向键、Tab、Esc 和空格各自处理当前操作，不误开关模拟；关闭窗口回到原入口，手机长按松手后菜单继续显示，打断的手势正确收尾。" },
       { id: "v138-update-safety", title: en ? "Safer client updates" : "客户端更新保护补丁",
-        description: en ? "The Windows updater includes an upstream protection patch for unusually costly update manifests." : "更新 Windows 自动更新所用组件，补上异常更新清单可能长时间占用处理器的保护。" },
+        description: en ? "The Windows updater and Android/Windows app runtimes include upstream security patches, including protection from unusually costly update manifests." : "补齐 Android、Windows 运行组件的安全补丁，并更新自动更新组件，防止异常更新清单长时间占用处理器。" },
       { id: "v138-responsive-theme", title: en ? "Readable large text and light theme" : "大字号与浅色界面更清楚",
         description: en ? "Compact menus and search results remain reachable. Large-text desktop metrics scroll within the header, and cloud recovery cards use readable light surfaces. Existing factories, inventories, research and backup preferences are preserved." : "紧凑菜单和搜索结果可滚动到达；桌面大字号指标在头栏内横向查看，浅色云恢复页面文字更清晰。现有工厂、物资、科技和备份偏好保持不变。" },
     ],

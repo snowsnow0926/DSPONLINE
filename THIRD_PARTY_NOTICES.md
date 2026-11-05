@@ -2,13 +2,13 @@
 
 This inventory is generated from the locked npm runtime dependency trees. Third-party components remain under their own licenses; the project's PolyForm Noncommercial terms do not replace them.
 
-Inventory SHA-256: `b95593d67449122275a38f3f9d1aad8c6b470aeca456f208b3e1211823ae791e`
+Inventory SHA-256: `ebfa9d1c93f6ab1a469805a5381ca370461b5e1d83e9a0112a78188579866055`
 
 ## Direct Runtime Dependencies
 
 | Package | Version | License | Runtime |
 | --- | --- | --- | --- |
-| `@capacitor/android` | `8.4.2` | `MIT` | client/runtime |
+| `@capacitor/android` | `8.4.3` | `MIT` | client/runtime |
 | `@capacitor/app` | `8.1.1` | `MIT` | client/runtime |
 | `@capacitor/browser` | `8.0.4` | `MIT` | client/runtime |
 | `@capacitor/core` | `8.4.2` | `MIT` | client/runtime |
@@ -19,7 +19,7 @@ Inventory SHA-256: `b95593d67449122275a38f3f9d1aad8c6b470aeca456f208b3e1211823ae
 | `@noble/hashes` | `2.2.0` | `MIT` | client/runtime |
 | `@xyflow/react` | `12.11.2` | `MIT` | client/runtime |
 | `better-sqlite3` | `12.11.1` | `MIT` | cloud service |
-| `electron` | `43.1.1` | `MIT` | client/runtime |
+| `electron` | `43.8.1` | `MIT` | client/runtime |
 | `electron-updater` | `6.8.9` | `MIT` | client/runtime |
 | `lucide-react` | `0.468.0` | `ISC` | client/runtime |
 | `react` | `19.2.7` | `MIT` | client/runtime |

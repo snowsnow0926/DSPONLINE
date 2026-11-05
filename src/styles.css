@@ -623,6 +623,7 @@
 .cloud-save-conflict > section > header strong { color: var(--text); font-size: 11px; }
 .cloud-save-conflict > section > header small { color: var(--muted); font-size: 8px; }
 .cloud-save-conflict > section > header > button { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid var(--line); border-radius: 3px; background: var(--surface-raised); color: var(--muted); }
+.cloud-save-conflict-feedback { margin: 0; padding: 12px 14px; border-block: 1px solid var(--line); color: var(--text); overflow-wrap: anywhere; }
 .cloud-save-conflict-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .cloud-save-conflict-comparison > section { min-width: 0; padding: 14px; border-right: 1px solid var(--line); }
 .cloud-save-conflict-comparison > section:last-child { border-right: 0; }

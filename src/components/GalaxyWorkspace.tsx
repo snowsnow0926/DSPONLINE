@@ -199,6 +199,7 @@ export function GalaxyWorkspace({
   const [cloudUploadCapacity, setCloudUploadCapacity] = useState<CloudSaveCapacityDetails | null>(null);
   const [cloudUploadErrorCode, setCloudUploadErrorCode] = useState<string | null>(null);
   const [cloudMessage, setCloudMessage] = useState<string | null>(null);
+  const cloudFeedbackRef = useRef<HTMLParagraphElement>(null);
   const [cloudEntries, setCloudEntries] = useState<CloudLeaderboardEntry[]>([]);
   const [cloudLeaderboardMe, setCloudLeaderboardMe] = useState<CloudLeaderboardMe | null>(null);
   const [leaderboardMeError, setLeaderboardMeError] = useState<string | null>(null);
@@ -209,6 +210,11 @@ export function GalaxyWorkspace({
   const [pendingCloudSave, setPendingCloudSave] = useState<CloudSave | null>(null);
   const cloudMailAvailable = cloudSession.mailAvailable;
   const [cloudConflict, setCloudConflict] = useState<{ slot: CloudSaveSlot; localPayload: string; remote: CloudSaveMetadata } | null>(null);
+  useEffect(() => {
+    if (!cloudConflict && cloudMessage === appMessage(locale, "localSaveCloudRestoreUnavailable")) {
+      cloudFeedbackRef.current?.scrollIntoView({ block: "start" });
+    }
+  }, [cloudConflict, cloudMessage, locale]);
   const [cloudDeleteRequest, setCloudDeleteRequest] = useState<(SaveDeleteTarget & { slot: CloudSaveSlot; mode: GameState["mode"]; metadata: CloudSaveMetadata }) | null>(null);
   const [localCloudPayload, setLocalCloudPayload] = useState<string | null>(null);
   const [localSaveSlots, setLocalSaveSlots] = useState(() => getSaveSlotSummaries(game.mode));
@@ -639,6 +645,7 @@ export function GalaxyWorkspace({
     if (cloudSession.status !== "authenticated" || !cloudSession.user) return;
     if (getLocalSaveBackend() === "memory") {
       setCloudMessage(appMessage(locale, "localSaveCloudRestoreUnavailable"));
+      cloudFeedbackRef.current?.scrollIntoView({ block: "start" });
       return;
     }
     const remote = cloudSession.cloudSaves?.[slot] ?? null;
@@ -1000,6 +1007,7 @@ export function GalaxyWorkspace({
       ) : tab === "cloud" ? (
         <div className="galaxy-cloud-view">
           <section className="galaxy-cloud-status">
+            {cloudMessage ? <p ref={cloudFeedbackRef} className="galaxy-cloud-message" role="status">{cloudMessage}</p> : null}
             <header>
               <i>{cloudSession.status === "offline" ? <CloudOff size={22} /> : <Cloud size={22} />}</i>
               <span><small>DSP 极简网络云节点</small><strong>{cloudSession.status === "authenticated" ? cloudSession.user?.displayName : cloudSession.status === "offline" ? "当前离线" : cloudSession.status === "checking" ? "正在连接" : "登录云账户"}</strong></span>
@@ -1035,11 +1043,10 @@ export function GalaxyWorkspace({
               </section> : null}
               <CloudAccountSecurity user={cloudSession.user} mailAvailable={cloudMailAvailable} onUserChange={(user) => setCloudSession((current) => ({ ...current, user }))} onLoggedOut={() => { setCloudSession((current) => ({ status: "anonymous", user: null, cloudSave: null, mailAvailable: current.mailAvailable, message: null })); setCloudEntries([]); }} />
             </div> : null}
-            {cloudMessage ? <p className="galaxy-cloud-message" role="status">{cloudMessage}</p> : null}
           </section>
           <aside className="galaxy-cloud-policy"><ShieldCheck size={20} /><span><strong>冲突与校验</strong><small>每次上传都携带云端修订号；另一台设备先更新后，本机不会静默覆盖。恢复云存档前会保留当前工厂快照。</small></span></aside>
           {pendingCloudSave ? <div className="galaxy-cloud-confirm"><section role="alertdialog" aria-modal="true" aria-label="确认恢复云存档"><header><Download size={18} /><span><strong>恢复{game.mode === "speedrun" ? "速通模式" : "普通模式"}云存档修订 {pendingCloudSave.revision}</strong><small>{new Date(pendingCloudSave.updatedAt).toLocaleString("zh-CN")}</small></span></header><p>只会替换当前模式工厂，并先创建同模式本地回滚快照；另一模式不会受到影响。</p><footer><button type="button" onClick={() => setPendingCloudSave(null)}>取消</button><button className="primary" type="button" onClick={restorePendingCloudSave}>确认恢复</button></footer></section></div> : null}
-          {cloudConflict ? <CloudSaveConflictDialog local={summarizeCloudPayload(cloudConflict.localPayload)} cloud={cloudConflict.remote} slot={cloudConflict.slot} busy={cloudBusy || (nativeAuthorityReadOnly && cloudConflict.slot === "main")} onUseCloud={() => void useCloudConflictVersion()} onKeepLocal={() => void keepLocalConflictVersion()} onExportLocal={() => void exportTextFile({ contents: cloudConflict.localPayload, fileName: `dsp-idle-${game.mode}-${cloudConflict.slot}-local-conflict.json`, title: "导出冲突本地副本" })} onExportCloud={() => void downloadCloudSave(cloudConflict.remote.revision, cloudConflict.slot, game.mode).then((save) => save && exportTextFile({ contents: save.payload, fileName: `dsp-idle-${game.mode}-${cloudConflict.slot}-cloud-r${save.revision}.json`, title: "导出冲突云端副本" })).catch((error) => setCloudMessage(error instanceof Error ? error.message : "冲突云端副本导出失败"))} onCancel={() => setCloudConflict(null)} /> : null}
+          {cloudConflict ? <CloudSaveConflictDialog local={summarizeCloudPayload(cloudConflict.localPayload)} cloud={cloudConflict.remote} slot={cloudConflict.slot} feedback={cloudMessage} busy={cloudBusy || (nativeAuthorityReadOnly && cloudConflict.slot === "main")} onUseCloud={() => void useCloudConflictVersion()} onKeepLocal={() => void keepLocalConflictVersion()} onExportLocal={() => void exportTextFile({ contents: cloudConflict.localPayload, fileName: `dsp-idle-${game.mode}-${cloudConflict.slot}-local-conflict.json`, title: "导出冲突本地副本" })} onExportCloud={() => void downloadCloudSave(cloudConflict.remote.revision, cloudConflict.slot, game.mode).then((save) => save && exportTextFile({ contents: save.payload, fileName: `dsp-idle-${game.mode}-${cloudConflict.slot}-cloud-r${save.revision}.json`, title: "导出冲突云端副本" })).catch((error) => setCloudMessage(error instanceof Error ? error.message : "冲突云端副本导出失败"))} onCancel={() => setCloudConflict(null)} /> : null}
           <SaveDeleteDialog target={cloudDeleteRequest} onCancel={() => setCloudDeleteRequest(null)} onDelete={() => void deleteSelectedCloudSave()} />
         </div>
       ) : (

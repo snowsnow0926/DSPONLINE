@@ -102,7 +102,7 @@ test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} 
   if (await pause.isVisible()) await pause.click();
   await expect(page.locator(".local-save-writer-banner--temporary")).toBeVisible();
   await page.getByLabel("打开银河网络", { exact: true }).click();
-  let galaxy = page.getByRole("dialog", { name: "银河网络", exact: true });
+  let galaxy = page.getByRole("dialog", { name: "银河网络", exact: true, includeHidden: true });
   await expect(galaxy).toBeVisible({ timeout: 60_000 });
   await galaxy.getByRole("tab", { name: "云存档", exact: true }).click();
   if (scenario.access === "denied") {
@@ -115,13 +115,49 @@ test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} 
   const conflict = page.getByRole("alertdialog", { name: "本地与云端都有不同进度", exact: true });
   await expect.poll(async () => (await conflict.isVisible()) || (await galaxy.locator(".galaxy-cloud-message").allTextContents()).join(";").length > 0).toBe(true);
   if (await conflict.isVisible()) await conflict.getByRole("button", { name: "使用云端版本", exact: true }).click();
-  await expect.poll(async () => (await galaxy.locator(".galaxy-cloud-message").allTextContents()).join(";"), { timeout: 60_000 }).not.toMatch(/^$|请.*选择/);
-  const feedback = (await galaxy.locator(".galaxy-cloud-message").allTextContents()).join(";");
+  const feedbackTarget = scenario.action === "conflict" ? conflict.getByRole("status") : galaxy.locator(".galaxy-cloud-message");
+  await expect(feedbackTarget).toBeVisible();
+  await expect(feedbackTarget).toContainText("无法保存到本机");
+  const feedback = (await feedbackTarget.allTextContents()).join(";");
   const localSummary = await row.locator("dd").first().textContent();
   await testInfo.attach("cloud-slot-temporary-outcome", { body: JSON.stringify({ ...scenario, feedback, localSummary, downloads, errors, writes }), contentType: "application/json" });
   expect.soft(feedback).toContain("无法保存到本机");
   expect.soft(downloads).toBe(0);
   if (scenario.action === "download") expect.soft(localSummary).toBe("空槽位");
+  if (scenario.access === "read-only") {
+    const geometry: Array<{ width: number; height: number; scale: number }> = [];
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+      await page.setViewportSize(viewport);
+      for (const scale of [80, 100, 125, 150, 200]) {
+        await page.evaluate((scale) => {
+          document.documentElement.dataset.uiFontScale = String(scale);
+          document.documentElement.style.setProperty("--ui-font-scale", String(scale / 100));
+        }, scale);
+        const status = feedbackTarget;
+        await status.evaluate((element) => element.scrollIntoView({ block: "start" }));
+        await expect.poll(() => status.evaluate((element) => {
+          const outer = element.closest('[role="dialog"]')!.getBoundingClientRect();
+          const bounds = element.getBoundingClientRect();
+          const warning = document.querySelector(".local-save-writer-banner--temporary")!.getBoundingClientRect();
+          const covered = bounds.left < warning.right && bounds.right > warning.left && bounds.top < warning.bottom && bounds.bottom > warning.top;
+          const topElement = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+          return (!covered || element.classList.contains("cloud-save-conflict-feedback")) && topElement === element && element.scrollWidth <= element.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth + 1 && bounds.left >= outer.left - 1 && bounds.right <= outer.right + 1;
+        }), { message: `cloud storage feedback ${viewport.width}x${viewport.height} ${scale}%` }).toBe(true);
+        geometry.push({ ...viewport, scale });
+        if (scale === 150) for (const theme of ["dark", "light"]) {
+          await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+          await page.screenshot({ path: `artifacts/review-cloud-slot-storage-20261105/${process.env.DSP_REVIEW_CHECK_NAME || "review"}-${scenario.action}-${viewport.width}x${viewport.height}-${theme}.png`, animations: "disabled" });
+        }
+      }
+    }
+    await testInfo.attach("cloud-slot-feedback-geometry", { body: JSON.stringify(geometry), contentType: "application/json" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => {
+      document.documentElement.dataset.uiFontScale = "100";
+      document.documentElement.style.setProperty("--ui-font-scale", "1");
+      document.documentElement.dataset.theme = "dark";
+    });
+  }
   if (await conflict.isVisible()) await conflict.getByRole("button", { name: "稍后处理", exact: true }).click();
   await page.evaluate(() => sessionStorage.removeItem("cloud-slot-blocked"));
   await page.reload();
@@ -142,7 +178,7 @@ test(`cloud slot ${scenario.action} reports unavailable with ${scenario.access} 
   expect(preserved.state.settings.autosaveIntervalSeconds).toBe(0);
   await page.getByLabel("关闭运营中心", { exact: true }).click();
   await page.getByLabel("打开银河网络", { exact: true }).click();
-  galaxy = page.getByRole("dialog", { name: "银河网络", exact: true });
+  galaxy = page.getByRole("dialog", { name: "银河网络", exact: true, includeHidden: true });
   await expect(galaxy).toBeVisible({ timeout: 60_000 });
   await galaxy.getByRole("tab", { name: "云存档", exact: true }).click();
   await galaxy.locator(`[data-cloud-slot="${scenario.slot}"]`).getByRole("button", { name: scenario.action === "conflict" ? "上传" : "下载", exact: true }).click();

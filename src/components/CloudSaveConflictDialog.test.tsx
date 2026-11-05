@@ -38,4 +38,32 @@ describe("CloudSaveConflictDialog", () => {
     expect(exportLocal).toHaveBeenCalledOnce();
     expect(exportCloud).toHaveBeenCalledOnce();
   });
+
+  it("announces a failed restore inside the active conflict and retains recovery actions", () => {
+    const retry = vi.fn();
+    const exportLocal = vi.fn();
+    const exportCloud = vi.fn();
+    act(() => root.render(<CloudSaveConflictDialog
+      local={null}
+      cloud={{ mode: "normal", slot: "1", revision: 7, updatedAt: 2, size: 100, checksum: "cloud", summary: null }}
+      slot="1"
+      feedback="当前浏览器无法保存到本机，云存档尚未恢复到本机。"
+      onUseCloud={retry}
+      onKeepLocal={() => undefined}
+      onExportLocal={exportLocal}
+      onExportCloud={exportCloud}
+      onCancel={() => undefined}
+    />));
+    const dialog = document.body.querySelector('[role="alertdialog"]')!;
+    expect(dialog.querySelector('[role="status"]')?.textContent).toContain("尚未恢复到本机");
+    const buttons = [...dialog.querySelectorAll("button")];
+    for (const label of ["使用云端版本", "导出本地副本", "导出云端副本"]) {
+      const button = buttons.find((candidate) => candidate.textContent?.includes(label))!;
+      expect(button.disabled).toBe(false);
+      act(() => button.click());
+    }
+    expect(retry).toHaveBeenCalledOnce();
+    expect(exportLocal).toHaveBeenCalledOnce();
+    expect(exportCloud).toHaveBeenCalledOnce();
+  });
 });

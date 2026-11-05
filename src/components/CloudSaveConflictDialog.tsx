@@ -7,6 +7,7 @@ interface CloudSaveConflictDialogProps {
   local: CloudSaveSummary | null;
   cloud: CloudSaveMetadata;
   slot: CloudSaveSlot;
+  feedback?: string | null;
   busy?: boolean;
   onUseCloud: () => void;
   onKeepLocal: () => void;
@@ -46,7 +47,7 @@ function Summary({ title, summary, revision, mode }: { title: string; summary: C
   </section>;
 }
 
-export function CloudSaveConflictDialog({ local, cloud, slot, busy = false, onUseCloud, onKeepLocal, onExportLocal, onExportCloud, onCancel }: CloudSaveConflictDialogProps) {
+export function CloudSaveConflictDialog({ local, cloud, slot, feedback, busy = false, onUseCloud, onKeepLocal, onExportLocal, onExportCloud, onCancel }: CloudSaveConflictDialogProps) {
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const targetMode = cloud.mode ?? local?.mode ?? "normal";
   const targetLabel = `${modeLabel(targetMode)} · ${slotLabel(slot)}`;
@@ -67,6 +68,7 @@ export function CloudSaveConflictDialog({ local, cloud, slot, busy = false, onUs
     </>}
   >
     <p className="cloud-save-conflict-target"><strong>本次唯一目标</strong><span>{targetLabel}</span></p>
+    {feedback ? <p className="cloud-save-conflict-feedback" role="status">{feedback}</p> : null}
     <div className="cloud-save-conflict-comparison">
       <Summary title="当前本地工厂" summary={local} />
       <Summary title="云端工厂" summary={cloud.summary} revision={cloud.revision} mode={cloud.mode} />

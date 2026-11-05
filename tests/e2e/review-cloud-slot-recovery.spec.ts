@@ -2,6 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 
+test.use({ hasTouch: true, isMobile: true });
+
 async function openSaves(page: Page) {
   await page.getByLabel("打开设置", { exact: true }).click();
   const saves = page.getByRole("dialog", { name: "运营中心", exact: true });
@@ -107,6 +109,45 @@ for (const { denySnapshot, backend } of [
     await expect(conflict.getByRole("status")).toBeVisible();
     expect.soft(feedback).toMatch(/快照/);
     expect.soft(attempts).toBeGreaterThan(0);
+    const geometry = [];
+    const status = conflict.getByRole("status");
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+      await page.setViewportSize(viewport);
+      for (const scale of [80, 100, 125, 150, 200]) {
+        await page.evaluate((scale) => {
+          document.documentElement.dataset.uiFontScale = String(scale);
+          document.documentElement.style.setProperty("--ui-font-scale", String(scale / 100));
+        }, scale);
+        await status.evaluate((element) => element.scrollIntoView({ block: "center" }));
+        await expect.poll(() => status.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          const outer = element.closest('[role="alertdialog"]')!.getBoundingClientRect();
+          return document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2) === element &&
+            element.scrollWidth <= element.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth + 1 &&
+            bounds.left >= outer.left - 1 && bounds.right <= outer.right + 1;
+        }), { message: `slot recovery feedback ${viewport.width}x${viewport.height} ${scale}%` }).toBe(true);
+        const retry = conflict.getByRole("button", { name: "使用云端版本", exact: true });
+        await expect(retry).toBeEnabled();
+        await retry.evaluate((element) => element.scrollIntoView({ block: "nearest" }));
+        await expect.poll(() => retry.evaluate((element) => {
+          const bounds = element.getBoundingClientRect(), hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+          return bounds.top >= 0 && bounds.bottom <= innerHeight && Boolean(hit && element.contains(hit));
+        }), { message: `slot retry target ${viewport.width}x${viewport.height} ${scale}%` }).toBe(true);
+        geometry.push({ ...viewport, scale });
+        await status.evaluate((element) => element.scrollIntoView({ block: "center" }));
+        if (scale === 150) for (const theme of ["dark", "light"]) {
+          await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+          await page.screenshot({ path: `artifacts/review-cloud-slot-recovery-20261105/${process.env.DSP_REVIEW_CHECK_NAME || "review"}-${viewport.width}x${viewport.height}-${theme}.png`, animations: "disabled" });
+        }
+      }
+    }
+    await testInfo.attach("slot-recovery-feedback-geometry", { body: JSON.stringify(geometry), contentType: "application/json" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => {
+      document.documentElement.dataset.uiFontScale = "100";
+      document.documentElement.style.setProperty("--ui-font-scale", "1");
+      document.documentElement.dataset.theme = "dark";
+    });
   }
   if (await conflict.isVisible()) await conflict.getByRole("button", { name: "稍后处理", exact: true }).click();
   await galaxy.getByLabel("关闭银河网络", { exact: true }).click();

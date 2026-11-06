@@ -1,6 +1,6 @@
 # 内容包 v4 全功能开发
 
-状态：功能与源码回归完成，正在冻结本地制品，未发布。角色：develop。工作树位于 D 盘，沿用 `codex/content-pack-cloud-fixes-20261107`，从 `1c53a7fe` 继续；已包含前批 Windows 云读取和网页满仓拖取提示修复。
+状态：开发、验证和本地制品交付完成，未发布。角色：develop。工作树位于 D 盘，沿用 `codex/content-pack-cloud-fixes-20261107`，从 `1c53a7fe` 继续，功能源码冻结为 `a08e173cce7c9533d397605885aabc9011187ebb`；其后只有交接文档更新。已包含前批 Windows 云读取和网页满仓拖取提示修复。
 
 ## 范围
 
@@ -38,6 +38,17 @@ JS/Worker 使用索引查询与按科技完成集合缓存的倍率；Rust 使�
 使用 Release profile 跑 Rust 测试时，另发现一个仅开启 debug assertions 才成立的旧测试；最终改用仓库的标准测试配置完整通过，未删除该断言。普通原生库存入口继续拒绝不符合内容包 ID 规则的 opaque 记录；自定义燃料发电通过声明式 generator 规则识别，保持旧核心电站的识别方式。
 
 本地代理拒绝对外 API 请求属于测试隔离；真实玩家账户、存档和服务器未操作。
+
+## 冻结成品
+
+- [完整 ZIP](../../artifacts/dspidle-1.3.8-content-v4-a08e173cce7c.zip)：172,468,255 B，SHA-256 `ed7dca84281ce83b5bcd475eae9e550a510a48e6c267ea5b1a0c20adc0df3390`。
+- [逐文件清单](../../artifacts/content-pack-v4-20261107-final/release-manifest.json)：282 件，包括 Web 200 件、Windows 75 件及内部构建证据 1 件、指南/示例/源码补丁等 6 件。源提交为上述干净功能提交，聚合 SHA-256 `7b495e92c2535c83140a3d3558fb50245d5b7953cc579c63d5233d7c2b2dee37`。
+- [压缩包读回证明](../../artifacts/content-pack-v4-20261107-final/archive-verification.json)：ZIP 内 282 项大小与 SHA-256 全部匹配。
+- [使用说明](../../artifacts/content-pack-v4-20261107-final/bundle/README.md)；[Windows 启动程序](../../artifacts/content-pack-v4-20261107-final/bundle/windows/win-unpacked/dsp-idle-performance-edition.exe)。性能开发版使用独立数据目录，默认离线；不是正式覆盖安装器。
+
+同一冻结 Web 成品的作者编辑、图标导入及桌面/横竖屏检查 7/7 通过。最终 release Host 再次执行 v4 科技、燃料、资源与配方完整状态对照通过。Windows 包核对 `NotSigned`、75 个文件和正确 Build ID 后，在独立 D 盘测试目录实际启动；真实 MessagePort 的主档、手动槽、速通读取及上传四次传输全部通过本地 HTTP 规则，读取无上传专用请求头，上传保留请求 ID。没有接触真实账户或上传玩家档案。
+
+主要原始证据位于 `artifacts/content-v4-unit-frozen.log`、`content-v4-native-diff-frozen.log`、`content-v4-rust-standard-final.log`、`content-v4-node-native-final.log`、`content-v4-e2e-final-all.log`、`content-v4-e2e-frozen-replay.log`，以及 `artifacts/content-pack-v4-20261107-final/` 下的构建、成品浏览器和桌面日志。新增文档链接已单独核对；未把全库历史断链整理加入本批范围。
 
 ## 发布边界
 

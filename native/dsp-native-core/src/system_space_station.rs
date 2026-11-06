@@ -975,7 +975,9 @@ fn station_output_capacity(
         return 0;
     };
     let count = safe_amount(station.get("machineCount")).max(1);
-    let rated = building.output_capacity.floor().max(0.0) as u64;
+    let rated = (building.output_capacity * state.capacity_multiplier_for(base))
+        .floor()
+        .max(0.0) as u64;
     rated
         .saturating_mul(count)
         .min(logistics_buffer_limit(base))

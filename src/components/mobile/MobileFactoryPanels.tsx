@@ -1,3 +1,4 @@
+import { getRecipeMissingTechnology, isRecipeTechnologyAvailable } from "../../game/contentRules";
 import {
   ArrowDownUp,
   Box,
@@ -205,7 +206,7 @@ export function MobileBuildSheet({ game, snap, placement, beltTier, beltTierMode
           const count = Math.floor(game.portableFleet?.[itemId] ?? 0);
           const plan = getRecursiveHandcraftPlan(game, recipe.id, 1);
           const craftable = plan.possible;
-          const missingTech = recipe.requiredTechId && !isTechnologyCompleted(game, recipe.requiredTechId) ? getTechnology(recipe.requiredTechId)?.name : null;
+          const missingTech = getTechnology(getRecipeMissingTechnology(recipe, game.research.completedTechIds))?.name ?? null;
           const blocker = plan.blocker;
           const blockedLabel = missingTech ? `缺少科技：${missingTech}` : blocker?.reason === "capacity" ? "物资托盘已满" : blocker ? `缺少${getItem(blocker.itemId).name}` : "材料不足";
           return <button className={`mobile-build-card${plan.decisions.length > 1 ? " upstream" : ""}`} type="button" disabled={!craftable} key={itemId} onClick={() => onCraftFleet(recipe.id)} title={craftable ? `制造${getItem(itemId).name}` : blockedLabel}>

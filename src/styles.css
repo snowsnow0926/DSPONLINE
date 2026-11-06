@@ -25207,3 +25207,13 @@ html:not([data-native-ui-scale])[data-ui-font-scale="200"] .construction-item {
     padding-right: 42px;
   }
 }
+.content-pack-author { grid-column: 1 / -1; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.content-pack-author summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+.content-pack-author > * + * { margin-top: 12px; }
+.content-author-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)); gap: 12px; min-width: 0; }
+.content-pack-author label { display: flex; flex-direction: column; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.content-pack-author input, .content-pack-author select { box-sizing: border-box; min-width: 0; max-width: 100%; width: 100%; min-height: 40px; padding: 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--surface); font: inherit; line-height: 1.4; }
+.content-pack-author input[type="checkbox"] { width: 22px; min-height: 22px; padding: 0; }
+.content-author-entry { padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
+.content-author-entry > * + * { margin-top: 12px; }
+.content-author-icon { width: 48px; height: 48px; object-fit: contain; }

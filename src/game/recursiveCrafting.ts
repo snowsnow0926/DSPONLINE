@@ -1,3 +1,4 @@
+import { getRecipeMissingTechnology, isRecipeTechnologyAvailable } from "./contentRules";
 import type { ItemAmount, ItemId, RecipeDefinition, RecipeId, TechId } from "./types";
 
 export type RecursiveCraftBlockerReason = "raw-shortage" | "technology" | "no-recipe" | "cycle";
@@ -132,8 +133,8 @@ function ensureItemOptions(
   const earlierAttempts: Array<{ recipeId: RecipeId; viable: boolean; blocker?: RecursiveCraftBlocker }> = [];
 
   for (const recipe of recipes) {
-    if (recipe.requiredTechId && !context.completedTechnologyIds.has(recipe.requiredTechId)) {
-      const blocker = { itemId, current, required, reason: "technology" as const, recipeId: recipe.id, technologyId: recipe.requiredTechId };
+    if (getRecipeMissingTechnology(recipe, context.completedTechnologyIds)) {
+      const blocker = { itemId, current, required, reason: "technology" as const, recipeId: recipe.id, technologyId: getRecipeMissingTechnology(recipe, context.completedTechnologyIds) };
       blockers.push({ ...blocker, depth });
       earlierAttempts.push({ recipeId: recipe.id, viable: false, blocker });
       continue;
@@ -306,9 +307,9 @@ function* lazyMissingItemOptions(
   const earlierAttempts: Array<{ recipeId: RecipeId; viable: boolean; blocker?: RecursiveCraftBlocker }> = [];
   let emitted = 0;
   for (const recipe of producingRecipes(context, itemId)) {
-    if (recipe.requiredTechId && !context.completedTechnologyIds.has(recipe.requiredTechId)) {
+    if (getRecipeMissingTechnology(recipe, context.completedTechnologyIds)) {
       earlierAttempts.push({ recipeId: recipe.id, viable: false, blocker: {
-        itemId, current, required, reason: "technology", recipeId: recipe.id, technologyId: recipe.requiredTechId,
+        itemId, current, required, reason: "technology", recipeId: recipe.id, technologyId: getRecipeMissingTechnology(recipe, context.completedTechnologyIds),
       } });
       continue;
     }
@@ -422,7 +423,7 @@ export function planSelectedRecipe({ inventory, recipe, batches, recipes, comple
 function planRecipeWithContext(context: PlannerContext, inventory: Partial<Record<ItemId, number>>, recipe: RecipeDefinition, batches: number): RecursiveCraftPlan {
   const count = Math.max(1, Math.floor(batches));
   const initial: PlannerWork = { inventory: normalizedInventory(inventory), steps: [], decisions: [] };
-  if (recipe.requiredTechId && !context.completedTechnologyIds.has(recipe.requiredTechId)) {
+  if (getRecipeMissingTechnology(recipe, context.completedTechnologyIds)) {
     const output = recipe.outputs[0];
     return {
       possible: false,
@@ -435,7 +436,7 @@ function planRecipeWithContext(context: PlannerContext, inventory: Partial<Recor
         required: output?.amount ?? 1,
         reason: "technology",
         recipeId: recipe.id,
-        technologyId: recipe.requiredTechId,
+        technologyId: getRecipeMissingTechnology(recipe, context.completedTechnologyIds),
       },
     };
   }

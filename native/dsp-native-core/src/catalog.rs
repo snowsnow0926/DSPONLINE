@@ -156,6 +156,11 @@ pub struct TechnologyDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogSnapshot {
+    #[serde(
+        default,
+        skip_serializing_if = "crate::content_rules::ContentRules::is_empty"
+    )]
+    pub content_rules: crate::content_rules::ContentRules,
     pub protocol_version: u16,
     pub registry_fingerprint: String,
     pub planets: Vec<PlanetDefinition>,
@@ -362,6 +367,7 @@ impl RuntimeCatalog {
         if snapshot.protocol_version != crate::CORE_PROTOCOL_VERSION {
             bail!("native catalog protocol version is unsupported");
         }
+        snapshot.content_rules.validate(&snapshot)?;
         if snapshot.registry_fingerprint != expected_registry_fingerprint
             || snapshot.registry_fingerprint.is_empty()
             || snapshot.registry_fingerprint.len() > 256

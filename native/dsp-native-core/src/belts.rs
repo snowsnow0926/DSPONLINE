@@ -3028,7 +3028,8 @@ fn normalized_buffer_limit(value: Option<&Value>) -> f64 {
         .clamp(1_000.0, 100_000_000.0)
 }
 
-fn stacked_capacity(base: f64, count: f64, limit: f64) -> f64 {
+fn stacked_capacity(multiplier: f64, base: f64, count: f64, limit: f64) -> f64 {
+    let base = base * multiplier;
     let base = base.max(0.0).floor();
     let count = count.floor().max(1.0);
     if base == 0.0 {
@@ -3732,6 +3733,7 @@ fn target_capacity(
         },
     ));
     let mut capacity = stacked_capacity(
+        state.capacity_multiplier_for(base),
         if string_at(target, "kind") == Some("station") {
             building.output_capacity
         } else {

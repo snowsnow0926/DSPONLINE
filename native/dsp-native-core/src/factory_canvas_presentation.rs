@@ -289,14 +289,6 @@ fn stacked_capacity(base_capacity: f64, count: f64, limit: f64) -> f64 {
     }
 }
 
-fn extractor_id(resource_id: &str) -> &'static str {
-    match resource_id {
-        "crude_oil" => "oil_extractor",
-        "water" | "sulfuric_acid" => "water_pump",
-        _ => "mining_machine",
-    }
-}
-
 fn output_capacity(
     base: &Map<String, Value>,
     entity: &Map<String, Value>,
@@ -315,7 +307,7 @@ fn output_capacity(
         let extractor = entity
             .get("extractorBuildingId")
             .and_then(Value::as_str)
-            .unwrap_or_else(|| extractor_id(resource_id));
+            .unwrap_or_else(|| catalog.snapshot.content_rules.extractor_id(resource_id));
         Some((
             catalog.buildings.get(extractor)?,
             object_number(entity, "minerCount"),
@@ -324,7 +316,15 @@ fn output_capacity(
         None
     };
     Some(definition.map_or(0.0, |(building, count)| {
-        stacked_capacity(building.output_capacity, count, limit)
+        stacked_capacity(
+            building.output_capacity
+                * catalog
+                    .snapshot
+                    .content_rules
+                    .multiplier(base, "storageCapacity"),
+            count,
+            limit,
+        )
     }))
 }
 
@@ -876,16 +876,10 @@ fn status(
         }
         .to_value();
     }
-    if let Some(required_tech_id) = recipe.required_tech_id.as_deref()
-        && !base
-            .get("research")
-            .and_then(|research| research.get("completedTechIds"))
-            .and_then(Value::as_array)
-            .is_some_and(|completed| {
-                completed
-                    .iter()
-                    .any(|tech_id| tech_id.as_str() == Some(required_tech_id))
-            })
+    if !catalog
+        .snapshot
+        .content_rules
+        .recipe_available(base, recipe)
     {
         return Status {
             code: "missing-recipe",
@@ -993,7 +987,7 @@ fn building_and_recipe<'a>(
         Some(Value::String(recipe_id)) => {
             let recipe = catalog.recipes.get(recipe_id)?;
             if let Some(building) = building
-                && recipe.building_id != building.id
+                && !catalog.recipe_allowed(&building.id, recipe)
             {
                 return None;
             }
@@ -1090,6 +1084,7 @@ mod tests {
     fn catalog(registry_fingerprint: &str) -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: registry_fingerprint.to_owned(),
                 planets: vec![PlanetDefinition {

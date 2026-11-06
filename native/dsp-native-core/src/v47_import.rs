@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{Error as IoError, ErrorKind, Read};
 
@@ -57,8 +57,91 @@ impl ParsedV47Envelope {
         &self.proof
     }
 
+    fn migrate_content_ids(
+        &mut self,
+        migrations: &[crate::content_id_migration::IdMigration],
+    ) -> anyhow::Result<()> {
+        if migrations.is_empty() {
+            return Ok(());
+        }
+        let mut base = Value::Object(std::mem::take(&mut self.base));
+        crate::content_id_migration::migrate_value(&mut base, "", migrations)?;
+        self.base = match base {
+            Value::Object(object) => object,
+            _ => unreachable!(),
+        };
+        for record in self.entities.iter_mut().chain(self.belts.iter_mut()) {
+            let mut value: Value = serde_json::from_str(record)?;
+            crate::content_id_migration::migrate_value(&mut value, "", migrations)?;
+            *record = serde_json::to_string(&value)?;
+        }
+        Ok(())
+    }
+
+    fn seed_content_resources(
+        &mut self,
+        rules: &[crate::content_rules::ResourceRule],
+    ) -> anyhow::Result<()> {
+        if rules.iter().all(|rule| rule.planet_ids.is_empty()) {
+            return Ok(());
+        }
+        let mut occupied = HashSet::<(String, String)>::new();
+        let mut counts = HashMap::<String, usize>::new();
+        for record in &self.entities {
+            let value: Value = serde_json::from_str(record)?;
+            if value.get("kind").and_then(Value::as_str) != Some("vein") {
+                continue;
+            }
+            if let (Some(planet), Some(item)) = (
+                value.get("planetId").and_then(Value::as_str),
+                value.get("resourceId").and_then(Value::as_str),
+            ) {
+                occupied.insert((planet.to_owned(), item.to_owned()));
+                *counts.entry(planet.to_owned()).or_default() += 1;
+            }
+        }
+        for rule in rules {
+            let Some(reserve) = rule.reserve else {
+                continue;
+            };
+            for planet in &rule.planet_ids {
+                if occupied.insert((planet.clone(), rule.item_id.clone())) {
+                    if self.entities.len() >= MAX_ENTITY_COUNT {
+                        bail!("content resource count exceeds native entity limit");
+                    }
+                    let index = counts.entry(planet.clone()).or_default();
+                    let entity = json!({
+                        "id":format!("content_vein_{planet}_{}", rule.item_id), "kind":"vein", "planetId":planet,
+                        "resourceId":rule.item_id, "position":{"x":-470 + (*index as i64 % 4)*320, "y":-250 + (*index as i64 / 4)*285},
+                        "interactionLocked":false, "powerGridId":"grid-a", "powerPriority":2,
+                        "machineCount":0, "minerCount":0, "inputs":{}, "outputs":{}, "progress":0,
+                        "routingCursor":0, "utilization":0, "productionRate":0,
+                        "resourceRemaining":reserve, "resourceCapacity":reserve, "resourceDepletionRemainder":0
+                    });
+                    *index += 1;
+                    self.entities.push(serde_json::to_string(&entity)?);
+                }
+                if let Some(profile) = self
+                    .base
+                    .get_mut("galaxy")
+                    .and_then(|value| value.get_mut("profiles"))
+                    .and_then(|value| value.get_mut(planet))
+                    .and_then(Value::as_object_mut)
+                {
+                    let entries = profile.entry("resourceIds").or_insert_with(|| json!([]));
+                    if let Some(entries) = entries.as_array_mut()
+                        && !entries.iter().any(|id| id.as_str() == Some(&rule.item_id))
+                    {
+                        entries.push(Value::String(rule.item_id.clone()));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn into_core_state(
-        self,
+        mut self,
         revision: u64,
         registry_fingerprint: &str,
         catalog: RuntimeCatalog,
@@ -66,6 +149,11 @@ impl ParsedV47Envelope {
         if revision > MAX_SAFE_INTEGER {
             bail!("native v47 import revision is invalid");
         }
+        // The parser has already checked the original bytes/checksum. Apply
+        // aliases only to the owned candidate, before catalog ID validation;
+        // the source file and its proof remain unchanged on failure.
+        self.migrate_content_ids(&catalog.snapshot.content_rules.id_migrations)?;
+        self.seed_content_resources(&catalog.snapshot.content_rules.resources)?;
         let slot = match self.proof.mode.as_str() {
             "normal" => "normal-main",
             "speedrun" => "speedrun-main",
@@ -875,6 +963,56 @@ mod tests {
         assert_eq!(
             parsed.proof().source_sha256,
             hex::encode(Sha256::digest(&bytes))
+        );
+    }
+
+    #[test]
+    fn verified_import_migrates_content_references_without_rewriting_source_proof() {
+        let bytes = fixture(true);
+        let mut parsed = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap();
+        let checksum = parsed.proof().state_checksum.clone();
+        parsed
+            .migrate_content_ids(&[crate::content_id_migration::IdMigration {
+                kind: "items".into(),
+                from: "iron_ore".into(),
+                to: "new_ore".into(),
+            }])
+            .unwrap();
+        let entity: Value = serde_json::from_str(&parsed.entities[0]).unwrap();
+        assert_eq!(entity["id"], "vein");
+        assert_eq!(entity["resourceId"], "new_ore");
+        assert_eq!(entity["outputs"]["new_ore"], 3);
+        assert_eq!(parsed.proof().state_checksum, checksum);
+        assert_eq!(
+            parsed.proof().source_sha256,
+            hex::encode(Sha256::digest(&bytes))
+        );
+    }
+
+    #[test]
+    fn resource_seeding_is_idempotent_and_never_refills_a_loaded_deposit() {
+        let bytes = fixture(true);
+        let mut parsed = parse_v47_envelope(bytes.as_slice(), bytes.len() as u64).unwrap();
+        parsed.base.insert(
+            "galaxy".into(),
+            json!({"profiles":{"home":{"resourceIds":["iron_ore"]}}}),
+        );
+        let rules: Vec<crate::content_rules::ResourceRule> = serde_json::from_value(json!([{"itemId":"custom_ore","extractorBuildingId":"custom_miner","planetIds":["home"],"reserve":100000}])).unwrap();
+        parsed.seed_content_resources(&rules).unwrap();
+        assert_eq!(parsed.entities.len(), 2);
+        let mut entity: Value = serde_json::from_str(&parsed.entities[1]).unwrap();
+        assert_eq!(entity["position"], json!({"x":-150,"y":-250}));
+        entity["resourceRemaining"] = json!(57);
+        entity["outputs"] = json!({"custom_ore":11});
+        parsed.entities[1] = serde_json::to_string(&entity).unwrap();
+        parsed.seed_content_resources(&rules).unwrap();
+        assert_eq!(parsed.entities.len(), 2);
+        let retained: Value = serde_json::from_str(&parsed.entities[1]).unwrap();
+        assert_eq!(retained["resourceRemaining"], 57);
+        assert_eq!(retained["outputs"]["custom_ore"], 11);
+        assert_eq!(
+            parsed.base["galaxy"]["profiles"]["home"]["resourceIds"],
+            json!(["iron_ore", "custom_ore"])
         );
     }
 

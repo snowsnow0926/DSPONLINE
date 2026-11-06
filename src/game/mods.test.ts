@@ -5,7 +5,7 @@ describe("content pack validation", () => {
   it("accepts a metadata-only pack and normalizes its arrays", () => {
     const result = validateContentPack(createContentPackTemplate());
     expect(result.valid).toBe(true);
-    expect(result.manifest?.formatVersion).toBe(3);
+    expect(result.manifest?.formatVersion).toBe(4);
     expect(result.counts).toEqual({ items: 0, buildings: 0, recipes: 0, technologies: 0 });
   });
 

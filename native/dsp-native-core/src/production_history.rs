@@ -1887,18 +1887,6 @@ impl CoreState {
                 .and_then(|settings| settings.get("resourceMode"))
                 .and_then(Value::as_str)
                 == Some("infinite");
-            let completed_tech = base
-                .get("research")
-                .and_then(Value::as_object)
-                .and_then(|research| research.get("completedTechIds"))
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<HashSet<_>>()
-                })
-                .unwrap_or_default();
             let has_active_research = crate::simple_factory::has_active_research(base);
             let remaining_research_costs = has_active_research
                 .then(|| crate::simple_factory::remaining_research_costs(self, base));
@@ -1952,24 +1940,11 @@ impl CoreState {
                 power_source_grids.entry(planet).or_default().insert(grid);
             }
 
-            let mining_output_capacity = self
+            let capacity_multiplier = self
                 .catalog
-                .buildings
-                .get("mining_machine")
-                .map(|building| building.output_capacity)
-                .unwrap_or(0.0);
-            let oil_output_capacity = self
-                .catalog
-                .buildings
-                .get("oil_extractor")
-                .map(|building| building.output_capacity)
-                .unwrap_or(0.0);
-            let water_output_capacity = self
-                .catalog
-                .buildings
-                .get("water_pump")
-                .map(|building| building.output_capacity)
-                .unwrap_or(0.0);
+                .snapshot
+                .content_rules
+                .multiplier(base, "storageCapacity");
             let inspect_blocked = |index: usize, value: &Value| {
                 let entity = value.as_object()?;
                 let kind = self
@@ -2009,16 +1984,18 @@ impl CoreState {
                             .and_then(|id| self.catalog.buildings.get(id));
                         match (recipe, building) {
                             (Some(recipe), Some(building)) => {
-                                if recipe
-                                    .required_tech_id
-                                    .as_deref()
-                                    .is_some_and(|id| !completed_tech.contains(id))
+                                if !self
+                                    .catalog
+                                    .snapshot
+                                    .content_rules
+                                    .recipe_available(base, recipe)
+                                    || !self.catalog.recipe_allowed(&building.id, recipe)
                                     || recipe.id == "matrix_research" && !has_active_research
                                 {
                                     true
                                 } else {
                                     let capacity = stacked_capacity(
-                                        building.output_capacity,
+                                        building.output_capacity * capacity_multiplier,
                                         count,
                                         production_buffer_limit,
                                     );
@@ -2144,11 +2121,12 @@ impl CoreState {
                     if depleted {
                         true
                     } else {
-                        let output_capacity = match resource {
-                            "crude_oil" => oil_output_capacity,
-                            "water" | "sulfuric_acid" => water_output_capacity,
-                            _ => mining_output_capacity,
-                        };
+                        let output_capacity = self
+                            .catalog
+                            .buildings
+                            .get(self.catalog.snapshot.content_rules.extractor_id(resource))
+                            .map(|building| building.output_capacity * capacity_multiplier)
+                            .unwrap_or(0.0);
                         let capacity =
                             stacked_capacity(output_capacity, count, production_buffer_limit);
                         let output = entity
@@ -2285,6 +2263,7 @@ mod tests {
     fn history_fixture_catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: "history-parallel-v1".to_owned(),
                 planets: vec![PlanetDefinition {

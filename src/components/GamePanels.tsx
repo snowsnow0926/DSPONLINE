@@ -1,3 +1,4 @@
+import { getRecipeMissingTechnology, isRecipeTechnologyAvailable } from "../game/contentRules";
 import {
   Atom,
   AlertTriangle,
@@ -865,7 +866,7 @@ function MultiSelectionInspector({ game, entities, belts, readModel, onRecipeCha
   }
   const machines = entities.filter((entity) => entity.kind === "machine" && entity.buildingId);
   const commonRecipes = machines.length > 0 ? getRecipesForBuilding(machines[0].buildingId!).filter((recipe) =>
-    (!recipe.requiredTechId || isTechnologyCompleted(game, recipe.requiredTechId)) &&
+    (isRecipeTechnologyAvailable(recipe, game.research.completedTechIds)) &&
     machines.every((entity) => getRecipesForBuilding(entity.buildingId!).some((candidate) => candidate.id === recipe.id))) : [];
   const commonRecipeId = machines.length > 0 && machines.every((entity) => entity.recipeId === machines[0].recipeId)
     ? machines[0].recipeId
@@ -2333,7 +2334,7 @@ function Fabricator({ game, focusItemId, onCraft, onCraftItem, onQueueCraftItem,
         );
       }) : handcraftRecipes.map((recipe) => {
         const output = recipe.outputs[0];
-        const unlocked = !recipe.requiredTechId || isTechnologyCompleted(game, recipe.requiredTechId);
+        const unlocked = isRecipeTechnologyAvailable(recipe, game.research.completedTechIds);
         const recursivePlan = recursivePlans.get(recipe.id) ?? getRecursiveHandcraftPlan(game, recipe.id, batches);
         const available = recursivePlan.possible;
         return (
@@ -2348,7 +2349,7 @@ function Fabricator({ game, focusItemId, onCraft, onCraftItem, onQueueCraftItem,
                 <button type="button" disabled={!canQueueHandcraftRecipe(game, recipe.id)} onClick={() => onQueueCraftItem(recipe.id, batches)} title={`加入${getItem(output.itemId).name}手工队列`} aria-label={`排队制造${getItem(output.itemId).name}`}><ListPlus size={14} /></button>
               </div>
             </header>
-            {!unlocked && recipe.requiredTechId ? <div className="fabricator-lock"><LockKeyhole size={11} /> {getTechnology(recipe.requiredTechId)?.name}</div> : null}
+            {!unlocked ? <div className="fabricator-lock"><LockKeyhole size={11} /> {getTechnology(getRecipeMissingTechnology(recipe, game.research.completedTechIds))?.name}</div> : null}
             <div className="fabricator-costs">
               {recipe.inputs.map((input) => {
                 const current = Math.floor(game.tray[input.itemId] ?? 0);
@@ -2822,9 +2823,7 @@ export function ConstructionDock({ game, placement, beltTier, beltTierMode, plac
           const count = Math.max(0, Math.floor(game.portableFleet?.[itemId] ?? 0));
           const cargoReady = game.cargo?.itemId === itemId;
           const craftable = fleetCraftability.get(itemId) ?? getRecursiveHandcraftPlan(game, recipe.id, 1).possible;
-          const missingTechnology = recipe.requiredTechId && !isTechnologyCompleted(game, recipe.requiredTechId)
-            ? getTechnology(recipe.requiredTechId)?.name
-            : null;
+          const missingTechnology = getTechnology(getRecipeMissingTechnology(recipe, game.research.completedTechIds))?.name ?? null;
           const missingItems = recipe.inputs.flatMap((input) => {
             const current = Math.floor(game.tray[input.itemId] ?? 0);
             return current < input.amount ? [`${getItem(input.itemId).name} ${formatQuantityCompact(current)}/${formatQuantityCompact(input.amount)}（缺 ${formatQuantityCompact(input.amount - current)}）`] : [];

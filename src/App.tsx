@@ -1,3 +1,5 @@
+import { addContentPackResources, getTechnologyMultiplier } from "./game/contentRules";
+import { migrateContentPackIds } from "./game/contentIdMigration";
 import {
   Background,
   BackgroundVariant,
@@ -16246,6 +16248,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [contentPackRegistry, playTone]);
 
   const applyRegisteredContentPacks = useCallback((registry: ContentPackRegistry) => {
+    const migrations = Object.values(registry.packs).filter((pack) => pack.enabled).flatMap((pack) => pack.manifest.idMigrations ?? []);
+    let migrated: GameState;
+    try { migrated = migrateContentPackIds(gameRef.current, migrations); }
+    catch (error) {
+      const issues = [error instanceof Error ? error.message : "旧 ID 迁移失败"];
+      setNotice(issues[0]);
+      return { persisted: false, catalogValid: false, activePackIds: [], blockedPackIds: [], issues };
+    }
     const report = commitContentPackRegistry(registry, contentPackRegistry);
     if (!report.persisted) {
       setNotice(`内容包未应用：${report.issues.join("；") || "依赖未就绪"}`);
@@ -16256,7 +16266,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setContentPackRegistry(registry);
     // Re-render catalog-driven panels after the live registry changes.
     const contentPacks = getActiveContentPackReferences(registry);
-    commitGame((current) => ({ ...current, contentPacks }));
+    commitGame(() => addContentPackResources({ ...migrated, contentPacks }));
     return report;
   }, [commitGame, contentPackRegistry]);
 
@@ -17040,7 +17050,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       researchCosts: technology?.costs.filter((cost) => (progress[cost.itemId] ?? 0) < cost.amount) ?? [],
       completedTechIds: canvasGame.research.completedTechIds,
       paused: nativePlayerAuthorityOwnsRuntime ? factoryRunStatusReadModel.paused : canvasGame.paused,
-      powerDemandMultiplier: getDifficultyDefinition(canvasGame.settings.difficulty).powerDemandMultiplier,
+      powerDemandMultiplier: getDifficultyDefinition(canvasGame.settings.difficulty).powerDemandMultiplier * getTechnologyMultiplier(canvasGame.research.completedTechIds, "powerConsumption"),
       solarGenerationMultiplier: nativePlayerAuthorityOwnsRuntime ? 0 : getPlanetSolarPowerMultiplier(canvasGame, factoryCanvasPlanetId),
       windGenerationMultiplier: planetProfile?.windMultiplier ?? 0,
       geothermalGenerationMultiplier: planetProfile?.geothermalMultiplier ?? 0,

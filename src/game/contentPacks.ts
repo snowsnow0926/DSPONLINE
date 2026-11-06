@@ -1,4 +1,5 @@
-import { BUILDINGS, CONSTRUCTION, ITEMS, RECIPES, TECHNOLOGIES, TECHNOLOGY_LIST, registerRuntimeBeltDefinition, resetRuntimeBeltDefinitions, validateContentCatalog } from "./content";
+import { BUILDINGS, CONSTRUCTION, FUEL_ENERGY_MJ, FUEL_ITEM_IDS, ITEMS, RECIPES, TECHNOLOGIES, TECHNOLOGY_LIST, registerRuntimeBeltDefinition, resetRuntimeBeltDefinitions, validateContentCatalog } from "./content";
+import { setContentRules, type ContentRules } from "./contentRules";
 import {
   parseContentPackDependency,
   satisfiesContentPackVersion,
@@ -20,6 +21,7 @@ import type {
   TechId,
 } from "./types";
 import { getContentPackUpdateReport } from "./contentPackUpdates";
+import { hasContentIdReference } from "./contentIdMigration";
 export { getContentPackUpdateReport } from "./contentPackUpdates";
 
 const CONTENT_PACK_STORAGE_KEY = "dsp-idle-network.content-packs.v1";
@@ -34,6 +36,7 @@ const CORE_BUILDING_DEFINITIONS = new Map(Object.entries(BUILDINGS).map(([id, de
 const CORE_RECIPE_DEFINITIONS = new Map(Object.entries(RECIPES));
 const CORE_TECHNOLOGY_DEFINITIONS = [...TECHNOLOGY_LIST];
 const CORE_CONSTRUCTION_DEFINITIONS = [...CONSTRUCTION];
+const CORE_FUELS = { ...FUEL_ENERGY_MJ };
 
 type RuntimeItems = Record<string, ItemDefinition>;
 type RuntimeBuildings = Record<string, BuildingDefinition>;
@@ -98,6 +101,9 @@ function getStorage(): Storage | null {
 }
 
 function cloneManifest(manifest: ContentPackManifest): ContentPackManifest {
+  // Rules and embedded presentation are nested author data. Never share them
+  // between history, editor drafts, workers and the live registry.
+  manifest = structuredClone(manifest);
   return {
     ...manifest,
     dependencies: [...(manifest.dependencies ?? [])],
@@ -275,6 +281,15 @@ export function getContentPackConflicts(registry: ContentPackRegistry, manifest:
       const targets = new Set(manifest[key]?.map((rule) => rule.id) ?? []);
       for (const rule of pack.manifest[key] ?? []) if (targets.has(rule.id)) conflicts.push(`规则 ${rule.id} 已由 ${pack.manifest.name} 调整`);
     }
+    for (const key of ["recipePolicies", "generators"] as const) {
+      const targets = new Set(manifest[key]?.map((rule) => rule.buildingId) ?? []);
+      for (const rule of pack.manifest[key] ?? []) if (targets.has(rule.buildingId)) conflicts.push(`${rule.buildingId} 的 ${key} 已由 ${pack.manifest.name} 配置`);
+    }
+    for (const key of ["items", "buildings", "recipes", "technologies", "belts"] as const) {
+      const aliases = new Set(manifest.idMigrations?.filter((rule) => rule.kind === key).map((rule) => rule.from) ?? []);
+      const otherAliases = new Set(pack.manifest.idMigrations?.filter((rule) => rule.kind === key).map((rule) => rule.from) ?? []);
+      if ((pack.manifest[key] ?? []).some((entry) => aliases.has(entry.id)) || (manifest[key] ?? []).some((entry) => otherAliases.has(entry.id)) || [...aliases].some((id) => otherAliases.has(id))) conflicts.push(`旧 ID 迁移与 ${pack.manifest.name} 的 ${key} 命名空间冲突`);
+    }
   }
   return [...new Set(conflicts)];
 }
@@ -284,18 +299,23 @@ export function getContentPackValidationContext(registry: ContentPackRegistry, e
   const itemIds = new Set<string>();
   const buildingIds = new Set<string>();
   const technologyIds = new Set<string>();
+  const recipeIds = new Set<string>();
+  const fuelItemIds = new Set<string>();
+  const buildingKinds: Record<string, BuildingDefinition["kind"]> = {};
   const technologyPrerequisites: Record<string, readonly string[]> = {};
   for (const pack of Object.values(registry.packs)) {
     if (pack.manifest.id === excludePackId) continue;
     for (const item of pack.manifest.items ?? []) itemIds.add(item.id);
-    for (const building of pack.manifest.buildings ?? []) buildingIds.add(building.id);
+    for (const building of pack.manifest.buildings ?? []) { buildingIds.add(building.id); buildingKinds[building.id] = building.kind ?? "machine"; }
+    for (const fuel of pack.manifest.fuels ?? []) fuelItemIds.add(fuel.itemId);
+    for (const recipe of pack.manifest.recipes ?? []) recipeIds.add(recipe.id);
     for (const technology of pack.manifest.technologies ?? []) {
       technologyIds.add(technology.id);
       technologyPrerequisites[technology.id] = technology.prerequisites ?? [];
     }
     for (const technology of pack.manifest.technologyOverrides ?? []) if (technology.prerequisites) technologyPrerequisites[technology.id] = technology.prerequisites;
   }
-  return { itemIds, buildingIds, technologyIds, technologyPrerequisites };
+  return { itemIds, buildingIds, technologyIds, recipeIds, fuelItemIds, buildingKinds, technologyPrerequisites };
 }
 
 export function registerContentPack(registry: ContentPackRegistry, validation: ModValidationResult, enable = true): { registry: ContentPackRegistry; enabled: boolean; reason?: string } {
@@ -309,13 +329,14 @@ export function registerContentPack(registry: ContentPackRegistry, validation: M
     if (!update.compatible) return { registry, enabled: previous.enabled, reason: update.issues.join("；") };
   }
   const now = Date.now();
+  const compatibleVersions = [...new Set([...(validation.manifest.compatibleSaveVersions ?? []), ...(previous?.compatibleVersions ?? []), ...(previous ? [previous.manifest.version] : [])])].filter((version) => version !== validation.manifest!.version).slice(-128);
   next.packs[validation.manifest.id] = {
-    manifest: cloneManifest(validation.manifest),
+    manifest: cloneManifest({ ...validation.manifest, ...(validation.manifest.formatVersion >= 4 && compatibleVersions.length ? { compatibleSaveVersions: compatibleVersions } : {}) }),
+    compatibleVersions,
     enabled: false,
     installedAt: previous?.installedAt ?? now,
     updatedAt: now,
     ...(previous ? {
-      compatibleVersions: [...new Set([...(previous.compatibleVersions ?? []), previous.manifest.version])].filter((version) => version !== validation.manifest!.version).slice(-128),
       previousManifests: previous.manifest.version === validation.manifest.version ? previous.previousManifests ?? [] : [...(previous.previousManifests ?? []), cloneManifest(previous.manifest)].slice(-5),
     } : {}),
   };
@@ -379,6 +400,10 @@ function activePacksInDependencyOrder(registry: ContentPackRegistry): { active: 
 }
 
 function resetRuntimeContent(): void {
+  setContentRules({});
+  for (const key of Object.keys(FUEL_ENERGY_MJ)) delete FUEL_ENERGY_MJ[key as ItemId];
+  Object.assign(FUEL_ENERGY_MJ, CORE_FUELS);
+  FUEL_ITEM_IDS.splice(0, FUEL_ITEM_IDS.length, ...Object.keys(CORE_FUELS) as ItemId[]);
   const items = ITEMS as unknown as RuntimeItems;
   const buildings = BUILDINGS as unknown as RuntimeBuildings;
   const recipes = RECIPES as unknown as RuntimeRecipes;
@@ -417,6 +442,8 @@ function registerItems(packs: RegisteredContentPack[]): void {
       color: item.color?.trim() || colorFor(item.id),
       kind: item.kind ?? "solid",
       description: item.description?.trim() || `${pack.manifest.name} 提供的物品。`,
+      ...(item.icon ? { icon: item.icon } : {}),
+      ...(item.categoryId ? { categoryId: item.categoryId } : {}),
     };
   }
 }
@@ -447,6 +474,8 @@ function registerBuildings(packs: RegisteredContentPack[]): void {
       ...(building.capabilities ? { capabilities: [...building.capabilities] } : {}),
       ...(building.scripted !== undefined ? { scripted: building.scripted } : {}),
       description: building.description?.trim() || `${pack.manifest.name} 提供的建筑。`,
+      ...(building.icon ? { icon: building.icon } : {}),
+      ...(building.categoryId ? { categoryId: building.categoryId } : {}),
     };
   }
 }
@@ -481,6 +510,8 @@ function registerRecipes(packs: RegisteredContentPack[]): void {
       ...(recipe.requiredTechId ? { requiredTechId: recipe.requiredTechId as TechId } : {}),
       ...(recipe.handcraftable !== undefined ? { handcraftable: recipe.handcraftable } : {}),
       ...(recipe.recursivePriority !== undefined ? { recursivePriority: recipe.recursivePriority } : {}),
+      ...(recipe.icon ? { icon: recipe.icon } : {}),
+      ...(recipe.categoryId ? { categoryId: recipe.categoryId } : {}),
     };
   }
 }
@@ -571,6 +602,20 @@ export function applyContentPackRegistry(registry: ContentPackRegistry): Content
   registerConstruction(active);
   registerBelts(active);
   applyContentRules(active);
+  const rules: ContentRules = {};
+  for (const key of ["technologyEffects", "recipeGroups", "recipePolicies", "fuels", "generators", "resources", "idMigrations", "categories"] as const) {
+    Object.assign(rules, { [key]: active.flatMap((pack) => (pack.manifest[key] ?? []) as unknown[]) });
+  }
+  setContentRules(rules);
+  for (const effect of rules.technologyEffects ?? []) {
+    const technology = TECHNOLOGIES[effect.technologyId as TechId];
+    for (const [key, label] of [["productionSpeed", "生产速度"], ["powerConsumption", "能耗"], ["miningSpeed", "采矿速度"], ["storageCapacity", "输入/输出容量"]] as const) {
+      if (effect[key] !== undefined) technology.unlocks.push(`${label} ×${effect[key]}`);
+    }
+  }
+  for (const group of rules.recipeGroups ?? []) TECHNOLOGIES[group.requiredTechId as TechId].unlocks.push(`配方组：${group.name}`);
+  for (const fuel of rules.fuels ?? []) FUEL_ENERGY_MJ[fuel.itemId as ItemId] = fuel.energyMj;
+  FUEL_ITEM_IDS.splice(0, FUEL_ITEM_IDS.length, ...Object.keys(FUEL_ENERGY_MJ) as ItemId[]);
   const audit = validateContentCatalog();
   return {
     activePackIds: active.map((pack) => pack.manifest.id),
@@ -613,7 +658,7 @@ export function getMissingContentPackRequirements(
     const installed = registry.packs[requirement.id];
     if (!installed) return [`缺少内容包 ${requirement.id}@${requirement.version}`];
     if (!installed.enabled) return [`内容包 ${requirement.id}@${requirement.version} 已安装但未启用`];
-    if (installed.manifest.version !== requirement.version && !installed.compatibleVersions?.includes(requirement.version)) return [`内容包 ${requirement.id} 版本不匹配：存档需要 ${requirement.version}，当前为 ${installed.manifest.version}`];
+    if (installed.manifest.version !== requirement.version && !installed.compatibleVersions?.includes(requirement.version) && !installed.manifest.compatibleSaveVersions?.includes(requirement.version)) return [`内容包 ${requirement.id} 版本不匹配：存档需要 ${requirement.version}，当前为 ${installed.manifest.version}`];
     return [];
   });
 }
@@ -640,5 +685,6 @@ export function getContentPackUsage(state: GameState, manifest: ContentPackManif
   add("配方聚焦", state.recipeFocus.itemId && itemIds.has(state.recipeFocus.itemId) ? 1 : 0);
   add("蓝图", state.blueprints.filter((blueprint) => blueprint.entities.some((entity) =>
     buildingIds.has(entity.buildingId) || (entity.recipeId ? recipeIds.has(entity.recipeId) : false)) || blueprint.belts.some((belt) => itemIds.has(belt.itemId))).length);
+  if (entries.length === 0 && hasContentIdReference(state, new Set([...itemIds, ...buildingIds, ...recipeIds, ...technologyIds, ...(manifest.belts ?? []).map((belt) => belt.id)]))) add("其他存档引用", 1);
   return { total: entries.reduce((sum, entry) => sum + Number(entry.split(" ").at(-1) ?? 0), 0), entries };
 }

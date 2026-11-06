@@ -1623,7 +1623,7 @@ fn station_capacity(
         .and_then(|id| state.catalog.buildings.get(id))
         .ok_or_else(|| anyhow!("native interstellar station building is missing"))?;
     let rated = stacked_capacity(
-        building.output_capacity,
+        building.output_capacity * state.capacity_multiplier_for(base),
         finite_number(entity.get("machineCount")),
         normalized_buffer_limit(base),
     );
@@ -5309,6 +5309,7 @@ mod tests {
     fn dispatch_fixture_catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: "remote-route-active-test".to_owned(),
                 planets: vec![

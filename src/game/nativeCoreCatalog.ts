@@ -16,6 +16,7 @@ import {
   getBeltConstructionId,
 } from "./content";
 import { isRecursiveManufacturingRecipe } from "./engine";
+import { getContentRules } from "./contentRules";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
 import type { DesktopNativeCoreCatalog } from "../desktop";
 
@@ -32,6 +33,7 @@ export function createNativeCoreCatalog(
   return {
     protocolVersion: 1,
     registryFingerprint: runtime.fingerprint,
+    contentRules: getContentRules(),
     planets: byId(PLANET_LIST.map((planet, simulationOrder) => ({
       id: planet.id,
       name: planet.name,

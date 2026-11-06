@@ -7299,6 +7299,7 @@ mod tests {
     fn fixture_catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: "core".into(),
                 planets: vec![PlanetDefinition {

@@ -1,4 +1,5 @@
 import { PLANET_LIST, RECIPES, TECHNOLOGY_LIST, getBuilding } from "./content";
+import { getContentRules } from "./contentRules";
 import { PLANET_TEMPLATE_POOLS, PLANET_TEMPLATES } from "./galaxyCatalog";
 import type { BuildingId, ItemId, PlanetId, RecipeDefinition, TechnologyDefinition } from "./types";
 
@@ -110,7 +111,8 @@ export function getResourceSource(itemId: ItemId): ResourceSourceDefinition | un
 }
 
 export function getResourceSources(itemId: ItemId): ResourceSourceDefinition[] {
-  return RESOURCE_SOURCES[itemId] ?? [];
+  const rule = getContentRules().resources?.find((entry) => entry.itemId === itemId);
+  return rule ? [{ label: "内容包资源采集", planetIds: rule.planetIds as PlanetId[], extractorBuildingId: rule.extractorBuildingId as BuildingId, manual: true }] : RESOURCE_SOURCES[itemId] ?? [];
 }
 
 export function getVirtualRecipeResult(recipe: RecipeDefinition): string | null {

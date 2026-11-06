@@ -431,7 +431,7 @@ fn validate_planet_metric_identity(
     if matches!(building_id, "accumulator" | "energy_exchanger") {
         metric_number_shape_is_closed(object.get("storedEnergyMj"))
             && metric_number_shape_is_closed(object.get("machineCount"))
-    } else if is_fuel_generator(building_id) {
+    } else if is_fuel_generator(state, building_id) {
         let Some(inputs) = object.get("inputs").and_then(Value::as_object) else {
             return false;
         };
@@ -1099,6 +1099,7 @@ struct MachineLocalSettlementContext {
     technology_available: bool,
     industrial_speed: f64,
     launch_factor: f64,
+    capacity_multiplier: f64,
 }
 
 #[derive(Debug)]
@@ -1128,6 +1129,8 @@ enum MachineProductionEvent {
 #[derive(Clone, Copy, Debug)]
 struct VeinSettlementContext {
     production_buffer_limit: f64,
+    capacity_multiplier: f64,
+    fluid_mining_multiplier: f64,
     mining_research_multiplier: f64,
     vein_level: f64,
     finite_consumption_tenths: f64,
@@ -1224,8 +1227,8 @@ fn normalized_buffer_limit(value: Option<&Value>) -> f64 {
     value.clamp(MIN_BUILDING_BUFFER_LIMIT, MAX_BUILDING_BUFFER_LIMIT)
 }
 
-fn stacked_capacity(base_capacity: f64, count: f64, limit: f64) -> f64 {
-    let base = base_capacity.max(0.0).floor();
+fn stacked_capacity(capacity_multiplier: f64, base_capacity: f64, count: f64, limit: f64) -> f64 {
+    let base = (base_capacity * capacity_multiplier).max(0.0).floor();
     let count = count.floor().max(1.0);
     if base == 0.0 {
         0.0
@@ -1245,11 +1248,17 @@ fn item_amount(entity: &Map<String, Value>, record: &str, item_id: &str) -> f64 
         .unwrap_or(0.0)
 }
 
-fn is_fuel_generator(building_id: &str) -> bool {
+fn is_fuel_generator(state: &CoreState, building_id: &str) -> bool {
     matches!(
         building_id,
         "thermal_power_plant" | "mini_fusion_power_plant" | "artificial_star"
-    )
+    ) || state
+        .catalog
+        .snapshot
+        .content_rules
+        .generators
+        .iter()
+        .any(|rule| rule.building_id == building_id)
 }
 
 fn fuel_energy_available(
@@ -1354,7 +1363,7 @@ fn probe_planet_metric(
         probe.reserve_kind = PlanetReserveKind::StoredEnergy;
         probe.reserve_primary = stored_energy(entity, building);
         probe.reserve_secondary = energy_capacity(entity, building);
-    } else if is_fuel_generator(building_id) {
+    } else if is_fuel_generator(state, building_id) {
         probe.reserve_kind = PlanetReserveKind::Fuel;
         probe.reserve_primary =
             fuel_energy_available(state, entity, building) * building.fuel_efficiency;
@@ -1499,12 +1508,14 @@ fn collect_planet_metrics_with_runtime(
 }
 
 fn item_output_free(
+    capacity_multiplier: f64,
     entity: &Map<String, Value>,
     building: &BuildingDefinition,
     item_id: &str,
     buffer_limit: f64,
 ) -> f64 {
     let capacity = stacked_capacity(
+        capacity_multiplier,
         building.output_capacity,
         finite_number(entity.get("machineCount")),
         buffer_limit,
@@ -1622,6 +1633,7 @@ fn power_generation_capacity_in_js_order(runtime: &GridRuntime) -> (f64, f64) {
 
 fn probe_power_source(
     state: &CoreState,
+    capacity_multiplier: f64,
     entities: &[Value],
     reception: &crate::dyson::Reception,
     profiles: &[PlanetProfile],
@@ -1652,7 +1664,7 @@ fn probe_power_source(
     let machine_count = finite_number(object.get("machineCount"));
     let source_kind = if is_ray_power {
         PowerSourceKind::Ray
-    } else if is_fuel_generator(building_id) {
+    } else if is_fuel_generator(state, building_id) {
         PowerSourceKind::Fuel
     } else {
         match building_id {
@@ -1680,7 +1692,7 @@ fn probe_power_source(
         probe.power_output_kw = Some(output);
         return Ok(Some(probe));
     }
-    if is_fuel_generator(building_id) {
+    if is_fuel_generator(state, building_id) {
         let available = fuel_energy_available(state, object, building);
         let rated = building.power_generation_kw * machine_count;
         let capacity = rated.min(available * building.fuel_efficiency * 1_000.0 / seconds);
@@ -1694,7 +1706,8 @@ fn probe_power_source(
                 kind: match building_id {
                     "thermal_power_plant" => DispatchKind::Thermal,
                     "mini_fusion_power_plant" => DispatchKind::Fusion,
-                    _ => DispatchKind::ArtificialStar,
+                    "artificial_star" => DispatchKind::ArtificialStar,
+                    _ => DispatchKind::Thermal,
                 },
             });
         }
@@ -1737,6 +1750,7 @@ fn probe_power_source(
         if mode == "discharge" {
             let queued = (item_amount(object, "inputs", "charged_accumulator") + EPSILON).floor();
             let usable = (active_cells + queued).min(item_output_free(
+                capacity_multiplier,
                 object,
                 building,
                 "accumulator",
@@ -1760,6 +1774,7 @@ fn probe_power_source(
         } else {
             let queued = (item_amount(object, "inputs", "accumulator") + EPSILON).floor();
             let usable = (active_cells + queued).min(item_output_free(
+                capacity_multiplier,
                 object,
                 building,
                 "charged_accumulator",
@@ -1872,6 +1887,7 @@ fn apply_static_renewable_power_probe(probe: StaticRenewablePowerProbe, grids: &
 fn collect_power_sources_with_runtime(
     deterministic_runtime: &DeterministicRuntime,
     state: &CoreState,
+    base: &Map<String, Value>,
     entities: &[Value],
     reception: &crate::dyson::Reception,
     profiles: &[PlanetProfile],
@@ -1894,6 +1910,7 @@ fn collect_power_sources_with_runtime(
             let entity_index = state.factory_topology.power_source_indices[source_slot];
             probe_power_source(
                 state,
+                state.capacity_multiplier_for(base),
                 entities,
                 reception,
                 profiles,
@@ -2043,6 +2060,7 @@ fn probe_ready_station_demand(
 
 fn probe_vein_demand(
     state: &CoreState,
+    base: &Map<String, Value>,
     entities: &[Value],
     production_buffer_limit: f64,
     power_demand_multiplier: f64,
@@ -2064,7 +2082,7 @@ fn probe_vein_demand(
     let extractor = state
         .catalog
         .buildings
-        .get(extractor_id(resource))
+        .get(state.catalog.snapshot.content_rules.extractor_id(resource))
         .ok_or_else(|| anyhow!("native simple factory extractor catalog is missing"))?;
     let current = object
         .get("outputs")
@@ -2073,6 +2091,7 @@ fn probe_vein_demand(
         .map(|value| finite_number(Some(value)))
         .unwrap_or(0.0);
     let capacity = stacked_capacity(
+        state.capacity_multiplier_for(base),
         extractor.output_capacity,
         miner_count,
         production_buffer_limit,
@@ -2226,6 +2245,7 @@ fn prepare_power_demand_probes_with_runtime(
             collect_indexed_power_probes_with_runtime(runtime, vein_indices, |&entity_index| {
                 probe_vein_demand(
                     state,
+                    base,
                     entities,
                     production_buffer_limit,
                     power_demand_multiplier,
@@ -2413,11 +2433,7 @@ fn static_admission_reason_with_records(
                 if !matches!(kind, "solid" | "fluid") {
                     return Ok(Some("simple-factory-vein-resource-unsupported"));
                 }
-                let extractor = match resource {
-                    "crude_oil" => "oil_extractor",
-                    "water" | "sulfuric_acid" => "water_pump",
-                    _ => "mining_machine",
-                };
+                let extractor = state.catalog.snapshot.content_rules.extractor_id(resource);
                 if string_at(object, "extractorBuildingId")
                     .is_some_and(|building| building != extractor)
                     || !state.catalog.buildings.contains_key(extractor)
@@ -2437,11 +2453,15 @@ fn static_admission_reason_with_records(
                         | "artificial_star"
                         | "accumulator"
                         | "energy_exchanger"
-                ) || !state.catalog.buildings.contains_key(building)
+                ) && !state
+                    .catalog
+                    .buildings
+                    .get(building)
+                    .is_some_and(|definition| definition.kind == "power")
                 {
                     return Ok(Some("simple-factory-power-source-unsupported"));
                 }
-                if is_fuel_generator(building)
+                if is_fuel_generator(state, building)
                     && string_at(object, "fuelItemId").is_some_and(|fuel| {
                         state
                             .catalog
@@ -2714,14 +2734,6 @@ fn profile_for(
     })
 }
 
-fn extractor_id(resource: &str) -> &'static str {
-    match resource {
-        "crude_oil" => "oil_extractor",
-        "water" | "sulfuric_acid" => "water_pump",
-        _ => "mining_machine",
-    }
-}
-
 fn vein_is_infinite(
     resource: &str,
     profile: PlanetProfile,
@@ -2766,7 +2778,14 @@ fn probe_vein_settlement(
         .state
         .catalog
         .buildings
-        .get(extractor_id(&resource))
+        .get(
+            environment
+                .state
+                .catalog
+                .snapshot
+                .content_rules
+                .extractor_id(&resource),
+        )
         .ok_or_else(|| anyhow!("native simple factory extractor catalog is missing"))?;
     let item_kind = environment
         .state
@@ -2784,6 +2803,7 @@ fn probe_vein_settlement(
         .unwrap_or(0.0)
         .floor();
     let capacity = stacked_capacity(
+        environment.context.capacity_multiplier,
         extractor.output_capacity,
         miner_count,
         environment.context.production_buffer_limit,
@@ -2820,7 +2840,7 @@ fn probe_vein_settlement(
     let mining_speed = (if item_kind == "solid" {
         environment.context.mining_research_multiplier
     } else {
-        1.0 + environment.context.vein_level * 0.1
+        (1.0 + environment.context.vein_level * 0.1) * environment.context.fluid_mining_multiplier
     }) * environment.profiles[planet].mining_multiplier;
     let progress = rounded(
         previous_progress
@@ -2975,7 +2995,7 @@ fn difficulty_multipliers(base: &Map<String, Value>) -> (f64, f64) {
     }
 }
 
-fn industrial_speed_multiplier(base: &Map<String, Value>) -> f64 {
+fn industrial_speed_multiplier(state: &CoreState, base: &Map<String, Value>) -> f64 {
     let level = number_at(
         base.get("endgame"),
         &["infiniteResearch", "matrix_compression", "level"],
@@ -2993,7 +3013,13 @@ fn industrial_speed_multiplier(base: &Map<String, Value>) -> f64 {
         "hard" => 0.85,
         _ => 1.0,
     };
-    (1.0 + level * 0.04) * difficulty
+    (1.0 + level * 0.04)
+        * difficulty
+        * state
+            .catalog
+            .snapshot
+            .content_rules
+            .multiplier(base, "productionSpeed")
 }
 
 fn research_speed_multiplier(base: &Map<String, Value>) -> f64 {
@@ -3022,11 +3048,16 @@ fn research_speed_multiplier(base: &Map<String, Value>) -> f64 {
     (1.0 + finite_bonus) * (1.0 + compression * 0.1) * difficulty
 }
 
-fn recipe_technology_available(base: &Map<String, Value>, recipe: &RecipeDefinition) -> bool {
-    recipe
-        .required_tech_id
-        .as_deref()
-        .is_none_or(|id| completed_tech(base, id))
+fn recipe_technology_available(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    recipe: &RecipeDefinition,
+) -> bool {
+    state
+        .catalog
+        .snapshot
+        .content_rules
+        .recipe_available(base, recipe)
 }
 
 fn proliferator_tier(entity: &Map<String, Value>) -> Option<u8> {
@@ -4320,9 +4351,17 @@ fn local_machine_settlement_context(
         .get(recipe_id)
         .ok_or_else(|| anyhow!("native simple factory machine recipe is missing"))?;
     Ok(MachineLocalSettlementContext {
-        technology_available: recipe_technology_available(base, recipe),
-        industrial_speed: industrial_speed_multiplier(base),
+        technology_available: recipe_technology_available(state, base, recipe)
+            && state.catalog.recipe_allowed(
+                state
+                    .symbols
+                    .resolve(state.entities.buildings[entity_index])
+                    .unwrap_or_default(),
+                recipe,
+            ),
+        industrial_speed: industrial_speed_multiplier(state, base),
         launch_factor: crate::dyson::launch_factor(base, &recipe.id),
+        capacity_multiplier: state.capacity_multiplier_for(base),
     })
 }
 
@@ -4382,6 +4421,7 @@ fn settle_parallel_local_machine(
 
     let machine_count = finite_number(object.get("machineCount"));
     let capacity = stacked_capacity(
+        context.capacity_multiplier,
         building.output_capacity,
         machine_count,
         production_buffer_limit,
@@ -4652,7 +4692,9 @@ fn machine_can_run(
     recipe: &RecipeDefinition,
     buffer_limit: f64,
 ) -> bool {
-    if !recipe_technology_available(base, recipe) {
+    if !recipe_technology_available(state, base, recipe)
+        || !state.catalog.recipe_allowed(&building.id, recipe)
+    {
         return false;
     }
     if proliferator_applies(entity, recipe)
@@ -4663,6 +4705,7 @@ fn machine_can_run(
         return false;
     }
     let capacity = stacked_capacity(
+        state.capacity_multiplier_for(base),
         building.output_capacity,
         finite_number(entity.get("machineCount")),
         buffer_limit,
@@ -4847,6 +4890,7 @@ fn charge_exchanger(
     let active_cells = if stored > EPSILON { 1.0 } else { 0.0 };
     let queued_cells = (item_amount(entity, "inputs", "accumulator") + EPSILON).floor();
     let usable_cells = (active_cells + queued_cells).min(item_output_free(
+        state.capacity_multiplier_for(base),
         entity,
         building,
         "charged_accumulator",
@@ -4908,6 +4952,7 @@ fn discharge_exchanger(
     let active_cells = if stored > EPSILON { 1.0 } else { 0.0 };
     let queued_cells = (item_amount(entity, "inputs", "charged_accumulator") + EPSILON).floor();
     let usable_cells = (active_cells + queued_cells).min(item_output_free(
+        state.capacity_multiplier_for(base),
         entity,
         building,
         "accumulator",
@@ -5788,6 +5833,12 @@ fn simulate_step(
         .map(|planet| profile_for(base, &planet.id, &planet.system_id))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let (_, power_demand_multiplier) = difficulty_multipliers(base);
+    let power_demand_multiplier = power_demand_multiplier
+        * state
+            .catalog
+            .snapshot
+            .content_rules
+            .multiplier(base, "powerConsumption");
     let production_buffer_limit = normalized_buffer_limit(
         base.get("settings")
             .and_then(Value::as_object)
@@ -5799,6 +5850,7 @@ fn simulate_step(
     let prepared_power_sources = collect_power_sources_with_runtime(
         runtime,
         state,
+        base,
         entities,
         &reception,
         &profiles,
@@ -5910,7 +5962,7 @@ fn simulate_step(
     let mut ready_station_indices = ready_stations.into_iter().collect::<Vec<_>>();
     ready_station_indices.sort_unstable();
     let mut disconnected_power_factor_indices = Vec::new();
-    let industrial_speed = industrial_speed_multiplier(base);
+    let industrial_speed = industrial_speed_multiplier(state, base);
     let research_speed = research_speed_multiplier(base);
     let prepared_power_demands = prepare_power_demand_probes_with_runtime(
         runtime,
@@ -6191,8 +6243,14 @@ fn simulate_step(
     } else {
         1.0
     };
-    let mining_research_multiplier =
-        research_base * (1.0 + vein_utilization_level(base) * 0.1) * difficulty_mining_multiplier;
+    let mining_research_multiplier = research_base
+        * (1.0 + vein_utilization_level(base) * 0.1)
+        * difficulty_mining_multiplier
+        * state
+            .catalog
+            .snapshot
+            .content_rules
+            .multiplier(base, "miningSpeed");
     let vein_level = vein_utilization_level(base);
     let finite_consumption_tenths = (10.0 - vein_level.min(10.0)).max(0.0).floor();
     let infinite_resource_mode = base
@@ -6203,6 +6261,12 @@ fn simulate_step(
         == Some("infinite");
     let vein_context = VeinSettlementContext {
         production_buffer_limit,
+        capacity_multiplier: state.capacity_multiplier_for(base),
+        fluid_mining_multiplier: state
+            .catalog
+            .snapshot
+            .content_rules
+            .multiplier(base, "miningSpeed"),
         mining_research_multiplier,
         vein_level,
         finite_consumption_tenths,
@@ -6406,7 +6470,7 @@ fn simulate_step(
                 },
             )?;
             set_number(object, "productionRate", 0.0)?;
-            if is_fuel_generator(building_id) {
+            if is_fuel_generator(state, building_id) {
                 burn_fuel(state, object, building, output, seconds)?;
             } else if building_id == "accumulator" {
                 let capacity = energy_capacity(object, building);
@@ -6491,7 +6555,9 @@ fn simulate_step(
             } else {
                 object.remove("powerFactor");
             }
-            if !recipe_technology_available(base, recipe) {
+            if !recipe_technology_available(state, base, recipe)
+                || !state.catalog.recipe_allowed(building_id, recipe)
+            {
                 set_number(object, "progress", 0.0)?;
                 set_number(object, "utilization", 0.0)?;
                 set_number(object, "productionRate", 0.0)?;
@@ -6499,6 +6565,7 @@ fn simulate_step(
             }
             let machine_count = finite_number(object.get("machineCount"));
             let capacity = stacked_capacity(
+                state.capacity_multiplier_for(base),
                 building.output_capacity,
                 machine_count,
                 production_buffer_limit,
@@ -6527,7 +6594,7 @@ fn simulate_step(
             let recipe_speed = if recipe.id == "matrix_research" {
                 research_speed_multiplier(base)
             } else {
-                industrial_speed_multiplier(base)
+                industrial_speed_multiplier(state, base)
             };
             let effective_cycles_per_second =
                 building.speed * machine_count * recipe_speed * planet_speed / recipe.duration;
@@ -6775,6 +6842,7 @@ fn simulate_step(
             .is_ok()
             || probe_vein_demand(
                 state,
+                base,
                 entities,
                 production_buffer_limit,
                 power_demand_multiplier,
@@ -8896,6 +8964,7 @@ pub(crate) mod tests {
         };
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: registry_fingerprint.to_owned(),
                 planets: vec![PlanetDefinition {
@@ -13604,6 +13673,8 @@ pub(crate) mod tests {
 
     fn finite_vein_context() -> VeinSettlementContext {
         VeinSettlementContext {
+            capacity_multiplier: 1.0,
+            fluid_mining_multiplier: 1.0,
             production_buffer_limit: 100.0,
             mining_research_multiplier: 1.25,
             vein_level: 1.0,
@@ -13889,7 +13960,7 @@ pub(crate) mod tests {
             if matches!(building_id, "accumulator" | "energy_exchanger") {
                 reserves.0 += stored_energy(entity, building);
                 reserves.1 += energy_capacity(entity, building);
-            } else if is_fuel_generator(building_id) {
+            } else if is_fuel_generator(state, building_id) {
                 reserves.2 +=
                     fuel_energy_available(state, entity, building) * building.fuel_efficiency;
                 reserves.3 +=
@@ -14071,6 +14142,7 @@ pub(crate) mod tests {
         let first = collect_power_sources_with_runtime(
             &DeterministicRuntime::for_test(4),
             &state,
+            state.base_value(),
             &entities,
             &reception,
             &profiles,
@@ -14086,6 +14158,7 @@ pub(crate) mod tests {
         let second = collect_power_sources_with_runtime(
             &DeterministicRuntime::for_test(4),
             &state,
+            state.base_value(),
             &entities,
             &reception,
             &profiles,
@@ -14133,6 +14206,7 @@ pub(crate) mod tests {
             let prepared = collect_power_sources_with_runtime(
                 &DeterministicRuntime::for_test(4),
                 &state,
+                state.base_value(),
                 &entities,
                 &reception,
                 &profiles,
@@ -14300,6 +14374,7 @@ pub(crate) mod tests {
             let scan = collect_power_sources_with_runtime(
                 &DeterministicRuntime::for_test(4),
                 &state,
+                state.base_value(),
                 &entities,
                 &reception,
                 &profiles,
@@ -14323,6 +14398,7 @@ pub(crate) mod tests {
             let scan = collect_power_sources_with_runtime(
                 &DeterministicRuntime::for_test(4),
                 &dense_state,
+                dense_state.base_value(),
                 &dense_entities,
                 &reception,
                 &[fixture_profile()],
@@ -14384,6 +14460,7 @@ pub(crate) mod tests {
         collect_power_sources_with_runtime(
             &DeterministicRuntime::for_test(4),
             &state,
+            state.base_value(),
             &entities,
             &crate::dyson::Reception::default(),
             &profiles,
@@ -14402,6 +14479,7 @@ pub(crate) mod tests {
         let indexed_scan = collect_power_sources_with_runtime(
             &DeterministicRuntime::for_test(4),
             &state,
+            state.base_value(),
             &entities,
             &changed_reception,
             &profiles,
@@ -14421,6 +14499,7 @@ pub(crate) mod tests {
         let flat_scan = collect_power_sources_with_runtime(
             &DeterministicRuntime::for_test(4),
             &state,
+            state.base_value(),
             &entities,
             &changed_reception,
             &profiles,
@@ -14514,6 +14593,7 @@ pub(crate) mod tests {
             let prepared = collect_power_sources_with_runtime(
                 &DeterministicRuntime::for_test(4),
                 &state,
+                state.base_value(),
                 &entities,
                 &reception,
                 &profiles,
@@ -14541,6 +14621,7 @@ pub(crate) mod tests {
             let flat = collect_power_sources_with_runtime(
                 &DeterministicRuntime::for_test(4),
                 &state,
+                state.base_value(),
                 &entities,
                 &reception,
                 &profiles,
@@ -14608,6 +14689,7 @@ pub(crate) mod tests {
                 let scan = collect_power_sources_with_runtime(
                     &DeterministicRuntime::for_test(4),
                     &state,
+                    state.base_value(),
                     &entities,
                     &crate::dyson::Reception::default(),
                     &[fixture_profile()],
@@ -14631,6 +14713,7 @@ pub(crate) mod tests {
         collect_power_sources_with_runtime(
             &DeterministicRuntime::for_test(4),
             &drifted,
+            drifted.base_value(),
             &entities,
             &crate::dyson::Reception::default(),
             &[fixture_profile()],
@@ -14646,6 +14729,7 @@ pub(crate) mod tests {
         let scan = collect_power_sources_with_runtime(
             &DeterministicRuntime::for_test(4),
             &drifted,
+            drifted.base_value(),
             &entities,
             &crate::dyson::Reception::default(),
             &[fixture_profile()],

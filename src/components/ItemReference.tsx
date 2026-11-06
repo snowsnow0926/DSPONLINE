@@ -2,6 +2,7 @@ import { BookOpen, Crosshair, Factory, FlaskConical, MapPin } from "lucide-react
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { getCompatibleRecipeBuildings, getItem, getPlanet } from "../game/content";
+import { getCategoryName } from "../game/contentRules";
 import { getConsumingRecipes, getProducingRecipes, getResearchUses, getResourceSources } from "../game/recipeGraph";
 import type { ItemId } from "../game/types";
 
@@ -44,7 +45,7 @@ export function getAccessibleItemGlyphTextColor(backgroundColor: string): "#0000
 
 export function ItemGlyph({ itemId, className = "" }: { itemId: ItemId; className?: string }) {
   const item = getItem(itemId);
-  return <i className={`item-glyph item-glyph--${item.kind}${className ? ` ${className}` : ""}`} style={{ backgroundColor: item.color, color: getAccessibleItemGlyphTextColor(item.color) }}>{item.symbol}</i>;
+  return <i className={`item-glyph item-glyph--${item.kind}${className ? ` ${className}` : ""}`} style={{ backgroundColor: item.color, color: getAccessibleItemGlyphTextColor(item.color) }}>{item.icon ? <img src={item.icon} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : item.symbol}</i>;
 }
 
 export function ItemHoverCard({ itemId, children, className = "" }: {
@@ -161,7 +162,7 @@ export function ItemHoverCard({ itemId, children, className = "" }: {
         >
           <header>
             <ItemGlyph itemId={itemId} />
-            <span><strong>{item.name}</strong><small>{KIND_LABELS[item.kind]}</small></span>
+            <span><strong>{item.name}</strong><small>{getCategoryName(item.categoryId) ?? KIND_LABELS[item.kind]}</small></span>
           </header>
           <p>{item.description}</p>
           {details.sources.length > 0 ? (

@@ -72,7 +72,14 @@ fn manual_output_capacity(
     let extractor_id = entity
         .get("extractorBuildingId")
         .and_then(Value::as_str)
-        .unwrap_or("mining_machine");
+        .unwrap_or_else(|| {
+            state.catalog.snapshot.content_rules.extractor_id(
+                entity
+                    .get("resourceId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+        });
     let extractor = state
         .catalog
         .buildings
@@ -84,7 +91,7 @@ fn manual_output_capacity(
         })
         .ok_or_else(|| anyhow!("native manual mining extractor catalog entry is invalid"))?;
     let miner_count = safe_counter(entity.get("minerCount"), "miner count")?.max(1);
-    let base_capacity = extractor.output_capacity.floor();
+    let base_capacity = (extractor.output_capacity * state.capacity_multiplier()).floor();
     let rated = if base_capacity <= 0.0 {
         0
     } else if base_capacity >= limit as f64 {

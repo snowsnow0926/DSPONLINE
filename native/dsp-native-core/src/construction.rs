@@ -4937,6 +4937,7 @@ mod tests {
     fn quantum_probe_catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: crate::CORE_PROTOCOL_VERSION,
                 registry_fingerprint: "construction-parallel".to_owned(),
                 planets: vec![PlanetDefinition {
@@ -5079,6 +5080,7 @@ mod tests {
     fn active_runtime_catalog_with_iron_cost(iron_cost: f64) -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: crate::CORE_PROTOCOL_VERSION,
                 registry_fingerprint: "construction-active-runtime".to_owned(),
                 planets: vec![PlanetDefinition {

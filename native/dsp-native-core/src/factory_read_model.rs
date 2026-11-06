@@ -354,21 +354,13 @@ fn native_workspace_action_read_model(
         }));
     }
 
-    let completed = base
-        .get("research")
-        .and_then(Value::as_object)
-        .and_then(|research| research.get("completedTechIds"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flat_map(|ids| ids.iter())
-        .filter_map(Value::as_str)
-        .collect::<HashSet<_>>();
     let mut recipes = state
         .catalog
         .recipes
         .values()
         .filter(|recipe| {
             handcraftable_recipe(&recipe.id)
+                && recipe.handcraftable != Some(false)
                 && !recipe.inputs.is_empty()
                 && !recipe.outputs.is_empty()
         })
@@ -388,7 +380,7 @@ fn native_workspace_action_read_model(
             "buildingId": building.id,
             "buildingName": workspace_label(&building.id, "building name")?,
             "duration": recipe.duration,
-            "unlocked": recipe.required_tech_id.as_deref().is_none_or(|id| completed.contains(id)),
+            "unlocked": state.catalog.snapshot.content_rules.recipe_available(state.base_value(), recipe),
             "requiredTechId": recipe.required_tech_id,
             "inputs": inputs,
             "outputs": outputs,
@@ -1717,6 +1709,7 @@ mod tests {
     fn catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: "factory-read-model-test".to_owned(),
                 planets: vec![
@@ -1907,6 +1900,7 @@ mod tests {
     fn construction_center_state(registry_fingerprint: &str, unknown_target: bool) -> CoreState {
         let catalog = RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: registry_fingerprint.to_owned(),
                 planets: vec![

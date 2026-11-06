@@ -1070,9 +1070,11 @@ fn validated_intent(
                                 "native player-authority blueprint source recipe is not in the catalog"
                             )
                         })?;
-                    if let Some(technology_id) = source_recipe.required_tech_id.as_deref()
-                        && (!state.catalog.technologies.contains_key(technology_id)
-                            || !crate::command::technology_is_completed(state, technology_id))
+                    if !state
+                        .catalog
+                        .snapshot
+                        .content_rules
+                        .recipe_available(state.base_value(), source_recipe)
                     {
                         bail!(
                             "native player-authority blueprint source recipe technology is locked or missing"
@@ -1087,9 +1089,11 @@ fn validated_intent(
                                 "native player-authority blueprint target recipe is not in the catalog"
                             )
                         })?;
-                    if let Some(technology_id) = target_recipe.required_tech_id.as_deref()
-                        && (!state.catalog.technologies.contains_key(technology_id)
-                            || !crate::command::technology_is_completed(state, technology_id))
+                    if !state
+                        .catalog
+                        .snapshot
+                        .content_rules
+                        .recipe_available(state.base_value(), target_recipe)
                     {
                         bail!(
                             "native player-authority blueprint target recipe technology is locked or missing"
@@ -1126,17 +1130,13 @@ fn validated_intent(
                                     "native player-authority blueprint matching template building ID is invalid"
                                 )
                             })?;
-                        let building = state.catalog.buildings.get(building_id).ok_or_else(|| {
+                        let _building = state.catalog.buildings.get(building_id).ok_or_else(|| {
                             anyhow!(
                                 "native player-authority blueprint matching template building is not in the catalog"
                             )
                         })?;
-                        let building_base_id = crate::command::recipe_building_base(
-                            building_id,
-                            building.family.as_deref(),
-                        );
-                        if building_base_id != source_recipe.building_id
-                            || building_base_id != target_recipe.building_id
+                        if !state.catalog.recipe_allowed(building_id, source_recipe)
+                            || !state.catalog.recipe_allowed(building_id, target_recipe)
                         {
                             bail!(
                                 "native player-authority blueprint source or target recipe is incompatible with a matching template"

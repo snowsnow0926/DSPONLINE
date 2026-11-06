@@ -15,7 +15,7 @@ use crate::{
     command::{
         EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, PathSegment, RecordPatch, SimulationCommandPatch,
         builtin_belt_construction_id, create_expected_value_patches,
-        normalized_construction_inventory, recipe_building_base, technology_is_completed,
+        normalized_construction_inventory,
     },
     state::CoreState,
 };
@@ -222,26 +222,30 @@ fn validated_transition(
     let building_id = entity
         .get("buildingId")
         .and_then(Value::as_str)
-        .filter(|building_id| BUILTIN_ORDINARY_RECIPE_BUILDINGS.contains(building_id))
+        .filter(|building_id| {
+            BUILTIN_ORDINARY_RECIPE_BUILDINGS.contains(building_id)
+                || state.catalog.building_metadata.contains_key(*building_id)
+        })
         .ok_or_else(|| anyhow!("native player-authority recipe building domain is not covered"))?;
-    let building = state
+    let _building = state
         .catalog
         .buildings
         .get(building_id)
         .filter(|building| building.kind == "machine")
         .ok_or_else(|| anyhow!("native player-authority recipe building catalog is invalid"))?;
-    let recipe_base = recipe_building_base(building_id, building.family.as_deref());
     let target_recipe = state
         .catalog
         .recipes
         .get(&intent.target_recipe_id)
-        .filter(|recipe| recipe.building_id == recipe_base)
+        .filter(|recipe| state.catalog.recipe_allowed(building_id, recipe))
         .ok_or_else(|| {
             anyhow!("native player-authority recipe is not supported by the building")
         })?;
-    if let Some(technology_id) = target_recipe.required_tech_id.as_deref()
-        && (!state.catalog.technologies.contains_key(technology_id)
-            || !technology_is_completed(state, technology_id))
+    if !state
+        .catalog
+        .snapshot
+        .content_rules
+        .recipe_available(state.base_value(), target_recipe)
     {
         bail!("native player-authority recipe technology is locked or missing")
     }
@@ -256,7 +260,7 @@ fn validated_transition(
             .catalog
             .recipes
             .get(current)
-            .is_none_or(|recipe| recipe.building_id != recipe_base)
+            .is_none_or(|recipe| !state.catalog.recipe_allowed(building_id, recipe))
         {
             bail!("native player-authority current recipe is invalid for the building")
         }

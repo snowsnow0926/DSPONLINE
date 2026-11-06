@@ -696,6 +696,7 @@ mod tests {
     fn catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: "recipe-workspace-test".to_owned(),
                 planets: vec![

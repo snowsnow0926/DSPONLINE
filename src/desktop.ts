@@ -809,6 +809,7 @@ export interface DesktopNativeCoreStarSystemDefinition {
 }
 
 export interface DesktopNativeCoreCatalog {
+  contentRules?: import("./game/contentRules").ContentRules;
   protocolVersion: 1;
   registryFingerprint: string;
   planets: DesktopNativeCorePlanetDefinition[];

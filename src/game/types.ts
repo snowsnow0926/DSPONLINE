@@ -805,7 +805,13 @@ export interface ItemAmount {
   amount: number;
 }
 
-export interface ItemDefinition {
+export interface CatalogPresentation {
+  /** Embedded raster data URI. No network request is required. */
+  icon?: string;
+  categoryId?: string;
+}
+
+export interface ItemDefinition extends CatalogPresentation {
   id: ItemId;
   name: string;
   symbol: string;
@@ -844,7 +850,7 @@ export interface StarSystemDefinition {
   prerequisiteSystemId?: StarSystemId;
 }
 
-export interface RecipeDefinition {
+export interface RecipeDefinition extends CatalogPresentation {
   id: RecipeId;
   name: string;
   buildingId: BuildingId;
@@ -858,7 +864,7 @@ export interface RecipeDefinition {
   recursivePriority?: number;
 }
 
-export interface BuildingDefinition {
+export interface BuildingDefinition extends CatalogPresentation {
   id: BuildingId;
   name: string;
   shortName: string;

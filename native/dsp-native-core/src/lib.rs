@@ -23,6 +23,8 @@ mod construction_planner;
 mod construction_queue_command;
 mod construction_removal_context;
 mod construction_stack_context;
+mod content_id_migration;
+pub mod content_rules;
 mod deterministic_runtime;
 mod dyson;
 mod dyson_orbit_command;

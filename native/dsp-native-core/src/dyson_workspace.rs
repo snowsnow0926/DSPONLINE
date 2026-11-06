@@ -243,6 +243,7 @@ mod tests {
     fn fixture_catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: FINGERPRINT.to_owned(),
                 planets: vec![
@@ -1531,11 +1532,11 @@ fn receiver_runnable(
         .get("ray_receiver")
         .is_some_and(|building| building.output_capacity > 0.0)
     {
-        (state.catalog.buildings["ray_receiver"]
-            .output_capacity
-            .floor()
-            * machine_count)
-            .min(buffer_limit)
+        (state.catalog.buildings["ray_receiver"].output_capacity
+            * state.capacity_multiplier_for(base))
+        .floor()
+        .mul_add(machine_count, 0.0)
+        .min(buffer_limit)
     } else {
         0.0
     };

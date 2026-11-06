@@ -843,10 +843,11 @@ fn apply_handcraft_enqueue(
                 )
         })
         .ok_or_else(|| anyhow!("native workspace handcraft recipe is not handcraftable"))?;
-    if recipe
-        .required_tech_id
-        .as_deref()
-        .is_some_and(|id| !completed_technology(state, id))
+    if !state
+        .catalog
+        .snapshot
+        .content_rules
+        .recipe_available(base, recipe)
     {
         bail!("native workspace handcraft technology is locked")
     }
@@ -1772,21 +1773,31 @@ mod tests {
     #[test]
     fn disabled_handcraft_rule_preserves_paid_work_but_refuses_new_batches() {
         let mut state = state();
-        std::sync::Arc::make_mut(&mut state.catalog).recipes.get_mut("plate_recipe").unwrap().handcraftable = Some(false);
+        std::sync::Arc::make_mut(&mut state.catalog)
+            .recipes
+            .get_mut("plate_recipe")
+            .unwrap()
+            .handcraftable = Some(false);
         let mut base = state.base_value().clone();
         let before = base.clone();
         let request = json!({ "recipeId": "plate_recipe", "batches": 2 });
         assert!(apply_handcraft_enqueue(&state, &mut base, request.as_object().unwrap()).is_err());
         assert_eq!(base, before);
         base.insert("totalProduced".to_owned(), json!({}));
-        base.insert("handcraftQueue".to_owned(), json!([{
-            "id": "paid", "recipeId": "plate_recipe", "planetId": "home",
-            "batchesTotal": 2, "batchesRemaining": 2, "progress": 0.5, "queuedAt": 0
-        }]));
+        base.insert(
+            "handcraftQueue".to_owned(),
+            json!([{
+                "id": "paid", "recipeId": "plate_recipe", "planetId": "home",
+                "batchesTotal": 2, "batchesRemaining": 2, "progress": 0.5, "queuedAt": 0
+            }]),
+        );
         crate::global_progress::advance_handcraft(&state, &mut base, 10.0).unwrap();
         assert_eq!(base["tray"]["ore"].as_f64(), Some(20.0));
         assert_eq!(base["tray"]["plate"].as_f64(), Some(1.0));
-        assert_eq!(base["handcraftQueue"][0]["batchesRemaining"].as_f64(), Some(1.0));
+        assert_eq!(
+            base["handcraftQueue"][0]["batchesRemaining"].as_f64(),
+            Some(1.0)
+        );
         assert_eq!(base["handcraftQueue"][0]["progress"].as_f64(), Some(0.0));
     }
 

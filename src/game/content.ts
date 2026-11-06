@@ -1,3 +1,4 @@
+import { getGeneratorRule, getResourceExtractor, recipePolicyAllows } from "./contentRules";
 import type {
   BeltTier,
   BuildingDefinition,
@@ -729,6 +730,8 @@ export function getRecipesForBuilding(buildingId: BuildingId): RecipeDefinition[
 }
 
 export function buildingSupportsRecipe(buildingId: BuildingId, recipe: RecipeDefinition): boolean {
+  const policy = recipePolicyAllows(buildingId, recipe.id);
+  if (policy !== undefined) return policy;
   if ((RECIPE_BUILDING_BASE[buildingId] ?? buildingId) === recipe.buildingId) return true;
   const family = BUILDINGS[buildingId]?.family;
   return Boolean(family && BUILDINGS[recipe.buildingId]?.family === family);
@@ -1694,12 +1697,16 @@ const FUSION_FUEL_ITEM_IDS: ItemId[] = ["deuteron_fuel_rod"];
 const ARTIFICIAL_STAR_FUEL_ITEM_IDS: ItemId[] = ["antimatter_fuel_rod"];
 
 export function getFuelItemIdsForBuilding(buildingId: BuildingId): ItemId[] {
+  const rule = getGeneratorRule(buildingId);
+  if (rule) return rule.fuelItemIds as ItemId[];
   if (buildingId === "mini_fusion_power_plant") return FUSION_FUEL_ITEM_IDS;
   if (buildingId === "artificial_star") return ARTIFICIAL_STAR_FUEL_ITEM_IDS;
   return buildingId === "thermal_power_plant" ? FUEL_ITEM_IDS : [];
 }
 
 export function getFuelEfficiency(buildingId: BuildingId): number {
+  const rule = getGeneratorRule(buildingId);
+  if (rule) return rule.efficiency;
   return buildingId === "thermal_power_plant" ? 0.8 : 1;
 }
 
@@ -1716,6 +1723,8 @@ export function getPlanetsForSystem(id: StarSystemId): PlanetDefinition[] {
 }
 
 export function getExtractorBuildingId(resourceId: ItemId): BuildingId {
+  const custom = getResourceExtractor(resourceId);
+  if (custom) return custom as BuildingId;
   if (resourceId === "crude_oil") return "oil_extractor";
   if (resourceId === "water" || resourceId === "sulfuric_acid") return "water_pump";
   return "mining_machine";

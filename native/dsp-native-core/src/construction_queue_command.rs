@@ -2348,16 +2348,16 @@ fn compile_deploy_records(
                 .recipes
                 .get(recipe_id)
                 .ok_or_else(|| anyhow!("native construction queue deploy recipe is missing"))?;
-            let building =
+            let _building =
                 state.catalog.buildings.get(building_id).ok_or_else(|| {
                     anyhow!("native construction queue deploy building is missing")
                 })?;
-            if recipe.building_id
-                != crate::command::recipe_building_base(building_id, building.family.as_deref())
-                || recipe
-                    .required_tech_id
-                    .as_deref()
-                    .is_some_and(|tech| !crate::command::technology_is_completed(state, tech))
+            if !state.catalog.recipe_allowed(building_id, recipe)
+                || !state
+                    .catalog
+                    .snapshot
+                    .content_rules
+                    .recipe_available(state.base_value(), recipe)
             {
                 bail!("native construction queue deploy recipe is unsupported")
             }

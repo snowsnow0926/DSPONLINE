@@ -1344,6 +1344,7 @@ mod tests {
         .collect();
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: REGISTRY.to_owned(),
                 planets: vec![PlanetDefinition {

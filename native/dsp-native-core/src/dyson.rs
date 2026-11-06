@@ -827,7 +827,8 @@ fn output_capacity(
             if building.output_capacity <= 0.0 {
                 0.0
             } else {
-                (building.output_capacity.floor() * count).min(limit)
+                ((building.output_capacity * state.capacity_multiplier_for(base)).floor() * count)
+                    .min(limit)
             }
         })
         .unwrap_or(0.0)
@@ -2515,6 +2516,7 @@ mod tests {
     fn fixture_catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: "dyson-receiver-test".to_owned(),
                 planets: [("home", "helios", 0), ("ice", "borealis", 1)]

@@ -238,10 +238,11 @@ fn ensure_item_options(
     let mut blockers = Vec::new();
     let mut earlier_attempts = Vec::<Fallback>::new();
     for recipe in recipes {
-        if recipe
-            .required_tech_id
-            .as_deref()
-            .is_some_and(|id| !completed_tech(base, id))
+        if !state
+            .catalog
+            .snapshot
+            .content_rules
+            .recipe_available(base, recipe)
         {
             let blocker = Blocker {
                 item_id: item_id.to_owned(),
@@ -555,10 +556,11 @@ pub(crate) fn probe_plan(
             let Some(recipe) = state.catalog.recipes.get(recipe_id) else {
                 return PlanOutcome::Blocked;
             };
-            if recipe
-                .required_tech_id
-                .as_deref()
-                .is_some_and(|id| !completed_tech(base, id))
+            if !state
+                .catalog
+                .snapshot
+                .content_rules
+                .recipe_available(base, recipe)
             {
                 return PlanOutcome::Blocked;
             }

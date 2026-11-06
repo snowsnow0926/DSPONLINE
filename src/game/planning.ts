@@ -1,3 +1,4 @@
+import { getTechnologyMultiplier, isRecipeTechnologyAvailable } from "./contentRules";
 import { ITEMS, PLANET_LIST, RECIPES, getBuilding, getExtractorBuildingId, getRecipe } from "./content";
 import { getMiningSpeedMultiplier } from "./engine";
 import { calculateFactoryStatistics } from "./statistics";
@@ -38,7 +39,7 @@ const EXCLUDED_PLAN_RECIPES = new Set<RecipeId>([
 ]);
 
 function unlockedRecipe(state: GameState, recipe: RecipeDefinition): boolean {
-  return !recipe.requiredTechId || state.research.completedTechIds.includes(recipe.requiredTechId);
+  return isRecipeTechnologyAvailable(recipe, state.research.completedTechIds);
 }
 
 function netRecipeOutput(recipe: RecipeDefinition, itemId: ItemId): number {
@@ -122,8 +123,8 @@ export function calculateProductionPlan(state: GameState, plan: ProductionTarget
     const building = getBuilding(buildingId);
     const outputAmount = recipe ? Math.max(0.0001, netRecipeOutput(recipe, entry.itemId)) : 1;
     const perMachinePerMinute = recipe
-      ? building.speed * 60 / recipe.duration * outputAmount
-      : building.speed * (ITEMS[entry.itemId].kind === "solid" ? getMiningSpeedMultiplier(state) : 1) * 60;
+      ? building.speed * 60 / recipe.duration * outputAmount * getTechnologyMultiplier(state.research.completedTechIds, "productionSpeed")
+      : building.speed * (ITEMS[entry.itemId].kind === "solid" ? getMiningSpeedMultiplier(state) : getTechnologyMultiplier(state.research.completedTechIds, "miningSpeed")) * 60;
     const machinesRequired = entry.requiredPerMinute / Math.max(0.0001, perMachinePerMinute);
     const additionalMachines = Math.ceil(deficitPerMinute / Math.max(0.0001, perMachinePerMinute));
     const logisticsPerMinute = recipe
@@ -142,7 +143,7 @@ export function calculateProductionPlan(state: GameState, plan: ProductionTarget
       buildingId,
       machinesRequired,
       additionalMachines,
-      powerDemandKw: additionalMachines * (building.powerDemandKw ?? 0),
+      powerDemandKw: additionalMachines * (building.powerDemandKw ?? 0) * getTechnologyMultiplier(state.research.completedTechIds, "powerConsumption"),
       logisticsPerMinute,
     };
   }).sort((a, b) => a.depth - b.depth || b.deficitPerMinute - a.deficitPerMinute);

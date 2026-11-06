@@ -247,14 +247,6 @@ fn construction_patches(
         .collect()
 }
 
-fn core_extractor_for_resource(resource_id: &str) -> &'static str {
-    match resource_id {
-        "crude_oil" => "oil_extractor",
-        "water" | "sulfuric_acid" => "water_pump",
-        _ => "mining_machine",
-    }
-}
-
 fn belt_construction_id(state: &CoreState, tier: u8) -> Option<String> {
     let built_in = match tier {
         1 => Some("conveyor_belt_mk1"),
@@ -326,7 +318,13 @@ fn expand_increase(
             let construction_id = entity
                 .get("extractorBuildingId")
                 .and_then(Value::as_str)
-                .unwrap_or_else(|| core_extractor_for_resource(resource_id));
+                .unwrap_or_else(|| {
+                    state
+                        .catalog
+                        .snapshot
+                        .content_rules
+                        .extractor_id(resource_id)
+                });
             if !state.catalog.constructions.contains_key(construction_id) {
                 bail!("native factory batch extractor construction is unknown")
             }
@@ -481,7 +479,13 @@ fn expand_remove(
             let construction_id = entity
                 .get("extractorBuildingId")
                 .and_then(Value::as_str)
-                .unwrap_or_else(|| core_extractor_for_resource(resource_id));
+                .unwrap_or_else(|| {
+                    state
+                        .catalog
+                        .snapshot
+                        .content_rules
+                        .extractor_id(resource_id)
+                });
             add_delta(&mut deltas, construction_id, i128::from(count))?;
             changed_entities.push(RecordPatch {
                 id: id.clone(),

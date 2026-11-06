@@ -295,16 +295,12 @@ fn normalized_offset(object: &Map<String, Value>, label: &str) -> anyhow::Result
     }))
 }
 
-fn expected_extractor_building_id(resource_id: &str) -> &'static str {
-    match resource_id {
-        "crude_oil" => "oil_extractor",
-        "water" | "sulfuric_acid" => "water_pump",
-        _ => "mining_machine",
-    }
-}
-
-fn recipe_supports_building_base(building_base_id: &str, recipe: &RecipeDefinition) -> bool {
-    building_base_id == recipe.building_id
+fn recipe_supports_building_base(
+    state: &CoreState,
+    building_base_id: &str,
+    recipe: &RecipeDefinition,
+) -> bool {
+    state.catalog.recipe_allowed(building_base_id, recipe)
 }
 
 fn completed_technology_ids(state: &CoreState) -> anyhow::Result<HashSet<String>> {
@@ -337,11 +333,20 @@ fn completed_technology_ids(state: &CoreState) -> anyhow::Result<HashSet<String>
     Ok(ids)
 }
 
-fn recipe_is_unlocked(recipe: &RecipeDefinition, completed_tech_ids: &HashSet<String>) -> bool {
+fn recipe_is_unlocked(
+    state: &CoreState,
+    recipe: &RecipeDefinition,
+    completed_tech_ids: &HashSet<String>,
+) -> bool {
     recipe
         .required_tech_id
         .as_ref()
         .is_none_or(|technology_id| completed_tech_ids.contains(technology_id))
+        && state
+            .catalog
+            .snapshot
+            .content_rules
+            .recipe_available(state.base_value(), recipe)
 }
 
 fn empty_recipe_override_detail(summary: Value, status: &str, reason: &str) -> Value {
@@ -397,9 +402,7 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
         if building.is_none() {
             unsupported = true;
         }
-        let building_base_id = building.map(|definition| {
-            crate::command::recipe_building_base(building_id, definition.family.as_deref())
-        });
+        let building_base_id = building.map(|_| building_id);
         let recipe_id = optional_text(
             object,
             "recipeId",
@@ -409,7 +412,7 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
         let recipe_supported = recipe_id.is_none_or(|recipe_id| {
             state.catalog.recipes.get(recipe_id).is_some_and(|recipe| {
                 building_base_id
-                    .is_some_and(|base_id| recipe_supports_building_base(base_id, recipe))
+                    .is_some_and(|base_id| recipe_supports_building_base(state, base_id, recipe))
             })
         });
         if !recipe_supported {
@@ -501,11 +504,11 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
                     break;
                 };
                 let building_bases = &source_recipe_building_bases[index];
-                if !recipe_is_unlocked(source_recipe, &completed_tech_ids)
+                if !recipe_is_unlocked(state, source_recipe, &completed_tech_ids)
                     || building_bases.is_empty()
-                    || building_bases
-                        .iter()
-                        .any(|base_id| !recipe_supports_building_base(base_id, source_recipe))
+                    || building_bases.iter().any(|base_id| {
+                        !recipe_supports_building_base(state, base_id, source_recipe)
+                    })
                 {
                     unsupported = true;
                     break;
@@ -518,10 +521,10 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
                     unsupported = true;
                     break;
                 };
-                if !recipe_is_unlocked(target_recipe, &completed_tech_ids)
-                    || building_bases
-                        .iter()
-                        .any(|base_id| !recipe_supports_building_base(base_id, target_recipe))
+                if !recipe_is_unlocked(state, target_recipe, &completed_tech_ids)
+                    || building_bases.iter().any(|base_id| {
+                        !recipe_supports_building_base(state, base_id, target_recipe)
+                    })
                 {
                     unsupported = true;
                     break;
@@ -533,10 +536,10 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
                     .recipes
                     .iter()
                     .filter(|recipe| {
-                        recipe_is_unlocked(recipe, &completed_tech_ids)
-                            && building_bases
-                                .iter()
-                                .all(|base_id| recipe_supports_building_base(base_id, recipe))
+                        recipe_is_unlocked(state, recipe, &completed_tech_ids)
+                            && building_bases.iter().all(|base_id| {
+                                recipe_supports_building_base(state, base_id, recipe)
+                            })
                     })
                     .take(MAX_RECIPE_OVERRIDE_OPTIONS + 1)
                     .collect::<Vec<_>>();
@@ -616,7 +619,12 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
         )?;
         if !state.catalog.items.contains_key(resource_id)
             || !state.catalog.buildings.contains_key(extractor_id)
-            || extractor_id != expected_extractor_building_id(resource_id)
+            || extractor_id
+                != state
+                    .catalog
+                    .snapshot
+                    .content_rules
+                    .extractor_id(resource_id)
         {
             unsupported = true;
         }

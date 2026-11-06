@@ -1,3 +1,4 @@
+import { getRecipeMissingTechnology, isRecipeTechnologyAvailable } from "../game/contentRules";
 import {
   AlertTriangle,
   Calculator,
@@ -126,7 +127,7 @@ export function ProductionManagement({ game, onFocusEntity, onFocusBelt, onBulkR
   const selectedMachines = useMemo(() => selectedRows.filter((row) => row.buildingId && row.group !== "mining" && row.group !== "logistics" && row.group !== "power"), [selectedRows]);
   const selectedStations = useMemo(() => selectedRows.filter((row) => row.buildingId === "planetary_logistics_station" || row.buildingId === "interstellar_logistics_station"), [selectedRows]);
   const recipeOptions = useMemo(() => Object.values(RECIPES).filter((recipe) =>
-    (!recipe.requiredTechId || isTechnologyCompleted(game, recipe.requiredTechId)) &&
+    (isRecipeTechnologyAvailable(recipe, game.research.completedTechIds)) &&
     selectedMachines.some((row) => row.buildingId && buildingSupportsRecipe(row.buildingId, recipe))), [game, selectedMachines]);
   const recipeCompatibleIds = batchRecipeId ? getRecipeCompatibleEntityIds(game, selectedIds, batchRecipeId) : [];
   const slotTemplate: StationSlotTemplate = { itemId: slotItemId, localMode, remoteMode, minimumLoad, minStock, maxStock, priority };

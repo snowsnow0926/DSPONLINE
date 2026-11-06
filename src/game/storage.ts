@@ -49,6 +49,8 @@ import { isSpaceStationFeatureEnabled } from "./spaceStationFeature";
 import { getOrbitalCargoPortItems } from "./stationCargoTerminal";
 import { addStationInteger } from "./stationMath";
 import { getMissingContentPackRequirements, loadContentPackRegistry, type ContentPackRegistry } from "./contentPacks";
+import { addContentPackResources } from "./contentRules";
+import { migrateContentPackIds } from "./contentIdMigration";
 import { projectPersistentSaveState } from "./saveProjection";
 import {
   clearPrimarySaveEmergencyMirror,
@@ -1118,7 +1120,7 @@ export function migrateGame(value: unknown, contentPackRegistry: ContentPackRegi
 /** One canonical migration; callers choose synchronous or cooperative driving. */
 function* migrateGameSteps(value: unknown, contentPackRegistry: ContentPackRegistry): Generator<void, GameState | null> {
   if (!value || typeof value !== "object") return null;
-  const saved = value as Record<string, any>;
+  const saved = migrateContentPackIds(value) as Record<string, any>;
   if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47].includes(saved.version) || !Array.isArray(saved.entities)) return null;
   // v43 was an unpublished space-station/elevator experiment. Never merge
   // its station inventory or fleet into the quantum pool. A v43 envelope that
@@ -1402,7 +1404,8 @@ function* migrateGameSteps(value: unknown, contentPackRegistry: ContentPackRegis
     const equivalentGuaranteedOil = resource.resourceId === "crude_oil" &&
       GUARANTEED_CRUDE_OIL_PLANETS.includes(resource.planetId as typeof GUARANTEED_CRUDE_OIL_PLANETS[number]) &&
       entities.some((entity) => entity.kind === "vein" && entity.planetId === resource.planetId && entity.resourceId === "crude_oil");
-    if (!equivalentGuaranteedOil && !entities.some((entity) => entity.id === resource.id)) {
+    const equivalentPackResource = resource.id.startsWith("content_vein_") && entities.some((entity) => entity.kind === "vein" && entity.planetId === resource.planetId && entity.resourceId === resource.resourceId);
+    if (!equivalentPackResource && !equivalentGuaranteedOil && !entities.some((entity) => entity.id === resource.id)) {
       entities.push({ ...resource, position: { ...resource.position }, inputs: {}, outputs: { ...resource.outputs } });
     }
   }
@@ -2526,7 +2529,7 @@ function* migrateGameSteps(value: unknown, contentPackRegistry: ContentPackRegis
   // speedrun milestone was persisted. Repair only that derived marker from
   // the authoritative counters; ordinary saves and the v46 shape stay intact.
   const repairedSpeedrun = evaluateSpeedrunMilestones(repairedResearch);
-  return syncCampaignProgress(repairedSpeedrun, { grantRewards: saved.version >= 18 });
+  return addContentPackResources(syncCampaignProgress(repairedSpeedrun, { grantRewards: saved.version >= 18 }));
 }
 
 /** Detach runtime-only fields before handing a snapshot to the save Worker. */

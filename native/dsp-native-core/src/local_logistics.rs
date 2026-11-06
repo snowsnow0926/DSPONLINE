@@ -1547,6 +1547,7 @@ fn entity_index(entities: &[Value]) -> HashMap<String, usize> {
 
 fn station_capacity(
     state: &CoreState,
+    base: &Map<String, Value>,
     entity: &Map<String, Value>,
     slot: &Slot,
     buffer_limit: f64,
@@ -1555,7 +1556,7 @@ fn station_capacity(
         .and_then(|id| state.catalog.buildings.get(id))
         .ok_or_else(|| anyhow!("native local station building is missing"))?;
     let rated = stacked_capacity(
-        building.output_capacity,
+        building.output_capacity * state.capacity_multiplier_for(base),
         finite_number(entity.get("machineCount")),
         buffer_limit,
     );
@@ -1926,7 +1927,7 @@ fn transfer_buffers_for_indices(
             let Some(item_id) = slot.item_id.as_deref() else {
                 continue;
             };
-            let capacity = station_capacity(state, station, slot, buffer_limit)?;
+            let capacity = station_capacity(state, base, station, slot, buffer_limit)?;
             let incoming = (item_amount(station, "inputs", item_id) + EPSILON).floor();
             let stored = (item_amount(station, "outputs", item_id) + EPSILON).floor();
             let moved = incoming.min((capacity - stored).max(0.0));
@@ -1969,6 +1970,7 @@ fn planned_buffer_amounts(
 
 fn plan_buffer_station(
     state: &CoreState,
+    base: &Map<String, Value>,
     entities: &[Value],
     directory: &LocalPeerDirectory,
     buffer_limit: f64,
@@ -1997,7 +1999,7 @@ fn plan_buffer_station(
             let Some(item_id) = slot.item_id.as_deref() else {
                 continue;
             };
-            let capacity = match station_capacity(state, station, slot, buffer_limit) {
+            let capacity = match station_capacity(state, base, station, slot, buffer_limit) {
                 Ok(capacity) => capacity,
                 Err(error) => {
                     plan.terminal_error = Some(error);
@@ -2090,6 +2092,7 @@ fn transfer_buffers_for_indices_with_runtime(
                 .map(|station_position| {
                     plan_buffer_station(
                         state,
+                        base,
                         entities,
                         directory,
                         buffer_limit,
@@ -2309,7 +2312,7 @@ fn ready_station_indices_with_scan(
         &station_indices,
         route_ledger,
         cargo_capacity(base),
-        |_, demand, demand_slot| station_capacity(state, demand, demand_slot, buffer_limit),
+        |_, demand, demand_slot| station_capacity(state, base, demand, demand_slot, buffer_limit),
     )?;
     let ready = replay_ready_station_indices(planned.clone());
     directory.commit_readiness(&planned, signature);
@@ -2462,12 +2465,13 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized, const PROFILE: bool>(
                     .then_with(|| left_slot.cmp(right_slot))
             });
             let demand_now = entities[demand_index].as_object().expect("station object");
-            let mut remaining_free = (station_capacity(state, demand_now, slot, buffer_limit)?
-                - item_amount(demand_now, "outputs", &item_id)
-                - ledger.in_flight(demand_index, &item_id)
-                + EPSILON)
-                .floor()
-                .max(0.0);
+            let mut remaining_free =
+                (station_capacity(state, base, demand_now, slot, buffer_limit)?
+                    - item_amount(demand_now, "outputs", &item_id)
+                    - ledger.in_flight(demand_index, &item_id)
+                    + EPSILON)
+                    .floor()
+                    .max(0.0);
             for (supply_index, peer_slot_index) in matches {
                 if remaining_free < 1.0 {
                     break;
@@ -3432,6 +3436,7 @@ mod tests {
     fn route_fixture_catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: "local-route-active-test".to_owned(),
                 planets: vec![PlanetDefinition {
@@ -5012,7 +5017,13 @@ mod tests {
                 &oracle_ledger,
                 cargo_capacity(&oracle_base),
                 |_, demand, slot| {
-                    station_capacity(&state, demand, slot, normalized_buffer_limit(&oracle_base))
+                    station_capacity(
+                        &state,
+                        &oracle_base,
+                        demand,
+                        slot,
+                        normalized_buffer_limit(&oracle_base),
+                    )
                 },
             )
             .unwrap();

@@ -770,19 +770,19 @@ pub(crate) fn recipe_building_base<'a>(building_id: &'a str, family: Option<&str
 }
 
 fn default_placement_recipe(state: &CoreState, building_id: &str) -> Option<String> {
-    let building = state.catalog.buildings.get(building_id)?;
-    let base_building_id = recipe_building_base(building_id, building.family.as_deref());
+    state.catalog.buildings.get(building_id)?;
     state
         .catalog
         .snapshot
         .recipes
         .iter()
         .find(|recipe| {
-            recipe.building_id == base_building_id
-                && recipe
-                    .required_tech_id
-                    .as_deref()
-                    .is_none_or(|technology_id| technology_is_completed(state, technology_id))
+            state.catalog.recipe_allowed(building_id, recipe)
+                && state
+                    .catalog
+                    .snapshot
+                    .content_rules
+                    .recipe_available(state.base_value(), recipe)
         })
         .map(|recipe| recipe.id.clone())
 }

@@ -25,7 +25,8 @@ import {
   Zap,
 } from "lucide-react";
 import { Handle, Position, useUpdateNodeInternals, type Node, type NodeProps } from "@xyflow/react";
-import { memo, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useEffect, useRef, useState, type RefObject, type ReactNode } from "react";
+import { getCategoryName } from "../game/contentRules";
 import { FUEL_ENERGY_MJ, ITEMS, MATRIX_ITEM_IDS, getBuilding, getExtractorBuildingId, getFuelItemIdsForBuilding, getItem, getProliferator, getRecipe, getRecipesForBuilding } from "../game/content";
 import { MATERIAL_DELIVERY_SLOT_COUNT, getEntityProliferatorItemId, getEntityProliferatorPowerMultiplier, getEntityProliferatorSpeedMultiplier, getMaterialDeliveryItems, getMaterialDeliverySlots, getStationDroneCapacity, getStationSlots, getStationVesselCapacity, type ResourceReserveSnapshot } from "../game/engine";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
@@ -601,6 +602,10 @@ function FactoryNodeStackOverlay({ data }: { data: FactoryNodeData }) {
   </>;
 }
 
+function ContentIcon({ icon, children }: { icon?: string; children: ReactNode }) {
+  return icon ? <img src={icon} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : children;
+}
+
 function FactoryNodeLodView({ data, selected }: NodeProps<FactoryFlowNode>) {
   const { entity, lod } = data;
   const resource = entity.resourceId ? getItem(entity.resourceId) : null;
@@ -622,7 +627,7 @@ function FactoryNodeLodView({ data, selected }: NodeProps<FactoryFlowNode>) {
   return <article className={`factory-node factory-node-lod factory-node-lod--${lod} factory-node--status-${data.status.tone}${selected ? " factory-node--selected" : ""}${entity.interactionLocked ? " factory-node--locked" : ""}`} data-node-lod={lod} data-heavy-card="false">
     <LightweightNodeHandles data={data} />
     <header className="factory-node__header">
-      <div className="node-icon" style={resource ? { color: resource.color } : undefined}>{icon}</div>
+      <div className="node-icon" style={resource ? { color: resource.color } : undefined}><ContentIcon icon={resource?.icon ?? recipe?.icon ?? building?.icon}>{icon}</ContentIcon></div>
       <div><span>{productionTitle && name === productionTitle ? `${productionTitle} · ${building?.name ?? category}` : category}</span><strong title={name}>{name}</strong></div>
       <small>×{count}</small>
     </header>
@@ -712,7 +717,7 @@ function VeinFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
     >
       <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} readOnly={data.readOnly} />
       <header className="factory-node__header">
-        <div className="node-icon" style={{ color: resource.color }}>{fluid ? <Droplets size={18} /> : <Pickaxe size={18} />}</div>
+        <div className="node-icon" style={{ color: resource.color }}><ContentIcon icon={resource.icon}>{fluid ? <Droplets size={18} /> : <Pickaxe size={18} />}</ContentIcon></div>
         <div>
           <span>{water ? "海洋水源" : sulfuricOcean ? "硫酸海洋" : fluid ? "原油涌泉" : remote ? "远端矿区" : "资源矿脉"}</span>
           <strong>{resource.name}</strong>
@@ -840,10 +845,10 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} readOnly={data.readOnly} />
       <header className="factory-node__header">
         <div className={`node-icon${rayReceiver ? " node-icon--ray" : railEjector || launchSilo ? " node-icon--orbit" : ""}`}>
-          {blackHoleConnector ? <Atom size={18} /> : timeWarpDevice ? <Gauge size={18} /> : galacticExporter ? <Rocket size={18} /> : entity.buildingId === "miniature_particle_collider" ? <Atom size={18} /> : railEjector ? <Satellite size={18} /> : launchSilo ? <Rocket size={18} /> : rayReceiver ? <RadioTower size={18} /> : <Factory size={18} />}
+          <ContentIcon icon={recipe?.icon ?? building.icon}>{blackHoleConnector ? <Atom size={18} /> : timeWarpDevice ? <Gauge size={18} /> : galacticExporter ? <Rocket size={18} /> : entity.buildingId === "miniature_particle_collider" ? <Atom size={18} /> : railEjector ? <Satellite size={18} /> : launchSilo ? <Rocket size={18} /> : rayReceiver ? <RadioTower size={18} /> : <Factory size={18} />}</ContentIcon>
         </div>
         <div>
-          <span>{blackHoleConnector ? "永久物资销毁" : timeWarpDevice ? "全局模拟主控" : constructionCenter ? "巨构自动补给" : galacticExporter ? "银河终局工程" : railEjector ? "恒星轨道设施" : launchSilo ? "戴森球建造设施" : rayReceiver ? "戴森系统接收设施" : building.shortName}</span>
+          <span>{getCategoryName(building.categoryId) ?? (blackHoleConnector ? "永久物资销毁" : timeWarpDevice ? "全局模拟主控" : constructionCenter ? "巨构自动补给" : galacticExporter ? "银河终局工程" : railEjector ? "恒星轨道设施" : launchSilo ? "戴森球建造设施" : rayReceiver ? "戴森系统接收设施" : building.shortName)}</span>
           <strong>{constructionCenter || galacticExporter || blackHoleConnector || timeWarpDevice ? building.name : recipe?.name ?? "未指定配方"}</strong>
         </div>
         <small>×{entity.machineCount}</small>
@@ -1067,7 +1072,7 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
     >
       <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} readOnly={data.readOnly} />
       <header className="factory-node__header">
-        <div className="node-icon">{cargoTerminal ? <Satellite size={18} /> : isStation ? <Orbit size={18} /> : isSplitter ? <GitFork size={18} /> : <Database size={18} />}</div>
+        <div className="node-icon"><ContentIcon icon={building.icon}>{cargoTerminal ? <Satellite size={18} /> : isStation ? <Orbit size={18} /> : isSplitter ? <GitFork size={18} /> : <Database size={18} />}</ContentIcon></div>
         <div><span>{cargoTerminal ? "全星系空间站上传" : deliveryHub ? "物资托盘直送" : orbitalCollector ? "气态巨星采集" : planetaryStation ? "行星无线运输" : isStation ? "跨行星运输" : isSplitter ? "物流分配" : "物流缓存"}</span><strong>{building.name}</strong></div>
         <small>×{entity.machineCount}</small>
       </header>
@@ -1191,7 +1196,7 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
     >
       <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} readOnly={data.readOnly} />
       <header className="factory-node__header">
-        <div className="node-icon node-icon--power">{icon}</div>
+        <div className="node-icon node-icon--power"><ContentIcon icon={building.icon}>{icon}</ContentIcon></div>
         <div>
           <span>{category}</span>
           <strong>{building.name}</strong>

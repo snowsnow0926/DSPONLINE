@@ -963,7 +963,9 @@ fn route_station_capacity(
         .ok_or_else(|| anyhow!("native stellar route station building is missing"))?;
     let count = station.machine_count.floor().max(1.0);
     let limit = route_buffer_limit(base);
-    let base_capacity = building.output_capacity.max(0.0).floor();
+    let base_capacity = (building.output_capacity * state.capacity_multiplier_for(base))
+        .max(0.0)
+        .floor();
     let rated = if base_capacity == 0.0 {
         0.0
     } else if base_capacity > limit / count {
@@ -3722,6 +3724,7 @@ mod tests {
     fn catalog(planets: Vec<PlanetDefinition>, fingerprint: &str) -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: fingerprint.to_owned(),
                 planets,

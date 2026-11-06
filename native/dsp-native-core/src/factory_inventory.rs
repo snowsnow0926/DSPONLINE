@@ -26,26 +26,6 @@ const DEFAULT_PRODUCTION_BUFFER_LIMIT: u64 = 1_000_000;
 const MAX_PRODUCTION_BUFFER_LIMIT: u64 = 100_000_000;
 const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
 
-/// Deliberately excludes storage, splitters, power/fuel buildings, stations,
-/// construction megastructures and every opaque/MOD building. These are the
-/// built-in recipe machines whose ordinary input semantics are fully described
-/// by the v47 catalog without another domain ledger.
-const BUILTIN_ORDINARY_RECIPE_BUILDINGS: &[&str] = &[
-    "arc_smelter",
-    "assembling_machine_mk1",
-    "assembling_machine_mk2",
-    "assembling_machine_mk3",
-    "chemical_plant",
-    "em_rail_ejector",
-    "fractionator",
-    "matrix_lab",
-    "miniature_particle_collider",
-    "oil_refinery",
-    "plane_smelter",
-    "quantum_chemical_plant",
-    "vertical_launching_silo",
-];
-
 const BUILTIN_MATRIX_ITEMS: &[&str] = &[
     "electromagnetic_matrix",
     "energy_matrix",
@@ -522,18 +502,6 @@ struct EntityInventoryTarget {
     capacity: u64,
 }
 
-fn canonical_recipe_building_id(building_id: &str) -> Option<&str> {
-    if !BUILTIN_ORDINARY_RECIPE_BUILDINGS.contains(&building_id) {
-        return None;
-    }
-    Some(match building_id {
-        "assembling_machine_mk2" | "assembling_machine_mk3" => "assembling_machine_mk1",
-        "plane_smelter" => "arc_smelter",
-        "quantum_chemical_plant" => "chemical_plant",
-        other => other,
-    })
-}
-
 fn recipe_accepts_ordinary_input(recipe: &crate::catalog::RecipeDefinition, item_id: &str) -> bool {
     recipe.inputs.iter().any(|input| input.item_id == item_id)
         || recipe.id == "matrix_research" && BUILTIN_MATRIX_ITEMS.contains(&item_id)
@@ -600,7 +568,13 @@ fn entity_inventory_target(
     let building_id = entity
         .get("buildingId")
         .and_then(Value::as_str)
-        .and_then(canonical_recipe_building_id)
+        .filter(|id| {
+            id.len() <= 64
+                && id.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
         .ok_or_else(|| anyhow!("native factory entity input building is not supported"))?;
     let building = entity
         .get("buildingId")
@@ -615,7 +589,9 @@ fn entity_inventory_target(
         .and_then(Value::as_str)
         .and_then(|id| state.catalog.recipes.get(id))
         .ok_or_else(|| anyhow!("native factory entity input recipe is missing"))?;
-    if recipe.building_id != building_id || !recipe_accepts_ordinary_input(recipe, item_id) {
+    if !state.catalog.recipe_allowed(building_id, recipe)
+        || !recipe_accepts_ordinary_input(recipe, item_id)
+    {
         bail!("native factory entity input item is not consumed by the active recipe")
     }
     let machine_count = safe_nonnegative_integer(entity.get("machineCount"), "machine count")?;
@@ -629,7 +605,7 @@ fn entity_inventory_target(
     {
         bail!("native factory entity input capacity is not a safe integer")
     }
-    let base_capacity = building.input_capacity as u64;
+    let base_capacity = (building.input_capacity * state.capacity_multiplier()).floor() as u64;
     let capacity = base_capacity
         .checked_mul(machine_count)
         .unwrap_or(MAX_JAVASCRIPT_SAFE_INTEGER)

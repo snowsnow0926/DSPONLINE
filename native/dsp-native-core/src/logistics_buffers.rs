@@ -248,7 +248,7 @@ fn settle_indices(
             .and_then(|id| state.catalog.buildings.get(id))
             .ok_or_else(|| anyhow!("native logistics building is missing"))?;
         let capacity = stacked_capacity(
-            building.output_capacity,
+            building.output_capacity * state.capacity_multiplier_for(base),
             finite_number(entity.get("machineCount")),
             limit,
         );

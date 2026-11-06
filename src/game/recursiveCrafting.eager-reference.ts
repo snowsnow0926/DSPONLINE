@@ -1,3 +1,4 @@
+import { getRecipeMissingTechnology, isRecipeTechnologyAvailable } from "./contentRules";
 // Frozen 368d5011 planner for differential tests. Do not import from production.
 import type { ItemAmount, ItemId, RecipeDefinition, RecipeId, TechId } from "./types";
 
@@ -136,8 +137,8 @@ function ensureItemOptions(
   const earlierAttempts: Array<{ recipeId: RecipeId; viable: boolean; blocker?: RecursiveCraftBlocker }> = [];
 
   for (const recipe of recipes) {
-    if (recipe.requiredTechId && !context.completedTechnologyIds.has(recipe.requiredTechId)) {
-      const blocker = { itemId, current, required, reason: "technology" as const, recipeId: recipe.id, technologyId: recipe.requiredTechId };
+    if (getRecipeMissingTechnology(recipe, context.completedTechnologyIds)) {
+      const blocker = { itemId, current, required, reason: "technology" as const, recipeId: recipe.id, technologyId: getRecipeMissingTechnology(recipe, context.completedTechnologyIds) };
       blockers.push({ ...blocker, depth });
       earlierAttempts.push({ recipeId: recipe.id, viable: false, blocker });
       continue;
@@ -289,7 +290,7 @@ export function planSelectedRecipe({ inventory, recipe, batches, recipes, comple
   const count = Math.max(1, Math.floor(batches));
   const context = plannerContext({ recipes, completedTechnologyIds, allowRecipe, optionLimit });
   const initial: PlannerWork = { inventory: normalizedInventory(inventory), steps: [], decisions: [] };
-  if (recipe.requiredTechId && !context.completedTechnologyIds.has(recipe.requiredTechId)) {
+  if (getRecipeMissingTechnology(recipe, context.completedTechnologyIds)) {
     const output = recipe.outputs[0];
     return {
       possible: false,
@@ -302,7 +303,7 @@ export function planSelectedRecipe({ inventory, recipe, batches, recipes, comple
         required: output?.amount ?? 1,
         reason: "technology",
         recipeId: recipe.id,
-        technologyId: recipe.requiredTechId,
+        technologyId: getRecipeMissingTechnology(recipe, context.completedTechnologyIds),
       },
     };
   }

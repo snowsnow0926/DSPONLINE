@@ -1511,6 +1511,7 @@ mod tests {
             "copper_ore",
         ];
         let snapshot = CatalogSnapshot {
+            content_rules: Default::default(),
             protocol_version: 1,
             registry_fingerprint: EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned(),
             planets: serde_json::from_value(json!([

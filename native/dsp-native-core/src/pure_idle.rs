@@ -7150,12 +7150,11 @@ fn bounded_handcraft_plan(state: &CoreState) -> Result<Option<BoundedHandcraftTa
                 recipe_id: recipe_id.to_owned(),
                 planet_id: planet_id.to_owned(),
                 can_start_batch: recipe.handcraftable != Some(false)
-                    && recipe.required_tech_id.as_deref().is_none_or(|tech_id| {
-                        base.get("research")
-                            .and_then(|research| research.get("completedTechIds"))
-                            .and_then(Value::as_array)
-                            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(tech_id)))
-                    }),
+                    && state
+                        .catalog
+                        .snapshot
+                        .content_rules
+                        .recipe_available(base, recipe),
                 duration_micros,
                 inputs: bounded_handcraft_catalog_totals(
                     &recipe.inputs,
@@ -9772,6 +9771,7 @@ mod tests {
     fn fixture_catalog() -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
+                content_rules: Default::default(),
                 protocol_version: 1,
                 registry_fingerprint: "pure-idle-test".into(),
                 planets: vec![PlanetDefinition {
@@ -14507,10 +14507,16 @@ mod tests {
     fn bounded_handcraft_tail_obeys_pack_rules_and_preserves_paid_work() {
         for progress in [0.0, 0.5] {
             let mut state = bounded_handcraft_macro_fixture(15.0, 2, 20);
-            Arc::make_mut(&mut state.catalog).recipes.get_mut("iron_ingot").unwrap().handcraftable = Some(false);
+            Arc::make_mut(&mut state.catalog)
+                .recipes
+                .get_mut("iron_ingot")
+                .unwrap()
+                .handcraftable = Some(false);
             state.base_value_mut()["handcraftQueue"][0]["progress"] = json!(progress);
             let result = apply_bounded_handcraft_tail(&mut state, 10.0).unwrap();
-            let BoundedHandcraftTailOutcome::Applied(result) = result else { panic!("expected a bounded queue result"); };
+            let BoundedHandcraftTailOutcome::Applied(result) = result else {
+                panic!("expected a bounded queue result");
+            };
             assert_eq!(result.completed_batches, if progress > 0.0 { 1 } else { 0 });
             assert_eq!(result.input_units_debited, 0);
             assert_eq!(state.base_value()["tray"]["iron_ore"], json!(20));
@@ -17781,7 +17787,7 @@ mod tests {
             &pure_idle_macro_request(fuel_revision, 60.0, 4.0),
         )
         .unwrap();
-        assert!(fuel_result.supported);
+        assert!(fuel_result.supported, "{:?}", fuel_result.reason);
         assert!(
             fuel_result
                 .reason

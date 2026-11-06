@@ -1,3 +1,4 @@
+import { addContentPackResources, getTechnologyMultiplier, isRecipeTechnologyAvailable } from "./contentRules";
 import {
   BUILDINGS,
   CONSTRUCTION,
@@ -676,7 +677,7 @@ export function createInitialState(seed = DEFAULT_GALAXY_SEED, preserveBaseline 
     const reserve = createVeinReserve(galaxy, entity.planetId, entity.resourceId, entity.id);
     return { ...entity, resourceRemaining: reserve, resourceCapacity: reserve };
   });
-  return {
+  return addContentPackResources({
     version: 47,
     mode: "normal",
     nextId: 1,
@@ -849,7 +850,7 @@ export function createInitialState(seed = DEFAULT_GALAXY_SEED, preserveBaseline 
     },
     endgame: createEndgameState(),
     paused: false,
-  };
+  });
 }
 
 export function createPlayerInitialState(): GameState {
@@ -888,7 +889,7 @@ export function hasActiveResearch(state: GameState): boolean {
 
 export function getRecipeSpeedMultiplier(state: GameState, recipeId: RecipeId | undefined): number {
   const difficulty = getDifficultyDefinition(state.settings?.difficulty);
-  if (recipeId !== "matrix_research") return getIndustrialEfficiencyMultiplier(state) * difficulty.productionMultiplier;
+  if (recipeId !== "matrix_research") return getIndustrialEfficiencyMultiplier(state) * difficulty.productionMultiplier * getTechnologyMultiplier(state.research.completedTechIds, "productionSpeed");
   return (1 + (state.research.completedTechIds.includes("research_speed_1") ? 0.25 : 0) +
     (state.research.completedTechIds.includes("research_speed_2") ? 0.25 : 0) +
     (state.research.completedTechIds.includes("research_speed_3") ? 0.25 : 0)) *
@@ -902,7 +903,7 @@ export function getMiningSpeedMultiplier(state: GameState): number {
     : state.research.completedTechIds.includes("mining_speed_2")
       ? 2
       : state.research.completedTechIds.includes("mining_speed_1") ? 1.5 : 1;
-  return base * getInfiniteResourceCollectionSpeedMultiplier(state) * difficulty.miningMultiplier;
+  return base * getInfiniteResourceCollectionSpeedMultiplier(state) * difficulty.miningMultiplier * getTechnologyMultiplier(state.research.completedTechIds, "miningSpeed");
 }
 
 export function getInfiniteResourceCollectionSpeedMultiplier(state: GameState): number {
@@ -1412,7 +1413,7 @@ function canMachineRun(state: GameState, entity: FactoryEntity, runtime?: Indexe
   if (entity.recipeId === "matrix_research" && !hasActiveResearch(state)) return false;
   if (entity.recipeId === "solar_sail_launch" && !getEjectorOrbitTargetStatus(state, entity).valid) return false;
   const recipe = runtime?.recipe ?? getRecipe(entity.recipeId);
-  if (recipe?.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId)) return false;
+  if (recipe && (!isRecipeTechnologyAvailable(recipe, state.research.completedTechIds) || !entity.buildingId || !buildingSupportsRecipe(entity.buildingId, recipe))) return false;
   if (proliferatorApplies(entity, recipe)) {
     const definition = getProliferator(entity.proliferatorTier!);
     if (!isTechnologyCompleted(state, definition.requiredTechId)) return false;
@@ -1604,7 +1605,7 @@ function stackedEntityCapacity(baseCapacity: number, machineCount: number, limit
 
 function getManualMiningOutputCapacity(state: GameState, entity: FactoryEntity): number {
   const rated = stackedEntityCapacity(
-    extractorFor(entity).outputCapacity,
+    extractorFor(entity).outputCapacity * getTechnologyMultiplier(state.research.completedTechIds, "storageCapacity"),
     Math.max(1, entity.minerCount),
     getEntityBufferLimit(state, entity),
   );
@@ -1625,12 +1626,12 @@ function getEntityCapacityDefinition(entity: FactoryEntity): { inputCapacity: nu
 
 export function getEntityInputCapacity(state: GameState, entity: FactoryEntity): number {
   const definition = getEntityCapacityDefinition(entity);
-  return definition ? stackedEntityCapacity(definition.inputCapacity, definition.count, getEntityBufferLimit(state, entity)) : 0;
+  return definition ? stackedEntityCapacity(definition.inputCapacity * getTechnologyMultiplier(state.research.completedTechIds, "storageCapacity"), definition.count, getEntityBufferLimit(state, entity)) : 0;
 }
 
 export function getEntityOutputCapacity(state: GameState, entity: FactoryEntity): number {
   const definition = getEntityCapacityDefinition(entity);
-  return definition ? stackedEntityCapacity(definition.outputCapacity, definition.count, getEntityBufferLimit(state, entity)) : 0;
+  return definition ? stackedEntityCapacity(definition.outputCapacity * getTechnologyMultiplier(state.research.completedTechIds, "storageCapacity"), definition.count, getEntityBufferLimit(state, entity)) : 0;
 }
 
 export function getStationSlotCapacity(state: GameState, station: FactoryEntity, slot: StationSlot): number {
@@ -3886,10 +3887,8 @@ function calculateDysonReception(state: GameState, lookup?: SimulationLookupCont
   };
 }
 
-const FUEL_GENERATOR_IDS: BuildingId[] = ["thermal_power_plant", "mini_fusion_power_plant", "artificial_star"];
-
 function isFuelGenerator(entity: FactoryEntity): boolean {
-  return Boolean(entity.buildingId && FUEL_GENERATOR_IDS.includes(entity.buildingId));
+  return Boolean(entity.buildingId && getFuelItemIdsForBuilding(entity.buildingId).length);
 }
 
 function fuelEnergyAvailable(entity: FactoryEntity): number {
@@ -4060,7 +4059,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
   let disconnectedDemandKw = 0;
   let generatorCount = 0;
   const profile = getPlanetIndustrialProfile(state, planetId);
-  const difficultyPowerMultiplier = getDifficultyDefinition(state.settings?.difficulty).powerDemandMultiplier;
+  const difficultyPowerMultiplier = getDifficultyDefinition(state.settings?.difficulty).powerDemandMultiplier * getTechnologyMultiplier(state.research.completedTechIds, "powerConsumption");
   const industrialRecipeSpeed = getRecipeSpeedMultiplier(state, "iron_ingot");
   const matrixResearchSpeed = getRecipeSpeedMultiplier(state, "matrix_research");
   const consumers: PowerConsumer[] = [];
@@ -4268,7 +4267,7 @@ function calculatePower(state: GameState, seconds: number, planetId: PlanetId, g
     windGenerationKw,
     solarGenerationKw,
     geothermalGenerationKw,
-    thermalGenerationKw: fuelOutput("thermal_power_plant"),
+    thermalGenerationKw: fuelOutput("thermal_power_plant") + fuelCandidates.filter((candidate) => !["thermal_power_plant", "mini_fusion_power_plant", "artificial_star"].includes(candidate.entity.buildingId!)).reduce((sum, candidate) => sum + (powerOutputByEntity.get(candidate.entity.id) ?? 0), 0),
     fusionGenerationKw: fuelOutput("mini_fusion_power_plant"),
     artificialStarGenerationKw: fuelOutput("artificial_star"),
     rayGenerationKw,
@@ -4306,7 +4305,7 @@ function isolateConstructionPowerDispatch(
   let constructionDemandKw = 0;
   let constructionAllocatedKw = 0;
   if (constructionAutomationHasDeficit(state)) {
-    const difficultyPowerMultiplier = getDifficultyDefinition(state.settings.difficulty).powerDemandMultiplier;
+    const difficultyPowerMultiplier = getDifficultyDefinition(state.settings.difficulty).powerDemandMultiplier * getTechnologyMultiplier(state.research.completedTechIds, "powerConsumption");
     // A complete index also proves that a planet has no centers. Falling back
     // on a missing entry rescanned the entire endgame factory for every empty
     // planet/grid on every exact calibration step.
@@ -4335,8 +4334,7 @@ function isolateConstructionPowerDispatch(
     const entityById = lookup?.entityById ?? new Map(state.entities.map((entity) => [entity.id, entity]));
     for (const [entityId, outputKw] of plan.powerOutputByEntity) {
       const buildingId = entityById.get(entityId)?.buildingId;
-      if (buildingId === "thermal_power_plant" || buildingId === "mini_fusion_power_plant" ||
-        buildingId === "artificial_star" || buildingId === "energy_exchanger" ||
+      if ((buildingId && getFuelItemIdsForBuilding(buildingId).length > 0) || buildingId === "energy_exchanger" ||
         buildingId === "accumulator") {
         plan.powerOutputByEntity.set(entityId, outputKw * ratio);
       }
@@ -5466,7 +5464,7 @@ function runMiners(
     const miner = extractorFor(entity);
     const miningSpeed = (ITEMS[entity.resourceId].kind === "solid"
       ? researchedMiningSpeed
-      : getInfiniteResourceCollectionSpeedMultiplier(state)) * profile.miningMultiplier;
+      : getInfiniteResourceCollectionSpeedMultiplier(state) * getTechnologyMultiplier(state.research.completedTechIds, "miningSpeed")) * profile.miningMultiplier;
     const capacity = getEntityOutputCapacity(state, entity);
     const current = Math.floor((entity.outputs[entity.resourceId] ?? 0) + EPSILON);
     const free = Math.max(0, capacity - current) + outputCapacityCredit(credits, entity, entity.resourceId);
@@ -5631,7 +5629,7 @@ function runMachines(
     const effectiveCyclesPerSecond = baseSpeedProduct *
       (runtime.matrixResearch ? matrixResearchSpeed : industrialRecipeSpeed) * planetSpeed / recipeDuration;
     const launchFactor = dysonLaunchFactor(state, recipe.id);
-    if (recipe.requiredTechId && !completedTechIds.has(recipe.requiredTechId)) {
+    if (!isRecipeTechnologyAvailable(recipe, state.research.completedTechIds) || !entity.buildingId || !buildingSupportsRecipe(entity.buildingId, recipe)) {
       entity.progress = 0;
       entity.utilization = 0;
       entity.productionRate = 0;
@@ -5777,7 +5775,7 @@ function runRayReceivers(
     entity.powerOutputKw = round(allocationKw, 2);
     entity.productionRate = 0;
     entity.utilization = 0;
-    if (!recipe || (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId))) {
+    if (!recipe || !isRecipeTechnologyAvailable(recipe, state.research.completedTechIds)) {
       entity.progress = 0;
       continue;
     }
@@ -9727,9 +9725,9 @@ export function placeBlueprint(
     const configuredRecipeId = template.recipeId ? blueprint.recipeOverrides?.[template.recipeId] ?? template.recipeId : undefined;
     const recipe = getRecipe(configuredRecipeId);
     const recipeId = recipe && buildingSupportsRecipe(template.buildingId, recipe) &&
-      (!recipe.requiredTechId || isTechnologyCompleted(next, recipe.requiredTechId))
+      isRecipeTechnologyAvailable(recipe, next.research.completedTechIds)
       ? recipe.id
-      : getRecipesForBuilding(template.buildingId).find((candidate) => !candidate.requiredTechId || isTechnologyCompleted(next, candidate.requiredTechId))?.id;
+      : getRecipesForBuilding(template.buildingId).find((candidate) => isRecipeTechnologyAvailable(candidate, next.research.completedTechIds))?.id;
     const placed: FactoryEntity = {
       id: entityId,
       kind: building.kind === "power" ? "power" : building.kind === "storage" ? "storage" :
@@ -10384,7 +10382,7 @@ export function placeBuilding(state: GameState, buildingId: BuildingId, position
     } : {}),
   };
   const recipe = getRecipesForBuilding(buildingId).find((candidate) =>
-    !candidate.requiredTechId || isTechnologyCompleted(state, candidate.requiredTechId));
+    isRecipeTechnologyAvailable(candidate, state.research.completedTechIds));
   next.construction[buildingId] = (next.construction[buildingId] ?? 0) - amount;
   next.entities.push({
     id: `entity_${next.nextId}`,
@@ -10851,7 +10849,7 @@ function hasBufferedItems(entity: FactoryEntity): boolean {
 function getAutoRecipeForInput(state: GameState, entity: FactoryEntity, itemId: ItemId): RecipeDefinition | undefined {
   if (entity.kind !== "machine" || !entity.buildingId || entity.interactionLocked || hasBufferedItems(entity)) return undefined;
   const recipes = getRecipesForBuilding(entity.buildingId)
-    .filter((recipe) => !recipe.requiredTechId || isTechnologyCompleted(state, recipe.requiredTechId));
+    .filter((recipe) => isRecipeTechnologyAvailable(recipe, state.research.completedTechIds));
   const defaultRecipe = recipes[0];
   if (!defaultRecipe || entity.recipeId !== defaultRecipe.id) return undefined;
   return recipes.find((recipe) => {
@@ -10946,7 +10944,7 @@ export function setEntityRecipe(state: GameState, entityId: string, recipeId: Re
   const entity = next.entities.find((item) => item.id === entityId);
   const recipe = getRecipe(recipeId);
   if (!entity?.buildingId || !recipe || !buildingSupportsRecipe(entity.buildingId, recipe) ||
-    (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId))) return state;
+    !isRecipeTechnologyAvailable(recipe, state.research.completedTechIds)) return state;
   if (entity.recipeId === recipeId) return state;
 
   for (const [itemId, amount] of Object.entries(entity.inputs)) addToTray(next, itemId as ItemId, amount ?? 0);
@@ -11112,7 +11110,7 @@ function applyAcrossEntityPlanets(
 
 export function getRecipeCompatibleEntityIds(state: GameState, entityIds: string[], recipeId: RecipeId): string[] {
   const recipe = getRecipe(recipeId);
-  if (!recipe || (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId))) return [];
+  if (!recipe || !isRecipeTechnologyAvailable(recipe, state.research.completedTechIds)) return [];
   const requested = new Set(entityIds);
   return state.entities
     .filter((entity) => requested.has(entity.id) && !entity.interactionLocked && entity.buildingId && buildingSupportsRecipe(entity.buildingId, recipe))
@@ -15676,7 +15674,7 @@ export function canHandcraftRecipe(state: GameState, recipeId: RecipeId, batches
   const recipe = getRecipe(recipeId);
   const amount = normalizeManualCraftBatches(batches);
   return Boolean(recipe && isHandcraftableRecipe(recipeId) &&
-    (!recipe.requiredTechId || isTechnologyCompleted(state, recipe.requiredTechId)) &&
+    isRecipeTechnologyAvailable(recipe, state.research.completedTechIds) &&
     recipe.inputs.every((input) => (state.tray[input.itemId] ?? 0) + EPSILON >= input.amount * amount) &&
     canStoreRecipeOutputsInTray(state, recipe, amount));
 }
@@ -15808,13 +15806,13 @@ export function handcraftRecipe(state: GameState, recipeId: RecipeId, batches = 
 export function canQueueHandcraftRecipe(state: GameState, recipeId: RecipeId): boolean {
   const recipe = getRecipe(recipeId);
   return Boolean(recipe && isHandcraftableRecipe(recipeId) &&
-    (!recipe.requiredTechId || isTechnologyCompleted(state, recipe.requiredTechId)) && state.handcraftQueue.length < 20);
+    isRecipeTechnologyAvailable(recipe, state.research.completedTechIds) && state.handcraftQueue.length < 20);
 }
 
 export function getMaxHandcraftBatches(state: GameState, recipeId: RecipeId): number {
   const recipe = getRecipe(recipeId);
   if (!recipe || !isHandcraftableRecipe(recipeId) ||
-    (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId))) return 0;
+    !isRecipeTechnologyAvailable(recipe, state.research.completedTechIds)) return 0;
   const inputTotals = new Map<ItemId, number>();
   const outputTotals = new Map<ItemId, number>();
   for (const input of recipe.inputs) inputTotals.set(input.itemId, (inputTotals.get(input.itemId) ?? 0) + input.amount);
@@ -15863,7 +15861,7 @@ function advanceHandcraftQueue(state: GameState, seconds: number): void {
     if (entry.progress <= EPSILON) {
       // Finish already-paid work after a pack update, but never start another
       // now-locked batch. The queue remains available for the player to cancel.
-      if (!isHandcraftableRecipe(recipe.id) || (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId))) break;
+      if (!isHandcraftableRecipe(recipe.id) || !isRecipeTechnologyAvailable(recipe, state.research.completedTechIds)) break;
       if (!canStoreRecipeOutputsInTray(state, recipe)) break;
       const hasInputs = recipe.inputs.every((input) => (state.tray[input.itemId] ?? 0) + EPSILON >= input.amount);
       if (!hasInputs) break;
@@ -16693,7 +16691,8 @@ export function getEntityOperatingStatus(state: GameState, entity: FactoryEntity
 
   const recipe = getRecipe(entity.recipeId);
   if (!recipe) return { code: "missing-recipe", label: "未选择配方", tone: "blocked" };
-  if (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId)) {
+  if (entity.buildingId && !buildingSupportsRecipe(entity.buildingId, recipe)) return { code: "missing-recipe", label: "建筑不支持此配方", tone: "blocked" };
+  if (!isRecipeTechnologyAvailable(recipe, state.research.completedTechIds)) {
     return { code: "missing-recipe", label: "配方科技未解锁", tone: "blocked" };
   }
   if (recipe.id === "matrix_research" && !hasActiveResearch(state)) {

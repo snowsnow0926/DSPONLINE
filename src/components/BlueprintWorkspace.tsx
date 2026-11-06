@@ -1,3 +1,4 @@
+import { getRecipeMissingTechnology, isRecipeTechnologyAvailable } from "../game/contentRules";
 import { ArrowUp, BoxSelect, Check, ChevronLeft, ChevronRight, Clock3, Copy, Download, FlipHorizontal2, Focus, Layers3, ListChecks, Lock, MousePointer2, PackageCheck, PackageOpen, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Redo2, RotateCw, Route, Trash2, Truck, Undo2, Unlock, Upload, WandSparkles, X } from "lucide-react";
 import { getConstructionDefinition, getItem, getPlanet, getRecipe, getRecipesForBuilding } from "../game/content";
 import { canPlaceBlueprint, canQueueBlueprint, getBlueprintFleetLoadPreview, getBlueprintRequirements, getConstructionQueueDetails, isTechnologyCompleted, transformBlueprintOffset } from "../game/engine";
@@ -613,7 +614,7 @@ export function BlueprintWorkspace({ open, game, draftScope, factoryHeadlineRead
                 <strong>配方参数</strong>
                 {sourceRecipeIds.map((sourceRecipeId) => {
                   const template = recipeTemplates.find((entity) => entity.recipeId === sourceRecipeId)!;
-                  const options = getRecipesForBuilding(template.buildingId).filter((recipe) => !recipe.requiredTechId || isTechnologyCompleted(game, recipe.requiredTechId));
+                  const options = getRecipesForBuilding(template.buildingId).filter((recipe) => isRecipeTechnologyAvailable(recipe, game.research.completedTechIds));
                   return <label key={sourceRecipeId}><span>{getRecipe(sourceRecipeId)?.name ?? sourceRecipeId}</span><select value={blueprint.recipeOverrides?.[sourceRecipeId] ?? sourceRecipeId} onChange={(event) => onRecipeOverride(blueprint.id, sourceRecipeId, event.target.value as RecipeId)}>{options.map((recipe) => <option value={recipe.id} key={recipe.id}>{recipe.name}</option>)}</select></label>;
                 })}
               </div> : null}

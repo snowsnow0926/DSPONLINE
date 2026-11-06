@@ -55,6 +55,7 @@ import { getLocalSaveStorageEstimate, type LocalSaveStorageEstimate, type SaveIn
 import type { ModRecipeDefinition, ModRecipeOverride, ModValidationResult } from "../game/mods";
 import { getContentPackDependencyStatuses, getContentPackUpdateReport, getContentPackUsage, registerContentPack, type ContentPackRegistry } from "../game/contentPacks";
 import { exportTextFile } from "../game/fileExport";
+import { ContentPackAuthor } from "./ContentPackAuthor";
 import type { AutomaticPerformanceReport } from "../game/benchmark";
 import { NativeUpdateCard } from "./NativeUpdateCard";
 import type { AutosaveIntervalSeconds, CargoStackSize, DefaultBeltRouteMode, DifficultyMode, FontScale, GameSettings, GameState, SimulationSpeed } from "../game/types";
@@ -1179,7 +1180,7 @@ function ContentPacksPanel({
   const technologies = useMemo(() => [...new Map([...TECHNOLOGY_LIST, ...(manifest?.technologies ?? [])].map((technology) => [technology.id, technology])).values()], [manifest, registry]);
   const editRecipe = (key: "recipes" | "recipeOverrides", id: string, rule: Partial<ModRecipeOverride>) => {
     if (!manifest) return;
-    const next = { ...manifest, formatVersion: 3, [key]: manifest[key]?.map((entry) => entry.id === id ? { ...entry, ...rule } : entry) };
+    const next = { ...manifest, formatVersion: Math.max(3, manifest.formatVersion), [key]: manifest[key]?.map((entry) => entry.id === id ? { ...entry, ...rule } : entry) };
     validateDraft(JSON.stringify(next, null, 2));
   };
   const exportManifest = async (contents: string, fileName: string) => {
@@ -1204,6 +1205,7 @@ function ContentPacksPanel({
         </div>
         <input ref={fileInputRef} type="file" accept="application/json,.json" aria-label="选择要注册的内容包" disabled={fileImport.status?.kind === "reading"} onChange={fileImport.onChange} />
         <FileImportFeedback status={fileImport.status} readingKey="contentPackImportReading" />
+        <ContentPackAuthor raw={draft} onChange={(value) => { setDraft(value); onClearValidation(); }} onValidate={validateDraft} />
         <details className="content-pack-editor" ref={editorRef}>
           <summary>编辑配置 JSON</summary>
           <StableTextArea draftId="content-pack-editor" value={draft} onValueChange={(value) => { setDraft(value); onClearValidation(); }} aria-label="内容包配置 JSON" spellCheck={false} placeholder="粘贴内容包 JSON，或从下方已安装的内容包载入配置" />

@@ -40,7 +40,16 @@ import {
   startSystemSpaceStationConstruction,
 } from "./systemSpaceStation";
 import { validateContentPack } from "./mods";
-import type { GameState } from "./types";
+import type { BuildingId, GameState, ItemId, RecipeId, TechId } from "./types";
+import { createExampleContentPack } from "../components/ContentPackAuthor";
+import { installMiner, setFuelItem } from "./engine";
+const CRYSTAL_ORE = "crystal_ore" as ItemId;
+const CRYSTAL_PLATE = "crystal_plate" as ItemId;
+const CRYSTAL_FURNACE = "crystal_furnace" as BuildingId;
+const CRYSTAL_GENERATOR = "crystal_generator" as BuildingId;
+const CRYSTAL_DRILL = "crystal_drill" as BuildingId;
+const CRYSTAL_EFFICIENCY = "crystal_efficiency" as TechId;
+const CRYSTAL_PLATE_RECIPE = "crystal_plate_recipe" as RecipeId;
 
 /**
  * Player-authority Exact catch-up is durably capped at 30 seconds per Host
@@ -5378,6 +5387,54 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         expect(advanced.supported, advanced.reason).toBe(true);
         expect(advanced.summary.canonicalSha256).toBe(canonicalSha256(expected));
         expect(expected.handcraftQueue[0].batchesRemaining).toBe(progress === 0 ? 4 : 3);
+        await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+      }
+    } finally { applyContentPackRuntimeSnapshot(runtime); }
+  }, 60_000);
+
+  it("settles v4 technology effects, custom fuel, resource mining and grouped recipes identically", async () => {
+    const activeRuntime = createContentPackRuntimeSnapshot(registerContentPack(createContentPackRegistry(), validateContentPack(createExampleContentPack())).registry);
+    applyContentPackRuntimeSnapshot(activeRuntime);
+    try {
+      for (const unlocked of [false, true, "researching"] as const) {
+        let initial = createInitialState();
+        if (unlocked === true) initial.research.completedTechIds.push(CRYSTAL_EFFICIENCY);
+        const vein = initial.entities.find((entity) => entity.resourceId === CRYSTAL_ORE)!;
+        initial.construction[CRYSTAL_DRILL] = 1;
+        initial.construction[CRYSTAL_GENERATOR] = 1;
+        initial.construction[CRYSTAL_FURNACE] = 1;
+        initial = installMiner(initial, vein.id);
+        initial = placeBuilding(initial, CRYSTAL_GENERATOR, { x: vein.position.x + 50, y: vein.position.y });
+        const generator = initial.entities.find((entity) => entity.buildingId === CRYSTAL_GENERATOR)!;
+        initial = setFuelItem(initial, generator.id, CRYSTAL_ORE);
+        initial.entities.find((entity) => entity.id === generator.id)!.inputs[CRYSTAL_ORE] = 50;
+        initial = placeBuilding(initial, CRYSTAL_FURNACE, { x: vein.position.x + 80, y: vein.position.y + 80 });
+        const machine = initial.entities.find((entity) => entity.buildingId === CRYSTAL_FURNACE)!;
+        machine.recipeId = CRYSTAL_PLATE_RECIPE;
+        machine.inputs[CRYSTAL_ORE] = 100;
+        machine.outputs[CRYSTAL_PLATE] = 90;
+        if (unlocked === "researching") {
+          initial.construction.matrix_lab = 1;
+          initial = placeBuilding(initial, "matrix_lab", { x: vein.position.x + 120, y: vein.position.y + 80 });
+          initial.research.selectedTechId = CRYSTAL_EFFICIENCY;
+          initial.research.progressByTech[CRYSTAL_EFFICIENCY] = { electromagnetic_matrix: 9 };
+          const lab = initial.entities.find((entity) => entity.buildingId === "matrix_lab")!;
+          lab.recipeId = "matrix_research";
+          lab.inputs.electromagnetic_matrix = 10;
+        }
+        initial.settings.resourceMode = "finite";
+        const checkpoint = await seed(initial, unlocked === "researching" ? 940 : unlocked ? 930 : 920, activeRuntime);
+        const opened = await open(checkpoint, activeRuntime);
+        const expected = advanceSimulationBudget(initial, 30, 30);
+        const advanced = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId, request: { baseRevision: checkpoint.revision, simulationSeconds: 30, wallSeconds: 30 } });
+        expect(advanced.supported, advanced.reason).toBe(true);
+        expect(advanced.summary.canonicalFields).toEqual(canonicalFields(expected));
+        expect(advanced.summary.canonicalSha256).toBe(canonicalSha256(expected));
+        expect(expected.entities.find((entity) => entity.id === vein.id)!.outputs[CRYSTAL_ORE]).toBeGreaterThan(0);
+        if (unlocked === true) expect(expected.entities.find((entity) => entity.id === machine.id)!.outputs[CRYSTAL_PLATE]).toBe(120);
+        else if (unlocked) expect(expected.entities.find((entity) => entity.id === machine.id)!.outputs[CRYSTAL_PLATE]).toBeGreaterThan(90);
+        else expect(expected.entities.find((entity) => entity.id === machine.id)!.outputs[CRYSTAL_PLATE]).toBe(90);
+        if (unlocked === "researching") expect(expected.research.completedTechIds).toContain(CRYSTAL_EFFICIENCY);
         await client.request({ operation: "coreClose", sessionId: opened.sessionId });
       }
     } finally { applyContentPackRuntimeSnapshot(runtime); }

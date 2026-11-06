@@ -10,6 +10,7 @@ export { getReleaseNotes134 } from "./releaseNotes134";
 export { getReleaseNotes135 } from "./releaseNotes135";
 export { getReleaseNotes136 } from "./releaseNotes136";
 export { getReleaseNotes137 } from "./releaseNotes137";
+export { getReleaseNotes138 } from "./releaseNotes138";
 
 export interface LocalizedReleaseNoteRecord {
   id: string;

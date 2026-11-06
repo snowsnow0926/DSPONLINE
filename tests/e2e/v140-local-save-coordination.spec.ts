@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { workflowTimeoutMs } from "./startup-timeout";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
-const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
+const RELEASE_NOTE_ID = "2026-11-07-v1.3.9";
 
 async function preparePage(page: Page, disableCoordinationApis = false) {
   await page.addInitScript(({ releaseNoteId, disable }) => {

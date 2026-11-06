@@ -9,7 +9,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-05-v1.3.8");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.9");
     }
   });
 }

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { workflowTimeoutMs } from "./startup-timeout";
 
-const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
+const RELEASE_NOTE_ID = "2026-11-07-v1.3.9";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript((releaseNoteId) => {

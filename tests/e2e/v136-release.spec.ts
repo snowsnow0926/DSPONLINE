@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-11-05-v1.3.8";
+const RELEASE_NOTE_ID = "2026-11-07-v1.3.9";
 const BELT_LANES_KEY = "dsp-idle-network.ui.default-belt-lanes.v1";
 
 test.beforeEach(async ({ page }) => {

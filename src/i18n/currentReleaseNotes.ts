@@ -1,33 +1,31 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-11-05-v1.3.8";
+export const CURRENT_RELEASE_ID = "2026-11-07-v1.3.9";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const en = locale === "en";
   return {
     id: CURRENT_RELEASE_ID,
-    date: en ? "November 5, 2026" : "2026年11月5日",
-    version: "1.3.8",
-    title: en ? "Save Protection and Interaction Improvements" : "存档保护与操作体验更新",
-    summary: en
-      ? "Safer save recovery and cloud slots, clearer save feedback, reliable text drafts, and smoother keyboard, touch and large-text interfaces. Existing saves and backup preferences are preserved."
-      : "补齐存档恢复和云槽位保护，明确保存状态，改善中文输入、名称草稿、菜单手势、大字号与浅色界面，保留现有存档和备份偏好。",
+    date: en ? "November 7, 2026" : "2026年11月7日",
+    version: "1.3.9",
+    title: en ? "Content Pack Upgrade and Cloud Save Fixes" : "内容包全面升级与云存档修复",
+    summary: en ? "Create and update content packs with visual tools, real technology effects and custom production rules. Windows cloud downloads and full-tray feedback are improved while existing saves remain compatible." : "新增内容包可视化作者工具、实际科技加成和自定义生产规则，支持保档更新与旧 ID 迁移，并修复 Windows 云存档下载、完善满仓取料反馈。",
     items: [
-      { id: "v138-save-feedback", title: en ? "Accurate save feedback" : "保存状态更准确",
-        description: en ? "When browser storage is unavailable, the game clearly reports that progress has not been saved. Temporary sessions can still export their current progress." : "浏览器存储不可用时，明确提示当前进度尚未保存；临时运行仍可导出进度文件，不再把内存中的临时记录显示为保存成功。" },
-      { id: "v138-recovery-points", title: en ? "Recovery points before replacement" : "恢复前保留旧进度",
-        description: en ? "Cloud recovery and save rescue require a verified recovery point before replacing progress. Manual cloud slots preserve the actual old slot and reject data for a different target." : "云恢复和坏档救援先确认恢复点保存成功，再替换进度；手动云槽位保留真正被覆盖的旧槽位，拒绝写入其他位置的存档。" },
-      { id: "v138-cancel-import", title: en ? "Safe cancellation and factory switching" : "取消与换档更安全",
-        description: en ? "Cancelled or outdated imports and restores cannot overwrite a later factory. Failed file reads remove stale previews, and repeated confirmation starts one preparation." : "取消操作或切换工厂后，旧导入、救援和云恢复不会再覆盖后来选择的工厂；文件读取失败清除旧预览，重复确认只准备一次。" },
-      { id: "v138-ime-drafts", title: en ? "Reliable Chinese input and drafts" : "中文输入与名称草稿保护",
-        description: en ? "Confirming an IME word does not execute game commands. Editing text and selection survive responsive layout changes, while blueprint and region drafts stay with their own factory." : "输入法回车选字不会误执行游戏命令；同一编辑器横竖屏切换保留文字和选区，蓝图与区域名称草稿不会串到另一座工厂。" },
-      { id: "v138-menu-gestures", title: en ? "Better menus and touch gestures" : "菜单与手机手势更顺手",
-        description: en ? "Arrow keys, Tab, Escape and Space work within menus without toggling the simulation by accident. Closing windows restores the opener, and long-press menus remain open after release." : "菜单方向键、Tab、Esc 和空格各自处理当前操作，不误开关模拟；关闭窗口回到原入口，手机长按松手后菜单继续显示，打断的手势正确收尾。" },
-      { id: "v138-update-safety", title: en ? "Safer client updates" : "客户端更新保护补丁",
-        description: en ? "The Windows updater and Android/Windows app runtimes include upstream security patches, including protection from unusually costly update manifests." : "补齐 Android、Windows 运行组件的安全补丁，并更新自动更新组件，防止异常更新清单长时间占用处理器。" },
-      { id: "v138-responsive-theme", title: en ? "Readable large text and light theme" : "大字号与浅色界面更清楚",
-        description: en ? "Compact menus and search results remain reachable. Large-text desktop metrics scroll within the header, and cloud recovery cards use readable light surfaces. Existing factories, inventories, research and backup preferences are preserved." : "紧凑菜单和搜索结果可滚动到达；桌面大字号指标在头栏内横向查看，浅色云恢复页面文字更清晰。现有工厂、物资、科技和备份偏好保持不变。" },
+      { id: "v139-cloud-download", title: en ? "Windows cloud-save downloads" : "Windows 云存档下载修复",
+        description: en ? "Windows can download main, manual-slot and speedrun cloud saves without the incorrect upload-only header." : "修复 Windows 桌面版下载云存档时被接入规则拒绝的问题，覆盖主存档、手动槽位和速通存档。" },
+      { id: "v139-author-tools", title: en ? "Visual content-pack authoring" : "可视化内容包作者工具",
+        description: en ? "Edit items, buildings, recipes, technologies and rules in forms, with embedded icons, categories and a working crystal-industry example." : "通过表单编辑物品、建筑、配方、科技和规则，支持内嵌图标、分类与可运行的晶体工业示例。" },
+      { id: "v139-recipe-rules", title: en ? "Handcraft and recipe unlock rules" : "手合、配方限制与分组解锁",
+        description: en ? "Authors can control handcrafting, assign allowed recipes to buildings and unlock recipe groups through technology." : "作者可设置配方是否允许手合、指定建筑可用配方，并通过科技统一解锁一组配方。" },
+      { id: "v139-technology-effects", title: en ? "Technology changes actual production" : "科技加成实际生效",
+        description: en ? "Researched effects change production speed, power consumption, mining speed and building input/output capacity in realtime and offline simulation." : "科技完成后实际影响生产速度、能耗、采矿效率和建筑输入输出容量，实时与离线结算遵守相同规则。" },
+      { id: "v139-production-rules", title: en ? "Custom fuel, power and resources" : "自定义燃料、发电与资源",
+        description: en ? "Content packs can declare fuel energy, generator efficiency and custom resource deposits with their mining buildings. Loading a save does not refill depleted deposits." : "内容包可配置燃料热值、发电效率、资源矿点和对应采矿建筑；读档和更新不会补满已消耗矿量。" },
+      { id: "v139-inventory-feedback", title: en ? "Clearer feedback when taking items" : "建筑取料反馈更明确",
+        description: en ? "Dragging items into a full material tray now explains why the transfer cannot complete and how to make room." : "向已满的物资托盘拖取建筑物品时，会明确提示容量不足和处理办法，保留建筑中的原有库存。" },
+      { id: "v139-safe-updates", title: en ? "Update content packs without clearing stock" : "内容包保档更新与旧 ID 迁移",
+        description: en ? "Compatible updates preserve stock, buildings and research. Explicit old-ID mappings support safe renaming, and previous configurations can be exported. Existing factories and save formats remain compatible." : "兼容更新保留库存、建筑和研究进度，旧 ID 显式映射支持安全改名，历史配置可导出备份；现有工厂和存档格式继续兼容。" },
     ],
   } as const;
 }

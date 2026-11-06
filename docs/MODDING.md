@@ -1,6 +1,6 @@
 # 内容包 Mod 编写指南
 
-> 本文包含基于 `1.3.8` 的开发更新（未发布）：内容包格式 `formatVersion: 4`，继续读取 v1/v2/v3。正式三端版本仍以发布记录为准。
+> 本文包含`1.3.9` 版本更新：内容包格式 `formatVersion: 4`，继续读取 v1/v2/v3。正式三端版本仍以发布记录为准。
 >
 > 本项目把 Mod 称为“内容包”。格式与行为的最终依据是 [`src/game/mods.ts`](../src/game/mods.ts) 和 [`src/game/contentPacks.ts`](../src/game/contentPacks.ts)；内容包只能使用经过校验的声明式 JSON，不能执行 JavaScript。
 

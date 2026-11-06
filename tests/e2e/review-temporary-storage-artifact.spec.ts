@@ -16,7 +16,7 @@ test("frozen public UI rejects volatile saving, exports current progress and pre
     }
     if (sessionStorage.getItem("artifact-seeded") === "1") return;
     sessionStorage.setItem("artifact-seeded", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-05-v1.3.8");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.9");
     localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state: {
       version: 47, entities: [], belts: [], tray: { iron_ore: 42 }, construction: {}, paused: true,
       research: { completedTechIds: ["electromagnetism"], selectedTechId: null, progressByTech: {} },

@@ -142,6 +142,12 @@ test(`menu cloud ${scenario.slot} recovery reports unavailable with read-only st
         geometry.push({ ...viewport, scale });
         if (scale === 150) for (const theme of ["dark", "light"]) {
           await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+          // Theme colors transition for 110 ms on buttons. Measure the settled
+          // palette, rather than an arbitrary interpolated color mid-transition.
+          await panel.locator(".cloud-save-mode-selector button.active").evaluate(async (button) => {
+            void getComputedStyle(button).color;
+            await Promise.all(button.getAnimations().map((animation) => animation.finished.catch(() => undefined)));
+          });
           const contrast = [];
           for (const [name, target] of [
             ["restore-feedback", feedbackTarget],

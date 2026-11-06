@@ -136,6 +136,7 @@ import {
   getMaterialDeliverySlotChangeCheck,
   getOrbitalCargoPortClearCheck,
   getPlanetFactoryResetPreview,
+  getPlanetTrayItemFreeCapacity,
   getRecursiveHandcraftPlan,
   MIN_CANVAS_REGION_SIZE,
   getEntityOutputCapacity,
@@ -13727,7 +13728,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const next = sourceKind === "node"
       ? moveEntityOutputToTray(before, sourceId, itemId)
       : moveEntityInputToTray(before, sourceId, itemId);
-    if (next === before) return;
+    if (next === before) {
+      const source = before.entities.find((entity) => entity.id === sourceId);
+      const available = source?.[sourceKind === "node" ? "outputs" : "inputs"][itemId] ?? 0;
+      if (available >= 1 && getPlanetTrayItemFreeCapacity(before, before.activePlanetId, itemId) < 1) {
+        setNotice(`物资托盘已满，未执行拖入${ITEMS[itemId].name}。物品仍在建筑中，请腾出空间或提高托盘上限。`);
+      }
+      return;
+    }
     if (commitGame(() => next)) recordBasicOnboardingEvent("cargo-stowed");
   }, [commitGame, commitNativeProjectedCommand, nativeEntityInventoryProjectionBinding, rejectLegacyFactoryInteractionWhileNative]);
 

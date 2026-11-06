@@ -1606,13 +1606,13 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toHaveAttribute("aria-label", "内容包全面升级与云存档修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.9");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
-  await expect(releaseNotes).toContainText("保存状态更准确");
-  await expect(releaseNotes).toContainText("恢复前保留旧进度");
-  await expect(releaseNotes).toContainText("取消与换档更安全");
-  await expect(releaseNotes).toContainText("中文输入与名称草稿保护");
-  await expect(releaseNotes).toContainText("菜单与手机手势更顺手");
-  await expect(releaseNotes).toContainText("客户端更新保护补丁");
-  await expect(releaseNotes).toContainText("大字号与浅色界面更清楚");
+  await expect(releaseNotes).toContainText("Windows 云存档下载修复");
+  await expect(releaseNotes).toContainText("可视化内容包作者工具");
+  await expect(releaseNotes).toContainText("手合、配方限制与分组解锁");
+  await expect(releaseNotes).toContainText("科技加成实际生效");
+  await expect(releaseNotes).toContainText("自定义燃料、发电与资源");
+  await expect(releaseNotes).toContainText("建筑取料反馈更明确");
+  await expect(releaseNotes).toContainText("内容包保档更新与旧 ID 迁移");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });

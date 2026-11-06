@@ -531,13 +531,13 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   await expect(dialog).toHaveAttribute("aria-label", "内容包全面升级与云存档修复");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.9");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(7);
-  await expect(dialog).toContainText("保存状态更准确");
-  await expect(dialog).toContainText("恢复前保留旧进度");
-  await expect(dialog).toContainText("取消与换档更安全");
-  await expect(dialog).toContainText("中文输入与名称草稿保护");
-  await expect(dialog).toContainText("菜单与手机手势更顺手");
-  await expect(dialog).toContainText("客户端更新保护补丁");
-  await expect(dialog).toContainText("大字号与浅色界面更清楚");
+  await expect(dialog).toContainText("Windows 云存档下载修复");
+  await expect(dialog).toContainText("可视化内容包作者工具");
+  await expect(dialog).toContainText("手合、配方限制与分组解锁");
+  await expect(dialog).toContainText("科技加成实际生效");
+  await expect(dialog).toContainText("自定义燃料、发电与资源");
+  await expect(dialog).toContainText("建筑取料反馈更明确");
+  await expect(dialog).toContainText("内容包保档更新与旧 ID 迁移");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

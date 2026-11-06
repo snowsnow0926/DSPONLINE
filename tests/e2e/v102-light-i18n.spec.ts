@@ -144,7 +144,7 @@ test("English light release notes are localized and persist dismissal", async ({
   await expect(dialog).toContainText("Custom fuel, power and resources");
   await expect(dialog).toContainText("Clearer feedback when taking items");
   await expect(dialog).toContainText("Update content packs without clearing stock");
-  await expect(dialog).toContainText("Existing factories, inventories, research and backup preferences are preserved.");
+  await expect(dialog).toContainText("Existing factories and save formats remain compatible.");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

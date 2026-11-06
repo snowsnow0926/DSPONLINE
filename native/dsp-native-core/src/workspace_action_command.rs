@@ -1784,10 +1784,10 @@ mod tests {
             "batchesTotal": 2, "batchesRemaining": 2, "progress": 0.5, "queuedAt": 0
         }]));
         crate::global_progress::advance_handcraft(&state, &mut base, 10.0).unwrap();
-        assert_eq!(base["tray"]["ore"], 20);
-        assert_eq!(base["tray"]["plate"], 1);
-        assert_eq!(base["handcraftQueue"][0]["batchesRemaining"], 1);
-        assert_eq!(base["handcraftQueue"][0]["progress"], 0.0);
+        assert_eq!(base["tray"]["ore"].as_f64(), Some(20.0));
+        assert_eq!(base["tray"]["plate"].as_f64(), Some(1.0));
+        assert_eq!(base["handcraftQueue"][0]["batchesRemaining"].as_f64(), Some(1.0));
+        assert_eq!(base["handcraftQueue"][0]["progress"].as_f64(), Some(0.0));
     }
 
     #[test]

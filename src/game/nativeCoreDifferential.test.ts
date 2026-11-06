@@ -2763,27 +2763,6 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     }
   }, 60_000);
 
-  it("preserves paid handcraft work and blocks new batches after content-pack rules change", async () => {
-    const activeRuntime = createContentPackRuntimeSnapshot(registerContentPack(createContentPackRegistry(), validateContentPack({
-      formatVersion: 3, id: "native_handcraft_rules", name: "Native handcraft rules", version: "1.0.0",
-      recipeOverrides: [{ id: "gear", handcraftable: false }],
-    })).registry);
-    applyContentPackRuntimeSnapshot(activeRuntime);
-    try {
-      for (const progress of [0, 0.5]) {
-        const initial = queuedGlobalProgressState();
-        initial.handcraftQueue[0].progress = progress;
-        const checkpoint = await seed(initial, 900 + progress * 2, activeRuntime);
-        const opened = await open(checkpoint, activeRuntime);
-        const expected = advanceSimulationBudget(initial, 2, 2);
-        const advanced = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId, request: { baseRevision: checkpoint.revision, simulationSeconds: 2, wallSeconds: 2 } });
-        expect(advanced.supported, advanced.reason).toBe(true);
-        expect(advanced.summary.canonicalSha256).toBe(canonicalSha256(expected));
-        expect(expected.handcraftQueue[0].batchesRemaining).toBe(progress === 0 ? 4 : 3);
-        await client.request({ operation: "coreClose", sessionId: opened.sessionId });
-      }
-    } finally { applyContentPackRuntimeSnapshot(runtime); }
-  }, 60_000);
 
   it("matches legacy network exports, reserves, project levels, and inventory withdrawal order", async () => {
     const initial = legacyGalacticExportState();
@@ -5381,4 +5360,26 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     },
     10 * 60_000,
   );
+
+  it("preserves paid handcraft work and blocks new batches after content-pack rules change", async () => {
+    const activeRuntime = createContentPackRuntimeSnapshot(registerContentPack(createContentPackRegistry(), validateContentPack({
+      formatVersion: 3, id: "native_handcraft_rules", name: "Native handcraft rules", version: "1.0.0",
+      recipeOverrides: [{ id: "gear", handcraftable: false }],
+    })).registry);
+    applyContentPackRuntimeSnapshot(activeRuntime);
+    try {
+      for (const progress of [0, 0.5]) {
+        const initial = queuedGlobalProgressState();
+        initial.handcraftQueue[0].progress = progress;
+        const checkpoint = await seed(initial, 900 + progress * 2, activeRuntime);
+        const opened = await open(checkpoint, activeRuntime);
+        const expected = advanceSimulationBudget(initial, 2, 2);
+        const advanced = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId, request: { baseRevision: checkpoint.revision, simulationSeconds: 2, wallSeconds: 2 } });
+        expect(advanced.supported, advanced.reason).toBe(true);
+        expect(advanced.summary.canonicalSha256).toBe(canonicalSha256(expected));
+        expect(expected.handcraftQueue[0].batchesRemaining).toBe(progress === 0 ? 4 : 3);
+        await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+      }
+    } finally { applyContentPackRuntimeSnapshot(runtime); }
+  }, 60_000);
 });

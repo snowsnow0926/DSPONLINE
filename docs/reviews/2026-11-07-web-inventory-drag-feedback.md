@@ -22,6 +22,10 @@
 - 修复后：新增暂停/运行/满仓 3 个流程，加既有拖入托盘流程，共 4/4；日志 `inventory-drag-after-fix.log`。
 - 相关两项容量/手持检查通过（其余 216 项按名字过滤，未执行），日志 `inventory-drag-unit.log`。
 - 类型检查通过，日志 `inventory-drag-typecheck.log`。
-- 新 Web 构建与制品校验在本次收尾补充；旧内容包开发包保持原状。
+- 干净源码 `736a3c3f14ddd32f65ecbef757a85d0b96de2e94` 的 Web 构建、启动预算、原生边界与覆盖清单全部通过，日志 `inventory-drag-build-final.log`。
+- 冻结网页重复验证暂停/运行/满仓三场景，3/3 通过，日志 `inventory-drag-production.log`。
+- [Web 制品清单](../../artifacts/web-inventory-drag-20261107/manifest.json)共 199 件，aggregate SHA-256 `8f92f3447443c3014ad90cb2a6a5067eaf24caf3209f63ab4385cdfd95e3526b`。
+- [Web 压缩包](../../artifacts/web-inventory-drag-20261107/web-1.3.8-736a3c3f.zip)，SHA-256 `fbd6325492be07f24a9289a7f9f94d3aa805c9abff288695c9c83da259bbf8ce`。
+- 旧内容包开发包保持原状；本次没有重打 Windows/Android 包，没有上线。
 
 本次未发布。内容包后续开放能力仍为建议范围，没有将新的科技加成、燃料或世界资源功能混入此次修复。

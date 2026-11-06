@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> **2026-11-07 Windows 开发包（未发布）**：`3650a3606105` 的独立性能开发版完成目录打包，75 个 Windows 文件核对、NotSigned；独立 D 盘测试目录下启动正常，真实 MessagePort 的主档/槽位/速通 GET 和直接 PUT 均通过本地 HTTP 合同校验。GET 不再追加上传专用请求 ID；Rust 普通与纯挂机结算遵守内容包手合规则。开发包默认离线，正式 Windows/Android 下载和更新源未改；不是正式安装器资格。[制品、校验及验证边界](./reviews/2026-11-07-content-pack-cloud-development.md)。
+
 > **当前正式下载（2026-11-06，1.3.8）**：Android `1.3.8 / 1003008`（历史证书、v2/v3/zipalign，Android runtime 8.4.3）与 Windows x64 `1.3.8`（NotSigned，Electron 43.8.1、js-yaml 4.3.2）同源 `8a52afce96ba`；下载页/stable feed 已更新，minimumAndroidCode 1000002 保持。APK 5,846,474 B、setup 111,622,950 B，完整公网摘要、Range 和 Windows feed SHA-512 相符；AAB 5,635,793 B 仅归档。1.3.7→1.3.8 模拟器及 Windows 独立目录保档升级/冷开通过，新安装器 79 文件核对。实体手机/输入法、系统 NSIS 与长时门禁仍未实测；没有扩展原生权威。[制品及兼容边界](./releases/1.3.8.md)。
 
 > **当前正式下载（2026-11-05，1.3.7）**：Android `1.3.7 / 1003007`（历史证书、v2/v3/zipalign）与 Windows x64 `1.3.7`（NotSigned）同源 `4daa203151e2`；下载页和 stable feed 已更新，minimumAndroidCode 1000002 保持。APK 5,838,020 B、Windows setup 108,088,929 B，完整公网摘要和 Range 通过；AAB 5,627,379 B 仅归档。1.3.6→1.3.7 模拟器及 Windows 独立目录保档升级/冷开通过，安装器 77 文件核对。实体手机/系统输入法、系统 NSIS 覆盖和长时门禁仍未实测，未扩展原生权威或 IPC 限额。[制品与兼容边界](./releases/1.3.7.md)。

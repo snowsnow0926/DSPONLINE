@@ -1,6 +1,6 @@
 # 1.3.8 基线：Windows 云读取与内容包 v3 开发交接
 
-当前为开发验证记录，未发布。最终制品、摘要和完整检查结果在收尾后更新。
+请求内的开发、验证和制品冻结已完成，未发布到生产。最终运行制品来自干净提交 `3650a36061058dca71fda1053defd73594d8befd`；后续交接提交仅更新文档。
 
 ## 范围与来源
 
@@ -30,14 +30,35 @@
 
 ## 验证记录
 
-已完成专项：内容包/目录 29 项；桌面云与相关入口 12 项；服务端 HTTP 合同 24 项；浏览器新增 6 个流程，包含 30 个视口/主题/字号组合；真实 Electron 包启动与 4 条 MessagePort 云传输。图像已检查桌面、手机竖屏/横屏及深浅主题。
+| 新执行检查 | 通过 / 跳过 / 失败 | 原始记录（工作树根目录） |
+| --- | --- | --- |
+| Vitest 全量 | 3,912 / 38 / 0，434 文件通过 | `content-pack-unit-final-all.log` |
+| Rust workspace | 1,349 / 3 / 0（Core 1,102、Host 244、集成 3） | `content-pack-rust-verified-final.log` |
+| Node native 全量 | 639 / 1 / 0 | `content-pack-node-native-final-all.log` |
+| 桌面云及 HTTP 合同专项 | 12 + 24 / 0 / 0 | `desktop-cloud-tests.log`、`cloud-api-contract-tests.log` |
+| Chromium 全量 | 604 / 34 / 1 | `content-pack-browser-complete.log` |
+| 上述失败用例及同文件复验 | 2 / 0 / 0 | `content-pack-contrast-final.log` |
+| 冻结网页预览 | 3 / 0 / 0 | `content-pack-production-ui.log` |
+| 最终 Windows 包 | 隔离启动、4 条 IPC 请求全部通过 | `content-pack-desktop-smoke-delivery.log` |
 
-全量单元首轮最终修订通过 3,912 / 跳过 38；Node native 通过 639 / 跳过 1。最后的纯挂机规则补充正在执行新的 Rust、成品和回归检查，以上数字不会冒充最后制品的新执行记录。
+Chromium 共 639 个声明场景，合并为 **605 个唯一通过、34 跳过、0 未解决失败**，不是一次全绿。主题切换的唯一失败是对比度采样读到按钮 110 ms 颜色过渡；现在先等待该按钮动画完成，再以原 4.5:1 阈值检查。全量与未修正复验报告分别保存在 `artifacts/content-pack-cloud-20261107/evidence/browser-full/` 和 `contrast-retry/`。开发态 ResizeObserver 与隔离接口拒绝日志保留，不能称零控制台告警。
 
-开发期失败记录保留：旧格式空规则数组兼容、测试中的整数/浮点 JSON 比较、原生差分夹具修订号顺序均已修正；一次并行原生编译内存不足后改为单 Cargo job。没有绕过失败门禁或放宽资源上限。
+新增内容包专项的 6 个流程、30 个屏幕/主题/字号组合已经包含在上述 Chromium 覆盖中；生产成品又执行桌面、手机横/竖屏 3 个流程。旧版存档重载保留 57 件合金与科研记录，拒写时旧目录和物品保持；已扣料队列在 JS/Rust 普通及纯挂机路径完成当前批次后停止。Windows 包用独立 D 盘目录启动，三次 GET 与一次 PUT 经真实 MessagePort 转发后按本地正式 HTTP 规则检查；未连接真实账号。
+
+Web/Desktop 构建、类型、启动预算、原生边界和覆盖清单通过；运行依赖 127 件许可声明通过。开发期的旧格式空规则数组、JSON 数字断言、原生差分夹具修订号顺序等失败记录保留且已修复；一次原生编译内存不足后改为单 Cargo job。没有绕过失败门禁或放宽资源上限。
 
 ## 制品与发布交接
 
-最终源码提交、Web/Windows 路径、清单与 SHA-256：待收尾填入。
+源码提交：`3650a36061058dca71fda1053defd73594d8befd`。核心实现 `61a937e8`，纯挂机补充 `d60ff069`；最终采色修订为测试变化，存档和模拟代码没有因该测试变化修改。
+
+制品根目录：`D:/GameDev/Worktrees/DSPidle2/resource-use-mobile-cards-20261104/artifacts/content-pack-cloud-20261107-final/`。
+
+- [完整开发包](../../artifacts/content-pack-cloud-20261107-final/dspidle-dev-1.3.8-3650a360.zip)：172,359,553 B，SHA-256 `c0949b10e90a91a6a4705d0f1c36ddc8d8003c7b4b9f2f13d7f716dcfad477de`。
+- [不可变文件清单](../../artifacts/content-pack-cloud-20261107-final/manifest.json)：284 件，aggregate SHA-256 `0e6606250b6c39b8b248139d9024a0c0decb9496a07564f2e700da96f419b4ae`。
+- [压缩包读回证据](../../artifacts/content-pack-cloud-20261107-final/integrity.json)：每个归档成员均与清单匹配。
+- Web 位于 `bundle/web/`，Windows 位于 `bundle/windows/win-unpacked/`；二者标识均为 `1.3.8+3650a3606105`。Windows 75 个文件的独立证据位于 `bundle/windows/desktop-build-evidence.json`，EXE 为 NotSigned。
+- 包内包含 v3 示例、相对 `ef976574` 的源码补丁、许可证及独立启动/传输验证。早期候选和失败日志保留，不与最终制品混用。
 
 没有生产发布授权；香港/上海 Web、API、下载页与更新源保持既有版本。本轮不重签 Android、不变更数据库、不启动自动备份。发布方需使用最终干净提交与不可变清单，另行执行目标节点发布门禁。
+
+正式发布前须确定新的应用版本号。旧客户端不能读取 v3 规则；回退测试应保留新存档与新注册表，以旧客户端配合对应旧数据副本验证，不能通过删除扩展字段强行载入。未做真实玩家账号下载、Android 实体设备或正式 NSIS 覆盖安装验收。

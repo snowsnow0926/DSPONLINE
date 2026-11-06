@@ -1,0 +1,516 @@
+{
+  "final": {
+    "version": "1.3.9",
+    "runtimeSha": "2027047763f5a91b8a16cc0de29a245c2e42e253",
+    "validationSha": "284e7e140d0dd754194a6d061de4ef482c57f2ce",
+    "allReleaseChecksPassed": true,
+    "verifiedAt": "2026-11-06T20:10:03.473Z",
+    "web": "1.3.9-2027047763f5",
+    "download": "download-site-1.3.9-2027047763f5",
+    "previousWeb": "1.3.8-8a52afce96ba",
+    "previousDownload": "download-site-1.3.8-8a52afce96ba",
+    "nginxSha256": "09a18ffddfd4066439cc5383b6a333128b82e8b6e598693c39aa73ca073eeb21",
+    "hongKongDiskAvailableRatio": 0.20132012066556387,
+    "publicWebFiles": 200,
+    "publicPreviousFiles": 199,
+    "publicDownloadFiles": 26,
+    "browser": {
+      "total": 647,
+      "passed": 613,
+      "skipped": 34,
+      "unresolved": 0
+    },
+    "durable": {
+      "startTime": "2026-11-06T20:02:01.591Z",
+      "duration": 93155.535,
+      "expected": 21,
+      "skipped": 22,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "pwaCacheSha256": "9ede5081edb217458a75d5fc8d5c5e050f4be1aa2dc36e34627f91c7c0aa9289",
+    "evidence": [
+      {
+        "name": "qualification.json",
+        "sha256": "bbc603e1d59a437497e0db40cbb3ea0be3b33265ca771d8320c0ffc6c044e87e"
+      },
+      {
+        "name": "freeze-proof.json",
+        "sha256": "d78966c7c37c7da742974c423121b2eba5cf72e33652e1e24d3592d742bc8b36"
+      },
+      {
+        "name": "download-plan.json",
+        "sha256": "ccfd5f0e88f26bc63dd1d277225fbbb9c68b396fed0225b0e02796df0ee27023"
+      },
+      {
+        "name": "android-assets-proof.json",
+        "sha256": "881a6946580ba44b38f9ec343135f84a972ff0664537a0bf2e49268f5a81704e"
+      },
+      {
+        "name": "android-upgrade-proof.json",
+        "sha256": "03cde894d7aad2476d876aabc02d8a1b285cd2a624f68eea58b65ce43c73301d"
+      },
+      {
+        "name": "windows-cloud-proof.json",
+        "sha256": "9be1b6730283f793bbc3fcc7781f4e1beae33bbb7f9d06585a922590f81f812b"
+      },
+      {
+        "name": "windows-upgrade-result.json",
+        "sha256": "80023f423b7d7f4f45abd7ded5c6f5678594947f03e19331bfeba39624289915"
+      },
+      {
+        "name": "real-version-upgrade.json",
+        "sha256": "634664ea4bbaa8aea2e4eae1490c0a0a9f6e98c76f747fde79c9ddc3786059d8"
+      },
+      {
+        "name": "stage-hk-web.json",
+        "sha256": "1b2db51dfe8ec329cdd3d5cd509e224d5c75378be363547c1d3a372f5ba026dd"
+      },
+      {
+        "name": "stage-download.json",
+        "sha256": "fb4d7667b3560099a17a5c45feb1b2d0cf10447a0f126b23cce1ce2ecf3c181b"
+      },
+      {
+        "name": "publish-hk-web.json",
+        "sha256": "992d750eb4fc5576fc3a2e5717c1e1919db9756aaadd206ac28961356a224833"
+      },
+      {
+        "name": "activate-download.json",
+        "sha256": "0fb884595feaaefe4efe43be1bbda9432cecec35736ce92aa086505503ffefe3"
+      },
+      {
+        "name": "observe-hk-web.json",
+        "sha256": "1ae58843c1c06508b70ffa62044786c52b111593de9ee8aac977236358ca0f2b"
+      },
+      {
+        "name": "prepare-hk-fallback.json",
+        "sha256": "e0d195805be44bb24fac740c33c9605de4eaf48519aa48039d940e63775902b3"
+      },
+      {
+        "name": "publish-hk-fallback.json",
+        "sha256": "0f8412931401a3c597c8445233567583618c7fe6409fc969d5e0f5234a9acdd6"
+      },
+      {
+        "name": "postflight-hk.json",
+        "sha256": "55c2e648881c65778735b37da5bff7d7f9ef95336cf6f126c84f5abe9c060f17"
+      },
+      {
+        "name": "postflight-download.json",
+        "sha256": "b2d31a96c6d67e79c2cfad6f0b6815097ae9197fd74c83eeeb28ea77d127f845"
+      },
+      {
+        "name": "public-web-http-proof.json",
+        "sha256": "f78d1c98687f693be60cb55238d79960d60d8e7d356edb3738989600c73b4c0b"
+      },
+      {
+        "name": "public-http-proof.json",
+        "sha256": "4fb41ada5651438f092daa1203669ffad453fe78208fd5de382226bf69b1557d"
+      },
+      {
+        "name": "public-verification.json",
+        "sha256": "957eefd801d05b2c4b9c33c266f7f372381523fefc0b3c9647f3fa846c1611b1"
+      },
+      {
+        "name": "download-browser-proof.json",
+        "sha256": "baf452e870516449cd79791a6482099764b2790ab4ba6eb181681f141a0775ba"
+      },
+      {
+        "name": "physical-download-proof.json",
+        "sha256": "ad15a5a86a3ec24fb65a42c26d9d434de445fc7ed380862e431011a1cf49038e"
+      },
+      {
+        "name": "hk-capacity-restored.json",
+        "sha256": "6cb63121050e6fa14289940d1dcd0d29b4893395840cd4d753b99f717e62e4d0"
+      },
+      {
+        "name": "validation-source.json",
+        "sha256": "c297155ac35f947a604bf2c9f90f4874e293b7a770772d1128c696a808579259"
+      },
+      {
+        "name": "vite-watch-resolution-proof.json",
+        "sha256": "d1c619f8fb8a693f54d913d2f904c6a1c01cea13465ec096a11a24277de73612"
+      },
+      {
+        "name": "report-location-proof.json",
+        "sha256": "60b42263f66e8075df11bdab53488ae0e5992807b8e55108cef5b3875626f803"
+      }
+    ]
+  },
+  "qualification": {
+    "readyForReleasePreflight": true,
+    "runtimeSha": "2027047763f5a91b8a16cc0de29a245c2e42e253",
+    "validationSha": "284e7e140d0dd754194a6d061de4ef482c57f2ce",
+    "version": "1.3.9",
+    "unit": {
+      "passed": 3933,
+      "skipped": 38
+    },
+    "rust": {
+      "passed": 1354,
+      "ignored": 3
+    },
+    "native": {
+      "passed": 639,
+      "skipped": 1
+    },
+    "server": {
+      "passed": 415,
+      "failed": 0,
+      "skipped": 2
+    },
+    "ops": {
+      "passed": 60,
+      "failed": 0,
+      "skipped": 6
+    },
+    "releaseSwitch": {
+      "passed": 33,
+      "failed": 0,
+      "skipped": 0
+    },
+    "browser": {
+      "total": 647,
+      "passed": 613,
+      "skipped": 34,
+      "unresolved": 0
+    },
+    "rawBrowserReports": [
+      {
+        "file": "e2e-static.json",
+        "stats": {
+          "startTime": "2026-11-06T19:15:36.595Z",
+          "duration": 2322799.422,
+          "expected": 582,
+          "skipped": 34,
+          "unexpected": 31,
+          "flaky": 0
+        }
+      },
+      {
+        "file": "e2e-retry1.json",
+        "stats": {
+          "startTime": "2026-11-06T19:33:06.129Z",
+          "duration": 6724.353,
+          "expected": 3,
+          "skipped": 0,
+          "unexpected": 0,
+          "flaky": 0
+        }
+      },
+      {
+        "file": "e2e-retry2.json",
+        "stats": {
+          "startTime": "2026-11-06T19:54:20.273Z",
+          "duration": 460665.15900000004,
+          "expected": 27,
+          "skipped": 0,
+          "unexpected": 3,
+          "flaky": 0
+        }
+      },
+      {
+        "file": "e2e-retry3.json",
+        "stats": {
+          "startTime": "2026-11-06T20:01:00.613Z",
+          "duration": 7240.535000000001,
+          "expected": 3,
+          "skipped": 0,
+          "unexpected": 0,
+          "flaky": 0
+        }
+      }
+    ],
+    "production": {
+      "startTime": "2026-11-06T19:18:14.306Z",
+      "duration": 31455.704,
+      "expected": 8,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durable": {
+      "startTime": "2026-11-06T20:02:01.591Z",
+      "duration": 93155.535,
+      "expected": 21,
+      "skipped": 22,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "webRelease": "1.3.9-2027047763f5",
+    "downloadRelease": "download-site-1.3.9-2027047763f5",
+    "androidVersionCode": 1003009,
+    "windowsNotSignedPolicy": true,
+    "qualifiedAt": "2026-11-06T20:03:54.027Z"
+  },
+  "web": {
+    "runtimeSha": "2027047763f5a91b8a16cc0de29a245c2e42e253",
+    "releaseId": "1.3.9-2027047763f5",
+    "buildId": "1.3.9+2027047763f5",
+    "fileCount": 200,
+    "aggregateSha256": "a186c02b10dc34722d60b10b1ec20a6847e4d40479b6909bc7222da9eef182cc",
+    "manifestSha256": "fa3d644571b41aaecf1d4f8b83e21cac551bac80922f9044ab65f0cdc4d939b4",
+    "archive": "web-1.3.9-2027047763f5.tar.gz",
+    "bytes": 2437464,
+    "sha256": "37a6898751d744a35c843699dcc938fa2ae5f4dbc23ca2deb6bc75f46bd1b8ac",
+    "verifiedFiles": 200
+  },
+  "download": {
+    "releaseId": "download-site-1.3.9-2027047763f5",
+    "sourceSha": "2027047763f5a91b8a16cc0de29a245c2e42e253",
+    "expectedPrevious": "download-site-1.3.8-8a52afce96ba",
+    "archiveBytes": 118612644,
+    "archiveSha256": "b0524f98ee65234785454784aadb5a0ab8c1e5c55e7c3023032a731ce78d3788",
+    "manifestSha256": "2411e57b73ed040dd20be34c76dab90ed1af31a15238efe2f5363f0278104926",
+    "aggregateSha256": "0a910c19461dc61334c5ab1b41074923788ecc7578d6231f5be05ab76dd2a81c",
+    "finalFileCount": 26,
+    "deltaFileCount": 9,
+    "retainedOldFileCount": 17
+  },
+  "hongKong": {
+    "checkedAt": "2026-11-07T04:06:31.090762+08:00",
+    "web": "1.3.9-2027047763f5",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "statePrevious": {
+      "webReleaseId": "1.3.8-8a52afce96ba",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "generation": 63,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "healthOk": true,
+    "readyWritable": true,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "nginxSha256": "09a18ffddfd4066439cc5383b6a333128b82e8b6e598693c39aa73ca073eeb21",
+    "diskAvailableRatio": 0.20132012066556387
+  },
+  "newShanghai": {
+    "checkedAt": "2026-11-07T04:05:00.743513+08:00",
+    "current": "download-site-1.3.9-2027047763f5",
+    "previous": "download-site-1.3.8-8a52afce96ba",
+    "web": "1.2.9-0521eb63f179",
+    "api": "api-1.2.6-df828869e276",
+    "filesVerified": 26,
+    "aggregateSha256": "0a910c19461dc61334c5ab1b41074923788ecc7578d6231f5be05ab76dd2a81c",
+    "nginxConfigUnchanged": true,
+    "certificateUnchanged": true,
+    "certificateNotAfter": "Jan 27 11:44:18 2027 GMT",
+    "certificateRenewalTimer": "active"
+  },
+  "publicPwa": {
+    "pwaInstallWindowSeconds": 600,
+    "pwaInstallElapsedMs": 50112,
+    "pwaPhaseElapsedMs": 54216,
+    "compressedTransport": true,
+    "twentySecondIdleTimeout": true,
+    "largeAssetDeadlineSeconds": 180,
+    "physicalEgress": true,
+    "strictTls": true,
+    "publicWeb": "1.3.9-2027047763f5",
+    "filesVerified": 200,
+    "allSizesAndSha256Match": true,
+    "cacheHeadersVerified": true,
+    "wwwCanonicalRedirect": true,
+    "publicHealth": true,
+    "publicReadyWritable": true,
+    "backupState": "disabled",
+    "previous": "1.3.8-8a52afce96ba",
+    "previousFilesVerified": 199,
+    "previousHtmlByteExact": true,
+    "previousWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "currentCacheBeforeAfterSha256": "9ede5081edb217458a75d5fc8d5c5e050f4be1aa2dc36e34627f91c7c0aa9289",
+    "fallbackCacheIsolation": true,
+    "offlineCurrentReopen": true,
+    "browserProductionApiBlocked": true,
+    "blockedApiRequests": 10,
+    "productionPlayerWrites": false
+  },
+  "publicNative": {
+    "ok": true,
+    "files": [
+      {
+        "path": "downloads/android/dsp-idle-1.3.9-1003009.apk",
+        "bytes": 5923990,
+        "sha256": "543b3c067afd7bc674f7ae7cd5bfffeef34b2f057214e54b08e9ba85ea4e1f73",
+        "strictTls": true,
+        "physicalEgress": true
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.9-x64-setup.exe",
+        "bytes": 112812759,
+        "sha256": "d34c83d5a1f47d5964dfeb29cedbb34dbfe6e0e72a062ba7baeb071eec095f39",
+        "strictTls": true,
+        "physicalEgress": true,
+        "sha512Base64": "eMr6OcG1cK/l5duaHt2s9f70782VhHJMM4Hux9v0Z+hrzrt8kTgx1ZSauQl7G5Dhz8Nwk/F2Lt/ulZo+d9//Ag==",
+        "matchesStableFeedSha512": true
+      }
+    ]
+  },
+  "capacity": {
+    "first": {
+      "ok": true,
+      "releaseId": "1.3.9-2027047763f5",
+      "verifiedFiles": 11,
+      "sourceBytes": 263525682,
+      "archivedBytes": 59948665,
+      "sourceFilesReleased": true,
+      "restorationMetadataRetained": true,
+      "databaseAndSaveBackupsUntouched": true,
+      "servicesAndNginxUnchanged": true,
+      "automaticBackupsDisabled": true,
+      "diskAvailableBytes": 14858039296,
+      "diskAvailableRatio": 0.201167558452235,
+      "projectedAfterReleaseRatio": 0.2004905930921205,
+      "archiveRoot": "/var/backups/dsp-idle-log-archives/1.3.9-2027047763f5",
+      "combinedManifestSha256": "9c430b8666ea1d2f503c7708523cf3154defcf37d6138e69c6297ebecb50d201"
+    },
+    "second": {
+      "archived": true,
+      "prunedVerifiedSources": true,
+      "fileCount": 20,
+      "logicalSourceBytes": 319992078,
+      "allocatedSourceBytes": 320036864,
+      "archiveBytes": 89696251,
+      "archiveSha256": "346995c4604d4fbba0c0d93156b80bb1e2181e660418df26bf3ff54abd7e1a6f",
+      "byteExactArchiveVerified": true,
+      "restorationMetadataRetained": true,
+      "selectedFilesClosedAndStable": true,
+      "databaseAndSaveBackupsUntouched": true,
+      "servicesAndNginxUnchanged": true,
+      "automaticBackupsDisabled": true,
+      "diskAvailableBytesBefore": 14666838016,
+      "diskAvailableBytesAfter": 14897127424,
+      "diskAvailableRatio": 0.20169678462518942,
+      "projectedAfterReleaseRatio": 0.20034285390496046,
+      "actualProjectedAfterReleaseRatio": 0.20034285390496046,
+      "rootOnlyArchive": "/var/backups/dsp-idle-log-archives/1.3.9-2027047763f5-capacity-2"
+    },
+    "restorationMetadata": {
+      "readOnly": true,
+      "archives": [
+        {
+          "release": "1.3.9-2027047763f5",
+          "rootOnly": true,
+          "files": [
+            {
+              "name": "closed-logs.tar.gz",
+              "mode": "0o600",
+              "bytes": 48179723,
+              "sha256": "4e41fdb982a5e5619eb300b5ac8239e146538e0ddd5215f563730ca36d64ac1b"
+            },
+            {
+              "name": "additional-cache.tar.gz",
+              "mode": "0o644",
+              "bytes": 11768942,
+              "sha256": "f71fa116b34a79909ac87e7ff5e6f41e72c192582527e3caac7eb43f84a5e20c"
+            },
+            {
+              "name": "restore-manifest.json",
+              "mode": "0o600",
+              "bytes": 1490,
+              "sha256": "2990154e77b6437f749a9924edf9653814064fb18ec627845cf2a6f5c9d2cbf3"
+            },
+            {
+              "name": "combined-restore-manifest.json",
+              "mode": "0o644",
+              "bytes": 6982,
+              "sha256": "9c430b8666ea1d2f503c7708523cf3154defcf37d6138e69c6297ebecb50d201"
+            },
+            {
+              "name": "public-proof.json",
+              "mode": "0o600",
+              "bytes": 771,
+              "sha256": "3a63cfe59479e9d3636da75735a4e726b74efdb5271d4415b2066c48771eee75"
+            }
+          ]
+        },
+        {
+          "release": "1.3.9-2027047763f5-capacity-2",
+          "rootOnly": true,
+          "files": [
+            {
+              "name": "closed-logs.tar.gz",
+              "mode": "0o600",
+              "bytes": 89696251,
+              "sha256": "346995c4604d4fbba0c0d93156b80bb1e2181e660418df26bf3ff54abd7e1a6f"
+            },
+            {
+              "name": "restore-manifest.json",
+              "mode": "0o600",
+              "bytes": 11479,
+              "sha256": "c81647381885482946e3304cea61cefedc112cea64c859b23fb2c8a52d8f518c"
+            },
+            {
+              "name": "public-proof.json",
+              "mode": "0o600",
+              "bytes": 784,
+              "sha256": "ed50ed63a3adb55e31810f3ae07515712a943c6642451959e90f4d083d257ad5"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "windows": {
+    "notSigned": true,
+    "cloudTransfers": {
+      "ok": true,
+      "version": "1.3.9",
+      "packaged": true,
+      "isolatedProfile": true,
+      "transferStatuses": [
+        200,
+        200,
+        200,
+        200
+      ],
+      "readRequestIdsAbsent": true,
+      "uploadRequestIdPreserved": true,
+      "exeSha256": "2fb181295c1aa8691481a3c78274d0c068d2b1c068378d5345f2060ff4f1e636",
+      "realAccountsUsed": false,
+      "network": "main-process synthetic fetch; renderer HTTP denied; physical production requests absent"
+    },
+    "upgrade": {
+      "ok": true,
+      "version": "1.3.9",
+      "upgradedFrom": "1.3.8",
+      "electronVersion": "43.8.1",
+      "packaged": true,
+      "isolatedProfile": true,
+      "networkBlocked": true,
+      "newGame": true,
+      "explicitSave": true,
+      "coldReopen": true,
+      "savedCharacters": 89390,
+      "savedSha256": "bfcb813df29ca87e6a11cfb213f177d8f5959bb8b666ac48a4c602e3db64056b",
+      "pageErrors": []
+    }
+  },
+  "validationSource": {
+    "runtimeSha": "2027047763f5a91b8a16cc0de29a245c2e42e253",
+    "validationSha": "284e7e140d0dd754194a6d061de4ef482c57f2ce",
+    "changedFiles": [
+      "tests/e2e/game-flow-menu-cloud.spec.ts",
+      "tests/e2e/v102-light-i18n.spec.ts",
+      "tests/e2e/v142-ui-review.spec.ts"
+    ],
+    "changes": "Sixteen current-release copy/date assertions; all runtime source and behavioral assertions unchanged."
+  },
+  "validationWatcher": {
+    "watchDisabled": true,
+    "configurationSha256": "74546130bad1674a548b6a7b51ee23ed27e63f5611b01cbea91731da228cba3d",
+    "cause": "Vite mergeConfig skips null overrides; assigning server.watch=null after merging is required.",
+    "productionSourceChanged": false,
+    "checkedAt": "2026-11-06T19:47:00.695Z"
+  },
+  "limits": [
+    "Physical Android/IME not tested",
+    "System NSIS overwrite installation not tested",
+    "Long-duration/low-end device and new real large-save performance not measured",
+    "New v3/v4 content-pack saves require 1.3.9"
+  ]
+}

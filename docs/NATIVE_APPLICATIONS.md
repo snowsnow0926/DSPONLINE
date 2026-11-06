@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> **当前正式下载（2026-11-07，1.3.9）**：Android1.3.9/1003009（原证书，v2/v3/zipalign）与Windows x64 1.3.9（NotSigned、Electron43.8.1）同源2027047763f5，下载页和stable feed已更新，minimumAndroidCode1000002保持。APK5923990B、setup112812759B，完整公网SHA/Range及Windows feed SHA512相符；AAB5713325B只归档。1.3.8升级保档/冷开、Windows77运行文件、APK/AAB209资源及正式Windows四条云传输通过。实体手机/输入法、系统NSIS与长时边界未实测，原生权威资格未扩展。下方本地与旧正式记录为历史。[制品与限制](./releases/1.3.9.md)。
+
 > **2026-11-07 内容包 v4 原生适配（本地完成，未发布）**：Rust 目录增加可选科技倍率、配方组/白名单、自定义资源/发电规则和旧 ID 映射；连续计算按当前科研状态取倍率。v47 直接导入先验证原始文件，再逐条迁移候选并补齐缺失资源，重复导入不会补满已有矿点。干净 `a08e173cce7c` 的性能开发版 75 个 Windows 文件已核对，NotSigned；独立 D 盘目录实际启动、三个云读取与一个上传 IPC 请求通过本地协议校验。JS/Rust 完整差分、1,354 条 Rust 标准回归及最终 Host 的 v4 专项通过。[成品与证据](./reviews/2026-11-07-content-pack-v4-development.md)。这不扩展默认原生权威资格，公开 Android/Windows 下载保持现有版本。
 
 > **2026-11-07 Windows 开发包（未发布）**：`3650a3606105` 的独立性能开发版完成目录打包，75 个 Windows 文件核对、NotSigned；独立 D 盘测试目录下启动正常，真实 MessagePort 的主档/槽位/速通 GET 和直接 PUT 均通过本地 HTTP 合同校验。GET 不再追加上传专用请求 ID；Rust 普通与纯挂机结算遵守内容包手合规则。开发包默认离线，正式 Windows/Android 下载和更新源未改；不是正式安装器资格。[制品、校验及验证边界](./reviews/2026-11-07-content-pack-cloud-development.md)。

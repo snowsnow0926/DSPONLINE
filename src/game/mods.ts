@@ -1,7 +1,14 @@
-import { BUILDINGS, ITEMS, RECIPES, TECHNOLOGIES, validateContentCatalog } from "./content";
+import { BUILDINGS, CONSTRUCTION, ITEMS, MATRIX_ITEM_IDS, RECIPES, TECHNOLOGIES, validateContentCatalog } from "./content";
 import type { BuildingDefinition, BuildingPortDefinition, ItemDefinition } from "./types";
 
-export const MOD_FORMAT_VERSION = 2;
+export const MOD_FORMAT_VERSION = 3;
+// Capture the core before any local pack is activated. Live catalog IDs also
+// include the previous version of the very pack an author is updating.
+const CORE_ITEMS = new Set(Object.keys(ITEMS));
+const CORE_BUILDINGS = new Set(Object.keys(BUILDINGS));
+const CORE_RECIPES = new Set(Object.keys(RECIPES));
+const CORE_TECHNOLOGIES = new Map(Object.entries(TECHNOLOGIES));
+const CORE_CONSTRUCTION = new Set(CONSTRUCTION.map((entry) => String(entry.buildingId)));
 
 export interface ModItemDefinition {
   id: string;
@@ -23,8 +30,32 @@ export interface ModRecipeDefinition {
   buildingId: string;
   duration: number;
   requiredTechId?: string;
+  handcraftable?: boolean;
+  recursivePriority?: number;
   inputs: ModRecipeAmount[];
   outputs: ModRecipeAmount[];
+}
+
+export interface ModRecipeOverride {
+  id: string;
+  requiredTechId?: string | null;
+  handcraftable?: boolean;
+  duration?: number;
+  recursivePriority?: number;
+}
+
+export interface ModTechnologyOverride {
+  id: string;
+  prerequisites?: string[];
+  costs?: ModRecipeAmount[];
+  tier?: number;
+  summary?: string;
+  unlocks?: string[];
+}
+
+export interface ModConstructionOverride {
+  id: string;
+  requiredTechId?: string | null;
 }
 
 export interface ModBuildingDefinition {
@@ -102,6 +133,9 @@ export interface ContentPackManifest {
   technologies?: ModTechnologyDefinition[];
   buildingOverrides?: ModBuildingOverride[];
   belts?: ModBeltDefinition[];
+  recipeOverrides?: ModRecipeOverride[];
+  technologyOverrides?: ModTechnologyOverride[];
+  constructionOverrides?: ModConstructionOverride[];
 }
 
 export interface ParsedContentPackDependency {
@@ -127,6 +161,7 @@ export interface ContentPackValidationContext {
   itemIds?: Iterable<string>;
   buildingIds?: Iterable<string>;
   technologyIds?: Iterable<string>;
+  technologyPrerequisites?: Record<string, readonly string[]>;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -214,9 +249,9 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
     issues.push({ severity: "error", code: "root", path: "$", message: "内容包根节点必须是对象" });
     return null;
   }
-  const formatVersion = typeof value.formatVersion === "number" ? Math.floor(value.formatVersion) : 0;
-  if (formatVersion !== 1 && formatVersion !== MOD_FORMAT_VERSION) {
-    issues.push({ severity: "error", code: "format-version", path: "$.formatVersion", message: `内容包格式必须为 v1 或 v${MOD_FORMAT_VERSION}` });
+  const formatVersion = typeof value.formatVersion === "number" ? value.formatVersion : 0;
+  if (![1, 2, MOD_FORMAT_VERSION].includes(formatVersion)) {
+    issues.push({ severity: "error", code: "format-version", path: "$.formatVersion", message: "内容包格式必须为 v1、v2 或 v3" });
   }
   for (const [key, label] of [["id", "内容包 ID"], ["name", "内容包名称"], ["version", "版本号"]] as const) {
     if (!nonEmpty(value[key])) issues.push({ severity: "error", code: "metadata", path: `$.${key}`, message: `${label}不能为空` });
@@ -233,6 +268,15 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
   const technologies = Array.isArray(value.technologies) ? value.technologies : [];
   const buildingOverrides = formatVersion >= 2 && Array.isArray(value.buildingOverrides) ? value.buildingOverrides : [];
   const belts = formatVersion >= 2 && Array.isArray(value.belts) ? value.belts : [];
+  const extensionArrays = ["recipeOverrides", "technologyOverrides", "constructionOverrides"] as const;
+  for (const key of ["items", "buildings", "recipes", "technologies", "buildingOverrides", "belts", ...extensionArrays]) {
+    if (value[key] !== undefined && (!Array.isArray(value[key]) || value[key].some((entry: unknown) => !isRecord(entry)))) {
+      issues.push({ severity: "error", code: "content-array", path: `$.${key}`, message: "内容列表必须是对象数组" });
+    }
+  }
+  for (const key of extensionArrays) if (Array.isArray(value[key]) && value[key].length > 0 && formatVersion < 3) {
+    issues.push({ severity: "error", code: "v3-required", path: `$.${key}`, message: "配方、科技和施工规则覆盖需要 formatVersion: 3" });
+  }
   if (items.length > 256 || buildings.length > 128 || recipes.length > 512 || technologies.length > 256 || buildingOverrides.length > 128 || belts.length > 29) {
     issues.push({ severity: "error", code: "size-limit", path: "$", message: "内容包超过单包内容数量上限" });
   }
@@ -342,9 +386,11 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
       return [];
     }
     if (entry.requiredTechId !== undefined && !validId(entry.requiredTechId)) issues.push({ severity: "error", code: "recipe-tech", path: `$.recipes[${index}].requiredTechId`, message: "配方科技 ID 无效" });
-    return [{ id: entry.id, name: entry.name.trim().slice(0, 80), buildingId: entry.buildingId, duration: entry.duration, ...(entry.requiredTechId ? { requiredTechId: entry.requiredTechId } : {}), inputs: entry.inputs, outputs: entry.outputs }];
+    if (entry.handcraftable !== undefined && typeof entry.handcraftable !== "boolean") issues.push({ severity: "error", code: "recipe-handcraftable", path: `$.recipes[${index}].handcraftable`, message: "handcraftable 必须是 true 或 false" });
+    if (entry.recursivePriority !== undefined && (!Number.isInteger(entry.recursivePriority) || Math.abs(entry.recursivePriority) > 1000)) issues.push({ severity: "error", code: "recipe-priority", path: `$.recipes[${index}].recursivePriority`, message: "递归优先级必须是 -1000～1000 的整数" });
+    return [{ id: entry.id, name: entry.name.trim().slice(0, 80), buildingId: entry.buildingId, duration: entry.duration, ...(entry.requiredTechId ? { requiredTechId: entry.requiredTechId } : {}), ...(typeof entry.handcraftable === "boolean" ? { handcraftable: entry.handcraftable } : {}), ...(Number.isInteger(entry.recursivePriority) ? { recursivePriority: entry.recursivePriority } : {}), inputs: entry.inputs, outputs: entry.outputs }];
   });
-  const coreBuildings = new Set(Object.keys(BUILDINGS));
+  const coreBuildings = CORE_BUILDINGS;
   const overrideRanges = {
     speed: [0.01, 1_000],
     inputCapacity: [0, 100_000_000],
@@ -391,9 +437,9 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
   const buildingIds = uniqueIds(validBuildings, "$.buildings", issues);
   const recipeIds = uniqueIds(validRecipes, "$.recipes", issues);
   const technologyIds = uniqueIds(validTechnologies, "$.technologies", issues);
-  const coreItems = new Set(Object.keys(ITEMS));
-  const coreRecipes = new Set(Object.keys(RECIPES));
-  const coreTechnologies = new Set(Object.keys(TECHNOLOGIES));
+  const coreItems = CORE_ITEMS;
+  const coreRecipes = CORE_RECIPES;
+  const coreTechnologies = new Set(CORE_TECHNOLOGIES.keys());
   for (const id of itemIds) if (coreItems.has(id)) issues.push({ severity: "error", code: "override-item", path: "$.items", message: `不能覆盖核心物品 ${id}` });
   for (const id of buildingIds) if (coreBuildings.has(id)) issues.push({ severity: "error", code: "override-building", path: "$.buildings", message: `不能覆盖核心建筑 ${id}` });
   for (const id of recipeIds) if (coreRecipes.has(id)) issues.push({ severity: "error", code: "override-recipe", path: "$.recipes", message: `不能覆盖核心配方 ${id}` });
@@ -401,6 +447,35 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
   const allItems = new Set([...coreItems, ...(context?.itemIds ?? []), ...itemIds]);
   const allBuildings = new Set([...coreBuildings, ...(context?.buildingIds ?? []), ...buildingIds]);
   const allTechnologies = new Set([...coreTechnologies, ...(context?.technologyIds ?? []), ...technologyIds]);
+  const parseOverrides = <T extends { id: string }>(key: typeof extensionArrays[number], allowedIds: Set<string>, fields: readonly string[]): T[] => {
+    const entries = formatVersion >= 3 && Array.isArray(value[key]) ? value[key] : [];
+    if (entries.length > 512) issues.push({ severity: "error", code: "size-limit", path: `$.${key}`, message: "单类规则覆盖不能超过 512 项" });
+    const result = entries.filter(isRecord).flatMap((entry, index) => {
+      const path = `$.${key}[${index}]`;
+      if (!validId(entry.id) || !allowedIds.has(entry.id)) {
+        issues.push({ severity: "error", code: "override-id", path, message: `规则覆盖必须引用已存在的核心 ID：${String(entry.id)}` });
+        return [];
+      }
+      const output: Record<string, unknown> = { id: entry.id };
+      for (const field of fields) if (entry[field] !== undefined) output[field] = entry[field];
+      if (Object.keys(output).length === 1) issues.push({ severity: "error", code: "override-empty", path, message: "规则覆盖至少需要一个受支持字段" });
+      if (output.requiredTechId !== undefined && output.requiredTechId !== null && (!validId(output.requiredTechId) || !allTechnologies.has(output.requiredTechId))) issues.push({ severity: "error", code: "override-tech", path, message: "规则覆盖引用未知科技" });
+      if (output.handcraftable !== undefined && typeof output.handcraftable !== "boolean") issues.push({ severity: "error", code: "recipe-handcraftable", path, message: "handcraftable 必须是 true 或 false" });
+      if (output.duration !== undefined && (typeof output.duration !== "number" || !Number.isFinite(output.duration) || output.duration <= 0 || output.duration > 86400)) issues.push({ severity: "error", code: "recipe-duration", path, message: "配方周期必须大于 0 且不超过 86400 秒" });
+      if (output.recursivePriority !== undefined && (!Number.isInteger(output.recursivePriority) || Math.abs(Number(output.recursivePriority)) > 1000)) issues.push({ severity: "error", code: "recipe-priority", path, message: "递归优先级必须是 -1000～1000 的整数" });
+      if (output.prerequisites !== undefined && (!Array.isArray(output.prerequisites) || output.prerequisites.length > 64 || !output.prerequisites.every((id) => validId(id) && allTechnologies.has(id)))) issues.push({ severity: "error", code: "technology-prerequisite", path, message: "科技前置必须引用已存在的科技" });
+      if (output.costs !== undefined && !amountList(output.costs)) issues.push({ severity: "error", code: "technology-costs", path, message: "科技成本必须是合法物品数量数组" });
+      if (output.tier !== undefined && (!Number.isInteger(output.tier) || Number(output.tier) < 0 || Number(output.tier) > 99)) issues.push({ severity: "error", code: "technology-tier", path, message: "科技层级必须是 0～99 的整数" });
+      if (output.summary !== undefined && (typeof output.summary !== "string" || output.summary.length > 240)) issues.push({ severity: "error", code: "technology-summary", path, message: "科技说明不能超过 240 字符" });
+      if (output.unlocks !== undefined && (!Array.isArray(output.unlocks) || !output.unlocks.every(nonEmpty))) issues.push({ severity: "error", code: "technology-unlocks", path, message: "科技解锁说明必须是文本数组" });
+      return [output as unknown as T];
+    });
+    uniqueIds(result, `$.${key}`, issues);
+    return result;
+  };
+  const recipeOverrides = parseOverrides<ModRecipeOverride>("recipeOverrides", coreRecipes, ["requiredTechId", "handcraftable", "duration", "recursivePriority"]);
+  const technologyOverrides = parseOverrides<ModTechnologyOverride>("technologyOverrides", coreTechnologies, ["prerequisites", "costs", "tier", "summary", "unlocks"]);
+  const constructionOverrides = parseOverrides<ModConstructionOverride>("constructionOverrides", CORE_CONSTRUCTION, ["requiredTechId"]);
   if (new Set(validBelts.map((belt) => belt.id)).size !== validBelts.length || new Set(validBelts.map((belt) => belt.tier)).size !== validBelts.length) {
     issues.push({ severity: "error", code: "belt-duplicate", path: "$.belts", message: "自定义传送带 ID 和等级必须唯一" });
   }
@@ -418,11 +493,31 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
     for (const entry of [...recipe.inputs, ...recipe.outputs]) if (!allItems.has(entry.itemId)) issues.push({ severity: "error", code: "recipe-item", path: `$.recipes.${recipe.id}`, message: `配方引用未知物品 ${entry.itemId}` });
   }
   for (const building of validBuildings) {
+    if (building.requiredTechId && !allTechnologies.has(building.requiredTechId)) issues.push({ severity: "error", code: "building-tech", path: `$.buildings.${building.id}`, message: `建筑引用未知科技 ${building.requiredTechId}` });
+    for (const cost of building.costs ?? []) if (!allItems.has(cost.itemId)) issues.push({ severity: "error", code: "building-cost", path: `$.buildings.${building.id}`, message: `建筑引用未知物品 ${cost.itemId}` });
     if (building.upgradeTargetId && (!allBuildings.has(building.upgradeTargetId) || building.upgradeTargetId === building.id)) {
       issues.push({ severity: "error", code: "building-upgrade", path: `$.buildings.${building.id}`, message: `建筑升级目标 ${building.upgradeTargetId} 不存在或指向自身` });
     }
   }
   for (const technology of validTechnologies) for (const prerequisite of technology.prerequisites ?? []) if (!allTechnologies.has(prerequisite)) issues.push({ severity: "error", code: "technology-prerequisite", path: `$.technologies.${technology.id}`, message: `科技引用未知前置 ${prerequisite}` });
+  for (const technology of [...validTechnologies, ...technologyOverrides]) for (const cost of technology.costs ?? []) {
+    if (!MATRIX_ITEM_IDS.includes(cost.itemId as never)) issues.push({ severity: formatVersion >= 3 ? "error" : "warning", code: "technology-cost-item", path: `$.technologies.${technology.id}.costs`, message: `科研成本必须使用研究站支持的六种核心矩阵：${cost.itemId}` });
+  }
+  const prerequisites = new Map<string, readonly string[]>([...CORE_TECHNOLOGIES].map(([id, tech]) => [id, tech.prerequisites]));
+  for (const [id, list] of Object.entries(context?.technologyPrerequisites ?? {})) prerequisites.set(id, list);
+  for (const tech of validTechnologies) prerequisites.set(tech.id, tech.prerequisites ?? []);
+  for (const tech of technologyOverrides) if (tech.prerequisites) prerequisites.set(tech.id, tech.prerequisites);
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string) => {
+    if (visiting.has(id)) { issues.push({ severity: "error", code: "technology-cycle", path: `$.technologies.${id}`, message: `科技前置形成循环：${id}` }); return; }
+    if (visited.has(id)) return;
+    visiting.add(id);
+    for (const prerequisite of prerequisites.get(id) ?? []) visit(prerequisite);
+    visiting.delete(id);
+    visited.add(id);
+  };
+  for (const id of prerequisites.keys()) visit(id);
 
   return {
     formatVersion,
@@ -438,6 +533,9 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
     technologies: validTechnologies,
     buildingOverrides: validBuildingOverrides,
     belts: validBelts,
+    recipeOverrides,
+    technologyOverrides,
+    constructionOverrides,
   };
 }
 
@@ -481,7 +579,7 @@ export function createContentPackTemplate(): ContentPackManifest {
     name: "我的内容包",
     version: "0.1.0",
     author: "",
-    description: "只扩展新 ID，不覆盖核心目录。",
+    description: "扩展内容，或通过规则覆盖配置核心配方与科技。",
     dependencies: [],
     items: [],
     buildings: [],
@@ -489,5 +587,8 @@ export function createContentPackTemplate(): ContentPackManifest {
     technologies: [],
     buildingOverrides: [],
     belts: [],
+    recipeOverrides: [],
+    technologyOverrides: [],
+    constructionOverrides: [],
   };
 }

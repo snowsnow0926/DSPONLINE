@@ -17,6 +17,7 @@ const {
   contract: cloudTransferContract,
   exactUint8Array,
   normalizeRequestHeaders,
+  normalizeTransferRequestHeaders,
   requestBodyLimit,
   requestTimeoutMs,
   validRequestId,
@@ -3352,13 +3353,12 @@ ipcMain.on("desktop:api-request-transfer", (event, request) => {
     postTransferError(port, Object.assign(new Error("桌面云请求过多，请稍后重试"), { code: "CLOUD_REQUEST_BUSY" }));
     return;
   }
-  const normalizedTransferHeaders = normalizeRequestHeaders(request?.headers);
+  const normalizedTransferHeaders = normalizeTransferRequestHeaders(request);
   const declaredBodyLimit = requestBodyLimit(normalizedTransferHeaders);
   if (request.bodyByteLength > declaredBodyLimit) {
     postTransferError(port, new Error("API 请求正文过大"));
     return;
   }
-  normalizedTransferHeaders[cloudTransferContract.requestIdHeader] = requestId;
   request = { ...request, headers: normalizedTransferHeaders };
   const record = {
     controller: new AbortController(),

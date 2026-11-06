@@ -161,6 +161,15 @@ pub(crate) fn advance_handcraft(
         let duration = recipe.duration.max(0.05);
         let progress = finite_number(entry.get("progress"));
         if progress <= EPSILON {
+            let locked = recipe.required_tech_id.as_deref().is_some_and(|id| {
+                !base.get("research")
+                    .and_then(|research| research.get("completedTechIds"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(id)))
+            });
+            if recipe.handcraftable == Some(false) || locked {
+                break;
+            }
             if !can_store_outputs(base, &recipe)? || !has_inputs(base, &recipe)? {
                 break;
             }

@@ -2558,6 +2558,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: Vec::new(),
                         outputs: Vec::new(),
@@ -2569,6 +2570,7 @@ mod tests {
                         duration: 1.5,
                         required_tech_id: Some("dirac_inversion".to_owned()),
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: Vec::new(),
                         outputs: vec![ItemAmount {

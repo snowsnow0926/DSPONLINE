@@ -103,6 +103,8 @@ pub struct RecipeDefinition {
     pub recursive_priority: f64,
     #[serde(default)]
     pub recursive_manufacturing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handcraftable: Option<bool>,
     pub inputs: Vec<ItemAmount>,
     pub outputs: Vec<ItemAmount>,
 }

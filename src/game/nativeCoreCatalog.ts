@@ -97,6 +97,7 @@ export function createNativeCoreCatalog(
       ...(recipe.requiredTechId ? { requiredTechId: recipe.requiredTechId } : {}),
       recursivePriority: recipe.recursivePriority ?? 0,
       recursiveManufacturing: isRecursiveManufacturingRecipe(recipe.id),
+      ...(recipe.handcraftable !== undefined ? { handcraftable: recipe.handcraftable } : {}),
       inputs: recipe.inputs.map((input) => ({ ...input })),
       outputs: recipe.outputs.map((output) => ({ ...output })),
     }))),

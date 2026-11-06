@@ -825,7 +825,8 @@ fn apply_handcraft_enqueue(
         .recipes
         .get(recipe_id)
         .filter(|recipe| {
-            !recipe.inputs.is_empty()
+            recipe.handcraftable != Some(false)
+                && !recipe.inputs.is_empty()
                 && !recipe.outputs.is_empty()
                 && !matches!(
                     recipe.id.as_str(),
@@ -1766,6 +1767,27 @@ mod tests {
             "changedEntities": [], "addedEntities": [], "removedEntityIds": [],
             "changedBelts": [], "addedBelts": [], "removedBeltIds": []
         })).unwrap()
+    }
+
+    #[test]
+    fn disabled_handcraft_rule_preserves_paid_work_but_refuses_new_batches() {
+        let mut state = state();
+        std::sync::Arc::make_mut(&mut state.catalog).recipes.get_mut("plate_recipe").unwrap().handcraftable = Some(false);
+        let mut base = state.base_value().clone();
+        let before = base.clone();
+        let request = json!({ "recipeId": "plate_recipe", "batches": 2 });
+        assert!(apply_handcraft_enqueue(&state, &mut base, request.as_object().unwrap()).is_err());
+        assert_eq!(base, before);
+        base.insert("totalProduced".to_owned(), json!({}));
+        base.insert("handcraftQueue".to_owned(), json!([{
+            "id": "paid", "recipeId": "plate_recipe", "planetId": "home",
+            "batchesTotal": 2, "batchesRemaining": 2, "progress": 0.5, "queuedAt": 0
+        }]));
+        crate::global_progress::advance_handcraft(&state, &mut base, 10.0).unwrap();
+        assert_eq!(base["tray"]["ore"], 20);
+        assert_eq!(base["tray"]["plate"], 1);
+        assert_eq!(base["handcraftQueue"][0]["batchesRemaining"], 1);
+        assert_eq!(base["handcraftQueue"][0]["progress"], 0.0);
     }
 
     #[test]

@@ -1878,6 +1878,7 @@ mod tests {
             duration: 1.0,
             required_tech_id: None,
             recursive_priority: 0.0,
+            handcraftable: None,
             recursive_manufacturing: false,
             inputs: vec![ItemAmount {
                 item_id: "iron_ore".to_owned(),

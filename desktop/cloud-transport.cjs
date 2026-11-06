@@ -19,6 +19,7 @@ const allowedRequestHeaders = new Set([
   "authorization",
   "content-type",
   "content-encoding",
+  "x-dsp-save-mode",
   contract.expectedRevisionHeader,
   contract.requestIdHeader,
   contract.originalBytesHeader,
@@ -36,6 +37,19 @@ function normalizeRequestHeaders(source = {}) {
     if (allowedRequestHeaders.has(normalized) && typeof value === "string" && value.length <= 512) {
       headers[normalized] = value;
     }
+  }
+  return headers;
+}
+
+// IPC request IDs identify cancellation/stream acknowledgements. Only the
+// direct upload protocol also uses that ID as an HTTP idempotency header.
+function normalizeTransferRequestHeaders(request) {
+  const headers = normalizeRequestHeaders(request?.headers);
+  if (String(request?.method ?? "GET").toUpperCase() === "PUT" &&
+      /^\/(?:api\/)?cloud-save(?:\?|$)/.test(request?.path ?? "") &&
+      headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() === contract.directPayloadContentType &&
+      validRequestId(request?.requestId)) {
+    headers[contract.requestIdHeader] = request.requestId;
   }
   return headers;
 }
@@ -78,6 +92,7 @@ module.exports = {
   exactArrayBuffer,
   exactUint8Array,
   normalizeRequestHeaders,
+  normalizeTransferRequestHeaders,
   requestBodyLimit,
   requestTimeoutMs,
   validRequestId,

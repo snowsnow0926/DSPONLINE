@@ -8878,6 +8878,7 @@ pub(crate) mod tests {
             duration: 1.0,
             required_tech_id: required_tech_id.map(str::to_owned),
             recursive_priority: 0.0,
+            handcraftable: None,
             recursive_manufacturing: false,
             inputs,
             outputs,

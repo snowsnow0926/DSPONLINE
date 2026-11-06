@@ -9983,6 +9983,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "iron_ore".into(),
@@ -10000,6 +10001,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "iron_ingot".into(),
@@ -10017,6 +10019,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "iron_ingot".into(),
@@ -10034,6 +10037,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "iron_ore".into(),
@@ -10051,6 +10055,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "iron_ore".into(),
@@ -10068,6 +10073,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "iron_ore".into(),
@@ -10085,6 +10091,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: Vec::new(),
                         outputs: Vec::new(),
@@ -10096,6 +10103,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "iron_ore".into(),
@@ -10113,6 +10121,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "iron_ore".into(),
@@ -10130,6 +10139,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "solar_sail".into(),
@@ -10144,6 +10154,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: vec![ItemAmount {
                             item_id: "small_carrier_rocket".into(),
@@ -10158,6 +10169,7 @@ mod tests {
                         duration: 1.0,
                         required_tech_id: None,
                         recursive_priority: 0.0,
+                        handcraftable: None,
                         recursive_manufacturing: false,
                         inputs: Vec::new(),
                         outputs: Vec::new(),

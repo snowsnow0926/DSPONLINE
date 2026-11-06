@@ -852,6 +852,8 @@ export interface RecipeDefinition {
   inputs: ItemAmount[];
   outputs: ItemAmount[];
   requiredTechId?: TechId;
+  /** False restricts this recipe to production facilities. Missing keeps legacy behavior. */
+  handcraftable?: boolean;
   /** Higher values are preferred by automatic recursive manufacturing. */
   recursivePriority?: number;
 }

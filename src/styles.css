@@ -22260,6 +22260,53 @@ input:focus-visible,
 .content-pack-registration > button { grid-row: span 2; min-height: 30px; align-self: center; }
 .content-pack-registration > button:disabled { opacity: .45; cursor: default; }
 
+.content-pack-editor,
+.content-pack-issues,
+.content-pack-recipe-rules,
+.content-pack-update-preview { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
+.content-pack-manager summary { cursor: pointer; padding: 8px 0; color: var(--text); }
+.content-pack-editor textarea { box-sizing: border-box; width: 100%; min-height: 230px; resize: vertical; padding: 10px; border: 1px solid var(--line); color: var(--text); background: var(--surface); font: inherit; font-family: monospace; }
+.content-pack-recipe-rule { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(140px, 1fr); align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.content-pack-recipe-rule > strong { display: grid; white-space: normal; overflow-wrap: anywhere; }
+.content-pack-recipe-rule label { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.content-pack-recipe-rule select { min-width: 0; max-width: 100%; min-height: 32px; color: var(--text); background: var(--surface); border: 1px solid var(--line); }
+.content-pack-history button { margin: 4px 8px 4px 0; }
+.content-pack-card > footer { flex-wrap: wrap; }
+.content-pack-card > footer > div { flex-wrap: wrap; }
+.content-pack-registration .content-pack-update-preview { color: var(--text); line-height: 1.6; }
+.content-pack-manager { font-size: calc(12px * var(--ui-font-scale, 1)); }
+.content-pack-manager .content-pack-importer > div:first-child strong,
+.content-pack-manager .content-pack-card > header strong,
+.content-pack-manager .content-pack-registration strong { font-size: calc(13px * var(--ui-font-scale, 1)); }
+.content-pack-manager .content-pack-importer > div:first-child small,
+.content-pack-manager .content-pack-registration p,
+.content-pack-manager .content-pack-registration small,
+.content-pack-manager .content-pack-card > p,
+.content-pack-manager .content-pack-card > header span,
+.content-pack-manager .content-pack-counts > span,
+.content-pack-manager .content-pack-usage,
+.content-pack-manager .content-pack-dependencies > strong,
+.content-pack-manager .content-pack-dependency { font-size: calc(11px * var(--ui-font-scale, 1)); }
+.content-pack-manager button { min-height: 34px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 3px; color: var(--text); background: var(--surface-raised); font: inherit; cursor: pointer; }
+.content-pack-manager .content-pack-importer,
+.content-pack-manager .content-pack-list,
+.content-pack-manager .content-pack-card,
+.content-pack-manager .content-pack-registration { background: var(--surface); border-color: var(--line); }
+.content-pack-manager .content-pack-card--enabled,
+.content-pack-manager .content-pack-registration--valid { border-color: var(--theme-accent-border); }
+.content-pack-manager button:hover:not(:disabled) { border-color: var(--cyan); }
+.content-pack-manager button:disabled { opacity: .5; cursor: default; }
+.content-pack-manager .content-pack-registration > button { grid-column: 1 / -1; grid-row: auto; justify-self: start; }
+.content-pack-manager .content-pack-recipe-rule > strong { font-size: inherit; }
+.content-pack-manager .content-pack-usage { white-space: normal; }
+@media (max-width: 700px) {
+  .content-pack-recipe-rule { grid-template-columns: minmax(0, 1fr); }
+  .content-pack-manager .content-pack-actions { flex-wrap: wrap; }
+  .content-pack-card > footer > div { flex-basis: 100%; }
+  .content-pack-recipe-rule label { min-height: 44px; }
+  .content-pack-manager button { min-height: 44px; }
+}
+
 .content-pack-list { display: grid; align-content: start; gap: 8px; }
 .content-pack-card { display: grid; gap: 8px; padding: 9px; border: 1px solid var(--line); background: #121916; }
 .content-pack-card--enabled { border-color: #3f7665; background: #13211c; }

@@ -1,0 +1,28 @@
+{
+  "formatVersion": 3,
+  "id": "example_rules_v3",
+  "name": "配方与科技配置示例",
+  "version": "1.0.0",
+  "description": "展示手合开关、核心配方与施工解锁、科技成本配置。",
+  "items": [{ "id": "example_machine_alloy", "name": "工业合金", "kind": "solid" }],
+  "recipes": [{
+    "id": "example_machine_alloy_recipe",
+    "name": "工业合金",
+    "buildingId": "assembling_machine_mk1",
+    "duration": 4,
+    "handcraftable": false,
+    "requiredTechId": "example_alloy_research",
+    "inputs": [{ "itemId": "iron_ingot", "amount": 2 }, { "itemId": "copper_ingot", "amount": 1 }],
+    "outputs": [{ "itemId": "example_machine_alloy", "amount": 1 }]
+  }],
+  "technologies": [{
+    "id": "example_alloy_research",
+    "name": "工业合金学",
+    "prerequisites": ["electromagnetic_matrix"],
+    "costs": [{ "itemId": "electromagnetic_matrix", "amount": 10 }],
+    "tier": 2
+  }],
+  "recipeOverrides": [{ "id": "gear", "handcraftable": true, "recursivePriority": 10 }],
+  "technologyOverrides": [{ "id": "basic_logistics", "summary": "研究基础物流，并可继续研究工业合金。" }],
+  "constructionOverrides": [{ "id": "storage_mk1", "requiredTechId": "example_alloy_research" }]
+}

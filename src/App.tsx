@@ -340,6 +340,7 @@ import { createContentPackTemplate, parseContentPack, type ModValidationResult }
 import { importWithRecovery } from "./game/dynamicImportRecovery";
 import {
   applyContentPackRegistry,
+  commitContentPackRegistry,
   createContentPackRuntimeSnapshot,
   getContentPackValidationContext,
   getContentPackUsage,
@@ -16228,15 +16229,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const clearModValidation = useCallback(() => setModValidation(null), []);
   const validateMod = useCallback((raw: string) => {
-    const result = parseContentPack(raw, getContentPackValidationContext(contentPackRegistry));
+    let proposedId: string | undefined;
+    try { const value = JSON.parse(raw); if (typeof value?.id === "string") proposedId = value.id; } catch { /* parseContentPack reports the JSON error below. */ }
+    const result = parseContentPack(raw, getContentPackValidationContext(contentPackRegistry, proposedId));
     setModValidation(result);
     setNotice(result.valid ? "内容包校验通过" : `内容包校验失败：${result.issues.find((issue) => issue.severity === "error")?.message ?? "请检查定义"}`);
     playTone(result.valid ? "confirm" : "alert");
   }, [contentPackRegistry, playTone]);
 
   const applyRegisteredContentPacks = useCallback((registry: ContentPackRegistry) => {
-    const report = applyContentPackRegistry(registry);
-    saveContentPackRegistry(registry);
+    const report = commitContentPackRegistry(registry, contentPackRegistry);
+    if (!report.persisted) {
+      setNotice(`内容包未应用：${report.issues.join("；") || "依赖未就绪"}`);
+      return report;
+    }
     contentPackRuntimeSnapshotRef.current = createContentPackRuntimeSnapshot(registry);
     simulationWorkerRegistryFingerprintRef.current = null;
     setContentPackRegistry(registry);
@@ -16244,7 +16250,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const contentPacks = getActiveContentPackReferences(registry);
     commitGame((current) => ({ ...current, contentPacks }));
     return report;
-  }, [commitGame]);
+  }, [commitGame, contentPackRegistry]);
 
   const registerValidatedContentPack = useCallback(() => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
@@ -16258,14 +16264,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     const existing = contentPackRegistry.packs[modValidation.manifest.id];
-    if (existing) {
-      const usage = getContentPackUsage(gameRef.current, existing.manifest);
-      if (usage.total > 0) {
-        setNotice(`无法更新内容包：当前存档仍在使用${usage.entries.join("、")}`);
-        playTone("alert");
-        return;
-      }
-    }
     const result = registerContentPack(contentPackRegistry, modValidation, true);
     if (result.registry === contentPackRegistry) {
       setNotice(`内容包未注册：${result.reason ?? "定义冲突"}`);
@@ -16273,8 +16271,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     const report = applyRegisteredContentPacks(result.registry);
+    if (!report.persisted) { playTone("alert"); return; }
     setNotice(result.enabled
-      ? `内容包已注册并启用：${modValidation.manifest.name}`
+      ? `${existing ? "内容包已兼容更新，原有物品和进度保留" : "内容包已注册并启用"}：${modValidation.manifest.name}`
       : `内容包已注册，等待依赖：${result.reason ?? "未满足"}`);
     playTone(result.enabled && report.catalogValid ? "complete" : "alert");
   }, [applyRegisteredContentPacks, contentPackRegistry, modValidation, playTone, readNativeAuthorityPersistenceBoundary]);
@@ -16302,6 +16301,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     const report = applyRegisteredContentPacks(result.registry);
+    if (!report.persisted) { playTone("alert"); return; }
     setNotice(`${pack.manifest.name}已${enabled ? "启用" : "停用"}${report.catalogValid ? "" : "，目录存在校验问题"}`);
     playTone(enabled && report.catalogValid ? "confirm" : "alert");
   }, [applyRegisteredContentPacks, contentPackRegistry, playTone, readNativeAuthorityPersistenceBoundary]);
@@ -16326,7 +16326,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       if (result.reason) playTone("alert");
       return;
     }
-    applyRegisteredContentPacks(result.registry);
+    if (!applyRegisteredContentPacks(result.registry).persisted) { playTone("alert"); return; }
     setNotice(`内容包已移除：${pack.manifest.name}`);
     playTone("remove");
   }, [applyRegisteredContentPacks, contentPackRegistry, playTone, readNativeAuthorityPersistenceBoundary]);

@@ -138,7 +138,7 @@
       "label": "轨道货运接口清空",
       "occurrences": 1,
       "lines": [
-        15199
+        15200
       ],
       "kind": "durable",
       "owner": "rust",
@@ -172,7 +172,7 @@
       "label": "建筑放置与扩建",
       "occurrences": 4,
       "lines": [
-        13734,
+        13735,
         18924,
         22644,
         23898
@@ -186,7 +186,7 @@
       "label": "建筑回收",
       "occurrences": 1,
       "lines": [
-        13795
+        13796
       ],
       "kind": "durable",
       "owner": "rust",
@@ -230,10 +230,10 @@
       "label": "建筑物资交互",
       "occurrences": 4,
       "lines": [
-        13635,
-        13651,
-        13667,
-        13689
+        13636,
+        13652,
+        13668,
+        13690
       ],
       "kind": "durable",
       "owner": "rust",
@@ -244,7 +244,7 @@
       "label": "建筑与线路回收",
       "occurrences": 1,
       "lines": [
-        13538
+        13539
       ],
       "kind": "durable",
       "owner": "rust",
@@ -268,7 +268,7 @@
       "label": "旧版游戏规则设置",
       "occurrences": 1,
       "lines": [
-        14523
+        14524
       ],
       "kind": "deliberately-unsupported",
       "owner": "web",
@@ -323,7 +323,7 @@
       "label": "批量接入量子物流",
       "occurrences": 1,
       "lines": [
-        14790
+        14791
       ],
       "kind": "durable",
       "owner": "rust",
@@ -334,7 +334,7 @@
       "label": "批量切换轨道采集器量子模式",
       "occurrences": 1,
       "lines": [
-        14819
+        14820
       ],
       "kind": "durable",
       "owner": "rust",
@@ -345,7 +345,7 @@
       "label": "批量升级星际物流站",
       "occurrences": 1,
       "lines": [
-        14760
+        14761
       ],
       "kind": "durable",
       "owner": "rust",
@@ -378,7 +378,7 @@
       "label": "手动采矿",
       "occurrences": 1,
       "lines": [
-        13604
+        13605
       ],
       "kind": "durable",
       "owner": "rust",
@@ -389,10 +389,10 @@
       "label": "托盘与手持物",
       "occurrences": 8,
       "lines": [
-        13527,
-        13698,
-        13723,
-        14638,
+        13528,
+        13699,
+        13724,
+        14639,
         22416,
         22667,
         22672,
@@ -418,7 +418,7 @@
       "label": "物料配送接口设置",
       "occurrences": 1,
       "lines": [
-        15181
+        15182
       ],
       "kind": "durable",
       "owner": "rust",

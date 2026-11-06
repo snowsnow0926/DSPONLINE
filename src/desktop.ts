@@ -775,6 +775,7 @@ export interface DesktopNativeCoreRecipeDefinition {
   requiredTechId?: string;
   recursivePriority: number;
   recursiveManufacturing: boolean;
+  handcraftable?: boolean;
   inputs: Array<{ itemId: string; amount: number }>;
   outputs: Array<{ itemId: string; amount: number }>;
 }

@@ -15649,7 +15649,7 @@ const NON_HANDCRAFTABLE_RECIPE_IDS = new Set<RecipeId>([
 /** Material recipes can be replicated by hand; facility-only state transitions cannot. */
 export function isHandcraftableRecipe(recipeId: RecipeId): boolean {
   const recipe = getRecipe(recipeId);
-  return Boolean(recipe && recipe.inputs.length > 0 && recipe.outputs.length > 0 && !NON_HANDCRAFTABLE_RECIPE_IDS.has(recipe.id));
+  return Boolean(recipe && recipe.handcraftable !== false && recipe.inputs.length > 0 && recipe.outputs.length > 0 && !NON_HANDCRAFTABLE_RECIPE_IDS.has(recipe.id));
 }
 
 const RECURSIVE_UPSTREAM_ONLY_RECIPE_IDS = new Set<RecipeId>([
@@ -15659,7 +15659,7 @@ const RECURSIVE_UPSTREAM_ONLY_RECIPE_IDS = new Set<RecipeId>([
 /** Facility recipes that may safely run as an internal recursive material step. */
 export function isRecursiveManufacturingRecipe(recipeId: RecipeId): boolean {
   const recipe = getRecipe(recipeId);
-  return Boolean(recipe && recipe.inputs.length > 0 && recipe.outputs.length > 0 &&
+  return Boolean(recipe && recipe.handcraftable !== false && recipe.inputs.length > 0 && recipe.outputs.length > 0 &&
     (isHandcraftableRecipe(recipeId) || RECURSIVE_UPSTREAM_ONLY_RECIPE_IDS.has(recipeId)));
 }
 
@@ -15861,6 +15861,9 @@ function advanceHandcraftQueue(state: GameState, seconds: number): void {
     }
     const duration = Math.max(0.05, recipe.duration);
     if (entry.progress <= EPSILON) {
+      // Finish already-paid work after a pack update, but never start another
+      // now-locked batch. The queue remains available for the player to cancel.
+      if (!isHandcraftableRecipe(recipe.id) || (recipe.requiredTechId && !isTechnologyCompleted(state, recipe.requiredTechId))) break;
       if (!canStoreRecipeOutputsInTray(state, recipe)) break;
       const hasInputs = recipe.inputs.every((input) => (state.tray[input.itemId] ?? 0) + EPSILON >= input.amount);
       if (!hasInputs) break;

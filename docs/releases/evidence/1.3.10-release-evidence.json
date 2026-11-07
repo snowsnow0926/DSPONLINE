@@ -1,0 +1,621 @@
+{
+  "final": {
+    "version": "1.3.10",
+    "runtimeSha": "de383a34bfb1235621784f9939574f19758a1ed6",
+    "allReleaseChecksPassed": true,
+    "verifiedAt": "2026-11-07T02:23:54.326Z",
+    "download": "download-site-1.3.10-de383a34bfb1",
+    "previousDownload": "download-site-1.3.9-2027047763f5",
+    "hongKongWebVersion": "1.3.9",
+    "androidVersion": "1.3.9",
+    "publicDownloadFiles": 28,
+    "installerSha256": "ba27c4addf1a7575ff40c9beed8709206ba516c80f0c925b4c7c5910edfc5aa1",
+    "observationSeconds": 57.17,
+    "evidence": [
+      {
+        "name": "qualification.json",
+        "sha256": "59703077ccf8f9dda957fd9754afe9238e494d293d8ce97bf972b3e3d7b1a991"
+      },
+      {
+        "name": "download-plan.json",
+        "sha256": "39e1e087ca0bf113d2b19154d473bbfd397db888f2e6bbd7e7102bf4681d5c2a"
+      },
+      {
+        "name": "windows-installer-verify.json",
+        "sha256": "8e26627baa8e0293ef10d03215034f497a325ae9b514d9bfd1b9745e3b895b0b"
+      },
+      {
+        "name": "after-button-proof.json",
+        "sha256": "70a99a0a9611c20da0aaee4384dc4d83b776fbb3d308f2387c0d5da92937751f"
+      },
+      {
+        "name": "windows-upgrade-result.json",
+        "sha256": "128a6114481c605c14fca4799d7c13071ea2a7d17b1dcab94a279ac54bed7ba1"
+      },
+      {
+        "name": "stage-download.json",
+        "sha256": "b32505dd5a1b87bf8a1fd615d5d1642e2069615c5af9e42b4507b54ecf0b8c66"
+      },
+      {
+        "name": "activate-download.json",
+        "sha256": "58d953c8a21d767eaebece02586f874c3a17878039a4745b5c46fca06ccf1894"
+      },
+      {
+        "name": "postflight-download.json",
+        "sha256": "3b4bbf2d7227735d132c42a524ddd6b8e8a6441e25961075b8af242d2ba3ce33"
+      },
+      {
+        "name": "observe-download.json",
+        "sha256": "02302ebc73dfcfb20e54aa1ab1c9ee32627098a72e3f2027c0486107dde9697a"
+      },
+      {
+        "name": "public-http-proof.json",
+        "sha256": "479d313eb53eeeada3d67455f3706bebc1d69c7cdfef437137a401009b6e3e23"
+      },
+      {
+        "name": "download-browser-proof.json",
+        "sha256": "917df5227871922b1d76b3a7ef533ca308c187d492307cb6d8cdc9d5f436a000"
+      },
+      {
+        "name": "physical-download-proof.json",
+        "sha256": "bb4872523a55e95a2b3a2489ca262053318012c2ea2cc0a33354de395159ed8d"
+      },
+      {
+        "name": "physical-downloads.log",
+        "sha256": "2f2426e32986e31a57e55f0d43ff8930880448ed0138e8ec344a64d01ff58852"
+      },
+      {
+        "name": "physical-downloads-resume.log",
+        "sha256": "35f2112c3818f666bcef807359929065255a8aa98b88c0131e6dc48c22f62890"
+      },
+      {
+        "name": "download-local-proof.json",
+        "sha256": "a7f5a0231b44e1bc627c8e6500080ae139b2816b7d24daccd2580d7152cf9c55"
+      }
+    ]
+  },
+  "qualification": {
+    "readyForReleasePreflight": true,
+    "runtimeSha": "de383a34bfb1235621784f9939574f19758a1ed6",
+    "version": "1.3.10",
+    "scope": "Windows stable and new Shanghai download site; Hong Kong Web and Android retained at 1.3.9",
+    "unit": {
+      "passed": 3939,
+      "skipped": 38
+    },
+    "rust": {
+      "passed": 1354,
+      "failed": 0,
+      "ignored": 3
+    },
+    "nodeSuites": {
+      "native-tools": {
+        "passed": 639,
+        "failed": 0,
+        "skipped": 1,
+        "cancelled": 0
+      },
+      "server": {
+        "passed": 415,
+        "failed": 0,
+        "skipped": 2,
+        "cancelled": 0
+      },
+      "ops": {
+        "passed": 60,
+        "failed": 0,
+        "skipped": 6,
+        "cancelled": 0
+      },
+      "release-switch": {
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0,
+        "cancelled": 0
+      }
+    },
+    "browser": {
+      "total": 647,
+      "passed": 613,
+      "skipped": 34,
+      "unresolved": 0,
+      "raw": [
+        {
+          "file": "e2e-static.json",
+          "stats": {
+            "startTime": "2026-11-07T02:03:17.665Z",
+            "duration": 729439.739,
+            "expected": 612,
+            "skipped": 34,
+            "unexpected": 1,
+            "flaky": 0
+          }
+        },
+        {
+          "file": "e2e-retry1.json",
+          "stats": {
+            "startTime": "2026-11-07T02:15:41.866Z",
+            "duration": 4919.553,
+            "expected": 1,
+            "skipped": 0,
+            "unexpected": 0,
+            "flaky": 0
+          }
+        }
+      ]
+    },
+    "durable": {
+      "total": 43,
+      "passed": 21,
+      "skipped": 22,
+      "unresolved": 0,
+      "raw": [
+        {
+          "file": "durable-final2.json",
+          "stats": {
+            "startTime": "2026-11-07T02:06:17.017Z",
+            "duration": 127563.834,
+            "expected": 20,
+            "skipped": 22,
+            "unexpected": 1,
+            "flaky": 0
+          }
+        },
+        {
+          "file": "durable-retry1.json",
+          "stats": {
+            "startTime": "2026-11-07T02:09:57.824Z",
+            "duration": 4876.873,
+            "expected": 1,
+            "skipped": 0,
+            "unexpected": 0,
+            "flaky": 0
+          }
+        }
+      ]
+    },
+    "windowsInstallerSha256": "ba27c4addf1a7575ff40c9beed8709206ba516c80f0c925b4c7c5910edfc5aa1",
+    "windowsManifestSha256": "a76fa1d52c550fd4468e2d9992cbf54951fb69230f2849d796c60452af2786eb",
+    "downloadRelease": "download-site-1.3.10-de383a34bfb1",
+    "downloadManifestSha256": "3872401830972d4f318453530d0b58949154e5e7a4d43fb8cd30e72da5ebdd1c",
+    "windowsNotSignedPolicy": true,
+    "runtimeAudits": {
+      "root": 0,
+      "server": 0
+    },
+    "qualifiedAt": "2026-11-07T02:15:50.528Z"
+  },
+  "download": {
+    "releaseId": "download-site-1.3.10-de383a34bfb1",
+    "sourceSha": "de383a34bfb1235621784f9939574f19758a1ed6",
+    "expectedPrevious": "download-site-1.3.9-2027047763f5",
+    "archiveBytes": 113046189,
+    "archiveSha256": "6763d2708a2253e0240f8f9a751ee94613d44daf6318e41a5d03e10a137f7818",
+    "manifestSha256": "3872401830972d4f318453530d0b58949154e5e7a4d43fb8cd30e72da5ebdd1c",
+    "aggregateSha256": "80d98339ef51003ec436dce1cad4756d71163f71791f5c3a759ac0d1f72cdfd5",
+    "finalFileCount": 28,
+    "deltaFileCount": 5,
+    "retainedOldFileCount": 23
+  },
+  "newShanghai": {
+    "checkedAt": "2026-11-07T10:16:44.527674+08:00",
+    "current": "download-site-1.3.10-de383a34bfb1",
+    "previous": "download-site-1.3.9-2027047763f5",
+    "filesVerified": 28,
+    "aggregateSha256": "80d98339ef51003ec436dce1cad4756d71163f71791f5c3a759ac0d1f72cdfd5",
+    "web": "1.2.9-0521eb63f179",
+    "api": "api-1.2.6-df828869e276",
+    "services": {
+      "nginx": {
+        "MainPID": "1852183",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      },
+      "dsp-idle-api-active.service": {
+        "MainPID": "1243306",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      },
+      "dsp-idle-api-handoff-proxy.service": {
+        "MainPID": "1243305",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      }
+    },
+    "nginxConfigUnchanged": true,
+    "nginxSha256": "d6bc345bb54b6be202e9d1567e3fa14f03ddae201b37357fa30d1d423ebf45f0",
+    "certificateUnchanged": true,
+    "certificateSha256": "fb7969caf7e90fea685deafc75a0154134c46c1c49a5b4c0d1ca5163e8030a73",
+    "certificateNotAfter": "Jan 27 11:44:18 2027 GMT",
+    "certificateRenewalTimer": "active",
+    "diskAvailableBytes": 20635615232
+  },
+  "observation": {
+    "ok": true,
+    "checkedAt": "2026-11-07T10:17:37.227257+08:00",
+    "elapsedSeconds": 57.17,
+    "samples": [
+      {
+        "sample": 1,
+        "elapsedSeconds": 0.24,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 2,
+        "elapsedSeconds": 5.4,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 3,
+        "elapsedSeconds": 10.55,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 4,
+        "elapsedSeconds": 15.71,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 5,
+        "elapsedSeconds": 20.94,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 6,
+        "elapsedSeconds": 26.23,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 7,
+        "elapsedSeconds": 31.38,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 8,
+        "elapsedSeconds": 36.53,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 9,
+        "elapsedSeconds": 41.69,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 10,
+        "elapsedSeconds": 46.86,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 11,
+        "elapsedSeconds": 52.01,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 12,
+        "elapsedSeconds": 57.17,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      }
+    ],
+    "productionWritten": false
+  },
+  "publicHttp": {
+    "ok": true,
+    "windowsVersion": "1.3.10",
+    "androidVersion": "1.3.9",
+    "webVersion": "1.3.9",
+    "files": [
+      {
+        "path": "downloads/android/dsp-idle-1.2.7-1002007.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.2.8-1002008.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.2.9-1002009.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.3.5-1003005.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.3.6-1003006.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.3.7-1003007.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.3.8-1003008.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/dsp-idle-1.3.9-1003009.apk",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/android/stable.json",
+        "status": 200,
+        "bytes": 586,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.2.6-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.2.6-x64-setup.exe.blockmap",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.10-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "new binary range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.10-x64-setup.exe.blockmap",
+        "status": 200,
+        "bytes": 118577,
+        "verification": "full SHA-256",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe.blockmap",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.6-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.6-x64-setup.exe.blockmap",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.7-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.7-x64-setup.exe.blockmap",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.8-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.8-x64-setup.exe.blockmap",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.9-x64-setup.exe",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.9-x64-setup.exe.blockmap",
+        "status": 206,
+        "bytes": 1024,
+        "verification": "retained range",
+        "cache": "public, max-age=31536000, immutable"
+      },
+      {
+        "path": "downloads/desktop/stable/latest.yml",
+        "status": 200,
+        "bytes": 356,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      },
+      {
+        "path": "downloads/desktop/stable/release.json",
+        "status": 200,
+        "bytes": 618,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      },
+      {
+        "path": "icon.svg",
+        "status": 200,
+        "bytes": 349,
+        "verification": "full SHA-256",
+        "cache": "max-age=604800, public, max-age=604800"
+      },
+      {
+        "path": "index.html",
+        "status": 200,
+        "bytes": 5629,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      },
+      {
+        "path": "version.json",
+        "status": 200,
+        "bytes": 109,
+        "verification": "full SHA-256",
+        "cache": "no-cache, no-store, must-revalidate"
+      }
+    ],
+    "redirects": [
+      {
+        "path": "/downloads/android/stable.json",
+        "status": 200,
+        "correctDestination": true
+      },
+      {
+        "path": "/downloads/desktop/stable/latest.yml",
+        "status": 200,
+        "correctDestination": true
+      },
+      {
+        "path": "/downloads/android/dsp-idle-1.3.9-1003009.apk",
+        "status": 206,
+        "correctDestination": true
+      },
+      {
+        "path": "/downloads/desktop/stable/dsp-idle-1.3.10-x64-setup.exe",
+        "status": 206,
+        "correctDestination": true
+      }
+    ],
+    "gameHealth": [
+      {
+        "path": "/version.json",
+        "status": 200
+      },
+      {
+        "path": "/api/health",
+        "status": 200
+      },
+      {
+        "path": "/api/ready",
+        "status": 200
+      }
+    ],
+    "verifiedAt": "2026-11-07T02:17:17.578Z"
+  },
+  "publicNative": {
+    "ok": true,
+    "files": [
+      {
+        "path": "downloads/android/dsp-idle-1.3.9-1003009.apk",
+        "bytes": 5923990,
+        "sha256": "543b3c067afd7bc674f7ae7cd5bfffeef34b2f057214e54b08e9ba85ea4e1f73",
+        "strictTls": true,
+        "physicalEgress": true
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.10-x64-setup.exe",
+        "bytes": 112813207,
+        "sha256": "ba27c4addf1a7575ff40c9beed8709206ba516c80f0c925b4c7c5910edfc5aa1",
+        "strictTls": true,
+        "physicalEgress": true,
+        "sha512Base64": "fM2pCyiKKVh0VSuXvgPPZeBE61VJDlzRpG1Tol5NgAmSR0j00JmlKD1aB4MCQgVOpv6YDAxFzIhVx5B60ISH5Q==",
+        "matchesStableFeedSha512": true
+      }
+    ]
+  },
+  "publicBrowser": {
+    "ok": true,
+    "windowsVersion": "1.3.10",
+    "androidVersion": "1.3.9",
+    "bothDownloadButtonsVisible": true,
+    "correctVersionedLinks": true,
+    "publicHttps": true
+  },
+  "windows": {
+    "notSigned": true,
+    "downloadButton": {
+      "ok": true,
+      "version": "1.3.10",
+      "packaged": true,
+      "profileIsolated": true,
+      "sourceUnchanged": true,
+      "checksum": "valid",
+      "clickedRealDownloadButton": true,
+      "factoryEntered": true,
+      "productionRequests": false,
+      "reads": [
+        {
+          "method": "GET",
+          "path": "/api/cloud-save",
+          "dspHeaderNames": []
+        }
+      ]
+    },
+    "upgrade": {
+      "ok": true,
+      "version": "1.3.10",
+      "upgradedFrom": "1.3.9",
+      "packaged": true,
+      "isolatedProfile": true,
+      "networkBlocked": true,
+      "coldReopen": true,
+      "primaryByteIdenticalAfterUpgrade": true,
+      "pageErrors": []
+    }
+  },
+  "limits": [
+    "System NSIS installation not exercised",
+    "No production-account write tests",
+    "Hong Kong Web and Android stay at 1.3.9; no rebuild or rollout",
+    "No low-end or long-duration performance claim"
+  ]
+}

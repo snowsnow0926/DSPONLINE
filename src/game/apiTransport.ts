@@ -37,7 +37,12 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     || /^\/cloud-save(?:\?|$)/.test(path) && (method === "PUT" || method === "GET");
   if (useTransfer) {
     const requestId = headers[CLOUD_TRANSFER_CONTRACT.requestIdHeader] || createCloudRequestId();
-    headers[CLOUD_TRANSFER_CONTRACT.requestIdHeader] = requestId;
+    // Every stream needs a local cancellation/ACK ID. Only the direct cloud
+    // upload protocol admits that ID as an HTTP idempotency header.
+    const directCloudUpload = method === "PUT" && /^\/cloud-save(?:\?|$)/.test(path)
+      && headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() === CLOUD_TRANSFER_CONTRACT.directPayloadContentType;
+    if (directCloudUpload) headers[CLOUD_TRANSFER_CONTRACT.requestIdHeader] = requestId;
+    else delete headers[CLOUD_TRANSFER_CONTRACT.requestIdHeader];
     const body = init.body == null ? new ArrayBuffer(0) : await transferableRequestBody(init.body);
     const abort = () => bridge.cancelApiRequest(requestId);
     if (init.signal?.aborted) {

@@ -50,6 +50,10 @@ function normalizeTransferRequestHeaders(request) {
       headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() === contract.directPayloadContentType &&
       validRequestId(request?.requestId)) {
     headers[contract.requestIdHeader] = request.requestId;
+  } else {
+    // Older renderers already include their local stream ID in headers.
+    // Remove it as well as declining to add it on non-upload requests.
+    delete headers[contract.requestIdHeader];
   }
   return headers;
 }

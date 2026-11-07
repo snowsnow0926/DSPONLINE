@@ -73,7 +73,7 @@ test("desktop cloud reads keep the IPC request ID out of HTTP headers", async ()
   const { bodyCapabilityForRoute } = await import("../server/http-route-policy.mjs");
   const { inspectHttpRequest } = await import("../server/http-security.mjs");
   for (const path of ["/cloud-save", "/cloud-save?slotId=1", "/cloud-save?mode=speedrun", "/account", "/account/export/archive"]) {
-    const headers = normalizeTransferRequestHeaders({ method: "GET", path, requestId: "download_12345678", headers: { authorization: "Bearer test", "x-dsp-save-mode": "speedrun" } });
+    const headers = normalizeTransferRequestHeaders({ method: "GET", path, requestId: "download_12345678", headers: { authorization: "Bearer test", "x-dsp-save-mode": "speedrun", [contract.requestIdHeader]: "download_12345678" } });
     assert.equal(headers[contract.requestIdHeader], undefined, path);
     assert.equal(headers["x-dsp-save-mode"], "speedrun");
     const allowed = bodyCapabilityForRoute("GET", `/api${path.split("?")[0]}`).allowedCustomHeaders;
@@ -87,7 +87,7 @@ test("desktop cloud reads keep the IPC request ID out of HTTP headers", async ()
 test("only a direct cloud upload receives the transfer idempotency header", () => {
   const request = { method: "PUT", path: "/cloud-save?slotId=2", requestId: "upload_12345678", headers: { "content-type": contract.directPayloadContentType, [contract.expectedRevisionHeader]: "7" } };
   assert.equal(normalizeTransferRequestHeaders(request)[contract.requestIdHeader], request.requestId);
-  for (const change of [{ method: "POST" }, { path: "/account" }, { headers: { "content-type": "application/json" } }]) {
+  for (const change of [{ method: "POST" }, { path: "/account" }, { headers: { "content-type": "application/json", [contract.requestIdHeader]: request.requestId } }]) {
     assert.equal(normalizeTransferRequestHeaders({ ...request, ...change })[contract.requestIdHeader], undefined);
   }
 });

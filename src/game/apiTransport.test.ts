@@ -98,7 +98,38 @@ describe("apiFetch", () => {
       expectedResponseBytes: CLOUD_TRANSFER_CONTRACT.singleSaveResponseLimitBytes,
       timeoutMs: cloudRequestTimeoutMs(0, CLOUD_TRANSFER_CONTRACT.singleSaveResponseLimitBytes),
     });
+    expect(requestApiTransfer.mock.calls[0][0].headers).not.toHaveProperty(CLOUD_TRANSFER_CONTRACT.requestIdHeader);
     await expect(response.json()).resolves.toEqual({ cloudSave: { payload: "large-save" } });
+  });
+
+  it("keeps an existing read stream ID local without changing the caller's headers", async () => {
+    const requestApiTransfer = vi.fn().mockResolvedValue({
+      ok: true, status: 200, bodyBuffer: new TextEncoder().encode("{}").buffer, headers: {},
+    });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { dspDesktop: desktopBridge({ requestApiTransfer }) } });
+    const headers = new Headers({ [CLOUD_TRANSFER_CONTRACT.requestIdHeader]: "cloud_read_existing", authorization: "Bearer test" });
+    await apiFetch("https://dsponline.cn/api/cloud-save", { headers });
+    expect(requestApiTransfer.mock.calls[0][0].requestId).toBe("cloud_read_existing");
+    expect(requestApiTransfer.mock.calls[0][0].headers).toEqual({ authorization: "Bearer test" });
+    expect(headers.get(CLOUD_TRANSFER_CONTRACT.requestIdHeader)).toBe("cloud_read_existing");
+  });
+
+  it("sends the idempotency ID only on a direct cloud upload", async () => {
+    const requestApiTransfer = vi.fn().mockResolvedValue({
+      ok: true, status: 200, bodyBuffer: new TextEncoder().encode("{}").buffer, headers: {},
+    });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { dspDesktop: desktopBridge({ requestApiTransfer }) } });
+    await apiFetch("https://dsponline.cn/api/cloud-save?slotId=1", {
+      method: "PUT", body: "{}", headers: { "content-type": CLOUD_TRANSFER_CONTRACT.directPayloadContentType },
+    });
+    const direct = requestApiTransfer.mock.calls[0][0];
+    expect(direct.headers[CLOUD_TRANSFER_CONTRACT.requestIdHeader]).toBe(direct.requestId);
+    await apiFetch("https://dsponline.cn/api/cloud-save", {
+      method: "PUT", body: "{}", headers: { "content-type": "application/json", [CLOUD_TRANSFER_CONTRACT.requestIdHeader]: "cloud_legacy_existing" },
+    });
+    const legacy = requestApiTransfer.mock.calls[1][0];
+    expect(legacy.requestId).toBe("cloud_legacy_existing");
+    expect(legacy.headers).not.toHaveProperty(CLOUD_TRANSFER_CONTRACT.requestIdHeader);
   });
 
   it("normalizes an omitted bridge verb for ordinary API requests", async () => {

@@ -39,7 +39,7 @@ for (const { denySnapshot, backend } of [
     if (backend === "local-storage") Object.defineProperty(window, "indexedDB", { configurable: true, value: { open() { throw new DOMException("fixture", "InvalidStateError"); } } });
     if (!sessionStorage.getItem("slot-recovery-seeded")) {
       sessionStorage.setItem("slot-recovery-seeded", "1");
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.9");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.10");
       localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
       localStorage.setItem("dsp-idle-network.cloud-token.v1", "isolated-slot-recovery-token");
       const state = { version: 47, entities: [], belts: [], construction: {}, tray: { iron_ore: 42 }, paused: true,

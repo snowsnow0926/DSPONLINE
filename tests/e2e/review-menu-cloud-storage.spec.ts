@@ -51,7 +51,7 @@ test(`menu cloud ${scenario.slot} recovery reports unavailable with read-only st
     Object.defineProperty(window, "indexedDB", { configurable: true, value: { open() { throw new DOMException("fixture", "InvalidStateError"); } } });
     if (!sessionStorage.getItem("cloud-slot-seeded")) {
       sessionStorage.setItem("cloud-slot-seeded", "1");
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.9");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.10");
       localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
       localStorage.setItem("dsp-idle-network.cloud-token.v1", "isolated-cloud-slot-token");
       localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state }));

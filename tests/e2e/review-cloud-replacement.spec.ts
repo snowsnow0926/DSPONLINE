@@ -42,7 +42,7 @@ test("cloud replacement requires a verified recovery snapshot and retries safely
     localStorage.setItem("dsp-idle-network.cloud-token.v1", "isolated-snapshot-fixture-token");
     if (sessionStorage.getItem("cloud-snapshot-seeded")) return;
     sessionStorage.setItem("cloud-snapshot-seeded", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.9");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.10");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state: {
       version: 47, entities: [], belts: [], construction: {}, tray: { iron_ore: 42 }, paused: true,
@@ -142,7 +142,7 @@ test(scenario === "switch" ? "an earlier cloud restore cannot replace a factory 
     localStorage.setItem("dsp-idle-network.cloud-token.v1", "isolated-cloud-epoch-token");
     if (sessionStorage.getItem("cloud-epoch-seeded")) return;
     sessionStorage.setItem("cloud-epoch-seeded", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.9");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.10");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     const state = {
       version: 47, entities: [], belts: [], construction: {}, tray: { iron_ore: 42 }, paused: true,

@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-11-07-v1.3.9";
+const RELEASE_NOTE_ID = "2026-11-07-v1.3.10";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next", lockedPlanets = false) {
   await page.addInitScript(({ releaseNoteId, mobileUi, lockedPlanets }) => {
@@ -134,21 +134,17 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en&releaseNotesTest=1");
-  const dialog = page.getByRole("dialog", { name: "Content Pack Upgrade and Cloud Save Fixes" });
+  const dialog = page.getByRole("dialog", { name: "Windows Cloud Download Hotfix" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.3.9");
-  await expect(dialog).toContainText("Windows cloud-save downloads");
-  await expect(dialog).toContainText("Visual content-pack authoring");
-  await expect(dialog).toContainText("Handcraft and recipe unlock rules");
-  await expect(dialog).toContainText("Technology changes actual production");
-  await expect(dialog).toContainText("Custom fuel, power and resources");
-  await expect(dialog).toContainText("Clearer feedback when taking items");
-  await expect(dialog).toContainText("Update content packs without clearing stock");
-  await expect(dialog).toContainText("Existing factories and save formats remain compatible.");
+  await expect(dialog).toContainText("1.3.10");
+  await expect(dialog).toContainText("Cloud saves download normally");
+  await expect(dialog).toContainText("Upload and cancellation remain protected");
+  await expect(dialog).toContainText("Existing saves remain compatible");
+  await expect(dialog).toContainText("Existing factories, inventories, research and content packs are preserved.");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-07-v1.3.9");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-07-v1.3.10");
 });
 
 test("English light primary workspaces use opaque light surfaces", async ({ page }) => {

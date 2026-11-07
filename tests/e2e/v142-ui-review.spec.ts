@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { workflowTimeoutMs } from "./startup-timeout";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-11-07-v1.3.9";
+const RELEASE_NOTE_ID = "2026-11-07-v1.3.10";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -528,16 +528,12 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "内容包全面升级与云存档修复");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.9");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(7);
-  await expect(dialog).toContainText("Windows 云存档下载修复");
-  await expect(dialog).toContainText("可视化内容包作者工具");
-  await expect(dialog).toContainText("手合、配方限制与分组解锁");
-  await expect(dialog).toContainText("科技加成实际生效");
-  await expect(dialog).toContainText("自定义燃料、发电与资源");
-  await expect(dialog).toContainText("建筑取料反馈更明确");
-  await expect(dialog).toContainText("内容包保档更新与旧 ID 迁移");
+  await expect(dialog).toHaveAttribute("aria-label", "Windows 云存档下载热修");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.10");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(3);
+  await expect(dialog).toContainText("云存档恢复正常下载");
+  await expect(dialog).toContainText("保留上传与取消保护");
+  await expect(dialog).toContainText("现有存档继续兼容");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

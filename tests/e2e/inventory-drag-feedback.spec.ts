@@ -16,7 +16,7 @@ for (const scenario of ["paused", "running", "full-tray"] as const) {
       sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
       localStorage.setItem("dsp-idle-network.save.v1", raw);
       localStorage.setItem("dsp-idle-network.ui.show-run-log.v1", "false");
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.9");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.10");
       localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     }, serializeEnvelope(state, Date.now()));
     await page.route("**/api/**", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"isolated inventory test"}' }));

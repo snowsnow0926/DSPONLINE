@@ -8,7 +8,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.9");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.10");
     }
   });
 }
@@ -1603,16 +1603,12 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "内容包全面升级与云存档修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.9");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
-  await expect(releaseNotes).toContainText("Windows 云存档下载修复");
-  await expect(releaseNotes).toContainText("可视化内容包作者工具");
-  await expect(releaseNotes).toContainText("手合、配方限制与分组解锁");
-  await expect(releaseNotes).toContainText("科技加成实际生效");
-  await expect(releaseNotes).toContainText("自定义燃料、发电与资源");
-  await expect(releaseNotes).toContainText("建筑取料反馈更明确");
-  await expect(releaseNotes).toContainText("内容包保档更新与旧 ID 迁移");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 云存档下载热修");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.10");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(3);
+  await expect(releaseNotes).toContainText("云存档恢复正常下载");
+  await expect(releaseNotes).toContainText("保留上传与取消保护");
+  await expect(releaseNotes).toContainText("现有存档继续兼容");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1638,9 +1634,9 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "内容包全面升级与云存档修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.9");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 云存档下载热修");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.10");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(3);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1678,16 +1674,16 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-07-v1.3.9");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-07-v1.3.10");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
   await page.getByRole("button", { name: "查看2026年11月7日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "内容包全面升级与云存档修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.9");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 云存档下载热修");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.10");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(3);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1697,9 +1693,9 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "内容包全面升级与云存档修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.9");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(7);
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Windows 云存档下载热修");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.10");
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(3);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-844x390.png", fullPage: true });

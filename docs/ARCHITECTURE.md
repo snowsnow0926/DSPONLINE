@@ -12,7 +12,7 @@ v4 的 `contentRules.ts` 管理声明式科技倍率、配方门槛/白名单、
 
 注册表先验证候选目录、持久写入并逐字读回，成功后才更新 React/Worker 快照；失败恢复旧目录。核心配方、科技与施工定义在每次目录重建前恢复，停用包不会遗留覆盖。`handcraftable` 在 JS 与 Rust 目录中传递；旧目录省略字段保留既有行为，已扣料的队列批次完成后才遵守新门禁。
 
-Electron MessagePort 的 IPC 请求 ID 只参与本地流式传输与取消；仅直接上传协议将它写成 `x-dsp-request-id`。云读取不附带上传头，保留服务器现有路由校验与保存模式头。
+Electron MessagePort 的 IPC 请求 ID 只参与本地流式传输与取消；仅直接上传协议将它写成 `x-dsp-request-id`。前端 `apiTransport.ts` 与桌面 `cloud-transport.cjs` 均须约束HTTP请求头，非直接上传须删除已有值，不能仅停止主动追加。1.3.9的前端漏修已由完整调用链和正式包按钮反例确认，`4c792dd337b7` 为本地修补，尚未发布；服务器现有读取白名单与保存模式头保持。
 
 接手候选将手动云槽位的直接下载和冲突选择合用 `preserveCloudRestoreSlot`：从实际模式/槽位 key 读取旧正文，目录仍占用但正文不可读时拒绝覆盖，有效旧档先取得已验证快照。正文槽位检查复用 `cloudRestoreTargetIssue`；客户端先拒绝显式不符的返回槽位，再补旧元数据默认值。App 的蓝图名/区域名加入组件实例及成功工厂替换代次，旧回调在 React 更新前失效；不全局清草稿。大字号头栏由 CSS 内容列宽和内部滚动容纳，不增加逐帧测量。存储公共 API、持久格式及 Native 权威协议保持。[复现与当前资格](./reviews/2026-11-05-develop-takeover.md)。
 

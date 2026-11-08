@@ -63,7 +63,7 @@ export function getContentPackUpdateReport(previous: ContentPackManifest, next: 
     const replacement = next.resources?.find((entry) => entry.itemId === resource.itemId);
     if (!replacement || replacement.extractorBuildingId !== resource.extractorBuildingId) issues.push(`${resource.itemId} 的资源采集映射必须保留，不能无偿转换已安装矿机`);
   }
-  for (const key of ["buildingOverrides", "recipeOverrides", "technologyOverrides", "constructionOverrides"] as const) {
+  for (const key of ["buildingOverrides", "recipeOverrides", "technologyOverrides", "constructionOverrides", "itemOverrides", "beltOverrides"] as const) {
     const before = new Map((previous[key] ?? []).map((entry) => [entry.id, entry]));
     const after = new Map((next[key] ?? []).map((entry) => [entry.id, entry]));
     added += [...after.keys()].filter((id) => !before.has(id)).length;

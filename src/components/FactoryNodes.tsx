@@ -27,7 +27,8 @@ import {
 import { Handle, Position, useUpdateNodeInternals, type Node, type NodeProps } from "@xyflow/react";
 import { memo, useEffect, useRef, useState, type RefObject, type ReactNode } from "react";
 import { getCategoryName } from "../game/contentRules";
-import { FUEL_ENERGY_MJ, ITEMS, MATRIX_ITEM_IDS, getBuilding, getExtractorBuildingId, getFuelItemIdsForBuilding, getItem, getProliferator, getRecipe, getRecipesForBuilding } from "../game/content";
+import { FUEL_ENERGY_MJ, MATRIX_ITEM_IDS, getExtractorBuildingId, getFuelItemIdsForBuilding, getProliferator, getRecipesForBuilding } from "../game/content";
+import { ITEM_PRESENTATIONS as ITEMS, getBuildingPresentation as getBuilding, getItemPresentation as getItem, getRecipePresentation as getRecipe } from "../game/contentPresentation";
 import { MATERIAL_DELIVERY_SLOT_COUNT, getEntityProliferatorItemId, getEntityProliferatorPowerMultiplier, getEntityProliferatorSpeedMultiplier, getMaterialDeliveryItems, getMaterialDeliverySlots, getStationDroneCapacity, getStationSlots, getStationVesselCapacity, type ResourceReserveSnapshot } from "../game/engine";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { RecipeCatalogPicker } from "./CatalogPicker";

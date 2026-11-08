@@ -56,6 +56,7 @@ import type { ModRecipeDefinition, ModRecipeOverride, ModValidationResult } from
 import { getContentPackDependencyStatuses, getContentPackUpdateReport, getContentPackUsage, registerContentPack, type ContentPackRegistry } from "../game/contentPacks";
 import { exportTextFile } from "../game/fileExport";
 import { ContentPackAuthor } from "./ContentPackAuthor";
+import { prepareContentPackRemoval } from "../game/contentPackRemoval";
 import type { AutomaticPerformanceReport } from "../game/benchmark";
 import { NativeUpdateCard } from "./NativeUpdateCard";
 import type { AutosaveIntervalSeconds, CargoStackSize, DefaultBeltRouteMode, DifficultyMode, FontScale, GameSettings, GameState, SimulationSpeed } from "../game/types";
@@ -107,6 +108,7 @@ interface OperationsWorkspaceProps {
   importPreview: SaveInspection | null;
   modValidation: ModValidationResult | null;
   contentPackRegistry: ContentPackRegistry;
+  contentPackOperationPending?: boolean;
   performanceReport: AutomaticPerformanceReport | null;
   productionRefreshPreference: ProductionRefreshPreference;
   productionRefreshIntervalMs: number;
@@ -193,7 +195,7 @@ interface OperationsWorkspaceProps {
   onExportModTemplate: () => void;
   onRegisterContentPack: () => void;
   onSetContentPackEnabled: (packId: string, enabled: boolean) => void;
-  onRemoveContentPack: (packId: string) => void;
+  onRemoveContentPack: (packId: string, cleanup?: boolean) => void;
   logisticsActions: Omit<LogisticsManagementPanelProps, "game">;
 }
 
@@ -1154,6 +1156,7 @@ function ContentPacksPanel({
   onRegister,
   onSetEnabled,
   onRemove,
+  operationPending = false,
 }: {
   game: GameState;
   registry: ContentPackRegistry;
@@ -1163,12 +1166,17 @@ function ContentPacksPanel({
   onExportTemplate: () => void;
   onRegister: () => void;
   onSetEnabled: (packId: string, enabled: boolean) => void;
-  onRemove: (packId: string) => void;
+  onRemove: (packId: string, cleanup?: boolean) => void;
+  operationPending?: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLDetailsElement>(null);
   const [draft, setDraft] = useState("");
   const [exportError, setExportError] = useState<string | null>(null);
+  const [removalId, setRemovalId] = useState<string | null>(null);
+  const [removalConfirmed, setRemovalConfirmed] = useState(false);
+  const removalPack = removalId ? registry.packs[removalId] : undefined;
+  const removalPlan = useMemo(() => removalPack ? prepareContentPackRemoval(game, removalPack.manifest) : null, [game, removalPack]);
   const validateDraft = (raw: string) => { setDraft(raw); onValidate(raw); };
   const fileImport = useFileImport({ read: (file) => file.text(), onImport: validateDraft, onStart: onClearValidation });
   const packs = useMemo(() => Object.values(registry.packs).sort((left, right) => left.manifest.name.localeCompare(right.manifest.name, "zh-CN")), [registry]);
@@ -1214,11 +1222,11 @@ function ContentPacksPanel({
         {exportError ? <p role="alert">{exportError}</p> : null}
         {validation && fileImport.status === null ? <div className={`content-pack-registration${validation.valid ? " content-pack-registration--valid" : " content-pack-registration--invalid"}`}>
           <div><FileCheck2 size={15} /><span><strong>{validation.manifest?.name ?? "未识别内容包"}</strong><small>{validation.manifest?.id ?? "--"} · v{validation.manifest?.version ?? "--"}</small></span></div>
-          <p>{validation.valid ? `物品 ${validation.counts.items} · 建筑 ${validation.counts.buildings} · 配方 ${validation.counts.recipes} · 科技 ${validation.counts.technologies}` : validation.issues.find((issue) => issue.severity === "error")?.message ?? "内容包格式无效"}</p>
+          <p>{validation.valid ? `物品 ${validation.counts.items} · 建筑 ${validation.counts.buildings} · 配方 ${validation.counts.recipes} · 科技 ${validation.counts.technologies}${manifest?.itemOverrides?.length || manifest?.beltOverrides?.length ? ` · 原版物品/传送带覆盖 ${(manifest.itemOverrides?.length ?? 0) + (manifest.beltOverrides?.length ?? 0)}` : ""}` : validation.issues.find((issue) => issue.severity === "error")?.message ?? "内容包格式无效"}</p>
           {validation.manifest?.dependencies?.length ? <span className="content-pack-preview-deps">依赖 {validation.manifest.dependencies.join(" · ")}</span> : null}
           {update ? <p className="content-pack-update-preview" role="status">{previous?.manifest.version} → {manifest?.version} · 新增 {update.added} 项 · 修改 {update.changed} 项 · {update.compatible ? "兼容更新，保留原有物品和进度" : update.issues.join("；")}</p> : null}
           {registrationBlocked ? <p role="alert">{registration?.reason}</p> : null}
-          <button type="button" disabled={!validation.valid || registrationBlocked} onClick={onRegister}><PackagePlus size={14} />{previous ? "兼容更新并启用" : "注册并启用"}</button>
+          <button type="button" disabled={!validation.valid || registrationBlocked || operationPending} onClick={onRegister}><PackagePlus size={14} />{previous ? "兼容更新并启用" : "注册并启用"}</button>
           {validation.issues.length > 0 ? <details className="content-pack-issues"><summary>查看全部 {validation.issues.length} 条校验结果</summary><ul>{validation.issues.map((issue, index) => <li key={`${issue.path}-${issue.code}-${index}`}>{issue.path}：{issue.message}</li>)}</ul></details> : null}
           {validation.valid && manifest && (manifest.recipes?.length || manifest.recipeOverrides?.length) ? <details className="content-pack-recipe-rules"><summary>配方手合与科技配置</summary>{([...(manifest.recipes ?? []).map((recipe) => ({ key: "recipes" as const, recipe })), ...(manifest.recipeOverrides ?? []).map((recipe) => ({ key: "recipeOverrides" as const, recipe }))]).map(({ key, recipe }: { key: "recipes" | "recipeOverrides"; recipe: ModRecipeDefinition | ModRecipeOverride }) => <div className="content-pack-recipe-rule" key={`${key}:${recipe.id}`}>
             <strong>{"name" in recipe ? recipe.name : RECIPES[recipe.id as keyof typeof RECIPES]?.name ?? recipe.id}<small>{recipe.id}</small></strong>
@@ -1241,16 +1249,26 @@ function ContentPacksPanel({
             </header>
             {pack.manifest.description ? <p>{pack.manifest.description}</p> : null}
             {pack.compatibleVersions?.length ? <p>可读取旧版存档：{pack.compatibleVersions.join("、")}</p> : null}
-            <div className="content-pack-counts"><span>物品 <strong>{pack.manifest.items?.length ?? 0}</strong></span><span>建筑 <strong>{pack.manifest.buildings?.length ?? 0}</strong></span><span>配方 <strong>{pack.manifest.recipes?.length ?? 0}</strong></span><span>科技 <strong>{pack.manifest.technologies?.length ?? 0}</strong></span></div>
+            <div className="content-pack-counts"><span>物品 <strong>{pack.manifest.items?.length ?? 0}</strong></span><span>建筑 <strong>{pack.manifest.buildings?.length ?? 0}</strong></span><span>配方 <strong>{pack.manifest.recipes?.length ?? 0}</strong></span><span>科技 <strong>{pack.manifest.technologies?.length ?? 0}</strong></span>{pack.manifest.itemOverrides?.length || pack.manifest.beltOverrides?.length ? <span>原版物品/传送带覆盖 <strong>{(pack.manifest.itemOverrides?.length ?? 0) + (pack.manifest.beltOverrides?.length ?? 0)}</strong></span> : null}</div>
             <div className="content-pack-dependencies"><strong>版本依赖</strong>{dependencies.length === 0 ? <span className="content-pack-dependency content-pack-dependency--ready"><CheckCircle2 size={12} />无外部依赖</span> : dependencies.map((dependency) => <span className={`content-pack-dependency${dependency.satisfied ? " content-pack-dependency--ready" : " content-pack-dependency--blocked"}`} key={dependency.specifier}>{dependency.satisfied ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}{dependency.id}{dependency.range ? ` ${dependency.range}` : ""}<small>{dependency.satisfied ? `v${dependency.version}` : dependency.reason}</small></span>)}</div>
             <footer>
               <span className={usage.total > 0 ? "content-pack-usage content-pack-usage--used" : "content-pack-usage"}>{usage.total > 0 ? `存档引用：${usage.entries.join(" · ")}` : "当前存档未引用"}</span>
-              <div><button type="button" onClick={() => { setDraft(JSON.stringify(pack.manifest, null, 2)); onClearValidation(); if (editorRef.current) { editorRef.current.open = true; editorRef.current.scrollIntoView({ block: "nearest" }); } }}>编辑配置</button><button type="button" onClick={() => void exportManifest(JSON.stringify(pack.manifest, null, 2), `${pack.manifest.id}-${pack.manifest.version}.json`)} aria-label={`导出${pack.manifest.name}`}><Download size={13} />导出</button><button type="button" onClick={() => onSetEnabled(pack.manifest.id, !pack.enabled)} title={pack.enabled ? "停用内容包" : "启用内容包"}><Power size={13} />{pack.enabled ? "停用" : "启用"}</button><button className="danger" type="button" onClick={() => onRemove(pack.manifest.id)} title="移除内容包" aria-label={`移除${pack.manifest.name}`}><Trash2 size={13} /></button></div>
+              <div><button type="button" onClick={() => { setDraft(JSON.stringify(pack.manifest, null, 2)); onClearValidation(); if (editorRef.current) { editorRef.current.open = true; editorRef.current.scrollIntoView({ block: "nearest" }); } }}>编辑配置</button><button type="button" onClick={() => void exportManifest(JSON.stringify(pack.manifest, null, 2), `${pack.manifest.id}-${pack.manifest.version}.json`)} aria-label={`导出${pack.manifest.name}`}><Download size={13} />导出</button><button type="button" disabled={operationPending} onClick={() => onSetEnabled(pack.manifest.id, !pack.enabled)} title={pack.enabled ? "停用内容包" : "启用内容包"}><Power size={13} />{pack.enabled ? "停用" : "启用"}</button>{usage.total > 0 ? <button type="button" disabled={operationPending} onClick={() => { setRemovalId(pack.manifest.id); setRemovalConfirmed(false); }}>清理残留并移除</button> : null}<button className="danger" type="button" disabled={operationPending} onClick={() => onRemove(pack.manifest.id)} title="移除内容包" aria-label={`移除${pack.manifest.name}`}><Trash2 size={13} /></button></div>
             </footer>
             {pack.previousManifests?.length ? <details className="content-pack-history"><summary>旧版配置备份（{pack.previousManifests.length}）</summary>{pack.previousManifests.map((old) => <button type="button" key={old.version} onClick={() => void exportManifest(JSON.stringify(old, null, 2), `${old.id}-${old.version}.json`)}>导出 v{old.version}</button>)}</details> : null}
           </article>;
         })}
       </section>
+      {removalPack && removalPlan ? <section className="content-pack-removal-preview" role="group" aria-label="移除内容包确认">
+        <strong>清理并移除：{removalPack.manifest.name}</strong>
+        <p>请先暂停工厂。操作前会保存完整回滚快照，并保留最近 8 份已移除配置供恢复。</p>
+        <p>将清理：{removalPlan.cleanup.join(" · ") || "没有可自动清理的残留"}。</p>
+        {removalPlan.blockers.total > 0 ? <p role="alert">仍有真实内容：{removalPlan.blockers.entries.join(" · ")}。先回收物资、矿机、线路或相关蓝图后再试。</p> : <p>当前库存、设备和其他内容包保持；已消耗的科研材料不返还。</p>}
+        <label><input type="checkbox" checked={removalConfirmed} disabled={operationPending} onChange={event => setRemovalConfirmed(event.target.checked)} />我理解将清理以上资源点、科技记录、历史统计及零库存索引</label>
+        <div className="content-pack-actions"><button type="button" disabled={!game.paused || operationPending || !removalConfirmed || removalPlan.blockers.total > 0} onClick={() => { setRemovalConfirmed(false); onRemove(removalPack.manifest.id, true); }}>确认清理并安全移除</button><button type="button" disabled={operationPending} onClick={() => setRemovalId(null)}>取消</button></div>
+      </section> : null}
+      {operationPending ? <p role="status">正在保存卸载前快照并安全移除内容包…</p> : null}
+      {registry.removedManifests?.length ? <details className="content-pack-history"><summary>已移除内容包配置备份（{registry.removedManifests.length}）</summary><p>恢复旧快照前，先载入配置并注册启用对应内容包。</p>{registry.removedManifests.map(old => <div className="content-pack-actions" key={`${old.id}@${old.version}`}><span>{old.name} · v{old.version}</span><button type="button" disabled={operationPending} onClick={() => validateDraft(JSON.stringify(old, null, 2))}>载入配置</button><button type="button" onClick={() => void exportManifest(JSON.stringify(old, null, 2), `${old.id}-${old.version}.json`)}>导出配置备份</button></div>)}</details> : null}
     </div>
   );
 }
@@ -1421,7 +1439,7 @@ export function OperationsWorkspace(props: OperationsWorkspaceProps) {
         {props.tab === "settings" ? <WindowsNativePerformancePolicySetting /> : null}
         {props.tab === "performance" ? <PerformancePanel game={props.game} snapshot={props.performanceMonitor} onStart={props.onStartPerformanceMonitor} onStop={props.onStopPerformanceMonitor} onClear={props.onClearPerformanceMonitor} onExport={props.onExportPerformanceMonitor} /> : null}
         {props.tab === "saves" ? <SavesPanel {...props} /> : null}
-        {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onClearValidation={props.onClearModValidation} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} /> : null}
+        {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onClearValidation={props.onClearModValidation} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} operationPending={props.contentPackOperationPending} /> : null}
         {props.tab === "support" ? <SupportPanel game={props.game} report={props.performanceReport} /> : null}
       </div>
     </WorkspaceFrame>

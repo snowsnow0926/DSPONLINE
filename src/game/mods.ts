@@ -1,9 +1,10 @@
 import { BUILDINGS, CONSTRUCTION, ITEMS, MATRIX_ITEM_IDS, RECIPES, TECHNOLOGIES, validateContentCatalog } from "./content";
 import type { BuildingDefinition, BuildingPortDefinition, CatalogPresentation, ItemDefinition } from "./types";
-import type { ContentRules } from "./contentRules";
+import type { ContentRules, IdMigration } from "./contentRules";
 import { validateContentRules } from "./contentRulesValidation";
+import { parseCoreContentOverrides, type ModItemOverride, type ModBeltOverride } from "./contentPackOverrides";
 
-export const MOD_FORMAT_VERSION = 4;
+export const MOD_FORMAT_VERSION = 5;
 // Capture the core before any local pack is activated. Live catalog IDs also
 // include the previous version of the very pack an author is updating.
 const CORE_ITEMS = new Set(Object.keys(ITEMS));
@@ -11,6 +12,14 @@ const CORE_BUILDINGS = new Set(Object.keys(BUILDINGS));
 const CORE_RECIPES = new Set(Object.keys(RECIPES));
 const CORE_TECHNOLOGIES = new Map(Object.entries(TECHNOLOGIES));
 const CORE_CONSTRUCTION = new Set(CONSTRUCTION.map((entry) => String(entry.buildingId)));
+
+export function isCoreContentPackId(kind: IdMigration["kind"], id: string): boolean {
+  if (kind === "items") return CORE_ITEMS.has(id);
+  if (kind === "buildings") return CORE_BUILDINGS.has(id);
+  if (kind === "recipes") return CORE_RECIPES.has(id);
+  if (kind === "technologies") return CORE_TECHNOLOGIES.has(id);
+  return /^conveyor_belt_mk[123]$/.test(id) && CORE_CONSTRUCTION.has(id);
+}
 
 export interface ModItemDefinition extends CatalogPresentation {
   id: string;
@@ -140,6 +149,8 @@ export interface ContentPackManifest extends ContentRules {
   recipeOverrides?: ModRecipeOverride[];
   technologyOverrides?: ModTechnologyOverride[];
   constructionOverrides?: ModConstructionOverride[];
+  itemOverrides?: ModItemOverride[];
+  beltOverrides?: ModBeltOverride[];
 }
 
 export interface ParsedContentPackDependency {
@@ -258,8 +269,8 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
   }
   const formatVersion = typeof value.formatVersion === "number" ? value.formatVersion : 0;
   if (value.compatibleSaveVersions !== undefined && (!Array.isArray(value.compatibleSaveVersions) || value.compatibleSaveVersions.length > 128 || value.compatibleSaveVersions.some((version: unknown) => typeof version !== "string" || !parseVersion(version)))) issues.push({ severity: "error", code: "save-versions", path: "$.compatibleSaveVersions", message: "兼容存档版本必须是最多 128 个语义版本号" });
-  if (![1, 2, 3, MOD_FORMAT_VERSION].includes(formatVersion)) {
-    issues.push({ severity: "error", code: "format-version", path: "$.formatVersion", message: "内容包格式必须为 v1、v2、v3 或 v4" });
+  if (![1, 2, 3, 4, MOD_FORMAT_VERSION].includes(formatVersion)) {
+    issues.push({ severity: "error", code: "format-version", path: "$.formatVersion", message: "内容包格式必须为 v1、v2、v3、v4 或 v5" });
   }
   for (const [key, label] of [["id", "内容包 ID"], ["name", "内容包名称"], ["version", "版本号"]] as const) {
     if (!nonEmpty(value[key])) issues.push({ severity: "error", code: "metadata", path: `$.${key}`, message: `${label}不能为空` });
@@ -547,6 +558,7 @@ function parseManifest(value: unknown, issues: ModValidationIssue[], context?: C
     constructionOverrides,
   };
   Object.assign(manifest, validateContentRules(value, manifest, issues, context));
+  Object.assign(manifest, parseCoreContentOverrides(value, allTechnologies, issues, allItems));
   for (const key of ["items", "buildings", "recipes"] as const) {
     for (const entry of manifest[key] ?? []) {
       const raw = value[key]?.find?.((candidate: any) => candidate?.id === entry.id);

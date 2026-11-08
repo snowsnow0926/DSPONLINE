@@ -48,7 +48,7 @@ import { normalizeOrbitalStationState } from "./orbitalStation";
 import { isSpaceStationFeatureEnabled } from "./spaceStationFeature";
 import { getOrbitalCargoPortItems } from "./stationCargoTerminal";
 import { addStationInteger } from "./stationMath";
-import { getMissingContentPackRequirements, loadContentPackRegistry, type ContentPackRegistry } from "./contentPacks";
+import { createContentPackRuntimeSnapshot, getContentPackRegistryFingerprint, getMissingContentPackRequirements, loadContentPackRegistry, type ContentPackRegistry } from "./contentPacks";
 import { addContentPackResources } from "./contentRules";
 import { migrateContentPackIds } from "./contentIdMigration";
 import { projectPersistentSaveState } from "./saveProjection";
@@ -128,6 +128,7 @@ type CachedSaveSummary = {
 };
 
 const saveSummaryCache = new Map<string, CachedSaveSummary>();
+let saveSummaryCatalogGeneration = 0;
 
 export type SaveSlotId = 1 | 2 | 3;
 export const SAVE_MODES: readonly SaveMode[] = ["normal", "speedrun"];
@@ -392,8 +393,9 @@ function pruneSaveSummaryCache(keys: Iterable<string>, scope: "slots" | "snapsho
   }
 }
 
-function invalidateSaveSummaryCache(key: string): void {
-  saveSummaryCache.delete(key);
+export function invalidateSaveSummaryCache(key?: string): void {
+  if (key !== undefined) saveSummaryCache.delete(key);
+  else { saveSummaryCache.clear(); saveSummaryCatalogGeneration += 1; }
 }
 
 function integerRecord(value: unknown): Partial<Record<ItemId, number>> {
@@ -544,13 +546,13 @@ export function serializeEnvelopeInWorker(
   reason?: string,
   slot: SaveSlotId | "main" = "main",
   includePayloadSha256 = false,
+  contentPackRegistry: ContentPackRegistry = loadContentPackRegistry(),
 ): Promise<BackgroundSaveResult> {
   if (typeof Worker === "undefined") {
     const startedAt = monotonicNow();
-    const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, loadContentPackRegistry(), slot);
+    const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, contentPackRegistry, slot);
     return Promise.resolve({ ...serialized, durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
   }
-  const contentPackRegistry = loadContentPackRegistry();
   const id = ++backgroundSaveRequestId;
   return new Promise((resolve, reject) => {
     let worker: Worker;
@@ -558,7 +560,7 @@ export function serializeEnvelopeInWorker(
       worker = new Worker(new URL("./save.worker.ts", import.meta.url), { type: "module", name: "save-serialization" });
     } catch {
       const startedAt = monotonicNow();
-      const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, loadContentPackRegistry(), slot);
+      const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, contentPackRegistry, slot);
       resolve({ ...serialized, durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
       return;
     }
@@ -584,7 +586,7 @@ export function serializeEnvelopeInWorker(
       decodeAbort?.abort();
       const startedAt = monotonicNow();
       try {
-        const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, loadContentPackRegistry(), slot);
+        const serialized = serializeEnvelopeProjection(state, savedAt, kind, reason, contentPackRegistry, slot);
         finish({ ...serialized, durationMs: Math.max(0, monotonicNow() - startedAt), usedWorker: false });
       } catch (error) {
         settled = true;
@@ -3394,6 +3396,7 @@ export async function saveGameVerifiedFromStateTransfer(
     onProgress?: (progress: AuthoritativeSaveSerializationProgress | { stage: string; bytes?: number }) => void;
     checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
     expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
+    contentPackRegistry?: ContentPackRegistry;
   } = {},
 ): Promise<SaveGameResult> {
   return saveGameVerifiedWithWorkerProof(state, stateTransfer, options);
@@ -3407,6 +3410,7 @@ async function saveGameVerifiedWithWorkerProof(
     checkpointOverlay?: AuthoritativeSaveCheckpointOverlay;
     expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
     frozenStateIsCurrent?: () => boolean;
+    contentPackRegistry?: ContentPackRegistry;
   } = {},
 ): Promise<SaveGameResult> {
   try {
@@ -3432,7 +3436,7 @@ async function saveGameVerifiedWithWorkerProof(
     // The v46 mode migration owns an immutable copy of the previous bytes.
     // It is a rare, deliberate compatibility fallback; current catalogued
     // large saves never reach it and therefore avoid a UI-thread payload read.
-    return saveGameVerifiedOnce(state);
+    return saveGameVerifiedOnce(state, undefined, { contentPackRegistry: options.contentPackRegistry });
   }
   const totalStartedAt = monotonicNow();
   const savedAt = Date.now();
@@ -3443,6 +3447,7 @@ async function saveGameVerifiedWithWorkerProof(
       savedAt,
       expectedStateIdentity,
       onProgress: options.onProgress,
+      contentPackRegistry: options.contentPackRegistry,
       ...(options.frozenStateIsCurrent ? { frozenStateIsCurrent: options.frozenStateIsCurrent } : {}),
       ...(options.checkpointOverlay ? { checkpointOverlay: options.checkpointOverlay } : {}),
     };
@@ -3795,14 +3800,14 @@ async function recoverLocalSaveCache(): Promise<void> {
 async function saveGameVerifiedOnce(
   state: GameState,
   stateTransfer?: SimulationStateTransfer,
-  options: { deferBackup?: boolean; preferWorkerProof?: boolean; frozenStateIsCurrent?: () => boolean } = {},
+  options: { deferBackup?: boolean; preferWorkerProof?: boolean; frozenStateIsCurrent?: () => boolean; contentPackRegistry?: ContentPackRegistry } = {},
 ): Promise<SaveGameResult> {
   if (stateTransfer) return saveGameVerifiedFromStateTransfer(state, stateTransfer);
   // Startup already owns a full state, but does not need a second UI-thread
   // envelope/catalog graph. Keep legacy/localStorage migration on its exact
   // compatibility path; Worker failures return a failed save for a safe retry.
   if (options.preferWorkerProof && typeof Worker !== "undefined" && getLocalSaveBackend() === "indexeddb") {
-    return saveGameVerifiedWithWorkerProof(state, undefined, { frozenStateIsCurrent: options.frozenStateIsCurrent });
+    return saveGameVerifiedWithWorkerProof(state, undefined, { frozenStateIsCurrent: options.frozenStateIsCurrent, contentPackRegistry: options.contentPackRegistry });
   }
   const totalStartedAt = monotonicNow();
   const serializeStartedAt = totalStartedAt;
@@ -3818,7 +3823,7 @@ async function saveGameVerifiedOnce(
   let workerVerification: SaveTransferVerification | undefined;
   let primarySummary: CloudSaveSummary | undefined;
   try {
-    const serialized = await serializeEnvelopeInWorker(state, savedAt);
+    const serialized = await serializeEnvelopeInWorker(state, savedAt, "primary", undefined, "main", false, options.contentPackRegistry);
     raw = serialized.raw;
     workerVerification = serialized.verification;
     primarySummary = serialized.summary;
@@ -3960,6 +3965,7 @@ interface PendingPrimarySave {
   expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
   deferBackup?: boolean;
   preferWorkerProof?: boolean;
+  contentPackRegistry?: ContentPackRegistry;
   frozenStateIsCurrent?: () => boolean;
   waiters: Array<(result: SaveGameResult) => void>;
 }
@@ -3969,6 +3975,7 @@ let activePrimaryRequest: PendingPrimarySave | null = null;
 const pendingPrimarySaves = new Map<SaveMode, PendingPrimarySave>();
 interface VerifiedPrimarySaveMemo {
   state: GameState;
+  registryFingerprint: string;
   result: SaveGameResult;
   identity: VerifiedPrimaryLocalSaveIdentity | null;
 }
@@ -4049,8 +4056,9 @@ async function processDeferredPrimaryBackup(): Promise<void> {
   }
 }
 
-function unchangedPrimarySaveResult(mode: SaveMode, state: GameState): SaveGameResult | null {
+function unchangedPrimarySaveResult(mode: SaveMode, state: GameState, registry: ContentPackRegistry): SaveGameResult | null {
   const memo = lastVerifiedPrimaryByMode.get(mode);
+  if (memo && memo.registryFingerprint !== getContentPackRegistryFingerprint(registry)) return null;
   if (!memo || memo.state !== state || !memo.result.success) return null;
   if (!memo.identity) {
     if (getLocalSaveBackend() === "indexeddb" || getLocalSaveValue(primarySaveKey(mode)) === null) {
@@ -4086,6 +4094,7 @@ function ensurePrimarySaveProcessor(): void {
       try {
         result = request.stateTransfer
           ? await saveGameVerifiedFromStateTransfer(request.state, request.stateTransfer, {
+            contentPackRegistry: request.contentPackRegistry,
             ...(request.checkpointOverlay ? { checkpointOverlay: request.checkpointOverlay } : {}),
             ...(request.expectedStateIdentity ? { expectedStateIdentity: request.expectedStateIdentity } : {}),
           })
@@ -4093,6 +4102,7 @@ function ensurePrimarySaveProcessor(): void {
             deferBackup: request.deferBackup === true,
             preferWorkerProof: request.preferWorkerProof === true,
             frozenStateIsCurrent: request.frozenStateIsCurrent,
+            contentPackRegistry: request.contentPackRegistry,
           });
       } catch {
         result = failedSave("unavailable", "本地主存档写入失败，请立即导出当前进度");
@@ -4100,9 +4110,9 @@ function ensurePrimarySaveProcessor(): void {
       if (result.success) {
         const identity = getVerifiedPrimaryLocalSaveIdentity(mode);
         if (identity && verifiedIdentityMatchesResult(identity, result)) {
-          lastVerifiedPrimaryByMode.set(mode, { state: request.state, result, identity });
+          lastVerifiedPrimaryByMode.set(mode, { state: request.state, result, identity, registryFingerprint: getContentPackRegistryFingerprint(request.contentPackRegistry ?? loadContentPackRegistry()) });
         } else if (getLocalSaveBackend() !== "indexeddb" && getLocalSaveValue(primarySaveKey(mode)) !== null) {
-          lastVerifiedPrimaryByMode.set(mode, { state: request.state, result, identity: null });
+          lastVerifiedPrimaryByMode.set(mode, { state: request.state, result, identity: null, registryFingerprint: getContentPackRegistryFingerprint(request.contentPackRegistry ?? loadContentPackRegistry()) });
         } else {
           lastVerifiedPrimaryByMode.delete(mode);
         }
@@ -4138,8 +4148,12 @@ export function saveGameVerified(
     frozenStateIsCurrent?: () => boolean;
     force?: boolean;
     expectedStateIdentity?: AuthoritativeSaveExpectedStateIdentity;
+    contentPackRegistry?: ContentPackRegistry;
   } = {},
 ): Promise<SaveGameResult> {
+  if (options.contentPackRegistry && stateTransfer) return Promise.resolve(failedSave("verification", "内容包切换需要独立完整检查点，原主档未修改"));
+  const saveRegistry = createContentPackRuntimeSnapshot(options.contentPackRegistry ?? loadContentPackRegistry()).registry;
+  const sameRegistry = (other: ContentPackRegistry | undefined) => Boolean(other && getContentPackRegistryFingerprint(saveRegistry) === getContentPackRegistryFingerprint(other));
   let ownedStateTransfer: SimulationStateTransfer | undefined;
   if (stateTransfer) {
     if (!(stateTransfer.buffer instanceof ArrayBuffer) || stateTransfer.buffer.byteLength === 0 ||
@@ -4161,7 +4175,7 @@ export function saveGameVerified(
   }
   return new Promise((resolve) => {
     const mode = saveModeForState(state);
-    if (activePrimaryRequest?.mode === mode && activePrimaryRequest.state === state) {
+    if (activePrimaryRequest?.mode === mode && activePrimaryRequest.state === state && sameRegistry(activePrimaryRequest.contentPackRegistry)) {
       if (options.deferBackup !== true) activePrimaryRequest.deferBackup = false;
       const pending = pendingPrimarySaves.get(mode);
       if (pending) {
@@ -4173,6 +4187,9 @@ export function saveGameVerified(
     }
     const pending = pendingPrimarySaves.get(mode);
     if (pending) {
+      const registryChanged = !sameRegistry(pending.contentPackRegistry);
+      pending.contentPackRegistry = saveRegistry;
+      if (registryChanged || options.contentPackRegistry) { delete pending.stateTransfer; delete pending.checkpointOverlay; delete pending.expectedStateIdentity; }
       if (pending.state !== state) {
         pending.state = state;
         pending.deferBackup = options.deferBackup === true;
@@ -4199,7 +4216,7 @@ export function saveGameVerified(
       if (options.frozenStateIsCurrent) pending.frozenStateIsCurrent = options.frozenStateIsCurrent;
       pending.waiters.push(resolve);
     } else {
-      const unchanged = options.force === true ? null : unchangedPrimarySaveResult(mode, state);
+      const unchanged = options.force === true || options.contentPackRegistry ? null : unchangedPrimarySaveResult(mode, state, saveRegistry);
       if (unchanged) {
         resolve(unchanged);
         return;
@@ -4207,6 +4224,7 @@ export function saveGameVerified(
       pendingPrimarySaves.set(mode, {
         mode,
         state,
+        ...(saveRegistry ? { contentPackRegistry: saveRegistry } : {}),
         ...(ownedStateTransfer ? { stateTransfer: ownedStateTransfer } : {}),
         ...(checkpointOverlay ? { checkpointOverlay } : {}),
         ...(options.expectedStateIdentity ? { expectedStateIdentity: options.expectedStateIdentity } : {}),
@@ -4996,8 +5014,10 @@ export async function getSaveSummariesInWorker(mode: SaveMode = "normal"): Promi
     return { slots: getSaveSlotSummaries(mode), snapshots: getSaveSnapshotSummaries(mode) };
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    const generation = saveSummaryCatalogGeneration;
     const id = ++saveSummaryWorkerRequestId;
+    let settled = false;
     let worker: Worker;
     try {
       worker = new Worker(new URL("./saveSummary.worker.ts", import.meta.url), { type: "module", name: "save-summary-validation" });
@@ -5006,13 +5026,18 @@ export async function getSaveSummariesInWorker(mode: SaveMode = "normal"): Promi
       return;
     }
     const fallback = () => {
+      if (settled) return;
+      settled = true;
       worker.terminate();
-       resolve({ slots: getSaveSlotSummaries(mode), snapshots: getSaveSnapshotSummaries(mode) });
+      if (generation !== saveSummaryCatalogGeneration) { void getSaveSummariesInWorker(mode).then(resolve, reject); return; }
+      resolve({ slots: getSaveSlotSummaries(mode), snapshots: getSaveSnapshotSummaries(mode) });
     };
     worker.onerror = fallback;
     worker.onmessage = (event: MessageEvent<SaveSummaryWorkerResponse>) => {
-      if (event.data?.id !== id) return;
+      if (settled || event.data?.id !== id) return;
+      settled = true;
       worker.terminate();
+      if (generation !== saveSummaryCatalogGeneration) { void getSaveSummariesInWorker(mode).then(resolve, reject); return; }
       for (const entry of event.data.summaries ?? []) {
         const source = pending.find((candidate) => candidate.key === entry.key);
         if (source) saveSummaryCache.set(entry.key, { raw: source.raw, summary: entry.summary });

@@ -1,4 +1,4 @@
-import { loadContentPackRegistry } from "./contentPacks";
+import { loadContentPackRegistry, type ContentPackRegistry } from "./contentPacks";
 import { SaveStateChunkProtocolError, SaveStateChunkSender } from "./saveStateChunkTransfer";
 import { claimCanonicalTerminalOwner, discardCanonicalTerminalOwner, type AuthoritativeSaveWorkerChannel } from "./canonicalTerminalOwnerRegistry";
 import type { GameState } from "./types";
@@ -48,6 +48,7 @@ type AuthoritativeSaveSerializationSource =
   | { kind: "envelope"; transfer: AuthoritativeSaveEnvelopeTransfer };
 
 interface AuthoritativeSaveSerializationOptions {
+  contentPackRegistry?: ContentPackRegistry;
   savedAt?: number;
   kind?: "primary" | "slot" | "snapshot";
   slot?: "main" | 1 | 2 | 3;
@@ -103,7 +104,7 @@ function serializeAuthoritativeSaveSourceInWorker(
   return new Promise((resolve, reject) => {
     let worker: AuthoritativeSaveWorkerChannel;
     let retainedOwner = false;
-    const contentPackRegistry = loadContentPackRegistry();
+    const contentPackRegistry = options.contentPackRegistry ?? loadContentPackRegistry();
     try {
       const owner = source.kind === "cloned-state" && !includeSourceStateTransfer && kind === "primary" && slot === "main" &&
         !options.checkpointOverlay && options.frozenStateIsCurrent

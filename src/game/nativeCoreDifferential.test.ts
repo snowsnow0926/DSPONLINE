@@ -5392,6 +5392,28 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     } finally { applyContentPackRuntimeSnapshot(runtime); }
   }, 60_000);
 
+  it("uses overridden core belt throughput identically in JavaScript and Rust", async () => {
+    const initial = simpleMiningState();
+    const baseline = advanceSimulationBudget(initial, 30, 30);
+    const activeRuntime = createContentPackRuntimeSnapshot(registerContentPack(createContentPackRegistry(), validateContentPack({
+      formatVersion: 5, id: "native_core_overrides", name: "Core overrides", version: "1.0.0",
+      itemOverrides: [{ id: "iron_ore", name: "重写铁矿" }],
+      beltOverrides: [{ id: "conveyor_belt_mk1", speed: 1, costs: [{ itemId: "iron_ingot", amount: 7 }], requiredTechId: null }],
+    })).registry);
+    applyContentPackRuntimeSnapshot(activeRuntime);
+    try {
+      const checkpoint = await seed(initial, 910, activeRuntime);
+      const opened = await open(checkpoint, activeRuntime);
+      const expected = advanceSimulationBudget(initial, 30, 30);
+      expect(canonicalSha256(expected)).not.toBe(canonicalSha256(baseline));
+      const advanced = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId, request: { baseRevision: checkpoint.revision, simulationSeconds: 30, wallSeconds: 30 } });
+      expect(advanced.supported, advanced.reason).toBe(true);
+      expect(advanced.summary.canonicalFields).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    } finally { applyContentPackRuntimeSnapshot(runtime); }
+  }, 60_000);
+
   it("settles v4 technology effects, custom fuel, resource mining and grouped recipes identically", async () => {
     const activeRuntime = createContentPackRuntimeSnapshot(registerContentPack(createContentPackRegistry(), validateContentPack(createExampleContentPack())).registry);
     applyContentPackRuntimeSnapshot(activeRuntime);

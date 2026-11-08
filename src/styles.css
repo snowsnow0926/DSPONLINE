@@ -22299,6 +22299,12 @@ input:focus-visible,
 .content-pack-manager .content-pack-registration > button { grid-column: 1 / -1; grid-row: auto; justify-self: start; }
 .content-pack-manager .content-pack-recipe-rule > strong { font-size: inherit; }
 .content-pack-manager .content-pack-usage { white-space: normal; }
+.content-pack-removal-preview { display: grid; min-width: 0; gap: 10px; padding: 12px; border: 1px solid var(--theme-accent-border); background: var(--surface); overflow-wrap: anywhere; }
+.content-pack-removal-preview p { margin: 0; line-height: 1.6; color: var(--text); }
+.content-pack-removal-preview label { display: flex; min-height: 44px; align-items: center; gap: 8px; }
+.content-pack-removal-preview input[type="checkbox"] { flex: 0 0 auto; }
+.content-pack-author .content-pack-actions > label { display: grid; min-width: 0; flex: 1 1 180px; gap: 4px; }
+.content-pack-author .content-pack-actions > label input { box-sizing: border-box; width: 100%; min-width: 0; }
 @media (max-width: 700px) {
   .content-pack-recipe-rule { grid-template-columns: minmax(0, 1fr); }
   .content-pack-manager .content-pack-actions { flex-wrap: wrap; }

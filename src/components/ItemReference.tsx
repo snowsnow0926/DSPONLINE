@@ -1,7 +1,8 @@
 import { BookOpen, Crosshair, Factory, FlaskConical, MapPin } from "lucide-react";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { getCompatibleRecipeBuildings, getItem, getPlanet } from "../game/content";
+import { getCompatibleRecipeBuildings, getPlanet } from "../game/content";
+import { getItemPresentation as getItem } from "../game/contentPresentation";
 import { getCategoryName } from "../game/contentRules";
 import { getConsumingRecipes, getProducingRecipes, getResearchUses, getResourceSources } from "../game/recipeGraph";
 import type { ItemId } from "../game/types";

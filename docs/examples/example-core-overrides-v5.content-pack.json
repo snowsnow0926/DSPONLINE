@@ -1,0 +1,13 @@
+{
+  "formatVersion": 5,
+  "id": "example_core_overrides",
+  "name": "原版物品与传送带覆盖示例",
+  "version": "1.0.0",
+  "description": "重写物品展示与传送带实际规则，保留物品物态、线路等级和已有库存。",
+  "itemOverrides": [
+    { "id": "iron_ore", "name": "赤铁矿", "symbol": "赤", "color": "#c94531", "description": "作者的矿石说明" }
+  ],
+  "beltOverrides": [
+    { "id": "conveyor_belt_mk1", "name": "基础运输线", "speed": 17, "costs": [{ "itemId": "iron_ingot", "amount": 7 }], "outputAmount": 2, "requiredTechId": null }
+  ]
+}

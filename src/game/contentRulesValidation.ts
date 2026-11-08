@@ -1,10 +1,10 @@
-import { BUILDINGS, FUEL_ENERGY_MJ, ITEMS, PLANETS, RECIPES, TECHNOLOGIES } from "./content";
+import { BUILDINGS, FUEL_ENERGY_MJ, ITEMS, PLANETS, RECIPES, TECHNOLOGIES, getBeltConstructionId, getBeltTiers } from "./content";
 import { EFFECT_KEYS, type ContentRules } from "./contentRules";
 import type { ContentPackManifest, ModValidationIssue } from "./mods";
 
 const core = {
   items: new Set(Object.keys(ITEMS)), buildings: new Set(Object.keys(BUILDINGS)),
-  recipes: new Set(Object.keys(RECIPES)), technologies: new Set(Object.keys(TECHNOLOGIES)), belts: new Set<string>(),
+  recipes: new Set(Object.keys(RECIPES)), technologies: new Set(Object.keys(TECHNOLOGIES)), belts: new Set<string>(getBeltTiers().map(getBeltConstructionId)),
 };
 const coreFuelIds = Object.keys(FUEL_ENERGY_MJ);
 const id = (value: unknown): value is string => typeof value === "string" && /^[a-z][a-z0-9_]{1,63}$/.test(value) && !["constructor", "prototype"].includes(value);

@@ -340,6 +340,9 @@ import {
 } from "./desktop";
 import { NATIVE_APP_STATE_EVENT } from "./nativeApp";
 import { createContentPackTemplate, parseContentPack, type ModValidationResult } from "./game/mods";
+import { prepareContentPackRemoval } from "./game/contentPackRemoval";
+import { getItemPresentation } from "./game/contentPresentation";
+import { invalidateSaveSummaryCache } from "./game/storage";
 import { importWithRecovery } from "./game/dynamicImportRecovery";
 import {
   applyContentPackRegistry,
@@ -2647,6 +2650,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   // boolean because lifecycle/manual/autosave requests may briefly overlap;
   // the fail-safe lock must remain active until the last verified write ends.
   const verifiedPrimarySaveInFlightDepthRef = useRef(0);
+  const contentPackRemovalOwnerRef = useRef<symbol | null>(null);
+  const [contentPackOperationPending, setContentPackOperationPending] = useState(false);
   const desktopClosePendingRef = useRef(false);
   // A Rust-owned checkpoint is an independent single-writer transaction. It
   // must reject renderer commands even when the legacy "edit while saving"
@@ -2720,6 +2725,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     writeAllowEditsDuringSavePreference(enabled);
   }, []);
   const rejectPlayerStateEditDuringPrimarySave = useCallback((): boolean => {
+    if (contentPackRemovalOwnerRef.current) {
+      setNotice("正在安全移除内容包，请等待存档和配置处理完成");
+      return true;
+    }
     if (desktopClosePendingRef.current) return true;
     if (nativePlayerAuthorityMacroReadOnlyRef.current) {
       setNotice("Windows 原生宏观结算正在推进权威状态；当前画面只读，本次操作未应用");
@@ -6834,7 +6843,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     };
   }, []);
 
-  const saveVerifiedPrimaryCheckpoint = useCallback(async (state: GameState, options: { deferBackup?: boolean; force?: boolean; frozenStateIsCurrent?: () => boolean } = {}): Promise<SaveGameResult> => {
+  const saveVerifiedPrimaryCheckpoint = useCallback(async (state: GameState, options: { deferBackup?: boolean; force?: boolean; frozenStateIsCurrent?: () => boolean; contentPackRegistry?: ContentPackRegistry } = {}): Promise<SaveGameResult> => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
       return {
         success: false,
@@ -6850,7 +6859,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     };
     let checkpoint = latestAuthoritativeCheckpointTransferRef.current;
     let result: SaveGameResult;
-    if (!checkpoint || checkpoint.state !== state) {
+    if (!checkpoint || checkpoint.state !== state || options.contentPackRegistry) {
       // A replacement/imported state must not retain the previous authority
       // buffer indefinitely. Identity mismatch already prevents reuse; clear
       // the stale 35+ MiB ownership here as well.
@@ -6939,6 +6948,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const persistDurablePrimaryCheckpoint = useCallback(async (
     requestedState: GameState | undefined,
     kind: RuntimePersistenceKind,
+    saveRegistry?: ContentPackRegistry,
   ): Promise<SaveGameResult> => {
     const authorityLease = issueLegacyJavaScriptAuthorityLease();
     if (!authorityLease) {
@@ -6974,7 +6984,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       // could race an older Worker response and rebase the durable head onto
       // the wrong revision.
       let sourceState = gameRef.current;
-      let barrierState = await requestAuthoritativeSimulationCheckpoint();
+      // A content-pack transaction already drained the paused Worker and owns
+      // an independent immutable checkpoint. During rollback its catalog may
+      // differ from the newly written T1 head; do not stage the old UI against
+      // that temporary head before restoring the original checkpoint.
+      let barrierState = requestedState && saveRegistry ? requestedState : await requestAuthoritativeSimulationCheckpoint();
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 durable 保存已取消");
       // React may still publish an edit that was accepted immediately before
       // this save acquired its edit lock. New player edits are rejected below,
@@ -7021,7 +7035,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       }
       setRuntimePersistenceProgress({ id: progressId, kind, phase: "serialize-write-readback", startedAt, message: "正在验证 T1 主存档并滚动 recovery…" });
       recordRuntimeTransitionPhase("persistence-phase", performance.now(), 0, { kind, phase: "serialize-write-readback" });
-      let result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+      let result = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave", contentPackRegistry: saveRegistry });
       if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 durable 保存结果已作废");
       if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
       if (!result.success) {
@@ -7046,8 +7060,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       // creates a head/state mismatch that eventually pauses on the next WAL
       // operation.
       const checkpointAdvancedDuringSave = () =>
-        simulationStateRevisionRef.current !== checkpointRevision ||
-        (!requestedState && allowEditsDuringSaveRef.current && gameRef.current !== saveState);
+        !(requestedState && saveRegistry) && (simulationStateRevisionRef.current !== checkpointRevision ||
+        (!requestedState && allowEditsDuringSaveRef.current && gameRef.current !== saveState));
       if (checkpointAdvancedDuringSave()) {
         const finalBarrierState = await requestAuthoritativeSimulationCheckpoint();
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 durable 保存已取消");
@@ -7055,7 +7069,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         if (finalBarrierState !== saveState || finalCheckpointRevision !== checkpointRevision) {
           saveState = finalBarrierState;
           checkpointRevision = finalCheckpointRevision;
-          const finalResult = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave" });
+          const finalResult = await saveVerifiedPrimaryCheckpoint(saveState, { deferBackup: kind === "autosave", force: kind !== "autosave", contentPackRegistry: saveRegistry });
           if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，旧 durable 保存结果已作废");
           if (!finalResult.success) throw new Error(finalResult.message);
           result = finalResult;
@@ -7080,7 +7094,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         baseIdentity: identity,
         sessionId: `roll_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`,
         stateRevision: checkpointRevision,
-        registry: contentPackRuntimeSnapshotRef.current,
+        registry: saveRegistry ? createContentPackRuntimeSnapshot(saveRegistry) : contentPackRuntimeSnapshotRef.current,
         committedAtMs: identity.savedAt,
       });
       const initialized = await initializeSimulationRuntimeRecoveryInPersistenceWorker(checkpoint, fence);
@@ -7627,8 +7641,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const persistPrimarySave = useCallback(async (
     state?: GameState,
     kind: RuntimePersistenceKind = "other",
-    options: { captureVolatileExport?: (raw: string) => void } = {},
+    options: { captureVolatileExport?: (raw: string) => void; contentPackOperationToken?: symbol; contentPackRegistry?: ContentPackRegistry } = {},
   ): Promise<SaveGameResult> => {
+    if (contentPackRemovalOwnerRef.current && options.contentPackOperationToken !== contentPackRemovalOwnerRef.current) {
+      return { success: false, message: "内容包移除正在保护当前主档，请稍候重试", code: "conflict" };
+    }
     if (lifecycleExitStartedRef.current) {
       return { success: false, message: "页面正在退出，已保留当前恢复边界", code: "conflict" };
     }
@@ -7659,7 +7676,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return { success: false, message: "已有存档检查点正在验证，请稍候再试", code: "conflict" };
     }
     if (durableSimulationRuntimeEnabled && durableRecoveryLifecycleRef.current === "active") {
-      return persistDurablePrimaryCheckpoint(state, kind);
+      return persistDurablePrimaryCheckpoint(state, kind, options.contentPackRegistry);
     }
     const authorityLease = issueLegacyJavaScriptAuthorityLease();
     if (!authorityLease) {
@@ -7832,7 +7849,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       if (volatileExport) {
         // Emergency export still owns the normal exact checkpoint and memory
         // barrier, but never commits a primary, backup, journal or proof to disk.
-        const exported = await serializeEnvelopeInWorker(saveState);
+        const exported = await serializeEnvelopeInWorker(saveState, undefined, "primary", undefined, "main", false, options.contentPackRegistry);
         if (!legacyJavaScriptAuthorityLeaseIsCurrent(authorityLease)) throw new Error("Windows 原生权威已接管，临时导出已取消");
         if (lifecycleExitStartedRef.current) return lifecycleSealedSaveResult();
         volatileExport(exported.raw);
@@ -7915,6 +7932,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       } else {
         result = await saveVerifiedPrimaryCheckpoint(saveState, {
           deferBackup: kind === "autosave", force: kind !== "autosave",
+          contentPackRegistry: options.contentPackRegistry,
           ...(preparedFrozenCheckpoint && isLargeRuntimeState(saveState) ? { frozenStateIsCurrent: () =>
             (preparedTerminal ? pureIdleStopCandidateRef.current === preparedTerminal :
               pureIdleStartupCheckpointRef.current === preparedStartup && pureIdleStartupOperationRef.current === preparedStartup?.operation &&
@@ -14857,6 +14875,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative, summarizeBatchSkipReasons]);
 
   const restoreGame = useCallback((state: GameState, report: OfflineReport | null = null): boolean => {
+    if (contentPackRemovalOwnerRef.current) { setNotice("正在安全移除内容包，暂不能切换工厂"); return false; }
     if (readNativeAuthorityPersistenceBoundary().protected) {
       setNotice("Windows 原生权威尚未安全交还控制权，已阻止替换当前工厂；Rust 工厂和旧 JavaScript 镜像均未改变");
       return false;
@@ -15022,7 +15041,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setMobilePanel("inspector");
     if (nextMobileShell) mobileNavigation.replaceModalWithSheet("inspector");
     window.setTimeout(() => focusEntityIds([entityId]), gameRef.current.settings.reducedMotion ? 0 : 50);
-    setNotice(`已定位：${entity.buildingId ? getBuilding(entity.buildingId).name : entity.resourceId ? ITEMS[entity.resourceId].name : entity.id}`);
+    setNotice(`已定位：${entity.buildingId ? getBuilding(entity.buildingId)?.name ?? "未知设备" : entity.resourceId ? getItemPresentation(entity.resourceId).name : entity.id}`);
   }, [ensureFactoryPlanetVisible, focusEntityIds, mobileNavigation.replaceModalWithSheet, nativeCoreProjectionSessionId, nativePlayerAuthorityClock, nextMobileShell, setCenter]);
 
   const locateProductionLine = useCallback((itemId: ItemId, planetId: PlanetId) => {
@@ -16261,6 +16280,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice(`内容包未应用：${report.issues.join("；") || "依赖未就绪"}`);
       return report;
     }
+    invalidateSaveSummaryCache();
     contentPackRuntimeSnapshotRef.current = createContentPackRuntimeSnapshot(registry);
     simulationWorkerRegistryFingerprintRef.current = null;
     setContentPackRegistry(registry);
@@ -16271,6 +16291,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [commitGame, contentPackRegistry]);
 
   const registerValidatedContentPack = useCallback(() => {
+    if (contentPackRemovalOwnerRef.current) { setNotice("请等待内容包移除完成"); return; }
     if (readNativeAuthorityPersistenceBoundary().protected) {
       setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
       playTone("alert");
@@ -16297,6 +16318,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [applyRegisteredContentPacks, contentPackRegistry, modValidation, playTone, readNativeAuthorityPersistenceBoundary]);
 
   const toggleRegisteredContentPack = useCallback((packId: string, enabled: boolean) => {
+    if (contentPackRemovalOwnerRef.current) { setNotice("请等待内容包移除完成"); return; }
     if (readNativeAuthorityPersistenceBoundary().protected) {
       setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
       playTone("alert");
@@ -16324,7 +16346,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     playTone(enabled && report.catalogValid ? "confirm" : "alert");
   }, [applyRegisteredContentPacks, contentPackRegistry, playTone, readNativeAuthorityPersistenceBoundary]);
 
-  const removeRegisteredContentPack = useCallback((packId: string) => {
+  const removeRegisteredContentPack = useCallback(async (packId: string, cleanup = false) => {
+    if (contentPackRemovalOwnerRef.current) return;
     if (readNativeAuthorityPersistenceBoundary().protected) {
       setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
       playTone("alert");
@@ -16332,9 +16355,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     const pack = contentPackRegistry.packs[packId];
     if (!pack) return;
+    if (!gameRef.current.paused) { setNotice("请先暂停工厂，再安全移除内容包"); return; }
     const usage = getContentPackUsage(gameRef.current, pack.manifest);
-    if (usage.total > 0) {
-      setNotice(`不能移除${pack.manifest.name}：当前存档仍在使用${usage.entries.join("、")}`);
+    if (!cleanup && usage.total > 0) {
+      setNotice(`当前存档仍引用${usage.entries.join("、")}；可查看“清理残留并移除”，真实物资和设备需先回收`);
       playTone("alert");
       return;
     }
@@ -16344,10 +16368,52 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       if (result.reason) playTone("alert");
       return;
     }
-    if (!applyRegisteredContentPacks(result.registry).persisted) { playTone("alert"); return; }
-    setNotice(`内容包已移除：${pack.manifest.name}`);
-    playTone("remove");
-  }, [applyRegisteredContentPacks, contentPackRegistry, playTone, readNativeAuthorityPersistenceBoundary]);
+    const token = Symbol("content-pack-removal");
+    contentPackRemovalOwnerRef.current = token;
+    setContentPackOperationPending(true);
+    let primaryWritten = false;
+    try {
+      const checkpoint = await requestAuthoritativeSimulationCheckpoint();
+      const expected = gameRef.current;
+      const isCurrent = () => contentPackRemovalOwnerRef.current === token && !lifecycleExitStartedRef.current && gameRef.current === expected && gameRef.current.paused && !readNativeAuthorityPersistenceBoundary().protected;
+      if (!isCurrent()) return;
+      const plan = prepareContentPackRemoval(checkpoint, pack.manifest);
+      if (plan.blockers.total > 0) { setNotice(`仍有真实内容不能清理：${plan.blockers.entries.join("、")}。请先回收物资、矿机或线路`); playTone("alert"); return; }
+      const snapshot = await saveGameSnapshotVerified(checkpoint, `移除内容包前：${pack.manifest.name}`, takeAuxiliaryCheckpointTransfer(checkpoint));
+      if (!isCurrent()) return;
+      if (!snapshot) { setNotice("移除前回滚快照保存失败，内容包和主档均未改变"); playTone("alert"); return; }
+      const candidate = { ...(cleanup ? plan.state : checkpoint), contentPacks: getActiveContentPackReferences(result.registry) };
+      const saved = await persistPrimarySave(candidate, "other", { contentPackOperationToken: token, contentPackRegistry: result.registry });
+      if (!saved.success) { setNotice(`内容包未移除：${saved.message}`); playTone("alert"); return; }
+      primaryWritten = true;
+      if (!isCurrent()) return;
+      const report = commitContentPackRegistry(result.registry, contentPackRegistry);
+      if (!report.persisted) {
+        const rollback = await persistPrimarySave(checkpoint, "other", { contentPackOperationToken: token, contentPackRegistry });
+        setNotice(rollback.success ? "配置保存失败，原主档和内容包已恢复" : "配置移除未完成；卸载前快照已保留，请恢复快照后重试");
+        playTone("alert");
+        return;
+      }
+      invalidateSaveSummaryCache();
+      contentPackRuntimeSnapshotRef.current = createContentPackRuntimeSnapshot(result.registry);
+      simulationWorkerRegistryFingerprintRef.current = null;
+      setContentPackRegistry(result.registry);
+      contentPackRemovalOwnerRef.current = null;
+      if (!restoreGame(candidate)) { setNotice("已保存移除后的主档，但当前权威状态已变化；请重新载入核对配置"); playTone("alert"); return; }
+      setOperationsTab("packs");
+      setOperationsOpen(true);
+      void refreshSaveData();
+      setNotice(`内容包已安全移除：${pack.manifest.name}。卸载前快照和配置备份已保留`);
+      playTone("remove");
+    } catch (failure) {
+      setNotice(primaryWritten ? "移除未完成，卸载前快照已保留；请重新载入并核对配置" : failure instanceof Error ? `内容包未移除：${failure.message}` : "内容包未移除，原主档和配置保持");
+      playTone("alert");
+    } finally {
+      if (contentPackRemovalOwnerRef.current === token) contentPackRemovalOwnerRef.current = null;
+      setContentPackOperationPending(false);
+      setRuntimePersistenceProgress(current => current?.phase === "complete" || current?.phase === "failed" ? null : current);
+    }
+  }, [contentPackRegistry, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, requestAuthoritativeSimulationCheckpoint, restoreGame, takeAuxiliaryCheckpointTransfer]);
 
   const downloadModTemplate = useCallback(() => {
     void exportTextFile({ contents: JSON.stringify(createContentPackTemplate(), null, 2), fileName: "dsp-content-pack-template.json", title: "导出内容包模板" })
@@ -23220,7 +23286,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               pannable
               zoomable
               onClick={(_event, position) => centerCanvasFromMinimap(position.x, position.y)}
-              nodeColor={(node) => node.type === "vein" ? ITEMS[(node.data as FactoryNodeData).entity.resourceId!].color : node.type === "power" ? "#e1b452" : node.type === "station" ? "#d8794d" : node.type === "storage" ? "#8aa69d" : node.type === "splitter" ? "#d2aa5b" : "#61a9a4"}
+              nodeColor={(node) => node.type === "vein" ? getItemPresentation((node.data as FactoryNodeData).entity.resourceId!).color : node.type === "power" ? "#e1b452" : node.type === "station" ? "#d8794d" : node.type === "storage" ? "#8aa69d" : node.type === "splitter" ? "#d2aa5b" : "#61a9a4"}
               maskColor={resolvedTheme === "light" ? "rgba(218, 229, 223, 0.76)" : "rgba(8, 11, 10, 0.76)"}
             /> : null}
             <Controls position="bottom-left" showInteractive={false} />
@@ -24812,6 +24878,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onClearModValidation={clearModValidation}
             onExportModTemplate={downloadModTemplate}
             onRegisterContentPack={registerValidatedContentPack}
+            contentPackOperationPending={contentPackOperationPending}
             onSetContentPackEnabled={toggleRegisteredContentPack}
             onRemoveContentPack={removeRegisteredContentPack}
             logisticsActions={{
@@ -24870,7 +24937,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         }}
         onPointerCancel={() => { mobileActionBackdropPressRef.current = null; }}>
         <section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="设备快捷操作">
-          <header><span><small>长按快捷操作</small><strong>{mobileActionEntity.buildingId ? getBuilding(mobileActionEntity.buildingId).name : mobileActionEntity.resourceId ? ITEMS[mobileActionEntity.resourceId].name : mobileActionEntity.id}</strong></span><button type="button" onClick={() => setMobileActionEntityId(null)} aria-label="关闭快捷操作"><X size={16} /></button></header>
+          <header><span><small>长按快捷操作</small><strong>{mobileActionEntity.buildingId ? getBuilding(mobileActionEntity.buildingId)?.name ?? "未知设备" : mobileActionEntity.resourceId ? getItemPresentation(mobileActionEntity.resourceId).name : mobileActionEntity.id}</strong></span><button type="button" onClick={() => setMobileActionEntityId(null)} aria-label="关闭快捷操作"><X size={16} /></button></header>
           <div>
             <button type="button" onClick={() => {
               const recipe = mobileActionEntity.recipeId ? RECIPES[mobileActionEntity.recipeId] : Object.values(RECIPES).find((candidate) => candidate.buildingId === mobileActionEntity.buildingId);

@@ -702,6 +702,14 @@ export function getBeltTiers(): BeltTier[] {
   return [...RUNTIME_BELT_DEFINITIONS.keys()].sort((left, right) => left - right);
 }
 
+/** Override an existing belt without reinterpreting tier or construction stock. */
+export function overrideRuntimeBeltDefinition(id: string, change: { speed?: number; name?: string }): boolean {
+  const current = [...RUNTIME_BELT_DEFINITIONS.values()].find(entry => entry.id === id);
+  if (!current || (change.speed !== undefined && (!Number.isFinite(change.speed) || change.speed <= 0 || change.speed > 1_000_000))) return false;
+  RUNTIME_BELT_DEFINITIONS.set(current.tier, { ...current, ...(change.speed !== undefined ? { speed: change.speed } : {}), ...(change.name !== undefined ? { name: change.name } : {}) });
+  return true;
+}
+
 export function isRegisteredBeltTier(tier: unknown): tier is BeltTier {
   return typeof tier === "number" && Number.isInteger(tier) && RUNTIME_BELT_DEFINITIONS.has(tier);
 }

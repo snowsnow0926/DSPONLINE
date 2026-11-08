@@ -137,7 +137,7 @@ describe("native authority persistence App boundary", () => {
     expect(restore).toMatch(/setViewport\([\s\S]*?return true;/);
 
     const callSites = app.match(/if \(!restoreGame\(/g) ?? [];
-    expect(callSites).toHaveLength(5);
+    expect(callSites).toHaveLength(6);
     expect(app.match(/(?<!if \(!)restoreGame\(/g) ?? []).toHaveLength(0);
   });
 
@@ -150,7 +150,9 @@ describe("native authority persistence App boundary", () => {
       const source = block(start, end);
       const guard = source.indexOf("readNativeAuthorityPersistenceBoundary().protected");
       expect(guard).toBeGreaterThanOrEqual(0);
-      expect(source.indexOf("applyRegisteredContentPacks")).toBeGreaterThan(guard);
+      const mutation = source.indexOf(start.includes("removeRegistered") ? "commitContentPackRegistry" : "applyRegisteredContentPacks");
+      expect(mutation).toBeGreaterThan(guard);
+      if (start.includes("removeRegistered")) expect(source.indexOf("persistPrimarySave")).toBeGreaterThan(guard);
     }
   });
 

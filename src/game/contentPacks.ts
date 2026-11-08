@@ -1,5 +1,7 @@
 import { BUILDINGS, CONSTRUCTION, FUEL_ENERGY_MJ, FUEL_ITEM_IDS, ITEMS, RECIPES, TECHNOLOGIES, TECHNOLOGY_LIST, registerRuntimeBeltDefinition, resetRuntimeBeltDefinitions, validateContentCatalog } from "./content";
 import { setContentRules, type ContentRules } from "./contentRules";
+import { overrideRuntimeBeltDefinition } from "./content";
+import { retainPreviousContentPresentation } from "./contentPresentation";
 import {
   parseContentPackDependency,
   satisfiesContentPackVersion,
@@ -29,6 +31,7 @@ const REGISTRY_VERSION = 1;
 export const CONTENT_PACK_RUNTIME_PROTOCOL_VERSION = 1 as const;
 
 const CORE_ITEM_IDS = new Set(Object.keys(ITEMS));
+const CORE_ITEM_DEFINITIONS = new Map(Object.entries(ITEMS).map(([id, item]) => [id, structuredClone(item)]));
 const CORE_BUILDING_IDS = new Set(Object.keys(BUILDINGS));
 const CORE_RECIPE_IDS = new Set(Object.keys(RECIPES));
 const CORE_TECH_IDS = new Set(Object.keys(TECHNOLOGIES));
@@ -56,6 +59,8 @@ export interface RegisteredContentPack {
 export interface ContentPackRegistry {
   version: typeof REGISTRY_VERSION;
   packs: Record<string, RegisteredContentPack>;
+  /** Recent removed configurations let a player restore a pre-removal snapshot. */
+  removedManifests?: ContentPackManifest[];
 }
 
 /** Serializable runtime directory sent to simulation workers; never persisted in GameState. */
@@ -119,9 +124,10 @@ function cloneManifest(manifest: ContentPackManifest): ContentPackManifest {
   };
 }
 
-function cloneRegistry(registry: ContentPackRegistry): ContentPackRegistry {
+function cloneRegistry(registry: ContentPackRegistry, includeRemoved = true): ContentPackRegistry {
   return {
     version: REGISTRY_VERSION,
+    ...(includeRemoved && registry.removedManifests?.length ? { removedManifests: registry.removedManifests.map(cloneManifest) } : {}),
     packs: Object.fromEntries(Object.entries(registry.packs).sort(([left], [right]) => left.localeCompare(right)).map(([id, pack]) => [id, {
       ...pack,
       manifest: cloneManifest(pack.manifest),
@@ -149,11 +155,12 @@ function hashString(value: string): string {
 }
 
 export function getContentPackRegistryFingerprint(registry: ContentPackRegistry): string {
-  return hashString(stableSerialize(cloneRegistry(registry)));
+  const runtime = cloneRegistry(registry, false);
+  return hashString(stableSerialize(runtime));
 }
 
 export function createContentPackRuntimeSnapshot(registry: ContentPackRegistry): ContentPackRuntimeSnapshot {
-  const normalized = cloneRegistry(registry);
+  const normalized = cloneRegistry(registry, false);
   return {
     protocolVersion: CONTENT_PACK_RUNTIME_PROTOCOL_VERSION,
     fingerprint: getContentPackRegistryFingerprint(normalized),
@@ -197,7 +204,12 @@ function normalizeRegistry(value: unknown): ContentPackRegistry {
         ? (candidate as RegisteredContentPack).previousManifests!.filter((entry) => entry?.id === id && validateContentPack(entry).manifest).slice(-5).map(cloneManifest) : [],
     };
   }
-  return { version: REGISTRY_VERSION, packs };
+  const rawRemoved = (value as ContentPackRegistry).removedManifests;
+  const removedManifests = Array.isArray(rawRemoved) ? rawRemoved.slice(-8).flatMap(entry => {
+    const checked = validateContentPack(entry);
+    return checked.manifest ? [cloneManifest(checked.manifest)] : [];
+  }) : [];
+  return { version: REGISTRY_VERSION, packs, ...(removedManifests.length ? { removedManifests } : {}) };
 }
 
 export function loadContentPackRegistry(): ContentPackRegistry {
@@ -277,7 +289,7 @@ export function getContentPackConflicts(registry: ContentPackRegistry, manifest:
       if (existingBuildingIds.has(belt.id)) conflicts.push(`传送带 ${belt.id} 与 ${pack.manifest.name} 的建筑 ID 冲突`);
     }
     for (const building of manifest.buildings ?? []) if (existingBeltIds.has(building.id)) conflicts.push(`建筑 ${building.id} 与 ${pack.manifest.name} 的传送带 ID 冲突`);
-    for (const key of ["recipeOverrides", "technologyOverrides", "constructionOverrides"] as const) {
+    for (const key of ["recipeOverrides", "technologyOverrides", "constructionOverrides", "itemOverrides", "beltOverrides"] as const) {
       const targets = new Set(manifest[key]?.map((rule) => rule.id) ?? []);
       for (const rule of pack.manifest[key] ?? []) if (targets.has(rule.id)) conflicts.push(`规则 ${rule.id} 已由 ${pack.manifest.name} 调整`);
     }
@@ -373,6 +385,7 @@ export function removeContentPack(registry: ContentPackRegistry, packId: string)
   const dependents = dependentPackIds(registry, packId);
   if (dependents.length > 0) return { registry, changed: false, reason: `仍被已启用的 ${dependents.join("、")} 依赖` };
   const next = cloneRegistry(registry);
+  next.removedManifests = [...(next.removedManifests ?? []).filter(entry => entry.id !== packId || entry.version !== registry.packs[packId].manifest.version), cloneManifest(registry.packs[packId].manifest)].slice(-8);
   delete next.packs[packId];
   return { registry: next, changed: true };
 }
@@ -400,6 +413,7 @@ function activePacksInDependencyOrder(registry: ContentPackRegistry): { active: 
 }
 
 function resetRuntimeContent(): void {
+  retainPreviousContentPresentation();
   setContentRules({});
   for (const key of Object.keys(FUEL_ENERGY_MJ)) delete FUEL_ENERGY_MJ[key as ItemId];
   Object.assign(FUEL_ENERGY_MJ, CORE_FUELS);
@@ -409,6 +423,7 @@ function resetRuntimeContent(): void {
   const recipes = RECIPES as unknown as RuntimeRecipes;
   const technologies = TECHNOLOGIES as unknown as RuntimeTechnologies;
   for (const id of Object.keys(items)) if (!CORE_ITEM_IDS.has(id)) delete items[id];
+  for (const [id, item] of CORE_ITEM_DEFINITIONS) items[id] = structuredClone(item);
   for (const id of Object.keys(buildings)) if (!CORE_BUILDING_IDS.has(id)) delete buildings[id];
   for (const [id, definition] of CORE_BUILDING_DEFINITIONS) buildings[id] = { ...definition };
   for (const id of Object.keys(recipes)) if (!CORE_RECIPE_IDS.has(id)) delete recipes[id];
@@ -585,6 +600,23 @@ function applyContentRules(packs: RegisteredContentPack[]): void {
   }
 }
 
+function applyCoreContentOverrides(packs: RegisteredContentPack[]): void {
+  const items = ITEMS as unknown as RuntimeItems;
+  for (const pack of packs) {
+    for (const override of pack.manifest.itemOverrides ?? []) items[override.id] = { ...items[override.id], ...override } as ItemDefinition;
+    for (const override of pack.manifest.beltOverrides ?? []) {
+      overrideRuntimeBeltDefinition(override.id, override);
+      const entry = CONSTRUCTION.find(entry => entry.buildingId === override.id);
+      if (!entry) continue;
+      if (override.name !== undefined) entry.name = override.name;
+      if (override.costs !== undefined) entry.costs = override.costs.map(cost => ({ itemId: cost.itemId as ItemId, amount: cost.amount }));
+      if (override.outputAmount !== undefined) entry.outputAmount = override.outputAmount;
+      if (override.requiredTechId === null) delete entry.requiredTechId;
+      else if (override.requiredTechId !== undefined) entry.requiredTechId = override.requiredTechId as TechId;
+    }
+  }
+}
+
 /** Rebuild the live catalog from the enabled local registry. Call this before loading saves. */
 export function applyContentPackRegistry(registry: ContentPackRegistry): ContentPackActivationReport {
   resetRuntimeContent();
@@ -601,6 +633,7 @@ export function applyContentPackRegistry(registry: ContentPackRegistry): Content
   registerRecipes(active);
   registerConstruction(active);
   registerBelts(active);
+  applyCoreContentOverrides(active);
   applyContentRules(active);
   const rules: ContentRules = {};
   for (const key of ["technologyEffects", "recipeGroups", "recipePolicies", "fuels", "generators", "resources", "idMigrations", "categories"] as const) {
@@ -668,14 +701,22 @@ export function getContentPackUsage(state: GameState, manifest: ContentPackManif
   const buildingIds = new Set(manifest.buildings?.map((building) => building.id) ?? []);
   const recipeIds = new Set(manifest.recipes?.map((recipe) => recipe.id) ?? []);
   const technologyIds = new Set(manifest.technologies?.map((technology) => technology.id) ?? []);
+  const beltTiers = new Set(manifest.belts?.map(belt => belt.tier) ?? []);
+  for (const belt of manifest.belts ?? []) buildingIds.add(belt.id);
+  for (const alias of manifest.idMigrations ?? []) {
+    const ids = alias.kind === "items" ? itemIds : alias.kind === "recipes" ? recipeIds : alias.kind === "technologies" ? technologyIds : buildingIds;
+    ids.add(alias.from);
+  }
   const entries: string[] = [];
   const add = (label: string, count: number) => { if (count > 0) entries.push(`${label} ${count}`); };
   add("设备", state.entities.filter((entity) => entity.buildingId && buildingIds.has(entity.buildingId)).length);
   add("配方设备", state.entities.filter((entity) => entity.recipeId && recipeIds.has(entity.recipeId)).length);
   add("运输线", state.belts.filter((belt) => itemIds.has(belt.itemId)).length);
+  add("自定义传送带", state.belts.filter(belt => beltTiers.has(belt.tier)).length);
+  add("资源点上的矿机", state.entities.filter(entity => entity.kind === "vein" && entity.resourceId && itemIds.has(entity.resourceId) && entity.minerCount > 0).length);
   add("科技记录", [...state.research.completedTechIds, ...state.research.queuedTechIds, state.research.selectedTechId]
     .flatMap((id) => id && technologyIds.has(id) ? [id] : []).length);
-  const inventoryCount = [state.tray, ...Object.values(state.planetTrays), state.totalProduced]
+  const inventoryCount = [state.tray, ...Object.values(state.planetTrays), ...state.entities.flatMap(entity => [entity.inputs, entity.outputs]), state.quantumLogisticsNetwork.inventory]
     .reduce((sum, record) => sum + Object.entries(record).filter(([itemId, amount]) => itemIds.has(itemId) && Number(amount) > 0).length, 0);
   add("库存记录", inventoryCount);
   add("施工库存", Object.entries(state.construction).filter(([buildingId, amount]) => buildingIds.has(buildingId) && Number(amount) > 0).length);

@@ -550,7 +550,65 @@
     {
       "name": "active-api-contract-validation.json",
       "sha256": "ecbd012d67a31c547ef45e8e272d1d5fea5df6fbd08f4ddf274adce31892a1fd"
+    },
+    {
+      "name": "audit-runtime.json",
+      "sha256": "6985caab2d328408bb96994dfc8760f1be50d0ac343a1949ff9cc1b598469c4a"
+    },
+    {
+      "name": "audit-server.json",
+      "sha256": "1b7bde006a6a9829166090c160cba61a6a67268131629c328379d2e09e0917c7"
+    },
+    {
+      "name": "audit-all.json",
+      "sha256": "162d99b02eb754cbef70a5ac55d90f30a9d978a3a4e32f35135f5a04e0245a29"
+    },
+    {
+      "name": "github-push-proof.json",
+      "sha256": "615cf760161f014594bedfb947c8bcc369c69ae9fde6577affec5f578d0cb09e"
     }
   ],
-  "developmentValidationEvidenceContext": "Historical accepted gate snapshot from the identical frozen candidate before deployment"
+  "developmentValidationEvidenceContext": "Historical accepted gate snapshot from the identical frozen candidate before deployment",
+  "dependencyAudit": {
+    "frontendProduction": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "serverProduction": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "npmAll": {
+      "info": 0,
+      "low": 0,
+      "moderate": 10,
+      "high": 6,
+      "critical": 0,
+      "total": 16
+    },
+    "githubPushNotice": {
+      "total": 46,
+      "high": 21,
+      "moderate": 18,
+      "low": 7,
+      "source": "GitHub receive-pack notification",
+      "scopeClassification": "pending independent review"
+    }
+  },
+  "githubMainPublication": {
+    "ok": true,
+    "branch": "main",
+    "commit": "5bfc53b6285ce57ac32593f11185e9afc13ae796",
+    "runtimeSha": "e599f8c6897978daa12bd84050d124a4ca4be2cd",
+    "readmeUpdated": true,
+    "fastForward": true
+  }
 }

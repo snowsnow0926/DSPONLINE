@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> **当前原生正式下载（2026-11-09，1.3.11）**。Windows x64 1.3.11 与 Android 1.3.11 / 1003011 已上线下载页及 stable 源。运行 `e599f8c68979`，Windows setup 112902219 B、NotSigned/Electron43.8.1；APK5947264 B、AAB5736587 B，历史证书、v2/v3、zipalign和207运行资源核对通过。Windows1.3.10升级保档/冷开，Android1.3.9同签名覆盖、保存新库存/冷开通过，公网整包SHA和Windows feed SHA512相符。AAB归档；实体设备、系统NSIS和长时低配仍待实测。[制品与回退](./releases/1.3.11.md)。
+
 > **2026-11-09 1.3.11 本地候选完成**。运行源码 `e599f8c68979` 的 Windows x64/stable 安装器 112,902,219 字节，NotSigned，79 个运行文件一致，1.3.10 保档升级/冷开与实际转换、快照恢复通过。Android 1.3.11 / 1003011 的 APK 5,947,264 字节、AAB 5,736,587 字节，经受保护入口核对历史证书连续性、v2/v3、zipalign 和每包 207 个运行资源。三端下载页候选与 stable feed 已生成，本机整包摘要/Range 通过。实体 Android、本候选模拟器升级、系统 NSIS 和长时/低配门禁仍待验收。[冻结制品与摘要](./releases/1.3.11-development-handoff-2026-11-09.md)。
 
 > **2026-11-08 内容包作者反馈原生验证（本地，未发布）**：干净源码 `d9c4b2b37217` 的离线性能开发包已冻结，Build ID `1.3.10+d9c4b2b37217`、75 个 Windows 运行文件、NotSigned；独立 D 盘测试数据目录实际启动，v5 原版物品/传送带覆盖注册与四条真实 MessagePort 云传输通过本机合同检查。优化 Host 新执行 JS/Rust 差分 61/1，覆盖原版带速变化。没有改变原生权威准入门槛，没有重做正式安装器或 Android 签名/实体资格，公开三端下载和更新源保持。[开发成品与边界](./reviews/2026-11-08-content-pack-author-feedback.md)。

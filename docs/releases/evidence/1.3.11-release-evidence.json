@@ -1,0 +1,556 @@
+{
+  "version": "1.3.11",
+  "runtimeSha": "e599f8c6897978daa12bd84050d124a4ca4be2cd",
+  "buildId": "1.3.11+e599f8c68979",
+  "published": true,
+  "softwareAndPublicChecksPassed": true,
+  "verifiedAt": "2026-11-09T09:33:12.664Z",
+  "developmentValidation": {
+    "kind": "development-release-candidate",
+    "version": "1.3.11",
+    "sourceSha": "e599f8c6897978daa12bd84050d124a4ca4be2cd",
+    "buildId": "1.3.11+e599f8c68979",
+    "published": false,
+    "unit": {
+      "passed": 3905,
+      "skipped": 37
+    },
+    "nativeDifferential": {
+      "passed": 62,
+      "skipped": 1
+    },
+    "rustWorkspace": {
+      "passed": 1354,
+      "ignored": 3,
+      "profiles": [
+        "serial",
+        "standard-four-threads-isolated"
+      ]
+    },
+    "nativeTools": {
+      "passed": 639,
+      "skipped": 1
+    },
+    "server": {
+      "passed": 415,
+      "skipped": 2
+    },
+    "ops": {
+      "passed": 60,
+      "skipped": 6
+    },
+    "releaseSwitch": {
+      "passed": 33,
+      "skipped": 0
+    },
+    "chromium": {
+      "declared": 665,
+      "uniquePassed": 631,
+      "skipped": 34,
+      "unresolvedFailures": 0,
+      "relatedReplay": 32,
+      "releaseNotesReplay": 3
+    },
+    "optionalDurable": {
+      "uniquePassed": 25,
+      "skipped": 0,
+      "finalConversionReplay": 8
+    },
+    "static": {
+      "typecheck": true,
+      "webDesktopAndroidBuilds": true,
+      "startupBudget": true,
+      "thinUiBoundary": true,
+      "nativeCoverage": true,
+      "runtimeLicenseNotices": 127,
+      "productionDependencyVulnerabilities": 0,
+      "serverProductionDependencyVulnerabilities": 0
+    },
+    "releasePreparation": {
+      "webConversion": true,
+      "windowsConversion": true,
+      "windowsInstallerRuntimeFileMatches": 79,
+      "windowsUpgradeFrom": "1.3.10",
+      "androidCertificateContinuity": true,
+      "androidVersionCode": 1003011,
+      "androidRuntimeAssetsPerPackage": 207,
+      "apiLayoutAndLoopbackHealth": true,
+      "localDownloadAndRangeChecks": 2,
+      "responsiveCombinations": 30,
+      "windowsAuthenticode": "NotSigned"
+    },
+    "pendingGates": [
+      "Android physical-device install, upgrade, input method and long-running checks",
+      "Android emulator upgrade and conversion for this candidate",
+      "Windows system NSIS installer and uninstall wizard",
+      "Long-running and low-spec thermal/performance checks",
+      "Release-role preflight, production backup, deployment, health and public download verification"
+    ],
+    "recovery": {
+      "scope": "all-content-packs",
+      "configurations": "retained-disabled",
+      "saveModeAndSlot": "retained",
+      "snapshotReason": "转回原版前（含全部内容包进度）",
+      "steps": [
+        "re-enable required content packs",
+        "reload factory",
+        "restore verified pre-conversion snapshot"
+      ]
+    }
+  },
+  "componentManifests": {
+    "web": {
+      "sha256": "5c04ec6afcd0fac64bb121d188c57dd92764bc9d1a76f95763178ef0742535e5",
+      "aggregateSha256": "dd885550d1af28007c80c96e1b18512efe0ee0cbe3f859564b49c784413d9b42",
+      "fileCount": 200,
+      "repositoryCopySha256": "1cd0aab5baf761952be5bb93543eeb6c69b8ad8547a3726614e3f63914460cc6",
+      "repositoryCopyRecordsEqual": true,
+      "deployedOriginalLineEndings": "CRLF",
+      "repositoryCopyLineEndings": "LF"
+    },
+    "download": {
+      "sha256": "dce77168e4d890ee41b0359ea73359af25f92fbcae7a5a9ad75fad0821ddd570",
+      "aggregateSha256": "d91b82df45ddedbbb2fa31a1d44c13a102eca69cb6ffcf81d9bfe73e00687ca6",
+      "fileCount": 31,
+      "repositoryCopySha256": "b4e4bebd19d075404d79f43439ee273d6a86d3df40fef60dad9b7dc2e834b17b",
+      "repositoryCopyRecordsEqual": true,
+      "deployedOriginalLineEndings": "CRLF",
+      "repositoryCopyLineEndings": "LF"
+    },
+    "candidate": {
+      "manifestSha256": "ca8c4aa4d0fab8e4553f003c9ea31d8f844b7061b9a2f2cfaad95db7b69be372",
+      "aggregateSha256": "f0c853bc8e37ed802645c65fc45c1d5cb19735b35de391ebd2bbcb9285d76266",
+      "fileCount": 498
+    }
+  },
+  "hongKong": {
+    "current": "1.3.11-e599f8c68979",
+    "previous": "1.3.9-2027047763f5",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "generation": 64,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "apiProcessPreserved": true,
+    "proxyProcessPreserved": true,
+    "databaseIdentityPreserved": true,
+    "preexistingMissingPayloadRows": 2,
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "diskAvailableBytes": 14830284800,
+    "diskAvailableRatio": 0.20079178180464627,
+    "nginxSha256": "b1acc206229b0d924a0eeaf53d19dfeb1564e6582890f7ee8963aa3ba727d125",
+    "configurationBackup": "/var/backups/dsp-idle/1.3.11-e599f8c68979",
+    "nginxRollback": "/var/backups/dsp-idle/1.3.11-e599f8c68979/fallback/original-app.conf",
+    "observation": {
+      "samples": 12,
+      "windowSeconds": 55,
+      "allHealthy": true,
+      "backupDisabled": true,
+      "sameApiProcess": true,
+      "sameProxyProcess": true,
+      "web": "1.3.11-e599f8c68979",
+      "diskAvailableRatio": 0.2008221167849047
+    }
+  },
+  "shanghai": {
+    "current": "download-site-1.3.11-e599f8c68979",
+    "previous": "download-site-1.3.10-de383a34bfb1",
+    "web": "1.2.9-0521eb63f179",
+    "api": "api-1.2.6-df828869e276",
+    "services": {
+      "nginx": {
+        "MainPID": "1852183",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      },
+      "dsp-idle-api-active.service": {
+        "MainPID": "1243306",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      },
+      "dsp-idle-api-handoff-proxy.service": {
+        "MainPID": "1243305",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      }
+    },
+    "nginxSha256": "d6bc345bb54b6be202e9d1567e3fa14f03ddae201b37357fa30d1d423ebf45f0",
+    "certificateUnchanged": true,
+    "certificateNotAfter": "Jan 27 11:44:18 2027 GMT",
+    "certificateRenewalTimer": "active",
+    "diskAvailableBytes": 19887923200,
+    "configurationBackup": "/var/backups/dsp-idle/download-site-1.3.11-e599f8c68979",
+    "observation": {
+      "ok": true,
+      "checkedAt": "2026-11-09T17:17:56.068544+08:00",
+      "elapsedSeconds": 56.87,
+      "samples": [
+        {
+          "sample": 1,
+          "elapsedSeconds": 0.15,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 2,
+          "elapsedSeconds": 5.31,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 3,
+          "elapsedSeconds": 10.46,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 4,
+          "elapsedSeconds": 15.62,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 5,
+          "elapsedSeconds": 20.77,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 6,
+          "elapsedSeconds": 25.93,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 7,
+          "elapsedSeconds": 31.09,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 8,
+          "elapsedSeconds": 36.24,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 9,
+          "elapsedSeconds": 41.39,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 10,
+          "elapsedSeconds": 46.55,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 11,
+          "elapsedSeconds": 51.71,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 12,
+          "elapsedSeconds": 56.87,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        }
+      ],
+      "productionWritten": false
+    }
+  },
+  "publicVerification": {
+    "http": {
+      "ok": true,
+      "publicWeb": "1.3.11-e599f8c68979",
+      "filesVerified": 200,
+      "previous": "1.3.9-2027047763f5",
+      "previousFilesVerified": 200,
+      "compressedTransport": true,
+      "twentySecondIdleTimeout": true,
+      "largeAssetDeadlineSeconds": 180,
+      "physicalEgress": true,
+      "strictTls": true,
+      "allSizesAndSha256Match": true,
+      "cacheHeadersVerified": true,
+      "wwwCanonicalRedirect": true,
+      "publicHealth": true,
+      "publicReadyWritable": true,
+      "backupState": "disabled",
+      "previousHtmlByteExact": true,
+      "previousWorkerRejected": true,
+      "currentWorkerAvailable": true
+    },
+    "pwa": {
+      "pwaInstallWindowSeconds": 600,
+      "pwaInstallElapsedMs": 110324,
+      "pwaPhaseElapsedMs": 118129,
+      "compressedTransport": true,
+      "twentySecondIdleTimeout": true,
+      "largeAssetDeadlineSeconds": 180,
+      "physicalEgress": true,
+      "strictTls": true,
+      "publicWeb": "1.3.11-e599f8c68979",
+      "filesVerified": 200,
+      "allSizesAndSha256Match": true,
+      "cacheHeadersVerified": true,
+      "wwwCanonicalRedirect": true,
+      "publicHealth": true,
+      "publicReadyWritable": true,
+      "backupState": "disabled",
+      "previous": "1.3.9-2027047763f5",
+      "previousFilesVerified": 200,
+      "previousHtmlByteExact": true,
+      "previousWorkerRejected": true,
+      "currentWorkerAvailable": true,
+      "currentCacheBeforeAfterSha256": "c90abf2c8c8c88803a76567afe1a3bdaff736b07b28ca6d3d5347442b6fe0350",
+      "fallbackCacheIsolation": true,
+      "offlineCurrentReopen": true,
+      "browserProductionApiBlocked": true,
+      "blockedApiRequests": 11,
+      "productionPlayerWrites": false
+    },
+    "downloadMetadataAndRange": 31,
+    "downloadRedirects": 4,
+    "packages": {
+      "ok": true,
+      "files": [
+        {
+          "path": "downloads/android/dsp-idle-1.3.11-1003011.apk",
+          "bytes": 5947264,
+          "sha256": "d612c1dcdb36a1ad3f4caf971d8f3dd909af66657fd6fbebf25797820d3d8117",
+          "strictTls": true,
+          "physicalEgress": true
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.11-x64-setup.exe",
+          "bytes": 112902219,
+          "sha256": "d367e57158778aecfde835d19152f18bc2d55713ea496dbf9d2538945c12f138",
+          "strictTls": true,
+          "physicalEgress": true,
+          "sha512Base64": "jVwKNIA/+9b+0YsVgZpoJWNDj+JshFcN5IYtKHhq1lA7f+iOE4lCn17GbHmBPKmhcYFDmlL+BASmKXMnUKzNpw==",
+          "matchesStableFeedSha512": true
+        }
+      ]
+    },
+    "liveConversion": {
+      "ok": true,
+      "platform": "web",
+      "sourceSha": "e599f8c6897978daa12bd84050d124a4ca4be2cd",
+      "version": "1.3.11",
+      "productionBuild": true,
+      "syntheticData": true,
+      "isolatedProfile": true,
+      "convertActualButton": true,
+      "exactCoreRefund": true,
+      "resumedAndReloaded": true,
+      "restoredThroughSnapshotButton": true,
+      "responsiveCombinations": 30,
+      "errors": []
+    }
+  },
+  "upgradeVerification": {
+    "web": {
+      "oldBuild": "1.3.9+2027047763f5",
+      "newBuild": "1.3.11+e599f8c68979",
+      "fixture": "public synthetic paused v47, autosave disabled",
+      "bytes": 119402,
+      "sha256": "f69f6b872a7dd460ae5e1128a346184d3f16641fb85563de70738447a0e28217",
+      "oldPrimaryByteIdentical": true,
+      "newPrimaryByteIdentical": true,
+      "offlinePrimaryByteIdentical": true,
+      "offlineReopen": true,
+      "productionApiCalled": false
+    },
+    "windows": {
+      "version": "1.3.11",
+      "upgradedFrom": "1.3.10",
+      "coldReopen": true,
+      "savedCharacters": 90447,
+      "savedSha256": "db87071826d6a4a16d488dd8ec600e3ad8127c8bbe81adacded2460a79bc08f3"
+    },
+    "android": {
+      "ok": true,
+      "fromVersion": "1.3.9",
+      "toVersion": "1.3.11",
+      "firstInstallTimePreserved": true,
+      "oldIronOre": 4,
+      "ironOreAfterUpgrade": 4,
+      "newIronOreAfterSaving": 7,
+      "ironOreAfterColdReopen": 7,
+      "pausedStatePreserved": true,
+      "oldExplicitSaveConfirmed": true,
+      "newExplicitSaveConfirmed": true,
+      "networkDisabled": true,
+      "noActiveDefaultNetwork": true,
+      "freshIsolatedEmulator": true,
+      "physicalDeviceTested": false,
+      "packageCrashRecords": 0,
+      "packageAnrRecords": 0,
+      "deviceDirectory": "android-device-01",
+      "harnessNotes": "Fresh isolated offline emulator, direct official 1.3.9 to frozen 1.3.11 upgrade. Explicit old/new save, integer inventory, pause, firstInstallTime and cold reopen are asserted through actual UI."
+    }
+  },
+  "spaceRecovery": {
+    "deduplication": {
+      "ok": true,
+      "releaseId": "1.3.11-e599f8c68979",
+      "deduplicatedFiles": 1100,
+      "allocatedBytesRecoverable": 425639936,
+      "freeBytesBefore": 14276935680,
+      "freeBytesAfter": 14702252032,
+      "freeRatio": 0.1990583068267348,
+      "allBytesPermissionsAndPathsPreserved": true,
+      "originalMetadataRetained": true,
+      "mtimePolicy": "shared anchor timestamp, original timestamps recorded",
+      "protectedCurrentAndPreviousReleasesExcluded": true,
+      "databaseAndSaveBackupsUntouched": true,
+      "apiAndProxyProcessesUnchanged": true,
+      "metadataRoot": "/var/backups/dsp-idle-immutable-dedup/1.3.11-e599f8c68979"
+    },
+    "cacheArchive": {
+      "archived": true,
+      "prunedVerifiedSources": true,
+      "fileCount": 19,
+      "logicalSourceBytes": 208241339,
+      "allocatedSourceBytes": 208285696,
+      "archiveBytes": 50985451,
+      "archiveSha256": "67b360c436530626f7a21f66401d878e2a0da0c1c92a227b952c88969f9d333c",
+      "byteExactArchiveVerified": true,
+      "restorationMetadataRetained": true,
+      "selectedFilesClosedAndStable": true,
+      "databaseAndSaveBackupsUntouched": true,
+      "servicesAndNginxUnchanged": true,
+      "automaticBackupsDisabled": true,
+      "diskAvailableBytesBefore": 14702010368,
+      "diskAvailableBytesAfter": 14859268096,
+      "diskAvailableRatio": 0.20118419555292516,
+      "projectedAfterReleaseRatio": 0.2005072301928107,
+      "actualProjectedAfterReleaseRatio": 0.2005072301928107,
+      "rootOnlyArchive": "/var/backups/dsp-idle-log-archives/1.3.11-e599f8c68979"
+    },
+    "evidenceFormat": {
+      "ok": true,
+      "operationJournalRecordsVerified": 1100,
+      "originalMetadataRetained": true,
+      "evidenceFormattingNormalized": true,
+      "runtimeFilesChanged": false
+    }
+  },
+  "residualGaps": [
+    "Physical Android install/upgrade, input-method and thermal tests",
+    "Windows system NSIS install/uninstall wizard",
+    "Long-running and low-spec physical-device checks"
+  ],
+  "windowsAuthenticode": "NotSigned",
+  "explicitPhysicalGateWaivers": [],
+  "productionDatabaseBackup": {
+    "created": false,
+    "scope": "Web and download static publication; production API, schema and persistence were preserved"
+  },
+  "evidence": [
+    {
+      "name": "qualification.json",
+      "sha256": "ec034c331bde953b53fb093459270ba6262293b835f9d0834a3faab587e61fad"
+    },
+    {
+      "name": "freeze-proof.json",
+      "sha256": "07ac60c1145d823c9832268a892916bc2e0900ec65a530469993ea8279c89413"
+    },
+    {
+      "name": "download-plan.json",
+      "sha256": "d134d1b57a8aece0c14cedc2eb2bbc585a20c091343f72dd57968a31ec1636e4"
+    },
+    {
+      "name": "stage-hk-web.json",
+      "sha256": "5474e80f64b3d4c4337417e878a8faa3429ecb8883df3fd41c6bc823167a8343"
+    },
+    {
+      "name": "publish-hk-web.json",
+      "sha256": "ce461a12701f18d2034d2bf802053a195396a3dcbd0cc0253ef8cc24b3c3efe2"
+    },
+    {
+      "name": "observe-hk-web.json",
+      "sha256": "0ae0b4ad6fa86d740e7d424895b60a9eba95dabc8bf6362bc65802fbbf1ee4ec"
+    },
+    {
+      "name": "prepare-hk-fallback.json",
+      "sha256": "802bce6a997c303601db6c1288cf50cca633d5be963452001d59091142d5e340"
+    },
+    {
+      "name": "publish-hk-fallback.json",
+      "sha256": "aeb48b128cea08504adfa58cee05e5c1b430ad9fdb70cf314ef8bcd94fe6af0b"
+    },
+    {
+      "name": "postflight-hk.json",
+      "sha256": "2d7494a20f90ff2141260555e48c95dc65afd4f71a4c3f2c0ebb79edc8899bd7"
+    },
+    {
+      "name": "stage-download.json",
+      "sha256": "6952d3572b2f9696d713361983d9e5a7e31edb6ff4505a0567d2a88e5f9c0e04"
+    },
+    {
+      "name": "activate-download.json",
+      "sha256": "7ee39cc5b2594f19854ae8a2178ec9add967e75ae3a608e402fe684b7275b619"
+    },
+    {
+      "name": "observe-download-final.json",
+      "sha256": "18e628a2a407d1743ad7c5720621c51568fde4943e94f55906f4de6bc7e8d224"
+    },
+    {
+      "name": "postflight-download-final.json",
+      "sha256": "651da1514d37c4205555c6e2c2987ab5d6d0cb5f751159e13054d376e6f1be55"
+    },
+    {
+      "name": "public-web-http-proof.json",
+      "sha256": "fae8f86575fa4a44f57ef807941fee4e5e1dbccce8b5db0230f1ef1bf56585df"
+    },
+    {
+      "name": "public-http-proof.json",
+      "sha256": "de5b45d7a1d5637f9f92da5a3666373993921942a52bf13cda0b5b957049149b"
+    },
+    {
+      "name": "public-verification.json",
+      "sha256": "3484c937b2672fa8b707bf39ec769993aa94bf272ca164dcc2729e43804e8f80"
+    },
+    {
+      "name": "download-browser-proof.json",
+      "sha256": "d5fc420624715be7f7381f2d73873698163b20ab31257529637ae0d1b262ee2f"
+    },
+    {
+      "name": "physical-download-proof.json",
+      "sha256": "404b94a07ba31852903d6f8b3850ec82a7739fa80b706a8e5e1fc0da17651800"
+    },
+    {
+      "name": "web-conversion-proof.json",
+      "sha256": "a1eef89581250644dc2b9dc3e8c97694063dbcd62a1f843f3c7215cc0169a569"
+    },
+    {
+      "name": "android-upgrade-proof.json",
+      "sha256": "dfbfa192ca25121a8c1e5badcb6c363eb7c17c5b637fa785c6a04b1c828a0be6"
+    },
+    {
+      "name": "real-version-upgrade.json",
+      "sha256": "f468428fa897b0a6ff0f4eec8a5650888ccb5e55a156271d378880fdd4760211"
+    },
+    {
+      "name": "hk-dedup.json",
+      "sha256": "8866dafc6797421b7aa7fcebe4ad22f4799584fbd4b77497766df55829af8877"
+    },
+    {
+      "name": "hk-cache-archive-final.json",
+      "sha256": "b7516bf34bb9e921f1861093ed3c932fa218c11b2ac5b768a1cce7f32ad312c2"
+    },
+    {
+      "name": "operations-evidence-format.json",
+      "sha256": "500b2a611f8c58e57c04f8e84d2ebb72542061c1e87bd1bc01d58da437a1d2eb"
+    },
+    {
+      "name": "active-api-contract-validation.json",
+      "sha256": "ecbd012d67a31c547ef45e8e272d1d5fea5df6fbd08f4ddf274adce31892a1fd"
+    }
+  ],
+  "developmentValidationEvidenceContext": "Historical accepted gate snapshot from the identical frozen candidate before deployment"
+}

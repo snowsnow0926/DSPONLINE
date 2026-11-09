@@ -8,15 +8,15 @@ A 2D infinite-canvas idle factory game inspired by the production flow of Dyson 
 
 ## Current Releases
 
-Public release metadata was checked on November 8, 2026. Platforms update independently.
+Public versions, manifests, and installation packages were verified on November 9, 2026.
 
 | Platform | Stable version | Get it |
 | --- | --- | --- |
-| Web / PWA | **1.3.9** | [Play online](https://dsponline.cn/) |
-| Windows x64 | **1.3.10** | [Download installer](https://download.dsponline.cn/downloads/desktop/stable/dsp-idle-1.3.10-x64-setup.exe) |
-| Android 7+ | **1.3.9 / 1003009** | [Download APK](https://download.dsponline.cn/downloads/android/dsp-idle-1.3.9-1003009.apk) |
+| Web / PWA | **1.3.11** | [Play online](https://dsponline.cn/) |
+| Windows x64 | **1.3.11** | [Download installer](https://download.dsponline.cn/downloads/desktop/stable/dsp-idle-1.3.11-x64-setup.exe) |
+| Android 7+ | **1.3.11 / 1003011** | [Download APK](https://download.dsponline.cn/downloads/android/dsp-idle-1.3.11-1003011.apk) |
 
-Windows 1.3.10 fixes cloud-save downloads rejected by DSP request-header validation. Web and Android remain on 1.3.9. See the [1.3.9 release record](./docs/releases/1.3.9.md) for content-pack and save-interaction improvements, and the [1.3.10 release record](./docs/releases/1.3.10.md) for the Windows hotfix, validation, and rollback details.
+Version 1.3.11 adds conversion to vanilla saves, v5 core overrides, and safe ID renaming, and includes the Windows cloud-save read hotfix. Save-preserving upgrades, public package checks, PWA offline reopening, and fallback cache isolation passed. [Release record and rollback details](./docs/releases/1.3.11.md)
 
 The Windows installer is currently `NotSigned`; Android retains its long-term release certificate. The download page provides SHA-256 checksums. Package details are in [Native Applications](./docs/NATIVE_APPLICATIONS.md).
 
@@ -24,14 +24,14 @@ The Windows installer is currently `NotSigned`; Android retains its long-term re
 
 ## Current Capabilities
 
-Version 1.3.11 has frozen local candidates for Web, Windows, signed Android, and the download site. Conversion to vanilla includes a preview, a verified recovery snapshot, recovery of core materials, and disabled pack configurations retained for restoration. The candidate also includes v5 core item and belt overrides and safe ID renaming with historical mappings. Device and system-installer gates are recorded in the handoff. [Candidate record](./docs/releases/1.3.11-development-handoff-2026-11-09.md)
+Operations Center → Content Packs provides conversion to vanilla gameplay with a preview, a verified snapshot, recovery of core materials, and disabled pack configurations retained for restoration. Normal and speedrun saves keep their modes. Physical-device, system-installer, and long-running limitations are recorded in the release record.
 
 - **Infinite-canvas factories:** React 19 and React Flow with zooming, blueprints, cross-planet production-line lookup, and desktop and mobile portrait/landscape controls.
 - **Industrial progression:** mining, smelting, manufacturing, power, belts, logistics, research, Dyson infrastructure, and a galactic endgame. Live simulation and offline settlement follow the same material rules.
 - **Planning and manufacturing:** multi-stage recursive crafting, the Construction Center, logistics vessels, a production codex, and real upstream-line location and highlighting.
 - **Local-save protection:** main saves, verified backups, snapshots, three manual slots, recovery points before save replacement, write-failure protection, and diagnostic exports.
 - **Cloud progress:** username accounts, optional email, four cloud-save slots, revision history, conflict handling, and leaderboards, with separate normal and speedrun progress.
-- **Content packs v4:** visual authoring, handcraft controls, recipe restrictions, effective technology bonuses, custom production rules, and save-preserving ID migration.
+- **Content packs v5** support visual authoring, handcraft controls, recipe restrictions, effective technology bonuses, custom production rules, core item/belt overrides, safe renaming, and save-preserving ID migration.
 - **Multiple interfaces:** Simplified Chinese and English, Dark/Light/System themes, font scaling, and two mobile layouts. Language preferences are stored per device.
 - **Apps and self-hosting:** Web/PWA, Electron Windows, Capacitor Android, a SQLite cloud service, backup/recovery tools, and independent-node deployment tooling.
 
@@ -46,8 +46,10 @@ Open the visual authoring tool under Operations Center → Content Packs to crea
 - Apply completed-technology bonuses to production speed, power consumption, mining efficiency, and input/output capacity.
 - Define fuel energy, generator efficiency, and resource deposits and mining buildings on existing planets.
 - Preserve inventory, buildings, and research during compatible updates, with explicit old-ID mappings for renamed content.
+- Rename IDs safely, override permitted core item and belt properties, preview residual data, and uninstall packs safely.
+- Convert to vanilla rules with a verified snapshot and recovery of core materials. Re-enable matching packs and restore the snapshot to recover pack progress.
 
-Start with the [content-pack guide](./docs/MODDING.md) and the [Crystal Industry v4 example](./docs/examples/example-crystal-v4.content-pack.json). Packs use validated declarative rules and cannot execute arbitrary scripts. Pack configurations are not distributed automatically with cloud saves; install the corresponding packs and compatible versions when moving to another device.
+Start with the [content-pack guide](./docs/MODDING.md), [Crystal Industry v4 example](./docs/examples/example-crystal-v4.content-pack.json), and [core overrides v5 example](./docs/examples/example-core-overrides-v5.content-pack.json). Packs use validated declarative rules. Install the corresponding pack configurations and compatible versions on each device.
 
 ## Local Development
 

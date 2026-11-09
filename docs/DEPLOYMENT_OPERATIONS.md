@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **当前基线（2026-11-09，1.3.11）**。香港 Web current/previous 为 `1.3.11-e599f8c68979` / `1.3.9-2027047763f5`，generation/proxy 64/202，API `api-1.3.0-4c8d0c13a714`、green/4322、forward，无 pending，API/代理进程与数据库身份保留，backup disabled、timer inactive。上一稳定入口为不可变 1.3.9，Nginx SHA `b1acc206229b0d924a0eeaf53d19dfeb1564e6582890f7ee8963aa3ba727d125`；根 Web 回退先恢复独立 Nginx 原件解除旧 worker 拒绝。新上海下载 current/previous 为 1.3.11/1.3.10，Android1003011、Windows1.3.11，游戏/API 为 1.2.9/1.2.6。400 网页、31 下载、两整包与 PWA 隔离通过，香港余量约20.079%。精确配置备份、容量归档和回退见[正式记录](./releases/1.3.11.md)。
+
 > **当前下载基线（2026-11-07，Windows 1.3.10）**：新上海下载 current/previous 为 download-site-1.3.10-de383a34bfb1 / download-site-1.3.9-2027047763f5；28 件核对、12 次采样、公网元数据/Range/整包通过。Nginx/证书/服务和上海游戏/API 保持。香港 Web、Android 继续 1.3.9，香港回退与 canary 未变；本次只备份并切换下载静态目录，没有 API/数据库写入或备份策略改动。[精确回退与证据](./releases/1.3.10.md)。
 
 > **当前基线（2026-11-07，1.3.9）**：香港Web current/previous为1.3.9-2027047763f5 / 1.3.8-8a52afce96ba；API api-1.3.0-4c8d0c13a714、green/4322，generation/proxy63/202，原进程与数据库身份保持，备份disabled/timer inactive。上一稳定入口为不可变1.3.8，Nginx SHA `09a18ffddfd4066439cc5383b6a333128b82e8b6e598693c39aa73ca073eeb21`；根站回退先恢复独立Nginx原件解除旧worker拒绝。新上海只切下载1.3.9/1.3.8，26件及整包校验通过，游戏/API/证书保持。可再生缓存及关闭日志先可恢复归档后释放原件，最终磁盘约20.132%，容量仍需规划。[证据与精确回退](./releases/1.3.9.md)。

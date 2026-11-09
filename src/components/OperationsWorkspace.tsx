@@ -57,6 +57,7 @@ import { getContentPackDependencyStatuses, getContentPackUpdateReport, getConten
 import { exportTextFile } from "../game/fileExport";
 import { ContentPackAuthor } from "./ContentPackAuthor";
 import { prepareContentPackRemoval } from "../game/contentPackRemoval";
+import { getVanillaSaveConversionPreview } from "../game/vanillaSaveConversion";
 import type { AutomaticPerformanceReport } from "../game/benchmark";
 import { NativeUpdateCard } from "./NativeUpdateCard";
 import type { AutosaveIntervalSeconds, CargoStackSize, DefaultBeltRouteMode, DifficultyMode, FontScale, GameSettings, GameState, SimulationSpeed } from "../game/types";
@@ -196,6 +197,7 @@ interface OperationsWorkspaceProps {
   onRegisterContentPack: () => void;
   onSetContentPackEnabled: (packId: string, enabled: boolean) => void;
   onRemoveContentPack: (packId: string, cleanup?: boolean) => void;
+  onRestoreVanillaSave?: () => void;
   logisticsActions: Omit<LogisticsManagementPanelProps, "game">;
 }
 
@@ -1156,6 +1158,7 @@ function ContentPacksPanel({
   onRegister,
   onSetEnabled,
   onRemove,
+  onRestoreVanilla,
   operationPending = false,
 }: {
   game: GameState;
@@ -1167,6 +1170,7 @@ function ContentPacksPanel({
   onRegister: () => void;
   onSetEnabled: (packId: string, enabled: boolean) => void;
   onRemove: (packId: string, cleanup?: boolean) => void;
+  onRestoreVanilla?: () => void;
   operationPending?: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1175,6 +1179,9 @@ function ContentPacksPanel({
   const [exportError, setExportError] = useState<string | null>(null);
   const [removalId, setRemovalId] = useState<string | null>(null);
   const [removalConfirmed, setRemovalConfirmed] = useState(false);
+  const [vanillaRequested, setVanillaRequested] = useState(false);
+  const [vanillaConfirmed, setVanillaConfirmed] = useState(false);
+  const vanillaPreview = useMemo(() => vanillaRequested ? getVanillaSaveConversionPreview(game, registry) : null, [game, registry, vanillaRequested]);
   const removalPack = removalId ? registry.packs[removalId] : undefined;
   const removalPlan = useMemo(() => removalPack ? prepareContentPackRemoval(game, removalPack.manifest) : null, [game, removalPack]);
   const validateDraft = (raw: string) => { setDraft(raw); onValidate(raw); };
@@ -1202,6 +1209,21 @@ function ContentPacksPanel({
         <div><span>扩展内容目录</span><strong>内容包管理器</strong></div>
         <span className="settings-state"><PackagePlus size={14} />已注册 {packs.length}</span>
       </header>
+      {onRestoreVanilla && packs.length > 0 ? <section className="content-pack-importer">
+        <div><strong>恢复原版玩法</strong><small>清除当前存档中的全部内容包物品、设备和进度。原版物资回收到对应行星托盘，原版建筑与研究进度保留。</small></div>
+        <button type="button" disabled={operationPending || (!game.contentPacks.length && packs.every(pack => !pack.enabled))} onClick={() => { setVanillaRequested(true); setVanillaConfirmed(false); }}>转回原版存档</button>
+      </section> : null}
+      {vanillaPreview ? <section className="content-pack-removal-preview" role="group" aria-label="转回原版存档确认">
+        <strong>清理全部内容包数据并恢复原版规则</strong>
+        <p>操作前会验证完整恢复快照。内容包配置将全部停用并保存在本机，重新启用后可读取转换前快照。</p>
+        <p>将移除 {vanillaPreview.entities} 个内容包实体、{vanillaPreview.belts} 条连接和 {vanillaPreview.technologies} 项自定义科技。将整理 {vanillaPreview.blueprints} 份蓝图，取消 {vanillaPreview.constructionOrders} 项建造订单和 {vanillaPreview.handcraftOrders} 项手合订单。</p>
+        {vanillaPreview.itemNames.length ? <details><summary>涉及 {vanillaPreview.itemNames.length} 种内容包物品</summary><p>{vanillaPreview.itemNames.join("、")}</p></details> : null}
+        <p>原版制造材料、施工预留物资和可回收矿机将返还。自定义物品与已投入的自定义科研进度会清除。</p>
+        {!game.paused ? <p role="alert">请先暂停工厂，再确认转换。</p> : null}
+        {game.timeWarp.enabled ? <p role="alert">请先退出纯挂机，再确认转换。</p> : null}
+        <label><input type="checkbox" checked={vanillaConfirmed} disabled={operationPending} onChange={event => setVanillaConfirmed(event.target.checked)} />我确认清除上述全部内容包数据并转回原版玩法</label>
+        <div className="content-pack-actions"><button type="button" disabled={!game.paused || game.timeWarp.enabled || operationPending || !vanillaConfirmed} onClick={() => { setVanillaConfirmed(false); setVanillaRequested(false); onRestoreVanilla?.(); }}>确认转换并保存</button><button type="button" disabled={operationPending} onClick={() => setVanillaRequested(false)}>取消</button></div>
+      </section> : null}
       <section className="content-pack-importer">
         <div>
           <strong>导入或更新内容包</strong>
@@ -1267,7 +1289,7 @@ function ContentPacksPanel({
         <label><input type="checkbox" checked={removalConfirmed} disabled={operationPending} onChange={event => setRemovalConfirmed(event.target.checked)} />我理解将清理以上资源点、科技记录、历史统计及零库存索引</label>
         <div className="content-pack-actions"><button type="button" disabled={!game.paused || operationPending || !removalConfirmed || removalPlan.blockers.total > 0} onClick={() => { setRemovalConfirmed(false); onRemove(removalPack.manifest.id, true); }}>确认清理并安全移除</button><button type="button" disabled={operationPending} onClick={() => setRemovalId(null)}>取消</button></div>
       </section> : null}
-      {operationPending ? <p role="status">正在保存卸载前快照并安全移除内容包…</p> : null}
+      {operationPending ? <p role="status">正在保存恢复快照并处理内容包…</p> : null}
       {registry.removedManifests?.length ? <details className="content-pack-history"><summary>已移除内容包配置备份（{registry.removedManifests.length}）</summary><p>恢复旧快照前，先载入配置并注册启用对应内容包。</p>{registry.removedManifests.map(old => <div className="content-pack-actions" key={`${old.id}@${old.version}`}><span>{old.name} · v{old.version}</span><button type="button" disabled={operationPending} onClick={() => validateDraft(JSON.stringify(old, null, 2))}>载入配置</button><button type="button" onClick={() => void exportManifest(JSON.stringify(old, null, 2), `${old.id}-${old.version}.json`)}>导出配置备份</button></div>)}</details> : null}
     </div>
   );
@@ -1439,7 +1461,7 @@ export function OperationsWorkspace(props: OperationsWorkspaceProps) {
         {props.tab === "settings" ? <WindowsNativePerformancePolicySetting /> : null}
         {props.tab === "performance" ? <PerformancePanel game={props.game} snapshot={props.performanceMonitor} onStart={props.onStartPerformanceMonitor} onStop={props.onStopPerformanceMonitor} onClear={props.onClearPerformanceMonitor} onExport={props.onExportPerformanceMonitor} /> : null}
         {props.tab === "saves" ? <SavesPanel {...props} /> : null}
-        {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onClearValidation={props.onClearModValidation} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} operationPending={props.contentPackOperationPending} /> : null}
+        {props.tab === "packs" ? <ContentPacksPanel game={props.game} registry={props.contentPackRegistry} validation={props.modValidation} onValidate={props.onValidateMod} onClearValidation={props.onClearModValidation} onExportTemplate={props.onExportModTemplate} onRegister={props.onRegisterContentPack} onSetEnabled={props.onSetContentPackEnabled} onRemove={props.onRemoveContentPack} onRestoreVanilla={props.onRestoreVanillaSave} operationPending={props.contentPackOperationPending} /> : null}
         {props.tab === "support" ? <SupportPanel game={props.game} report={props.performanceReport} /> : null}
       </div>
     </WorkspaceFrame>

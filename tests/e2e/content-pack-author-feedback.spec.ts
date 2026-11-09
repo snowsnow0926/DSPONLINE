@@ -19,7 +19,7 @@ async function openPacks(page: Page, installed = false, stock = 0) {
   const durable = ["true", "1", "on"].includes((process.env.VITE_DURABLE_RUNTIME_RECOVERY ?? "").toLowerCase());
   await page.addInitScript(({ pack, installed, stock, durable }) => {
     if (!durable) sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.10");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-09-v1.3.11");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     if (sessionStorage.getItem("feedback-fixture-seeded")) return;
     sessionStorage.setItem("feedback-fixture-seeded", "1");

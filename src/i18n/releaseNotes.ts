@@ -1,5 +1,6 @@
 import type { AppLocale } from "./locale";
 export { getCurrentReleaseNotes } from "./currentReleaseNotes";
+export { getReleaseNotes1310 } from "./releaseNotes1310";
 export { getReleaseNotes139 } from "./releaseNotes139";
 export { getReleaseNotes127 } from "./releaseNotes127";
 export { getReleaseNotes129 } from "./releaseNotes129";

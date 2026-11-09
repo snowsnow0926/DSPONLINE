@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { startupTimeoutMs } from "./startup-timeout";
 import { injectOneConservativeDecision } from "./offline-decision-test-helpers";
 
-const RELEASE_NOTE_ID = "2026-11-07-v1.3.10";
+const RELEASE_NOTE_ID = "2026-11-09-v1.3.11";
 
 async function seedBatchSave(page: Page, options: { offlineSeconds?: number; paused?: boolean; topology?: boolean; bypassMenu?: boolean } = {}) {
   await page.addInitScript(({ offlineSeconds, paused, topology, bypassMenu, releaseNoteId }) => {

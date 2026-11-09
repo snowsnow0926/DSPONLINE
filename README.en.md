@@ -24,6 +24,8 @@ The Windows installer is currently `NotSigned`; Android retains its long-term re
 
 ## Current Capabilities
 
+Version 1.3.11 is in release preparation. The candidate adds a backed-up conversion to vanilla gameplay, v5 core item and belt overrides, and safe ID renaming with historical mappings. Conversion includes a preview and recovery of core materials. [Candidate record](./docs/releases/1.3.11-development-handoff-2026-11-09.md)
+
 - **Infinite-canvas factories:** React 19 and React Flow with zooming, blueprints, cross-planet production-line lookup, and desktop and mobile portrait/landscape controls.
 - **Industrial progression:** mining, smelting, manufacturing, power, belts, logistics, research, Dyson infrastructure, and a galactic endgame. Live simulation and offline settlement follow the same material rules.
 - **Planning and manufacturing:** multi-stage recursive crafting, the Construction Center, logistics vessels, a production codex, and real upstream-line location and highlighting.

@@ -92,3 +92,55 @@ export function hasContentIdReference(source: unknown, ids: ReadonlySet<string>)
   };
   return visit(source);
 }
+
+/** Remove declared content references from a conversion candidate. Graphs and
+ * funded work must be settled by the caller before this metadata pass. */
+export type ContentIdSets = Record<Kind, ReadonlySet<string>>;
+
+function hasTypedId(ids: ContentIdSets, kind: Kind, id: string): boolean {
+  return ids[kind].has(id) || (kind === "buildings" && ids.belts.has(id));
+}
+
+export function hasTypedContentIdReference(source: unknown, ids: ContentIdSets): boolean {
+  const visit = (value: unknown, key = ""): boolean => {
+    if (typeof value === "string") return Boolean(scalarKinds[key] && hasTypedId(ids, scalarKinds[key], value));
+    if (Array.isArray(value)) {
+      const kind = arrayKinds[key] ?? (["orbitalCargoPortItems", "elevatorOutputItems"].includes(key) ? "items" : undefined);
+      return value.some(entry => typeof entry === "string" && kind ? hasTypedId(ids, kind, entry) : visit(entry));
+    }
+    if (!value || typeof value !== "object") return false;
+    for (const [id, entry] of Object.entries(value)) {
+      if (key !== "jobs" && mapKinds[key] && hasTypedId(ids, mapKinds[key], id)) return true;
+      if ((key === "recipeSelections" || key === "recipeOverrides") && typeof entry === "string" && hasTypedId(ids, "recipes", entry)) return true;
+      if (visit(entry, nestedItemMaps.has(key) || key === "progressByTech" ? "inventory" : id)) return true;
+    }
+    return false;
+  };
+  return visit(source);
+}
+
+export function removeContentIdReferences<T>(source: T, ids: ContentIdSets): T {
+  const nullableFields = new Set(["selectedTechId", "pausedTechId", "lastCraftedId"]);
+  const fixedItemArrays = new Set(["orbitalCargoPortItems", "elevatorOutputItems"]);
+  const walk = (value: unknown, key = ""): unknown => {
+    if (typeof value === "string" && scalarKinds[key] && hasTypedId(ids, scalarKinds[key], value)) {
+      return nullableFields.has(key) ? null : undefined;
+    }
+    if (Array.isArray(value)) {
+      if (arrayKinds[key]) return value.filter(entry => typeof entry !== "string" || !hasTypedId(ids, arrayKinds[key], entry));
+      if (fixedItemArrays.has(key)) return value.map(entry => typeof entry === "string" && ids.items.has(entry) ? null : entry);
+      return value.map(entry => walk(entry));
+    }
+    if (!value || typeof value !== "object") return value;
+    const result: Record<string, unknown> = {};
+    for (const [id, entry] of Object.entries(value)) {
+      if (key !== "jobs" && mapKinds[key] && hasTypedId(ids, mapKinds[key], id)) continue;
+      if ((key === "recipeSelections" || key === "recipeOverrides") && typeof entry === "string" && ids.recipes.has(entry)) continue;
+      const childKey = nestedItemMaps.has(key) || key === "progressByTech" ? "inventory" : id;
+      const retained = walk(entry, childKey);
+      if (retained !== undefined) result[id] = retained;
+    }
+    return result;
+  };
+  return walk(source) as T;
+}

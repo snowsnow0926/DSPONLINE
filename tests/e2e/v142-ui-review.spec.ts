@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { workflowTimeoutMs } from "./startup-timeout";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-11-07-v1.3.10";
+const RELEASE_NOTE_ID = "2026-11-09-v1.3.11";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -528,12 +528,12 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "Windows 云存档下载热修");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.10");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(3);
-  await expect(dialog).toContainText("云存档恢复正常下载");
-  await expect(dialog).toContainText("保留上传与取消保护");
-  await expect(dialog).toContainText("现有存档继续兼容");
+  await expect(dialog).toHaveAttribute("aria-label", "内容包升级与一键转回原版");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.11");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(dialog).toContainText("一键转回原版存档");
+  await expect(dialog).toContainText("转换前完整恢复快照");
+  await expect(dialog).toContainText("安全改名与保档迁移");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

@@ -43,6 +43,7 @@ import { validateContentPack } from "./mods";
 import type { BuildingId, GameState, ItemId, RecipeId, TechId } from "./types";
 import { createExampleContentPack } from "../components/ContentPackAuthor";
 import { installMiner, setFuelItem } from "./engine";
+import { prepareVanillaSaveConversion } from "./vanillaSaveConversion";
 const CRYSTAL_ORE = "crystal_ore" as ItemId;
 const CRYSTAL_PLATE = "crystal_plate" as ItemId;
 const CRYSTAL_FURNACE = "crystal_furnace" as BuildingId;
@@ -5406,6 +5407,31 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       const opened = await open(checkpoint, activeRuntime);
       const expected = advanceSimulationBudget(initial, 30, 30);
       expect(canonicalSha256(expected)).not.toBe(canonicalSha256(baseline));
+      const advanced = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId, request: { baseRevision: checkpoint.revision, simulationSeconds: 30, wallSeconds: 30 } });
+      expect(advanced.supported, advanced.reason).toBe(true);
+      expect(advanced.summary.canonicalFields).toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256).toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    } finally { applyContentPackRuntimeSnapshot(runtime); }
+  }, 60_000);
+
+  it("loads and advances a converted vanilla factory identically in JavaScript and Rust", async () => {
+    const registry = registerContentPack(createContentPackRegistry(), validateContentPack(createExampleContentPack())).registry;
+    applyContentPackRuntimeSnapshot(createContentPackRuntimeSnapshot(registry));
+    try {
+      let source = simpleMiningState();
+      source.construction[CRYSTAL_FURNACE] = 1;
+      source = placeBuilding(source, CRYSTAL_FURNACE, { x: 300, y: 300 });
+      source.entities.find(entity => entity.buildingId === CRYSTAL_FURNACE)!.outputs = { iron_ingot: 7, [CRYSTAL_PLATE]: 9 };
+      source.tray[CRYSTAL_ORE] = 13;
+      source.research.completedTechIds.push(CRYSTAL_EFFICIENCY);
+      const plan = prepareVanillaSaveConversion(source, registry);
+      expect(plan.issues).toEqual([]);
+      const convertedRuntime = createContentPackRuntimeSnapshot(plan.registry);
+      applyContentPackRuntimeSnapshot(convertedRuntime);
+      const checkpoint = await seed(plan.state, 920, convertedRuntime);
+      const opened = await open(checkpoint, convertedRuntime);
+      const expected = advanceSimulationBudget(plan.state, 30, 30);
       const advanced = await client.request({ operation: "coreAdvance", sessionId: opened.sessionId, request: { baseRevision: checkpoint.revision, simulationSeconds: 30, wallSeconds: 30 } });
       expect(advanced.supported, advanced.reason).toBe(true);
       expect(advanced.summary.canonicalFields).toEqual(canonicalFields(expected));

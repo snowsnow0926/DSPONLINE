@@ -341,6 +341,7 @@ import {
 import { NATIVE_APP_STATE_EVENT } from "./nativeApp";
 import { createContentPackTemplate, parseContentPack, type ModValidationResult } from "./game/mods";
 import { prepareContentPackRemoval } from "./game/contentPackRemoval";
+import { prepareVanillaSaveConversion } from "./game/vanillaSaveConversion";
 import { getItemPresentation } from "./game/contentPresentation";
 import { invalidateSaveSummaryCache } from "./game/storage";
 import { importWithRecovery } from "./game/dynamicImportRecovery";
@@ -16230,6 +16231,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return;
     }
     refreshSaveData();
+    setRuntimePersistenceProgress(current => current?.phase === "complete" || current?.phase === "failed" ? null : current);
     setNotice("已回滚到自动快照");
     playTone("complete");
   }, [persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, restoreGame]);
@@ -16346,24 +16348,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     playTone(enabled && report.catalogValid ? "confirm" : "alert");
   }, [applyRegisteredContentPacks, contentPackRegistry, playTone, readNativeAuthorityPersistenceBoundary]);
 
-  const removeRegisteredContentPack = useCallback(async (packId: string, cleanup = false) => {
+  const removeRegisteredContentPack = useCallback(async (packId: string | null, cleanup = false) => {
     if (contentPackRemovalOwnerRef.current) return;
     if (readNativeAuthorityPersistenceBoundary().protected) {
       setNotice(nativeAuthorityReplacementBlockedMessage("content-pack"));
       playTone("alert");
       return;
     }
-    const pack = contentPackRegistry.packs[packId];
-    if (!pack) return;
+    const convertingToVanilla = packId === null;
+    const pack = packId ? contentPackRegistry.packs[packId] : undefined;
+    if (!convertingToVanilla && !pack) return;
     if (!gameRef.current.paused) { setNotice("请先暂停工厂，再安全移除内容包"); return; }
-    const usage = getContentPackUsage(gameRef.current, pack.manifest);
+    if (convertingToVanilla && gameRef.current.timeWarp.enabled) { setNotice("请先退出纯挂机，再转换存档"); return; }
+    const usage = pack ? getContentPackUsage(gameRef.current, pack.manifest) : { total: 0, entries: [] };
     if (!cleanup && usage.total > 0) {
       setNotice(`当前存档仍引用${usage.entries.join("、")}；可查看“清理残留并移除”，真实物资和设备需先回收`);
       playTone("alert");
       return;
     }
-    const result = removeContentPack(contentPackRegistry, packId);
-    if (!result.changed) {
+    const operationName = convertingToVanilla ? "转回原版玩法" : pack!.manifest.name;
+    const result = convertingToVanilla ? null : removeContentPack(contentPackRegistry, packId!);
+    if (result && !result.changed) {
       setNotice(`内容包未移除：${result.reason ?? "无需操作"}`);
       if (result.reason) playTone("alert");
       return;
@@ -16377,17 +16382,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       const expected = gameRef.current;
       const isCurrent = () => contentPackRemovalOwnerRef.current === token && !lifecycleExitStartedRef.current && gameRef.current === expected && gameRef.current.paused && !readNativeAuthorityPersistenceBoundary().protected;
       if (!isCurrent()) return;
-      const plan = prepareContentPackRemoval(checkpoint, pack.manifest);
+      const conversion = convertingToVanilla ? prepareVanillaSaveConversion(checkpoint, contentPackRegistry) : null;
+      if (conversion?.issues.length) { setNotice(`转换未完成。${conversion.issues.join("、")}`); playTone("alert"); return; }
+      const nextRegistry = conversion ? conversion.registry : result!.registry;
+      const plan = conversion
+        ? { state: conversion.state, blockers: { total: 0, entries: [] } }
+        : prepareContentPackRemoval(checkpoint, pack!.manifest);
       if (plan.blockers.total > 0) { setNotice(`仍有真实内容不能清理：${plan.blockers.entries.join("、")}。请先回收物资、矿机或线路`); playTone("alert"); return; }
-      const snapshot = await saveGameSnapshotVerified(checkpoint, `移除内容包前：${pack.manifest.name}`, takeAuxiliaryCheckpointTransfer(checkpoint));
+      const snapshotReason = convertingToVanilla ? "转回原版前（含全部内容包进度）" : `移除内容包前：${pack!.manifest.name}`;
+      const snapshot = await saveGameSnapshotVerified(checkpoint, snapshotReason, takeAuxiliaryCheckpointTransfer(checkpoint));
       if (!isCurrent()) return;
       if (!snapshot) { setNotice("移除前回滚快照保存失败，内容包和主档均未改变"); playTone("alert"); return; }
-      const candidate = { ...(cleanup ? plan.state : checkpoint), contentPacks: getActiveContentPackReferences(result.registry) };
-      const saved = await persistPrimarySave(candidate, "other", { contentPackOperationToken: token, contentPackRegistry: result.registry });
+      const candidate = { ...(cleanup ? plan.state : checkpoint), contentPacks: getActiveContentPackReferences(nextRegistry) };
+      const saved = await persistPrimarySave(candidate, "other", { contentPackOperationToken: token, contentPackRegistry: nextRegistry });
       if (!saved.success) { setNotice(`内容包未移除：${saved.message}`); playTone("alert"); return; }
       primaryWritten = true;
       if (!isCurrent()) return;
-      const report = commitContentPackRegistry(result.registry, contentPackRegistry);
+      const report = commitContentPackRegistry(nextRegistry, contentPackRegistry);
       if (!report.persisted) {
         const rollback = await persistPrimarySave(checkpoint, "other", { contentPackOperationToken: token, contentPackRegistry });
         setNotice(rollback.success ? "配置保存失败，原主档和内容包已恢复" : "配置移除未完成；卸载前快照已保留，请恢复快照后重试");
@@ -16395,15 +16406,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         return;
       }
       invalidateSaveSummaryCache();
-      contentPackRuntimeSnapshotRef.current = createContentPackRuntimeSnapshot(result.registry);
+      contentPackRuntimeSnapshotRef.current = createContentPackRuntimeSnapshot(nextRegistry);
       simulationWorkerRegistryFingerprintRef.current = null;
-      setContentPackRegistry(result.registry);
+      setContentPackRegistry(nextRegistry);
       contentPackRemovalOwnerRef.current = null;
       if (!restoreGame(candidate)) { setNotice("已保存移除后的主档，但当前权威状态已变化；请重新载入核对配置"); playTone("alert"); return; }
       setOperationsTab("packs");
       setOperationsOpen(true);
       void refreshSaveData();
-      setNotice(`内容包已安全移除：${pack.manifest.name}。卸载前快照和配置备份已保留`);
+      setNotice(convertingToVanilla
+        ? "已转回原版玩法。原版物资已回收，转换前快照可在存档页恢复；重新启用原内容包后可读取该快照"
+        : `内容包已安全移除：${operationName}。卸载前快照和配置备份已保留`);
       playTone("remove");
     } catch (failure) {
       setNotice(primaryWritten ? "移除未完成，卸载前快照已保留；请重新载入并核对配置" : failure instanceof Error ? `内容包未移除：${failure.message}` : "内容包未移除，原主档和配置保持");
@@ -24881,6 +24894,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             contentPackOperationPending={contentPackOperationPending}
             onSetContentPackEnabled={toggleRegisteredContentPack}
             onRemoveContentPack={removeRegisteredContentPack}
+            onRestoreVanillaSave={() => { void removeRegisteredContentPack(null, true); }}
             logisticsActions={{
               onSlotItemChange: (entityId, slotIndex, itemId) => void changeRemoteStationSlotItem(entityId, slotIndex, itemId),
               onSlotModeChange: (entityId, slotIndex, scope, mode) => commitGame((current) => setStationSlotMode(current, entityId, slotIndex, scope, mode)),

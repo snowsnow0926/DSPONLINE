@@ -79,7 +79,7 @@ async function findBlankCanvasPoint(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-07-v1.3.10");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-09-v1.3.11");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
   });
 });

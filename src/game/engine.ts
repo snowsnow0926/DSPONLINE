@@ -6158,7 +6158,7 @@ function refundStationRouteWarpers(state: GameState, demand: FactoryEntity, rout
   addToPlanetTray(state, owner.planetId, "space_warper", amount - stored);
 }
 
-function cancelStationRoutes(
+export function cancelStationRoutes(
   state: GameState,
   predicate: (demand: FactoryEntity, route: StationRoute) => boolean,
 ): void {

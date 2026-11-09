@@ -24,7 +24,7 @@ The Windows installer is currently `NotSigned`; Android retains its long-term re
 
 ## Current Capabilities
 
-Version 1.3.11 is in release preparation. The candidate adds a backed-up conversion to vanilla gameplay, v5 core item and belt overrides, and safe ID renaming with historical mappings. Conversion includes a preview and recovery of core materials. [Candidate record](./docs/releases/1.3.11-development-handoff-2026-11-09.md)
+Version 1.3.11 has frozen local candidates for Web, Windows, signed Android, and the download site. Conversion to vanilla includes a preview, a verified recovery snapshot, recovery of core materials, and disabled pack configurations retained for restoration. The candidate also includes v5 core item and belt overrides and safe ID renaming with historical mappings. Device and system-installer gates are recorded in the handoff. [Candidate record](./docs/releases/1.3.11-development-handoff-2026-11-09.md)
 
 - **Infinite-canvas factories:** React 19 and React Flow with zooming, blueprints, cross-planet production-line lookup, and desktop and mobile portrait/landscape controls.
 - **Industrial progression:** mining, smelting, manufacturing, power, belts, logistics, research, Dyson infrastructure, and a galactic endgame. Live simulation and offline settlement follow the same material rules.

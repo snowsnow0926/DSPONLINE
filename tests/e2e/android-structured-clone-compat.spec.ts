@@ -30,7 +30,7 @@ for (const missingApi of [false, true]) {
     await page.addInitScript(({ missingApi }) => {
       const scope = globalThis as typeof globalThis & { originalStructuredClone?: typeof structuredClone };
       scope.originalStructuredClone = scope.structuredClone;
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.12");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.13");
       localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       if (!missingApi) return;
       Reflect.deleteProperty(scope, "structuredClone");

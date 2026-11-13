@@ -1,6 +1,6 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-11-13-v1.3.12";
+export const CURRENT_RELEASE_ID = "2026-11-13-v1.3.13";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
@@ -8,18 +8,16 @@ export function getCurrentReleaseNotes(locale: AppLocale) {
   return {
     id: CURRENT_RELEASE_ID,
     date: en ? "November 13, 2026" : "2026年11月13日",
-    version: "1.3.12",
-    title: en ? "Mobile Scrolling and Save Conflict Fixes" : "手机滚动与存档冲突修复",
-    summary: en ? "Restores scrolling in mobile menus and pickers, moves the automatic card status clear of planet controls, and fixes repeated empty-save conflicts on Windows." : "修复手机菜单与选择列表无法下滑的问题，优化自动卡片状态的位置，并修复 Windows 空存档冲突反复弹出和处理入口无法操作的问题。",
+    version: "1.3.13",
+    title: en ? "Android Factory Startup Compatibility" : "Android 工厂启动兼容修复",
+    summary: en ? "Fixes factory creation on Android runtimes missing structuredClone, with compatibility support across the interface, simulation and save workers." : "修复部分安卓运行环境点击“建立工厂”时报 structuredClone is not defined 的问题，兼容处理覆盖主界面、后台模拟与存档流程。",
     items: [
-      { id: "v1312-mobile-scroll", title: en ? "Scroll mobile menus and lists" : "恢复手机菜单与列表滚动",
-        description: en ? "New-game controls and item or recipe lists remain reachable in portrait, landscape and larger font settings." : "手机竖屏、横屏及大字号下，可上下滑动主菜单、物品与配方列表，正常找到新建存档等操作。" },
-      { id: "v1312-canvas-status", title: en ? "Clearer automatic card status" : "优化自动卡片状态位置",
-        description: en ? "The automatic card status has its own layout position, keeping planet navigation and mobile canvas controls accessible." : "为自动卡片状态安排独立布局位置，方便查看星球导航和操作手机画布工具。" },
-      { id: "v1312-empty-conflict", title: en ? "Recover from empty-save conflicts" : "修复空存档冲突循环",
-        description: en ? "Repeated deletion of an already empty save completes safely. Historical empty deletion reports no longer block creating or saving a factory." : "安全处理已为空的存档删除请求，避免历史空删除记录在重启后反复弹出，阻塞新建和保存工厂。" },
-      { id: "v1312-conflict-actions", title: en ? "Resolve save conflicts from settings" : "恢复存档冲突处理入口",
-        description: en ? "Settings now opens the available conflict choices. Explicit tab takeover and verification continue to protect actual save versions." : "设置页可点击“处理存档冲突”并转到版本选择，配合明确的标签页接管和存档读回校验，保护实际存档版本。" },
+      { id: "v1313-factory", title: en ? "Factory creation on Android" : "修复安卓建立工厂报错",
+        description: en ? "Android runtimes without structuredClone receive a compatible implementation before content-pack initialization, allowing a new factory to open." : "在缺少 structuredClone 的环境中提前提供兼容实现，支持完成内容包初始化并进入新工厂。" },
+      { id: "v1313-workers", title: en ? "Simulation and save workers" : "后台模拟与存档兼容",
+        description: en ? "The interface and workers initialize cloning support in their own runtime, supporting simulation, saving and reopening." : "主界面和后台 Worker 分别初始化克隆支持，覆盖模拟运行、保存和重新进入工厂。" },
+      { id: "v1313-save", title: en ? "Lossless save cloning" : "完整复制与存档保护",
+        description: en ? "Compatibility checks cover object graphs, shared references and ArrayBuffer transfers, including preservation when a transfer fails." : "兼容处理覆盖对象图、共享引用与 ArrayBuffer 转移，并校验复制失败时的原数据保护。" },
     ],
   } as const;
 }

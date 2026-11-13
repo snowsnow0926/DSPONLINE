@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { startupTimeoutMs } from "./startup-timeout";
 import { migrateGame, serializeEnvelope } from "../../src/game/storage";
 
-const RELEASE_NOTE_ID = "2026-11-13-v1.3.12";
+const RELEASE_NOTE_ID = "2026-11-13-v1.3.13";
 
 function createV104LegacyState(endgame = false) {
   const entityBase = {

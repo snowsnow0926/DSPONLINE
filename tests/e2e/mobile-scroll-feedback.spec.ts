@@ -45,7 +45,7 @@ for (const device of devices) {
 
     test.beforeEach(async ({ page }) => {
       await page.addInitScript(() => {
-        localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.12");
+        localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.13");
         localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       });
       await page.route("**/api/**", route => route.fulfill({ status: 503, contentType: "application/json", body: "{}" }));

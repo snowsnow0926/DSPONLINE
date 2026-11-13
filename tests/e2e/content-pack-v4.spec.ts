@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 async function openAuthor(page: Page) {
   await page.addInitScript(() => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.12");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.13");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, done: true }));
     localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state: { version: 47, entities: [], belts: [], tray: { iron_ore: 42 }, construction: {}, paused: true, research: { completedTechIds: [], selectedTechId: null, progressByTech: {} }, settings: { autosaveIntervalSeconds: 0, simulationSpeed: 1, theme: "dark" } } }));
   });

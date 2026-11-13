@@ -1,3 +1,4 @@
+import "./compat/structuredClone";
 import { addContentPackResources, getTechnologyMultiplier } from "./game/contentRules";
 import { migrateContentPackIds } from "./game/contentIdMigration";
 import {

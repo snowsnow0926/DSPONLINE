@@ -1,3 +1,4 @@
+import "../compat/structuredClone";
 /// <reference lib="webworker" />
 import { readPureIdleRecoveryForMacro } from "./pureIdleRecovery";
 

@@ -1,3 +1,4 @@
+import "../compat/structuredClone";
 import { getBuilding, getPlanet } from "./content";
 import { getSystemDistanceLy } from "./galaxy";
 import type {

@@ -1,3 +1,4 @@
+import "../compat/structuredClone";
 import {
   DYSON_SHELL_CAPACITY_PER_STRUCTURE,
   DYSON_SHELL_SAIL_POWER_KW,

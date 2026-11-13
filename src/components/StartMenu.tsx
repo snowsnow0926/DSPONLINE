@@ -1,3 +1,4 @@
+import "../compat/structuredClone";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   Activity,

@@ -1,3 +1,4 @@
+import "../compat/structuredClone";
 import {
   runPlanetSimulationPhase,
   type SimulationPlanetPhaseExecutor,

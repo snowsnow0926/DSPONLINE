@@ -1,3 +1,4 @@
+import "../compat/structuredClone";
 import {
   CONSTRUCTION,
   FUEL_ENERGY_MJ,

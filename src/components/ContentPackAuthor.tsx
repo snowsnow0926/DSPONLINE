@@ -1,3 +1,4 @@
+import "../compat/structuredClone";
 import { useMemo, useRef, useState } from "react";
 import { createContentPackTemplate, MOD_FORMAT_VERSION, type ContentPackManifest } from "../game/mods";
 import { TECHNOLOGY_LIST } from "../game/content";

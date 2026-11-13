@@ -89,6 +89,7 @@
     "@capacitor/splash-screen": "8.0.2",
     "@capacitor/status-bar": "8.0.3",
     "@xyflow/react": "^12.9.3",
+    "core-js-pure": "3.51.0",
     "electron-updater": "^6.8.9",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",

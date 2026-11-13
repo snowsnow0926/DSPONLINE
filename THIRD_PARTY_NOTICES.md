@@ -2,7 +2,7 @@
 
 This inventory is generated from the locked npm runtime dependency trees. Third-party components remain under their own licenses; the project's PolyForm Noncommercial terms do not replace them.
 
-Inventory SHA-256: `ebfa9d1c93f6ab1a469805a5381ca370461b5e1d83e9a0112a78188579866055`
+Inventory SHA-256: `5a0e04ca2a32083fdbb2a43c031431332e2843eba0f4a059915c685d16297658`
 
 ## Direct Runtime Dependencies
 
@@ -19,6 +19,7 @@ Inventory SHA-256: `ebfa9d1c93f6ab1a469805a5381ca370461b5e1d83e9a0112a7818857986
 | `@noble/hashes` | `2.2.0` | `MIT` | client/runtime |
 | `@xyflow/react` | `12.11.2` | `MIT` | client/runtime |
 | `better-sqlite3` | `12.11.1` | `MIT` | cloud service |
+| `core-js-pure` | `3.51.0` | `MIT` | client/runtime |
 | `electron` | `43.8.1` | `MIT` | client/runtime |
 | `electron-updater` | `6.8.9` | `MIT` | client/runtime |
 | `lucide-react` | `0.468.0` | `ISC` | client/runtime |
@@ -38,7 +39,7 @@ Inventory SHA-256: `ebfa9d1c93f6ab1a469805a5381ca370461b5e1d83e9a0112a7818857986
 | `BSD-2-Clause` | 1 |
 | `BSD-3-Clause` | 2 |
 | `ISC` | 18 |
-| `MIT` | 96 |
+| `MIT` | 97 |
 | `Python-2.0` | 1 |
 
 Complete npm runtime license and notice texts are in [`public/THIRD_PARTY_LICENSES.txt`](./public/THIRD_PARTY_LICENSES.txt), which is copied into Web, desktop, and Android builds.

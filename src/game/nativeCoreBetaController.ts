@@ -1,3 +1,4 @@
+import "../compat/structuredClone";
 import {
   getDesktopBridge,
   type DesktopNativeCoreCommitOperationResult,

@@ -1,0 +1,434 @@
+{
+  "formatVersion": 1,
+  "version": "1.3.14",
+  "runtimeSha": "2798a0ccca0452c67024e2816800ae9610b96d98",
+  "buildId": "1.3.14+2798a0ccca04",
+  "fileCount": 85,
+  "files": [
+    {
+      "path": "desktop-build-evidence.json",
+      "size": 14142,
+      "sha256": "89f3f07efe3b1f98657bc5c7e36813d77d83337329114edfdd5c1f4943e57874"
+    },
+    {
+      "path": "dsp-idle-1.3.14-x64-setup.exe",
+      "size": 113222056,
+      "sha256": "c210a5dfc7a1c03bbc9b44636925b8d3e807fc3d3f92c52865a26ab10aa14a88"
+    },
+    {
+      "path": "dsp-idle-1.3.14-x64-setup.exe.blockmap",
+      "size": 118877,
+      "sha256": "616d722c3f297c93f51eb2675aa79f6810af1d14e2e554ebef46fd15fd179ee5"
+    },
+    {
+      "path": "latest.yml",
+      "size": 356,
+      "sha256": "80e7445ca84c75ad5ba4e68cc93f2ac35994f1fa42c7db0b75ba82bab2f7e8b4"
+    },
+    {
+      "path": "update-feed/desktop/stable/dsp-idle-1.3.14-x64-setup.exe",
+      "size": 113222056,
+      "sha256": "c210a5dfc7a1c03bbc9b44636925b8d3e807fc3d3f92c52865a26ab10aa14a88"
+    },
+    {
+      "path": "update-feed/desktop/stable/dsp-idle-1.3.14-x64-setup.exe.blockmap",
+      "size": 118877,
+      "sha256": "616d722c3f297c93f51eb2675aa79f6810af1d14e2e554ebef46fd15fd179ee5"
+    },
+    {
+      "path": "update-feed/desktop/stable/latest.yml",
+      "size": 356,
+      "sha256": "80e7445ca84c75ad5ba4e68cc93f2ac35994f1fa42c7db0b75ba82bab2f7e8b4"
+    },
+    {
+      "path": "update-feed/desktop/stable/release.json",
+      "size": 618,
+      "sha256": "43158183d114901e62e2942335792247daf463bcc79be8ecb093fab39b9ad2ea"
+    },
+    {
+      "path": "win-unpacked/chrome_100_percent.pak",
+      "size": 119905,
+      "sha256": "d76fe8fa3a14cd73e4c858746e2ab2d2fa6f2df38a906fa5814b50a8a895fc96"
+    },
+    {
+      "path": "win-unpacked/chrome_200_percent.pak",
+      "size": 197089,
+      "sha256": "b74ad439f3d3762657f3ba533a6af3ac63315c838ed46519891366f43d834a0e"
+    },
+    {
+      "path": "win-unpacked/d3dcompiler_47.dll",
+      "size": 4741488,
+      "sha256": "a05f99734f7c4822fefc12b367af21fd0976ed6608752fb1e1e80b6ece7ecbbb"
+    },
+    {
+      "path": "win-unpacked/DSP极简网络.exe",
+      "size": 239377920,
+      "sha256": "b5864eaaaa4730b242b021c6a1738fe91faa6dc50462e7ae662b10f9ac3b7ecc"
+    },
+    {
+      "path": "win-unpacked/dxcompiler.dll",
+      "size": 25610240,
+      "sha256": "b245bcc7887f14f540f7114d90e8b11ee71daf4b3d4e77f228f4b2a18a751b48"
+    },
+    {
+      "path": "win-unpacked/dxil.dll",
+      "size": 1509760,
+      "sha256": "77e039c905030a641e53658a008b74e90635a5ea9b6b79eabd0f2003bdfca59a"
+    },
+    {
+      "path": "win-unpacked/ffmpeg.dll",
+      "size": 3061248,
+      "sha256": "1c26ae8a3e72cc2df7e1601e9981b5eebc0157255b6876f9360642db9e6c5703"
+    },
+    {
+      "path": "win-unpacked/icudtl.dat",
+      "size": 10875024,
+      "sha256": "67c332a252ae56e300213753784e4256b201a6bd5156db9eb87a6afda20215f2"
+    },
+    {
+      "path": "win-unpacked/libEGL.dll",
+      "size": 467968,
+      "sha256": "6f1231cdf2516923f159bcbec13643553d36096e60437bd15c5f5c123e693aba"
+    },
+    {
+      "path": "win-unpacked/libGLESv2.dll",
+      "size": 8058368,
+      "sha256": "7a79ba1d4efdd3886b785a7dcc85c6da44732a08e7ff1682d7b7bdea450528eb"
+    },
+    {
+      "path": "win-unpacked/LICENSE.electron.txt",
+      "size": 1096,
+      "sha256": "5154e165bd6c2cc0cfbcd8916498c7abab0497923bafcd5cb07673fe8480087d"
+    },
+    {
+      "path": "win-unpacked/LICENSES.chromium.html",
+      "size": 20313960,
+      "sha256": "c971fa90cb787337e9df73773f3b43cd5621f035e53cded439bd927b3b759e0c"
+    },
+    {
+      "path": "win-unpacked/locales/af.pak",
+      "size": 614017,
+      "sha256": "dcf39c3edbb6b0a625baee0263a9b426eadd1a6d1bfbf03a209501a18bc4b0e4"
+    },
+    {
+      "path": "win-unpacked/locales/am.pak",
+      "size": 994699,
+      "sha256": "b1d444f2346105a6e15f9b14fc5653e1edaa2b435290fb8f1238347a4d4ca8f9"
+    },
+    {
+      "path": "win-unpacked/locales/ar.pak",
+      "size": 1096145,
+      "sha256": "0baa84907ae148d2fc772cdd6c62dbeedfcc45aa4bc67c9d7164906ff0c69247"
+    },
+    {
+      "path": "win-unpacked/locales/bg.pak",
+      "size": 1138139,
+      "sha256": "e4a5bea23a26a06af611a7cb518b22a1d53ec5df45a6322f0e264b99c7318441"
+    },
+    {
+      "path": "win-unpacked/locales/bn.pak",
+      "size": 1461103,
+      "sha256": "8e4aebe835b6b46f31c4a902e833d645cfe2990dcf354d1d3c5851e468b4c277"
+    },
+    {
+      "path": "win-unpacked/locales/ca.pak",
+      "size": 692259,
+      "sha256": "8a472eabdc3f30d94c56367d526f6d345ad65732827097aac747438f233a536f"
+    },
+    {
+      "path": "win-unpacked/locales/cs.pak",
+      "size": 718691,
+      "sha256": "5804ba5b76974b48b15922cf91c3e9dbbf549e2d88218dc767e4650520503135"
+    },
+    {
+      "path": "win-unpacked/locales/da.pak",
+      "size": 644715,
+      "sha256": "57f4637094de41122da569415c16c5524794bc90aa3af226da14703d04981db0"
+    },
+    {
+      "path": "win-unpacked/locales/de.pak",
+      "size": 693336,
+      "sha256": "4919ce127533d3cac698d837306161c00cf69ce30f9fa4b25b80fda171d78f89"
+    },
+    {
+      "path": "win-unpacked/locales/el.pak",
+      "size": 1251062,
+      "sha256": "48d430dca8785ce24fc605851b2bb739164b8e5fb5588909329a82e58f6902d0"
+    },
+    {
+      "path": "win-unpacked/locales/en-GB.pak",
+      "size": 559903,
+      "sha256": "7d3f5c381b1ec39bc57d6cee58f9bd69be9b36aa98ffca0b94e81f4df92e5388"
+    },
+    {
+      "path": "win-unpacked/locales/en-US.pak",
+      "size": 566095,
+      "sha256": "74404352908184e834397df60b238f23462e77d69ac4136b4f20af2db6191436"
+    },
+    {
+      "path": "win-unpacked/locales/es-419.pak",
+      "size": 683097,
+      "sha256": "cd173ec7abdc3609b8ea33764fa8e106147121ee2d262cf5aef22d50fd386fb9"
+    },
+    {
+      "path": "win-unpacked/locales/es.pak",
+      "size": 679701,
+      "sha256": "9ff88eabacab95f8bbef9e95f63d3619fa8d640ec03523d80abb26243b059a65"
+    },
+    {
+      "path": "win-unpacked/locales/et.pak",
+      "size": 620420,
+      "sha256": "0292298736847491828465a3dcf04cf4a0d9bd63d4b1a9d183c7eeb389343d26"
+    },
+    {
+      "path": "win-unpacked/locales/fa.pak",
+      "size": 1026888,
+      "sha256": "61323fafa841e5cb977e80d27b2c2746ab3eee7fdeec4e9312915d9e0c45b52e"
+    },
+    {
+      "path": "win-unpacked/locales/fi.pak",
+      "size": 632436,
+      "sha256": "0535e2acd4517ce8099aa0a4a3e562af37ca6a699faca1de3b348b8bfacf2a8b"
+    },
+    {
+      "path": "win-unpacked/locales/fil.pak",
+      "size": 715769,
+      "sha256": "f9e86324deee168d160a51402588da9987646c8c5899b76b6255d7e3a46a7bb5"
+    },
+    {
+      "path": "win-unpacked/locales/fr.pak",
+      "size": 738348,
+      "sha256": "843d7236fef5375ef08b9af9eb7e443ecafe0593deebc18a45ba5cf67a3a1f00"
+    },
+    {
+      "path": "win-unpacked/locales/gu.pak",
+      "size": 1443762,
+      "sha256": "34e4d54d66a0b0471542ee76c55cc9d3b27fcaf15cdf63c3d7e7b46cfdfb3f4f"
+    },
+    {
+      "path": "win-unpacked/locales/he.pak",
+      "size": 898800,
+      "sha256": "75fbe196eda1791775243822da4e7f9737710f627b6ee27cc4c6d975865ea7cd"
+    },
+    {
+      "path": "win-unpacked/locales/hi.pak",
+      "size": 1529643,
+      "sha256": "7557c5d5b46c8ff4ebc159bbdf0477d28e4baa7c3bedcb947d59028301ff21e6"
+    },
+    {
+      "path": "win-unpacked/locales/hr.pak",
+      "size": 691185,
+      "sha256": "9ef77921560c91e5d6e42df6504589b8b7efb84c9b5119ac51e9a10d8c83a089"
+    },
+    {
+      "path": "win-unpacked/locales/hu.pak",
+      "size": 738546,
+      "sha256": "31e407f43bbd0cd0692755f961bb39d10af1f9f0af205455dd70fb4c7eeb85a5"
+    },
+    {
+      "path": "win-unpacked/locales/id.pak",
+      "size": 612462,
+      "sha256": "e7957c9c58f890b5d053ea50c5fcb4b66cbc3c47478c42a5962810cb15814249"
+    },
+    {
+      "path": "win-unpacked/locales/it.pak",
+      "size": 669241,
+      "sha256": "4b06d5f8a4f75b3122bc3f1c54af59eadf6117507758d4efbcb5f1f88f322e61"
+    },
+    {
+      "path": "win-unpacked/locales/ja.pak",
+      "size": 815509,
+      "sha256": "89178f1acd5af747dde41399ba0c1e229eb53e2800d4b15ea2d9f3358e69edd3"
+    },
+    {
+      "path": "win-unpacked/locales/kn.pak",
+      "size": 1661701,
+      "sha256": "9744dbadbb7c31cc6393a0682daf91045be270bab934dff7dbad79b76287616e"
+    },
+    {
+      "path": "win-unpacked/locales/ko.pak",
+      "size": 694030,
+      "sha256": "fa24cc7d4089c81247ed9d5e81d8b67890a09a82ff6d450fe94a654374a2a46e"
+    },
+    {
+      "path": "win-unpacked/locales/lt.pak",
+      "size": 752001,
+      "sha256": "bc5d99751f1b252ed074bfc4bf6dc94321b3f785a0a0d4300209acae40220f74"
+    },
+    {
+      "path": "win-unpacked/locales/lv.pak",
+      "size": 749059,
+      "sha256": "e91342ed84e1847968b40194250b4d76bbd2ea13133675b8b099dca45ee0f197"
+    },
+    {
+      "path": "win-unpacked/locales/ml.pak",
+      "size": 1705593,
+      "sha256": "b813f87ec80ffb496413949ef7bc8208db6fb7ceaaf88145f160bf8abcfe2f01"
+    },
+    {
+      "path": "win-unpacked/locales/mr.pak",
+      "size": 1415199,
+      "sha256": "fa87d519a8545b2748c52ccd7704b320877b2d03385991ceabe75c2745200331"
+    },
+    {
+      "path": "win-unpacked/locales/ms.pak",
+      "size": 644669,
+      "sha256": "2ab44645c1ed7b68c9121ee0ab9cdf8c7b9d1721d131b08f258b8a85b8ed0af0"
+    },
+    {
+      "path": "win-unpacked/locales/nb.pak",
+      "size": 616327,
+      "sha256": "8eaa23c418a3fafb9e85b5445e73fb2f5e13be1f033ff2487c4081148aaa2f4e"
+    },
+    {
+      "path": "win-unpacked/locales/nl.pak",
+      "size": 642143,
+      "sha256": "432dcf6ae7f418986244ed3c953aa36176fce7218de4e48158213389594e7dcd"
+    },
+    {
+      "path": "win-unpacked/locales/pl.pak",
+      "size": 717729,
+      "sha256": "5e47475490d1514e3670c44f55a2061672c8e7f6219211b3d907bacbe5aa0a5c"
+    },
+    {
+      "path": "win-unpacked/locales/pt-BR.pak",
+      "size": 673197,
+      "sha256": "0be502c6b71b94ccd76b30a0b8ce3a816d7223ab1d4c0a81c150df0cf3fc43f5"
+    },
+    {
+      "path": "win-unpacked/locales/pt-PT.pak",
+      "size": 676984,
+      "sha256": "98daa1072e7c405e3f5e030bfe25ef1e12b31a96e0b1db245d6805a564390f75"
+    },
+    {
+      "path": "win-unpacked/locales/ro.pak",
+      "size": 702574,
+      "sha256": "da5c79d06ae972aa460724ef378f91bf4afda911b167a896963f6e0d4daf9aec"
+    },
+    {
+      "path": "win-unpacked/locales/ru.pak",
+      "size": 1163483,
+      "sha256": "e4236ef1cad608c76dc1594645c345feb3459f8ccdcdf4ed2f5b33ba188dabeb"
+    },
+    {
+      "path": "win-unpacked/locales/sk.pak",
+      "size": 730264,
+      "sha256": "ca41ac3e8b3352f1bdd66ce54afaddfaf86c1cebfd5bfa3e82a23bded674a83f"
+    },
+    {
+      "path": "win-unpacked/locales/sl.pak",
+      "size": 699179,
+      "sha256": "2bc385d457dc844794f9396458c4090e6233afec5a08b4a5a92e45ef31e07b78"
+    },
+    {
+      "path": "win-unpacked/locales/sr.pak",
+      "size": 1075898,
+      "sha256": "c3b4a5aba1e86ea0088e5c33002bb055ed567840b2859b277014be0a7283013e"
+    },
+    {
+      "path": "win-unpacked/locales/sv.pak",
+      "size": 624021,
+      "sha256": "3af85c15ce3e76344404c37325a60932ce53763539c8cd8b3120424f709f73de"
+    },
+    {
+      "path": "win-unpacked/locales/sw.pak",
+      "size": 660623,
+      "sha256": "a806d782b21930ec6243b8e5b393e7fa970ce9d297e96b02e6596fa6ce6c8a86"
+    },
+    {
+      "path": "win-unpacked/locales/ta.pak",
+      "size": 1696711,
+      "sha256": "516660683214c01341300fa8d15c7e39aecc38792b76fe74bdcc464024f4294f"
+    },
+    {
+      "path": "win-unpacked/locales/te.pak",
+      "size": 1571940,
+      "sha256": "5439181ded31f8cc5dbcc1eed358753d4b7449ad29380baabe4cb893d8751a06"
+    },
+    {
+      "path": "win-unpacked/locales/th.pak",
+      "size": 1320867,
+      "sha256": "946b4a45a9d43b15359927f33307fc35f50d7e880f02890b07bdfd1160f2db59"
+    },
+    {
+      "path": "win-unpacked/locales/tr.pak",
+      "size": 672669,
+      "sha256": "98151ed08e518b76f33cf20926717e0d8e28d8e4eb111e0c6e33b95c8acaa99e"
+    },
+    {
+      "path": "win-unpacked/locales/uk.pak",
+      "size": 1172739,
+      "sha256": "6cdfc2782df67c0b72962fc62d2c2eb8d93102255115dae093dde530e345c643"
+    },
+    {
+      "path": "win-unpacked/locales/ur.pak",
+      "size": 1010270,
+      "sha256": "d57cd219249e207d34c21a619935d0f0a7814a0ccdd36051a42400c60a599e47"
+    },
+    {
+      "path": "win-unpacked/locales/vi.pak",
+      "size": 799770,
+      "sha256": "37f2c01a308ad8bb93d9525d81480880f97d54191dbe7c1c1e75aa9fcf009450"
+    },
+    {
+      "path": "win-unpacked/locales/zh-CN.pak",
+      "size": 571748,
+      "sha256": "e2c2d278e66e1cd806f707259fabf8fed43f0e2e04edb23e4808c46fb872d8d7"
+    },
+    {
+      "path": "win-unpacked/locales/zh-TW.pak",
+      "size": 564374,
+      "sha256": "f4c2f92b0de0326377b7d441fab0fe7441ab3d09c188c530445c210a88377234"
+    },
+    {
+      "path": "win-unpacked/resources/app-update.yml",
+      "size": 124,
+      "sha256": "3024a0773aece2f71b975e15145718d8f27c77e5cf37db66e9552dff4be6cc61"
+    },
+    {
+      "path": "win-unpacked/resources/app.asar",
+      "size": 50000374,
+      "sha256": "cb929e1e73b8c7e4fbc9e3082593a77969a79b29db9d84b04ab0d0b88c2f8405"
+    },
+    {
+      "path": "win-unpacked/resources/elevate.exe",
+      "size": 107520,
+      "sha256": "9b1fbf0c11c520ae714af8aa9af12cfd48503eedecd7398d8992ee94d1b4dc37"
+    },
+    {
+      "path": "win-unpacked/resources/native/dsp-native-host.exe",
+      "size": 18026496,
+      "sha256": "152e504c0c3e51e40519245c53ec7db52e55429023220f06bdfb1bbd0a159a81"
+    },
+    {
+      "path": "win-unpacked/resources.pak",
+      "size": 7236872,
+      "sha256": "b88115979b34be771ce2547a550cc46cb11fa19882e02f54f84a5471fa94f9f3"
+    },
+    {
+      "path": "win-unpacked/snapshot_blob.bin",
+      "size": 365744,
+      "sha256": "581d2980e9a2afba5adc550a281859efe2584c87a60ff4cfcf5f540147780556"
+    },
+    {
+      "path": "win-unpacked/v8_context_snapshot.bin",
+      "size": 740304,
+      "sha256": "50f416705ee8218f12f853187c1a4197f8a1e7ea773d2ccae4b768ebfc0aa8bc"
+    },
+    {
+      "path": "win-unpacked/vk_swiftshader_icd.json",
+      "size": 106,
+      "sha256": "32d83ff113fef532a9f97e0d2831f8656628ab1c99e9060f0332b1532839afd9"
+    },
+    {
+      "path": "win-unpacked/vk_swiftshader.dll",
+      "size": 5505536,
+      "sha256": "5a7aed599604a3a52e74ba9c641fb8a74afba19621fc4eee216b9d32c6c88fe1"
+    },
+    {
+      "path": "win-unpacked/vulkan-1.dll",
+      "size": 924160,
+      "sha256": "407240da36c7df3e48f23a6f9096207408f0bb2f251f807e203a7b6f21cfff39"
+    }
+  ]
+}

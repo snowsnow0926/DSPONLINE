@@ -1,8 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { workflowTimeoutMs } from "./startup-timeout";
+import { selectSettingsCategory } from "./settings-helpers";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
-const RELEASE_NOTE_ID = "2026-11-09-v1.3.11";
+const RELEASE_NOTE_ID = "2026-11-13-v1.3.12";
 
 async function preparePage(page: Page, disableCoordinationApis = false) {
   await page.addInitScript(({ releaseNoteId, disable }) => {
@@ -754,4 +755,167 @@ test("missing-primary conflict can intentionally keep the clearly labelled empty
   expect(await readRecord(page, SAVE_KEY)).toBeNull();
   expect(await readRecord(page, seeded.candidateKey)).toBeNull();
   expect(await page.evaluate(async () => (await (await import("/src/game/localSaveStore.ts")).getLocalSaveConflicts()).length)).toBe(0);
+});
+
+test("deleting an already missing save is idempotent for its current writer", async ({ page }) => {
+  test.setTimeout(workflowTimeoutMs(90_000));
+  await preparePage(page);
+  const result = await page.evaluate(async () => {
+    const storage = await import("/src/game/storage.ts");
+    const engine = await import("/src/game/engine.ts");
+    const store = await import("/src/game/localSaveStore.ts");
+    const catalog = await import("/src/game/localSaveCatalog.ts");
+    const state = engine.createInitialState();
+    state.paused = true;
+    state.tray.iron_ore = 42;
+    const saved = await storage.saveGameVerified(state);
+    const slot = await storage.saveGameSlotVerified(1, state);
+    if (!saved.success || !slot.success) throw new Error("fixture save failed");
+    const saveKey = "dsp-idle-network.save.v1";
+    const slotKey = "dsp-idle-network.slot.1";
+    const originalSlot = await store.readPersistedLocalSaveValue(slotKey);
+    const revision = store.getPrimaryLocalSaveRevision();
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dsp-idle-network.local-saves");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("records", "readwrite");
+      const records = transaction.objectStore("records");
+      records.delete(saveKey);
+      records.delete(catalog.localSaveCatalogRecordKey(saveKey));
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    store.removeLocalSaveValue(saveKey);
+    let error: string | null = null;
+    try { await store.flushLocalSaveWrites(); } catch (failure) { error = (failure as Error).name; }
+    return {
+      error,
+      writer: store.getLocalSaveWriterStatus().role,
+      conflicts: (await store.getLocalSaveConflicts()).length,
+      primary: await store.readPersistedLocalSaveValue(saveKey),
+      slotPreserved: originalSlot !== null && await store.readPersistedLocalSaveValue(slotKey) === originalSlot,
+      revisionDelta: store.getPrimaryLocalSaveRevision() - revision,
+    };
+  });
+  expect(result).toEqual({ error: null, writer: "primary", conflicts: 0, primary: null, slotPreserved: true, revisionDelta: 1 });
+});
+
+test("historical empty deletion conflicts allow a verified new save after reload", async ({ page }) => {
+  test.setTimeout(workflowTimeoutMs(90_000));
+  await preparePage(page);
+  const original = await page.evaluate(async () => {
+    const storage = await import("/src/game/storage.ts");
+    const engine = await import("/src/game/engine.ts");
+    const store = await import("/src/game/localSaveStore.ts");
+    const state = engine.createInitialState();
+    state.paused = true;
+    state.tray.iron_ore = 42;
+    const saved = await storage.saveGameVerified(state);
+    if (!saved.success) throw new Error(saved.message);
+    return { raw: await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1"), writer: store.getLocalSaveWriterStatus() };
+  });
+  for (const id of ["empty-delete-1", "empty-delete-2"]) {
+    await writeLegacyRecord(page, `dsp-idle-network.local-save-coordination.v1.conflict.${id}`, JSON.stringify({
+      schemaVersion: 1, conflictId: id, saveKey: SAVE_KEY,
+      candidateKey: `${SAVE_KEY}.conflict.${id}.candidate`,
+      persistedKey: `${SAVE_KEY}.conflict.${id}.persisted`,
+      candidateDeleted: true, persistedMissing: true,
+      writerId: original.writer.writerId, fencingToken: original.writer.fencingToken, createdAt: Date.now(),
+    }));
+  }
+  await page.reload();
+  await expect(page.locator(".start-menu")).toBeVisible();
+  const recovered = await page.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    return { role: store.getLocalSaveWriterStatus().role, conflicts: await store.getLocalSaveConflicts() };
+  });
+  expect(recovered).toEqual({ role: "primary", conflicts: [] });
+  expect(await readRecord(page, SAVE_KEY)).toBe(original.raw);
+  await page.getByRole("button", { name: "新建游戏", exact: true }).click();
+  await expect(page.locator(".start-menu-new")).toBeVisible();
+  await page.getByRole("button", { name: "开始新游戏", exact: true }).click();
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".local-save-writer-banner--conflict")).toHaveCount(0);
+  const final = await page.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    const integrity = await import("/src/game/saveEnvelopeIntegrity.ts");
+    const raw = await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+    return { role: store.getLocalSaveWriterStatus().role, integrity: raw && integrity.inspectSaveEnvelopeChecksum(raw).status, conflicts: (await store.getLocalSaveConflicts()).length };
+  });
+  expect(final).toEqual({ role: "primary", integrity: "valid", conflicts: 0 });
+});
+
+test("an empty deletion from a fenced writer stays read-only and can explicitly take over", async ({ page }) => {
+  test.setTimeout(workflowTimeoutMs(90_000));
+  await preparePage(page);
+  const before = await page.evaluate(async () => (await import("/src/game/localSaveStore.ts")).getLocalSaveWriterStatus());
+  const foreignLease = JSON.stringify({
+    schemaVersion: 1, ownerId: "tab_other_window", fencingToken: before.fencingToken + 1,
+    heartbeatAt: Date.now(), expiresAt: Date.now() + 60_000,
+  });
+  await writeLegacyRecord(page, "dsp-idle-network.local-save-coordination.v1.writer-lease", foreignLease);
+  const blocked = await page.evaluate(async () => {
+    const store = await import("/src/game/localSaveStore.ts");
+    store.removeLocalSaveValue("dsp-idle-network.save.v1");
+    let error: string | null = null;
+    try { await store.flushLocalSaveWrites(); } catch (failure) { error = (failure as Error).name; }
+    return { error, role: store.getLocalSaveWriterStatus().role, conflicts: (await store.getLocalSaveConflicts()).length };
+  });
+  expect(blocked).toEqual({ error: "LocalSaveReadOnlyError", role: "secondary", conflicts: 0 });
+  expect(await readRecord(page, "dsp-idle-network.local-save-coordination.v1.writer-lease")).toBe(foreignLease);
+  await page.getByRole("button", { name: "强制接管本页", exact: true }).click();
+  await page.getByRole("button", { name: "确认接管本页", exact: true }).click();
+  await expect(page.locator(".local-save-writer-banner--secondary")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(async () => (await import("/src/game/localSaveStore.ts")).getLocalSaveWriterStatus().role)).toBe("primary");
+});
+
+test("empty conflict metadata retains every payload and rejects inconsistent resolution", async ({ page }) => {
+  test.setTimeout(workflowTimeoutMs(90_000));
+  await preparePage(page);
+  const seeded = await seedMissingPrimaryConflict(page, 0);
+  const metadataKey = `dsp-idle-network.local-save-coordination.v1.conflict.${seeded.conflictId}`;
+  const rawMetadata = await readRecord(page, metadataKey);
+  if (!rawMetadata) throw new Error("missing fixture conflict metadata");
+  await writeLegacyRecord(page, metadataKey, JSON.stringify({ ...JSON.parse(rawMetadata), candidateDeleted: true }));
+  await page.reload();
+  await expect(page.locator(".start-menu")).toBeVisible();
+  const results = await page.evaluate(async conflictId => {
+    const store = await import("/src/game/localSaveStore.ts");
+    return {
+      conflicts: (await store.getLocalSaveConflicts()).length,
+      candidate: await store.resolveLocalSaveConflictDetailed(conflictId, "candidate"),
+      persisted: await store.resolveLocalSaveConflictDetailed(conflictId, "persisted"),
+    };
+  }, seeded.conflictId);
+  expect(results.conflicts).toBe(1);
+  expect(results.candidate).toMatchObject({ ok: false, code: "verification-failed" });
+  expect(results.persisted).toMatchObject({ ok: false, code: "verification-failed" });
+  expect(await readRecord(page, seeded.candidateKey)).toBe(seeded.candidateRaw);
+  expect(await readRecord(page, metadataKey)).toBe(JSON.stringify({ ...JSON.parse(rawMetadata), candidateDeleted: true }));
+});
+
+test("settings opens the preserved conflict choices from its authority action", async ({ page }) => {
+  test.setTimeout(workflowTimeoutMs(90_000));
+  await preparePage(page);
+  await page.getByRole("button", { name: "新建游戏", exact: true }).click();
+  await page.getByRole("button", { name: "开始新游戏", exact: true }).click();
+  await expect(page.locator(".game-shell")).toBeVisible({ timeout: 30_000 });
+  await page.getByLabel("打开设置", { exact: true }).click();
+  const operations = page.getByRole("dialog", { name: "运营中心" });
+  await selectSettingsCategory(operations, "存档与云同步", "storage");
+  const seeded = await seedMissingPrimaryConflict(page, 0);
+  const resolve = operations.getByRole("button", { name: "处理存档冲突", exact: true });
+  await expect(resolve).toBeEnabled();
+  await resolve.click();
+  await expect(operations).toHaveCount(0);
+  const banner = page.locator(".local-save-writer-banner--conflict");
+  await expect(banner.getByRole("button", { name: "保留当前存档", exact: true })).toBeFocused();
+  await expect(banner.getByRole("button", { name: "采用本页候选", exact: true })).toBeEnabled();
+  expect(await readRecord(page, seeded.candidateKey)).toBe(seeded.candidateRaw);
+  await page.screenshot({ path: "artifacts/windows-local-save-conflict-20261113/conflict-choices.png" });
 });

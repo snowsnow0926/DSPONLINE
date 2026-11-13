@@ -1,27 +1,25 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-11-09-v1.3.11";
+export const CURRENT_RELEASE_ID = "2026-11-13-v1.3.12";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const en = locale === "en";
   return {
     id: CURRENT_RELEASE_ID,
-    date: en ? "November 9, 2026" : "2026年11月9日",
-    version: "1.3.11",
-    title: en ? "Content Packs and Return to Vanilla" : "内容包升级与一键转回原版",
-    summary: en ? "Adds a backed-up conversion from content packs to vanilla gameplay, core item and belt overrides, and safe ID renaming. Authors and players can manage their packs and continue existing factories." : "新增带恢复快照的一键转回原版存档，开放原版物品与传送带覆盖，以及自动维护引用的安全改名，方便作者更新内容包与玩家继续已有工厂。",
+    date: en ? "November 13, 2026" : "2026年11月13日",
+    version: "1.3.12",
+    title: en ? "Mobile Scrolling and Save Conflict Fixes" : "手机滚动与存档冲突修复",
+    summary: en ? "Restores scrolling in mobile menus and pickers, moves the automatic card status clear of planet controls, and fixes repeated empty-save conflicts on Windows." : "修复手机菜单与选择列表无法下滑的问题，优化自动卡片状态的位置，并修复 Windows 空存档冲突反复弹出和处理入口无法操作的问题。",
     items: [
-      { id: "v1311-vanilla-conversion", title: en ? "Return an existing factory to vanilla" : "一键转回原版存档",
-        description: en ? "Preview and confirm the removal of pack items, entities, research and references. Core inventories and funded construction are recovered, while core factories and research continue." : "预览并确认清理内容包物品、设备、科技和相关引用，回收设备与订单中的原版物资，继续已有原版工厂和研究进度。" },
-      { id: "v1311-recovery", title: en ? "Verified recovery snapshot" : "转换前完整恢复快照",
-        description: en ? "Conversion first verifies a full snapshot. Pack configurations stay available in a disabled state, ready to be enabled when restoring that snapshot." : "转换前保存并验证完整快照。内容包配置会停用并保存在本机，重新启用后可恢复转换前进度。" },
-      { id: "v1311-core-overrides", title: en ? "Override core items and belts" : "重写原版物品与传送带",
-        description: en ? "Authors can change core item presentation and belt speed, construction costs, output amounts and technology requirements through the editor." : "作者可在编辑器中修改原版物品的名称、图标和分类，以及传送带的实际速度、制造成本、产量和解锁科技。" },
-      { id: "v1311-safe-renaming", title: en ? "Rename IDs with compatible migrations" : "安全改名与保档迁移",
-        description: en ? "Renaming a pack entry updates its references and historical aliases together and increases the patch version for a compatible update." : "修改包内 ID 时同步更新物料、配方、科技和资源引用，保留旧 ID 映射并提高补丁版本，帮助已有存档读取新版。" },
-      { id: "v1311-safe-removal", title: en ? "Remove unused pack records" : "清理资源点和科技残留",
-        description: en ? "A separate cleanup action removes idle resource nodes, research history and empty inventory entries, with a preview and recovery snapshot." : "安全卸载入口可清理空闲资源点、科技历史和零库存索引，操作前提供清理预览与恢复快照。" },
+      { id: "v1312-mobile-scroll", title: en ? "Scroll mobile menus and lists" : "恢复手机菜单与列表滚动",
+        description: en ? "New-game controls and item or recipe lists remain reachable in portrait, landscape and larger font settings." : "手机竖屏、横屏及大字号下，可上下滑动主菜单、物品与配方列表，正常找到新建存档等操作。" },
+      { id: "v1312-canvas-status", title: en ? "Clearer automatic card status" : "优化自动卡片状态位置",
+        description: en ? "The automatic card status has its own layout position, keeping planet navigation and mobile canvas controls accessible." : "为自动卡片状态安排独立布局位置，方便查看星球导航和操作手机画布工具。" },
+      { id: "v1312-empty-conflict", title: en ? "Recover from empty-save conflicts" : "修复空存档冲突循环",
+        description: en ? "Repeated deletion of an already empty save completes safely. Historical empty deletion reports no longer block creating or saving a factory." : "安全处理已为空的存档删除请求，避免历史空删除记录在重启后反复弹出，阻塞新建和保存工厂。" },
+      { id: "v1312-conflict-actions", title: en ? "Resolve save conflicts from settings" : "恢复存档冲突处理入口",
+        description: en ? "Settings now opens the available conflict choices. Explicit tab takeover and verification continue to protect actual save versions." : "设置页可点击“处理存档冲突”并转到版本选择，配合明确的标签页接管和存档读回校验，保护实际存档版本。" },
     ],
   } as const;
 }

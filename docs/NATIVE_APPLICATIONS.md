@@ -1,5 +1,9 @@
 # 原生应用构建与更新
 
+> **当前原生正式下载（2026-11-13，1.3.12）**。Windows x64 1.3.12与Android1.3.12/1003012已上线下载页及stable源。运行 `75724d4a0129`，Windows setup112903058B、NotSigned/Electron43.8.1，79运行文件相同，1.3.11保档升级及七项网络隔离冲突检查通过。APK5948514B、AAB5737833B，历史证书、v2/v3、zipalign及每包209封装资源核对通过，1.3.11同签名升级/保存/冷开通过。公网完整包SHA及feed SHA512相符。实体设备与系统安装向导仍待实测。[制品、验证与回退](./releases/1.3.12.md)。
+
+> **2026-11-13 Windows 本地存档修复验证**。开发源码 `a9eb3c6682e7` 完成空删除冲突循环与设置页版本处理入口修复，Windows 平台构建及实际 Electron 主入口、预加载桥、文件来源页面验证通过。D 盘隔离 profile 完成三次重载、明确接管、真实冲突选择、逐字读回和冷启动，最终 7 检查点通过、0 页面异常。200 件 Windows 前端冻结载荷已校验，本轮交付为本地开发构建。安装器覆盖升级和玩家原机回访待后续验收。[证据与范围](./reviews/2026-11-13-windows-local-save-conflicts.md)。
+
 > **当前原生正式下载（2026-11-09，1.3.11）**。Windows x64 1.3.11 与 Android 1.3.11 / 1003011 已上线下载页及 stable 源。运行 `e599f8c68979`，Windows setup 112902219 B、NotSigned/Electron43.8.1；APK5947264 B、AAB5736587 B，历史证书、v2/v3、zipalign和207运行资源核对通过。Windows1.3.10升级保档/冷开，Android1.3.9同签名覆盖、保存新库存/冷开通过，公网整包SHA和Windows feed SHA512相符。AAB归档；实体设备、系统NSIS和长时低配仍待实测。[制品与回退](./releases/1.3.11.md)。
 
 > **2026-11-09 1.3.11 本地候选完成**。运行源码 `e599f8c68979` 的 Windows x64/stable 安装器 112,902,219 字节，NotSigned，79 个运行文件一致，1.3.10 保档升级/冷开与实际转换、快照恢复通过。Android 1.3.11 / 1003011 的 APK 5,947,264 字节、AAB 5,736,587 字节，经受保护入口核对历史证书连续性、v2/v3、zipalign 和每包 207 个运行资源。三端下载页候选与 stable feed 已生成，本机整包摘要/Range 通过。实体 Android、本候选模拟器升级、系统 NSIS 和长时/低配门禁仍待验收。[冻结制品与摘要](./releases/1.3.11-development-handoff-2026-11-09.md)。
@@ -240,14 +244,13 @@ node scripts/create-native-update-manifests.mjs `
 - 两个发布 workflow 的 token 权限为只读，并显式注入官方 API、公开 origin 和更新基址；普通 Pull Request CI 不接收这些配置或签名 secrets。
 - 向正式更新目录发布前仍需核对版本、通道、SHA-256、证书、安装覆盖、本地存档、云登录、回滚版本和 HTTPS 缓存头。
 
-## 7. 当前原生发布状态
+## 7. 当前原生发布状态（1.3.12）
 
-- 已验证 Windows 解包版与 setup 隔离启动、`file://` 加载、FileVersion/ProductVersion 1.0.42、Stable 通道、受限 HTTPS API 和更新基址；隔离用户数据目录正常初始化。
-- Android 稳定 APK 为 `1.0.42 / 1000042`，大小 4,900,079 字节，SHA-256 为 `7a2450b21b23619004ed6b665f1ebe5067b5b158f0f53ce09bf1d8bb14864b95`。APK v2/v3、zipalign、批准证书和模拟器覆盖升级均通过；4,688,602 字节 AAB 只归档，未进入下载站或应用商店。
-- Windows x64 安装程序版本为 `1.0.42`，大小 109,545,221 字节，SHA-256 为 `c837b5b3ca4aa6f6715349e7bdbfae162d71206976936e52f6b24e5bb8fcbe2d`。Authenticode 状态为 `NotSigned`，下载页继续显示未知发布者警告；blockmap 为 116,356 字节，SHA-256 `8eb5f53512b9e3d680c070bdd039a5a339ae08e0d122b9ff905976cd036700a3`。
-- 上海下载站当前目录为 `/var/www/dsp-idle-downloads/releases/download-site-1.0.42-c24e6247d257`；1.0.38 和 1.0.37 历史目录继续保留。二进制使用 immutable 缓存，更新清单使用 no-cache，Range 请求返回 `206`，香港 `/downloads/*` 302 至上海下载域名。
-- Web/API 与双原生制品来自运行时发布标识 `1.0.42-c24e6247d257`，包内版本、Build ID、官方 API、更新源与公网 9 文件完整哈希均已复验。完整生产备份、切换和残余风险见 [releases/1.0.42.md](./releases/1.0.42.md)。
-- 本轮没有连接 Android 实体设备或低配 Windows；API 36.1 模拟器 1.0.38→1.0.42 覆盖升级和 Windows 隔离启动通过。卸载应用仍会删除本机应用数据，覆盖升级不会主动清除应用数据。
-- GitHub Android/Desktop Release 工作流已具备签名门禁，但 GitHub Actions Secrets 尚未配置；本机 Android SDK 和长期 keystore 已恢复并记录在受保护 vault 中。后续配置 CI 时只能导入同一 Android 密钥，不能新建证书替代覆盖升级链。Windows 继续沿用历史未签名测试包策略。
+- Windows x64与Android的Build ID为 `1.3.12+75724d4a0129`，stable通道。Windows实际 `file://` 入口、预加载桥、1.3.11升级及冷开保档通过。
+- Android稳定APK为 `1.3.12 / 1003012`，5948514B，SHA-256为 `d8b78f5c7f5644ffad56be4e5d8382cc0e7b453337ce81fd1c26cef3862f756f`。历史证书、v2/v3、zipalign及隔离模拟器1.3.11覆盖升级通过，5737833B的AAB归档。
+- Windows安装器112903058B，SHA-256为 `b80a1db6f22ee424807fe2ee8d2e953eaf792f48d0f810706a3c0dbc4e4c8583`，Authenticode为NotSigned。安装器79个运行文件与实测目录一致。
+- 下载current/previous为 `download-site-1.3.12-75724d4a0129` / `download-site-1.3.11-e599f8c68979`。34件文件、两整包、SHA512、缓存头、206与香港302跳转通过。[完整发布与回退](./releases/1.3.12.md)。
+- 实体Android、原机、系统输入法、系统NSIS安装/卸载和长时低配实测仍待完成。
+- GitHub Android/Desktop Release工作流具备签名门禁。本机正式Android构建通过受保护入口注入长期签名材料并校验证书连续性。
 - Android 系统浏览器安装 APK 时，玩家设备可能要求允许该来源安装应用；正式商店分发可作为后续渠道，但不改变包名和签名连续性要求。
 - Windows 可信代码签名、iOS 壳层、App Store/Google Play 发布、崩溃收集和物理 Android/iPhone 30 分钟温度耗电测试仍在后续范围。

@@ -6,6 +6,7 @@ import {
   createLocalSaveRevision,
   createLocalSaveWriterLease,
   inspectLocalSaveIdentity,
+  isEmptyLocalSaveDeleteConflict,
   localSaveConflictKeys,
   localSaveEmergencyMirrorKeys,
   localSaveRevisionKey,
@@ -14,6 +15,7 @@ import {
   parseLocalSaveRevision,
   parseLocalSaveWriterLease,
   renewOwnedLocalSaveWriterLease,
+  type LocalSaveConflictRecord,
 } from "./localSaveCoordination";
 
 describe("local save cross-tab coordination", () => {
@@ -86,6 +88,27 @@ describe("local save cross-tab coordination", () => {
     expect(parseLocalSaveWriterLease(JSON.stringify({ schemaVersion: 1, ownerId: "x", fencingToken: 0, heartbeatAt: 1, expiresAt: 2 }))).toBeNull();
     expect(parseLocalSaveWriterLease("{broken")).toBeNull();
     expect(parseLocalSaveConflictRecord(JSON.stringify({ schemaVersion: 1, conflictId: "x" }))).toBeNull();
+  });
+
+  it("identifies an empty delete conflict only when neither side has payload bytes", () => {
+    const keys = localSaveConflictKeys("empty-delete");
+    const conflict: LocalSaveConflictRecord = {
+      schemaVersion: 1,
+      conflictId: "empty-delete",
+      saveKey: "dsp-idle-network.save.v1",
+      candidateKey: keys.candidate,
+      persistedKey: keys.persisted,
+      candidateDeleted: true,
+      persistedMissing: true,
+      writerId: "tab-a",
+      fencingToken: 1,
+      createdAt: 1_000,
+    };
+    expect(isEmptyLocalSaveDeleteConflict(conflict, new Set())).toBe(true);
+    expect(isEmptyLocalSaveDeleteConflict(conflict, new Set([keys.candidate]))).toBe(false);
+    expect(isEmptyLocalSaveDeleteConflict(conflict, new Set([keys.persisted]))).toBe(false);
+    expect(isEmptyLocalSaveDeleteConflict({ ...conflict, candidateDeleted: false }, new Set())).toBe(false);
+    expect(isEmptyLocalSaveDeleteConflict({ ...conflict, persistedMissing: false }, new Set())).toBe(false);
   });
 
   it("accepts only an emergency mirror proven to continue the durable writer chain", () => {

@@ -22,7 +22,7 @@ async function openFabricator(page: Page, mobile: boolean) {
     localStorage.setItem("dsp-idle-network.save.v1", save);
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-09-v1.3.11");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.12");
   }, serializeEnvelope(game));
   await page.goto(`/?mobileUi=${mobile ? "next" : "legacy"}`);
   await expect(page.locator(".game-shell")).toBeVisible();

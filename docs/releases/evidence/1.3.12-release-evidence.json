@@ -1,0 +1,891 @@
+{
+  "version": "1.3.12",
+  "runtimeSha": "75724d4a012979ce4ae49ed35c8a74f431f5b076",
+  "buildId": "1.3.12+75724d4a0129",
+  "releaseId": "1.3.12-75724d4a0129",
+  "verifiedAt": "2026-11-13T14:00:43.724Z",
+  "qualification": {
+    "readyForReleasePreflight": true,
+    "runtimeSha": "75724d4a012979ce4ae49ed35c8a74f431f5b076",
+    "releaseId": "1.3.12-75724d4a0129",
+    "buildId": "1.3.12+75724d4a0129",
+    "webFiles": 200,
+    "downloadFiles": 34,
+    "defaultChromium": {
+      "passed": 647,
+      "skipped": 34,
+      "unresolved": 0
+    },
+    "initialDefaultStats": {
+      "startTime": "2026-11-13T13:20:01.858Z",
+      "duration": 1313085.3830000001,
+      "expected": 645,
+      "skipped": 34,
+      "unexpected": 2,
+      "flaky": 0
+    },
+    "announcementRecheckStats": {
+      "startTime": "2026-11-13T13:33:27.406Z",
+      "duration": 39128.785,
+      "expected": 3,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "productionStats": {
+      "startTime": "2026-11-13T13:34:11.880Z",
+      "duration": 19141.992,
+      "expected": 9,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durableStats": {
+      "startTime": "2026-11-13T13:34:01.749Z",
+      "duration": 82661.256,
+      "expected": 7,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "androidEmulatorUpgrade": true,
+    "windowsUpgrade": true,
+    "signatureProofVerified": true,
+    "physicalAndroidTested": false,
+    "systemNsisWizardTested": false,
+    "longRunningLowSpecTested": false,
+    "serverCodeChangeRequired": false,
+    "scope": [
+      "HongKong Web",
+      "new Shanghai download site and native stable feeds"
+    ],
+    "capacityDecision": "Necessary player-blocking static hotfix with actual artifact budget verified against approximately 14 GB free. The operations manual stops nonessential releases above 80% disk use."
+  },
+  "tests": {
+    "unit": {
+      "passed": 3968,
+      "skipped": 38
+    },
+    "rust": {
+      "passed": 1354,
+      "ignored": 3
+    },
+    "nativeTools": {
+      "passed": 639,
+      "skipped": 1
+    },
+    "apiAndStation": {
+      "passed": 415,
+      "skipped": 2
+    },
+    "operations": {
+      "passed": 60,
+      "skipped": 6
+    },
+    "releaseSwitch": {
+      "passed": 33,
+      "skipped": 0
+    },
+    "defaultChromium": {
+      "passed": 647,
+      "skipped": 34,
+      "unresolved": 0
+    },
+    "productionChromium": {
+      "startTime": "2026-11-13T13:34:11.880Z",
+      "duration": 19141.992,
+      "expected": 9,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durableWal": {
+      "startTime": "2026-11-13T13:34:01.749Z",
+      "duration": 82661.256,
+      "expected": 7,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "durableContent": {
+      "startTime": "2026-11-13T13:38:17.939Z",
+      "duration": 74947.866,
+      "expected": 18,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    }
+  },
+  "production": {
+    "hongKong": {
+      "postflight": true,
+      "checkedAt": "2026-11-13T21:58:31.050165+08:00",
+      "web": "1.3.12-75724d4a0129",
+      "api": "api-1.3.0-4c8d0c13a714",
+      "webVersion": "1.3.12",
+      "webBuildId": "1.3.12+75724d4a0129",
+      "stateCurrent": {
+        "webReleaseId": "1.3.12-75724d4a0129",
+        "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+        "slot": "green",
+        "port": 4322
+      },
+      "statePrevious": {
+        "webReleaseId": "1.3.11-e599f8c68979",
+        "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+        "slot": "green",
+        "port": 4322
+      },
+      "generation": 65,
+      "proxyGeneration": 202,
+      "proxyMode": "forward",
+      "pendingSwitch": false,
+      "healthOk": true,
+      "backupState": "disabled",
+      "offsiteBackupTimer": "inactive",
+      "readyWritable": true,
+      "currentMainPayloadCounts": {
+        "available": true,
+        "checkedAt": 1794578230779,
+        "checked": 2240,
+        "resolvable": 2238,
+        "unresolvable": 2,
+        "invalidMetadata": 0,
+        "orphanedMetadata": 0,
+        "missingPayloadRows": 2,
+        "invalidPayloadRows": 0,
+        "metadataMismatches": 0,
+        "missingBlobs": 0,
+        "blobMetadataMismatches": 0,
+        "legacyDirectRows": 0
+      },
+      "apiService": {
+        "MainPID": "3517864",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      },
+      "proxyService": {
+        "MainPID": "3465101",
+        "NRestarts": "0",
+        "ActiveState": "active"
+      },
+      "nginxValid": true,
+      "nginxSha256": "7cf1917cb6d679e0299f2eb78a99292d0da1b475cb2819b5b3f62f6eafa741c6",
+      "fallbackRoutes": [
+        "/canary/1.0.37-853ecdb12795/",
+        "/canary/1.0.43-fceca3eda51c/",
+        "/canary/1.0.46-d5b60dc3b7d6/",
+        "/canary/1.0.47-aab581cf0c78/",
+        "/canary/1.1.1-da53958b860c/",
+        "/canary/1.1.3-f35d60a22223/",
+        "/canary/1.1.4-7dbc149a016c/",
+        "/canary/1.1.5-a92c0d3157f3/",
+        "/canary/1.1.6-4f6d24f8c709/",
+        "/canary/1.1.8-c53497b050c4/",
+        "/canary/1.1.9-c3f4eff6cb5a/",
+        "/canary/1.2.2-8b9c93e13270/",
+        "/canary/1.2.3-25aeeb34e501/",
+        "/canary/1.2.4-3154f8cf4479/",
+        "/canary/1.2.5-0a1c6629ced1/",
+        "/canary/1.2.6-df828869e276/",
+        "/canary/1.2.7-dab2ff5066b7/",
+        "/canary/1.2.7-fccaa35e6b41/",
+        "/canary/1.2.9-0521eb63f179/",
+        "/canary/1.3.0-e8c44f8d7160/",
+        "/canary/1.3.1-9af159f1b38e/",
+        "/canary/1.3.11-e599f8c68979/",
+        "/canary/1.3.2-34f3dd45e467/",
+        "/canary/1.3.3-a0fd77efc399/",
+        "/canary/1.3.4-61fb10311cb9/",
+        "/canary/1.3.5-7d62d4625603/",
+        "/canary/1.3.6-187ae5bd4d2e/",
+        "/canary/1.3.7-4daa203151e2/",
+        "/canary/1.3.8-8a52afce96ba/",
+        "/canary/1.3.9-2027047763f5/"
+      ],
+      "diskAvailableBytes": 14031564800,
+      "diskAvailableRatio": 0.1899776663560335,
+      "databaseDevice": 64770,
+      "databaseInode": 663062,
+      "databaseBytes": 8386949120,
+      "serverDataWritten": false
+    },
+    "downloadSite": {
+      "checkedAt": "2026-11-13T21:58:36.650936+08:00",
+      "current": "download-site-1.3.12-75724d4a0129",
+      "previous": "download-site-1.3.11-e599f8c68979",
+      "filesVerified": 34,
+      "aggregateSha256": "487c10d35f8a697f2237010db246e60a1b39aa10898d367d8c58ed347d64a7e4",
+      "web": "1.2.9-0521eb63f179",
+      "api": "api-1.2.6-df828869e276",
+      "services": {
+        "nginx": {
+          "MainPID": "1852183",
+          "NRestarts": "0",
+          "ActiveState": "active"
+        },
+        "dsp-idle-api-active.service": {
+          "MainPID": "1243306",
+          "NRestarts": "0",
+          "ActiveState": "active"
+        },
+        "dsp-idle-api-handoff-proxy.service": {
+          "MainPID": "1243305",
+          "NRestarts": "0",
+          "ActiveState": "active"
+        }
+      },
+      "nginxConfigUnchanged": true,
+      "nginxSha256": "d6bc345bb54b6be202e9d1567e3fa14f03ddae201b37357fa30d1d423ebf45f0",
+      "certificateUnchanged": true,
+      "certificateSha256": "fb7969caf7e90fea685deafc75a0154134c46c1c49a5b4c0d1ca5163e8030a73",
+      "certificateNotAfter": "Jan 27 11:44:18 2027 GMT",
+      "certificateRenewalTimer": "active",
+      "diskAvailableBytes": 18627579904,
+      "productionWritten": false
+    },
+    "webSwitch": {
+      "published": true,
+      "web": "1.3.12-75724d4a0129",
+      "rollback": "1.3.11-e599f8c68979",
+      "api": "api-1.3.0-4c8d0c13a714",
+      "apiProcessUnchanged": true,
+      "proxyProcessUnchanged": true,
+      "databaseIdentityPreserved": true,
+      "backupState": "disabled",
+      "generation": 65,
+      "buildId": "1.3.12+75724d4a0129",
+      "ready": true
+    },
+    "downloadSwitch": {
+      "published": true,
+      "current": "download-site-1.3.12-75724d4a0129",
+      "previous": "download-site-1.3.11-e599f8c68979",
+      "version": "1.3.12",
+      "buildId": "1.3.12+75724d4a0129",
+      "filesVerified": 34,
+      "servicesUnchanged": true,
+      "nginxConfigUnchanged": true,
+      "gamePointersUnchanged": true,
+      "databaseTouched": false,
+      "backupsSettingsChanged": false
+    },
+    "fallback": {
+      "published": true,
+      "previousWeb": "1.3.11-e599f8c68979",
+      "rootWeb": "1.3.12-75724d4a0129",
+      "nginxSha256": "7cf1917cb6d679e0299f2eb78a99292d0da1b475cb2819b5b3f62f6eafa741c6",
+      "previousHtmlByteExact": true,
+      "oldWorkerRejected": true,
+      "currentWorkerAvailable": true,
+      "backup": "/var/backups/dsp-idle/1.3.12-75724d4a0129/fallback/original-app.conf"
+    },
+    "hongKongObservation": {
+      "samples": 12,
+      "windowSeconds": 55,
+      "allHealthy": true,
+      "backupDisabled": true,
+      "sameApiProcess": true,
+      "sameProxyProcess": true,
+      "web": "1.3.12-75724d4a0129",
+      "diskAvailableRatio": 0.1900246938939844
+    },
+    "downloadObservation": {
+      "ok": true,
+      "checkedAt": "2026-11-13T21:44:59.6281+08:00",
+      "elapsedSeconds": 56.83,
+      "samples": [
+        {
+          "sample": 1,
+          "elapsedSeconds": 0.15,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 2,
+          "elapsedSeconds": 5.3,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 3,
+          "elapsedSeconds": 10.45,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 4,
+          "elapsedSeconds": 15.6,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 5,
+          "elapsedSeconds": 20.75,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 6,
+          "elapsedSeconds": 25.91,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 7,
+          "elapsedSeconds": 31.06,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 8,
+          "elapsedSeconds": 36.21,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 9,
+          "elapsedSeconds": 41.36,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 10,
+          "elapsedSeconds": 46.52,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 11,
+          "elapsedSeconds": 51.67,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        },
+        {
+          "sample": 12,
+          "elapsedSeconds": 56.83,
+          "versionsCorrect": true,
+          "servicesUnchanged": true
+        }
+      ],
+      "productionWritten": false
+    }
+  },
+  "public": {
+    "web": {
+      "pwaInstallWindowSeconds": 600,
+      "pwaInstallElapsedMs": 280829,
+      "pwaPhaseElapsedMs": 298723,
+      "compressedTransport": true,
+      "twentySecondIdleTimeout": true,
+      "largeAssetDeadlineSeconds": 180,
+      "physicalEgress": true,
+      "strictTls": true,
+      "publicWeb": "1.3.12-75724d4a0129",
+      "filesVerified": 200,
+      "allSizesAndSha256Match": true,
+      "cacheHeadersVerified": true,
+      "wwwCanonicalRedirect": true,
+      "publicHealth": true,
+      "publicReadyWritable": true,
+      "backupState": "disabled",
+      "previous": "1.3.11-e599f8c68979",
+      "previousFilesVerified": 200,
+      "previousHtmlByteExact": true,
+      "previousWorkerRejected": true,
+      "currentWorkerAvailable": true,
+      "currentCacheBeforeAfterSha256": "a279ca2aa3666b4c92fd2da564590e752b2623aa2be902e008d2505397eb459b",
+      "fallbackCacheIsolation": true,
+      "offlineCurrentReopen": true,
+      "browserProductionApiBlocked": true,
+      "blockedApiRequests": 22,
+      "productionPlayerWrites": false
+    },
+    "webHttp": {
+      "ok": true,
+      "publicWeb": "1.3.12-75724d4a0129",
+      "filesVerified": 200,
+      "previous": "1.3.11-e599f8c68979",
+      "previousFilesVerified": 200,
+      "compressedTransport": true,
+      "twentySecondIdleTimeout": true,
+      "largeAssetDeadlineSeconds": 180,
+      "physicalEgress": true,
+      "strictTls": true,
+      "allSizesAndSha256Match": true,
+      "cacheHeadersVerified": true,
+      "wwwCanonicalRedirect": true,
+      "publicHealth": true,
+      "publicReadyWritable": true,
+      "backupState": "disabled",
+      "previousHtmlByteExact": true,
+      "previousWorkerRejected": true,
+      "currentWorkerAvailable": true
+    },
+    "downloadHttp": {
+      "ok": true,
+      "version": "1.3.12",
+      "files": [
+        {
+          "path": "downloads/android/dsp-idle-1.2.7-1002007.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/dsp-idle-1.2.8-1002008.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/dsp-idle-1.2.9-1002009.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/dsp-idle-1.3.11-1003011.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/dsp-idle-1.3.12-1003012.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "new binary range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/dsp-idle-1.3.5-1003005.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/dsp-idle-1.3.6-1003006.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/dsp-idle-1.3.7-1003007.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/dsp-idle-1.3.8-1003008.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/dsp-idle-1.3.9-1003009.apk",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/android/stable.json",
+          "status": 200,
+          "bytes": 593,
+          "verification": "full SHA-256",
+          "cache": "no-cache, no-store, must-revalidate"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.2.6-x64-setup.exe",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.2.6-x64-setup.exe.blockmap",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.10-x64-setup.exe",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.10-x64-setup.exe.blockmap",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.11-x64-setup.exe",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.11-x64-setup.exe.blockmap",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.12-x64-setup.exe",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "new binary range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.12-x64-setup.exe.blockmap",
+          "status": 200,
+          "bytes": 118676,
+          "verification": "full SHA-256",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.5-x64-setup.exe.blockmap",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.6-x64-setup.exe",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.6-x64-setup.exe.blockmap",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.7-x64-setup.exe",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.7-x64-setup.exe.blockmap",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.8-x64-setup.exe",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.8-x64-setup.exe.blockmap",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.9-x64-setup.exe",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.9-x64-setup.exe.blockmap",
+          "status": 206,
+          "bytes": 1024,
+          "verification": "retained range",
+          "cache": "public, max-age=31536000, immutable"
+        },
+        {
+          "path": "downloads/desktop/stable/latest.yml",
+          "status": 200,
+          "bytes": 356,
+          "verification": "full SHA-256",
+          "cache": "no-cache, no-store, must-revalidate"
+        },
+        {
+          "path": "downloads/desktop/stable/release.json",
+          "status": 200,
+          "bytes": 618,
+          "verification": "full SHA-256",
+          "cache": "no-cache, no-store, must-revalidate"
+        },
+        {
+          "path": "icon.svg",
+          "status": 200,
+          "bytes": 349,
+          "verification": "full SHA-256",
+          "cache": "max-age=604800, public, max-age=604800"
+        },
+        {
+          "path": "index.html",
+          "status": 200,
+          "bytes": 5592,
+          "verification": "full SHA-256",
+          "cache": "no-cache, no-store, must-revalidate"
+        },
+        {
+          "path": "version.json",
+          "status": 200,
+          "bytes": 94,
+          "verification": "full SHA-256",
+          "cache": "no-cache, no-store, must-revalidate"
+        }
+      ],
+      "redirects": [
+        {
+          "path": "/downloads/android/stable.json",
+          "status": 200,
+          "correctDestination": true
+        },
+        {
+          "path": "/downloads/desktop/stable/latest.yml",
+          "status": 200,
+          "correctDestination": true
+        },
+        {
+          "path": "/downloads/android/dsp-idle-1.3.12-1003012.apk",
+          "status": 206,
+          "correctDestination": true
+        },
+        {
+          "path": "/downloads/desktop/stable/dsp-idle-1.3.12-x64-setup.exe",
+          "status": 206,
+          "correctDestination": true
+        }
+      ],
+      "gameHealth": [
+        {
+          "path": "/version.json",
+          "status": 200
+        },
+        {
+          "path": "/api/health",
+          "status": 200
+        },
+        {
+          "path": "/api/ready",
+          "status": 200
+        }
+      ],
+      "verifiedAt": "2026-11-13T13:45:44.504Z"
+    },
+    "installers": {
+      "ok": true,
+      "files": [
+        {
+          "path": "downloads/android/dsp-idle-1.3.12-1003012.apk",
+          "bytes": 5948514,
+          "sha256": "d8b78f5c7f5644ffad56be4e5d8382cc0e7b453337ce81fd1c26cef3862f756f",
+          "strictTls": true,
+          "physicalEgress": true
+        },
+        {
+          "path": "downloads/desktop/stable/dsp-idle-1.3.12-x64-setup.exe",
+          "bytes": 112903058,
+          "sha256": "b80a1db6f22ee424807fe2ee8d2e953eaf792f48d0f810706a3c0dbc4e4c8583",
+          "strictTls": true,
+          "physicalEgress": true,
+          "sha512Base64": "4Ms/tjdI/Pao3KLRgRBeERI5m5rp5wNFSX5Ie3tF0Z/p4lAU5Z2CcQ9Qoyf4SMgHIbf/lxp+AMvNmUJwVII7lA==",
+          "matchesStableFeedSha512": true
+        }
+      ]
+    },
+    "browser": {
+      "ok": true,
+      "version": "1.3.12",
+      "bothDownloadButtonsVisible": true,
+      "correctVersionedLinks": true,
+      "publicHttps": true
+    }
+  },
+  "retention": {
+    "web": {
+      "oldBuild": "1.3.11+e599f8c68979",
+      "newBuild": "1.3.12+75724d4a0129",
+      "fixture": "public synthetic paused v47, autosave disabled",
+      "bytes": 119402,
+      "sha256": "f5605ff9ed397708ed629a7860b92167a32cc72e27a85e1f77efe86f7c3911b8",
+      "oldPrimaryByteIdentical": true,
+      "newPrimaryByteIdentical": true,
+      "offlinePrimaryByteIdentical": true,
+      "offlineReopen": true,
+      "productionApiCalled": false
+    },
+    "windows": {
+      "ok": true,
+      "version": "1.3.12",
+      "upgradedFrom": "1.3.11",
+      "electronVersion": "43.8.1",
+      "packaged": true,
+      "isolatedProfile": true,
+      "networkBlocked": true,
+      "newGame": true,
+      "explicitSave": true,
+      "coldReopen": true,
+      "savedCharacters": 90435,
+      "savedSha256": "5e77b5861f1a3ce18192ea02941d44604f142e0a4aabf0daf52b31f8eea72478",
+      "pageErrors": []
+    },
+    "windowsConflictCheckpoints": 7,
+    "windowsPageErrors": [],
+    "windowsConflictNetworkBlocked": true,
+    "android": {
+      "ok": true,
+      "fromVersion": "1.3.11",
+      "toVersion": "1.3.12",
+      "firstInstallTimePreserved": true,
+      "oldIronOre": 4,
+      "ironOreAfterUpgrade": 4,
+      "newIronOreAfterSaving": 7,
+      "ironOreAfterColdReopen": 7,
+      "pausedStatePreserved": true,
+      "oldExplicitSaveConfirmed": true,
+      "newExplicitSaveConfirmed": true,
+      "networkDisabled": true,
+      "noActiveDefaultNetwork": true,
+      "freshIsolatedEmulator": true,
+      "physicalDeviceTested": false,
+      "packageCrashRecords": 0,
+      "packageAnrRecords": 0,
+      "deviceDirectory": "android-device-01",
+      "harnessNotes": "Fresh isolated offline emulator, direct official 1.3.11 to frozen 1.3.12 upgrade. Explicit old/new save, integer inventory, pause, firstInstallTime and cold reopen are asserted through actual UI."
+    }
+  },
+  "artifacts": {
+    "web": {
+      "runtimeSha": "75724d4a012979ce4ae49ed35c8a74f431f5b076",
+      "releaseId": "1.3.12-75724d4a0129",
+      "buildId": "1.3.12+75724d4a0129",
+      "fileCount": 200,
+      "aggregateSha256": "65e33694e8f01601b891f4af024625f891343bfe40c7274635c77cefa1446423",
+      "manifestSha256": "c0ba336d2d256b57715e0e2acbdfb17e876761ab67ecd5e11fa3eab5ece285ca",
+      "archive": "web-1.3.12-75724d4a0129.tar.gz",
+      "bytes": 2485957,
+      "sha256": "096a26a19359b015b022e292e1cbcfb667efb55d8ffb77cc1c64d7859be8e463",
+      "verifiedFiles": 200
+    },
+    "download": {
+      "releaseId": "download-site-1.3.12-75724d4a0129",
+      "sourceSha": "75724d4a012979ce4ae49ed35c8a74f431f5b076",
+      "expectedPrevious": "download-site-1.3.11-e599f8c68979",
+      "archiveBytes": 118622898,
+      "archiveSha256": "f2ab77859ba845be67f5d0cfc61e731677dc534c18727b8bf85380f3189aa473",
+      "manifestSha256": "ae1fb5c41bb5aed18d6b30537ad287cb0a6159756e778b578d55cc6997e863d1",
+      "aggregateSha256": "487c10d35f8a697f2237010db246e60a1b39aa10898d367d8c58ed347d64a7e4",
+      "finalFileCount": 34,
+      "deltaFileCount": 9,
+      "retainedOldFileCount": 25
+    },
+    "windows": {
+      "ok": true,
+      "version": "1.3.12",
+      "sourceSha": "75724d4a012979ce4ae49ed35c8a74f431f5b076",
+      "buildId": "1.3.12+75724d4a0129",
+      "output": "D:/GameDev/WorkArtifacts/DSPidle2/release-1.3.12/candidate/windows",
+      "executable": "D:\\GameDev\\WorkArtifacts\\DSPidle2\\release-1.3.12\\candidate\\windows\\win-unpacked\\DSP极简网络.exe",
+      "installer": "D:\\GameDev\\WorkArtifacts\\DSPidle2\\release-1.3.12\\candidate\\windows\\dsp-idle-1.3.12-x64-setup.exe",
+      "installerBytes": 112903058,
+      "installerSha256": "b80a1db6f22ee424807fe2ee8d2e953eaf792f48d0f810706a3c0dbc4e4c8583",
+      "installerPayloadMatchesTestedDirectory": true,
+      "comparedFiles": 79,
+      "evidenceFiles": 86
+    },
+    "android": {
+      "ok": true,
+      "mode": "build",
+      "gitSha": "75724d4a012979ce4ae49ed35c8a74f431f5b076",
+      "packageName": "cn.dsponline.network",
+      "versionCode": "1003012",
+      "versionName": "1.3.12",
+      "apk": {
+        "name": "app-release.apk",
+        "size": 5948514,
+        "sha256": "d8b78f5c7f5644ffad56be4e5d8382cc0e7b453337ce81fd1c26cef3862f756f",
+        "v2": true,
+        "v3": true,
+        "zipalign": true,
+        "certificateContinuity": true
+      },
+      "aab": {
+        "name": "app-release.aab",
+        "size": 5737833,
+        "sha256": "d3f24ab88405a8da6c4a9c63e3b6bb75f2bd170c0b441c13f3c7c3fd2c0ff168",
+        "certificateContinuity": true
+      },
+      "productionConnectionAttempted": false,
+      "secretsExposed": false
+    },
+    "androidAssets": {
+      "ok": true,
+      "buildId": "1.3.12+75724d4a0129",
+      "buildMetadataOmittedByCapacitor": [
+        ".vite/manifest.json"
+      ],
+      "packages": [
+        {
+          "kind": "apk",
+          "matchedPackagedAssets": 209,
+          "sha256": "d8b78f5c7f5644ffad56be4e5d8382cc0e7b453337ce81fd1c26cef3862f756f"
+        },
+        {
+          "kind": "aab",
+          "matchedPackagedAssets": 209,
+          "sha256": "d3f24ab88405a8da6c4a9c63e3b6bb75f2bd170c0b441c13f3c7c3fd2c0ff168"
+        }
+      ]
+    },
+    "repositoryManifestSha256": {
+      "web": "8d54f34540c1117232bbd6c04fd3f9da1bc17d8bedaa33d3130fa25548476e85",
+      "downloads": "8dd5e12e1e27a615687382098d3a8b2a0a0d635f8afbfe57527f85e467002b59"
+    }
+  },
+  "productionDatabaseSnapshotsCreated": 0,
+  "capacityDecision": "Necessary player-blocking static hotfix with actual artifact budget verified against approximately 14 GB free. The operations manual stops nonessential releases above 80% disk use.",
+  "remainingChecks": [
+    "physical Android and player original devices",
+    "system IME",
+    "system NSIS installation and uninstallation wizard",
+    "long-running low-spec measurements"
+  ],
+  "harnessNotes": [
+    "Default Chromium first run retained 645 passes, 34 skips and 2 stale announcement-expectation failures. The final three-case announcement replay passed and mapped to existing cases.",
+    "The Shanghai postflight previous-version expectation was corrected to the observed 1.3.11-e599f8c68979 pointer, then all 34 files and services passed.",
+    "Public TLS verification retained bounded MaxListenersExceededWarning diagnostics.",
+    "The serial public-file verifier was retained and stopped, then all 400 files passed a bounded four-request verifier.",
+    "Packaged Windows conflict checkpoints were repeated with explicit API, resolver and session network blocking."
+  ]
+}

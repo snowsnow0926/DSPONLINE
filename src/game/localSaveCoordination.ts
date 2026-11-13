@@ -107,6 +107,15 @@ export function localSaveConflictMetadataKey(conflictId: string): string {
   return `${LOCAL_SAVE_CONFLICT_METADATA_KEY_PREFIX}${conflictId}`;
 }
 
+export function isEmptyLocalSaveDeleteConflict(
+  conflict: LocalSaveConflictRecord,
+  storedKeys: ReadonlySet<string>,
+): boolean {
+  // Keep contradictory metadata visible whenever either payload still exists.
+  return conflict.candidateDeleted && conflict.persistedMissing &&
+    !storedKeys.has(conflict.candidateKey) && !storedKeys.has(conflict.persistedKey);
+}
+
 export function localSaveEmergencyMirrorKeys(mode: "normal" | "speedrun"): { payload: string; metadata: string } {
   return {
     payload: `${LOCAL_SAVE_EMERGENCY_MIRROR_PREFIX}.${mode}.payload`,

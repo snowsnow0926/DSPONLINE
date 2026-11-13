@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **当前基线（2026-11-14，1.3.14）**。香港 Web current/previous 为 `1.3.14-2798a0ccca04` / `1.3.13-59c3bcddbe36`，generation/proxy 为67/202，API为 `api-1.3.0-4c8d0c13a714`、green/4322、forward，无pending，健康与可写12次观察通过。上一稳定入口指向不可变1.3.13，活动Nginx SHA为 `8c93979436d41f48052f228b0550de45d1d29565514f3d88d95bf12bf14b02a5`，原件已精确备份。新上海下载 current/previous 为1.3.14/1.3.13，40文件及12次观察通过，证书和服务匹配预检。公网400网页、40下载、两个整包与PWA隔离/离线通过。香港约14.10GB/19.10%余量，按必要静态热修预算验收。[备份、状态与回退](./releases/1.3.14.md)。
+
 > **当前基线（2026-11-13，1.3.13）**。香港 Web current/previous 为 `1.3.13-59c3bcddbe36` / `1.3.12-75724d4a0129`，generation/proxy 为 66/202。API 为 `api-1.3.0-4c8d0c13a714`、green/4322、forward，无 pending，健康和可写采样 12 次通过。上一稳定入口为不可变 1.3.12，Nginx SHA 为 `da9f8c777b6cb8b4a4036d3abe9c7fab1baedbcae4a09831b9cfff815e24e1c7`，精确原件已备份。新上海下载 current/previous 为 1.3.13/1.3.12，Android1003013、Windows1.3.13，12 次观察通过。400 网页、37 下载和两个完整安装包摘要核对通过。香港约 14.12 GB、19.12% 余量，按必要静态热修实际占用验收。[实际备份、验收与回退](./releases/1.3.13.md)。
 
 > **当前基线（2026-11-13，1.3.12）**。香港 Web current/previous 为 `1.3.12-75724d4a0129` / `1.3.11-e599f8c68979`，generation/proxy65/202，API `api-1.3.0-4c8d0c13a714`、green/4322、forward，无pending，health/ready与12次观察通过。上一稳定入口为不可变1.3.11，Nginx SHA `7cf1917cb6d679e0299f2eb78a99292d0da1b475cb2819b5b3f62f6eafa741c6`；根Web回退先恢复独立Nginx原件。新上海下载current/previous为1.3.12/1.3.11，Android1003012、Windows1.3.12，游戏/API为1.2.9/1.2.6。400网页、34下载、两整包及PWA隔离通过。香港约14.03GB/19.0%余量，本次为必要静态热修，容量检查为只读。[实际备份、容量与回退](./releases/1.3.12.md)。

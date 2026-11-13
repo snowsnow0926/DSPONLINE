@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **当前正式基线（2026-11-14，1.3.14）**。Android 旧内核 Array.at/Object.hasOwn 兼容和连续 Worker 恢复刷屏修复已进入香港 Web、Windows、Android、下载页及两端 stable 源。运行 `2798a0ccca04`，Web current/previous 为 1.3.14/1.3.13、generation 67，下载 current/previous 为 1.3.14/1.3.13。完整单元3975/38、Chromium652/34、成品兼容4项、可选恢复25项及生产手机/PWA9项通过，均为通过/条件跳过。三端1.3.13保档升级、公网400网页/40下载/两整包、PWA回退隔离和离线重开通过。Android历史签名与每包209资源匹配，Windows为NotSigned。香港约19.10%余量，按必要静态热修预算验收。玩家原机、实体及系统安装门禁待复测。[发布、验证与回退](./releases/1.3.14.md)。
+
 > **2026-11-14 Android Worker 兼容与运行记录修复（本地候选）**。正式1.3.13在缺少 Array.at 的 Worker 中重现同图异常及五秒68次创建。运行 5112ef433c36 为主界面和全部16个Worker补齐 Array.at、Object.hasOwn，并对两类恢复错误共用次数上限。单元3975/38、完整浏览器652/34、原生工具639/1、成品兼容4项、可选恢复25项和生产手机/PWA9项通过，均为通过/条件跳过。同签名安卓候选完成覆盖安装、显式保存及冷启动，库存4保留并保存至7，存储权限请求列表为空。用户确认权限说法属于玩家猜测，原机待复测。[修复、候选与验收](./reviews/2026-11-14-android-worker-runtime-compatibility.md)。
 
 > **当前正式基线（2026-11-13，1.3.13）**。Android 点击“建立工厂”缺少 structuredClone 的兼容修复已进入香港 Web、Windows、Android、下载页和两端 stable 源。运行 `59c3bcddbe36`，Web current/previous 为 1.3.13/1.3.12、generation 66，下载 current/previous 为 1.3.13/1.3.12。完整浏览器 649 通过/34 跳过，三端 1.3.12 保档升级、400 件网页、37 件下载与两个完整安装包摘要通过。APK 历史签名和每包 209 个资源匹配，Windows 为 NotSigned。实体原机和系统安装向导待复测，香港余量约 19.12%，按必要静态热修的实际占用预算验收。[发布、验收与回退](./releases/1.3.13.md)。

@@ -1,5 +1,7 @@
 # 原生应用构建与更新
 
+> **当前原生正式下载（2026-11-14，1.3.14）**。Windows x64 1.3.14与Android1.3.14/1003014已进入下载页及stable源，运行 `2798a0ccca04`。Android主界面/16类Worker的旧接口兼容与三次恢复失败暂停通过成品四类环境验证，APK6202286B、AAB5991582B，历史证书、v2/v3、zipalign及每包209资源核对通过。Windows setup113222056B、NotSigned/Electron43.8.1，77运行文件相同。两端正式1.3.13保档升级/保存/冷开、七个Windows冲突检查点与两个完整公网安装包摘要通过。原机、实体设备和系统安装向导待复测。[制品、验证及回退](./releases/1.3.14.md)。
+
 > **2026-11-14 Android Worker 兼容复测包（本地）**。同签名候选为1.3.13/1003013，Build ID为1.3.13+5112ef433c36。补齐旧环境的Array.at、Object.hasOwn及Worker初始化，并限制持续运行异常的自动重建。APK6201652B，SHA-256为00897f5123af392c26e551fe33766eca22bf43e819b28dc40fed6ce84c308cd7；AAB5990988B归档。历史证书、v2/v3、zipalign及每包209资源通过。成品四类兼容环境通过，隔离模拟器完成正式13覆盖候选、库存4到7、保存和冷启动，安装摘要核对及权限检查通过。实体原机待复测。[本地制品与验证](./reviews/2026-11-14-android-worker-runtime-compatibility.md)。
 
 > **当前原生正式下载（2026-11-13，1.3.13）**。Windows x64 1.3.13 与 Android1.3.13/1003013 已上线下载页及 stable 源，运行 `59c3bcddbe36`。Android 缺少 structuredClone 时的建厂、模拟和存档兼容流程通过，APK6140133B、AAB5929435B，历史签名和每包209资源核对通过。Windows setup113308038B、NotSigned/Electron43.8.1，79运行文件匹配，七个网络隔离冲突检查点通过。两端1.3.12保档覆盖升级及冷启动通过，完整公网包SHA和feed SHA512相符。玩家原机、实体设备和系统安装向导待复测。[制品、验收与回退](./releases/1.3.13.md)。

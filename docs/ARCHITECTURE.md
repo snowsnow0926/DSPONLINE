@@ -1,5 +1,9 @@
 # 系统架构
 
+## 浏览器对象克隆兼容
+
+`src/compat/structuredClone.ts` 以 `core-js-pure` 提供按能力启用的全局 structuredClone 适配。主入口以及调用该方法的共享模块先接入适配，Worker 在自身 realm 完成初始化。原生方法的函数身份、缺失时的对象图复制及应用使用的 ArrayBuffer transfer 分离和失败原子性均有回归验证。[Android 缺失 API 复现与验证](./reviews/2026-11-13-android-structured-clone-compatibility.md)。
+
 ## 2026-11-09 全部内容包转换与 1.3.11 候选
 
 `vanillaSaveConversion.ts` 从已注册清单、历史清单和旧 ID 映射收集各类别的扩展 ID。预览扫描引用，确认后才复制权威检查点。实体和蓝图先处理图关系，建造订单按原版本判断并退还预留，手合仅返还已支付的当前批次，后台制造返还剩余库存。原版物流货物在抵达前仍保留于供货站，路线和量子桥作为预留同步清理。

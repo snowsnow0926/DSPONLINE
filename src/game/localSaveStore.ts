@@ -19,6 +19,7 @@ import {
   createLocalSaveWriterId,
   createLocalSaveWriterLease,
   inspectLocalSaveIdentity,
+  isEmptyLocalSaveDeleteConflict,
   localSaveEmergencyMirrorKeys,
   localSaveConflictKeys,
   localSaveConflictMetadataKey,
@@ -1451,7 +1452,23 @@ async function commitCoordinatedRecord(
     currentCatalog.revision === baseCatalog.revision && catalogMatchesPayload(baseCatalog, persisted);
   const persistedMatches = baseValue !== null ? persisted === baseValue : baseKnown ? catalogProofMatches : persisted === null;
   const legacyBaseMatches = !revision && expectedRevision === 0 && persistedMatches;
-  if (!leaseMatches || !persistedMatches || !(revisionMatches && (revision !== null || legacyBaseMatches))) {
+  // Repeated deletion can satisfy a stale base once the payload is absent.
+  // The current writer fence still gates the durable tombstone update.
+  const deletionAlreadyApplied = value === null && persisted === null;
+  const baseMatches = persistedMatches && revisionMatches && (revision !== null || legacyBaseMatches);
+  if (!leaseMatches || !deletionAlreadyApplied && !baseMatches) {
+    if (deletionAlreadyApplied) {
+      transaction.abort();
+      void done.catch(() => undefined);
+      publishWriterStatus({
+        role: "secondary",
+        writerId,
+        fencingToken: lease?.fencingToken ?? writerStatus.fencingToken,
+        leaseExpiresAt: lease?.expiresAt ?? 0,
+        reason: "本地存档写入权已由另一个标签页接管",
+      });
+      throw new LocalSaveReadOnlyError(writerStatus.reason);
+    }
     const conflictId = preserveWriteConflict(store, key, value, persisted, writerStatus.fencingToken, now, buildLocalSaveCatalog);
     await done;
     cache.delete(key);
@@ -1482,7 +1499,7 @@ async function commitCoordinatedRecord(
   }
   const nextRevision = createLocalSaveRevision({
     saveKey: key,
-    previousRevision: expectedRevision,
+    previousRevision: deletionAlreadyApplied ? revision?.revision ?? 0 : expectedRevision,
     value,
     writerId,
     fencingToken: renewedLease!.fencingToken,
@@ -1547,7 +1564,7 @@ async function refreshAfterRemoteChange(message: LocalSaveBroadcastMessage): Pro
     }
     if (message.type === "conflict" && message.conflictId) {
       const conflict = parseLocalSaveConflictRecord(await readCoordinationValue(database, localSaveConflictMetadataKey(message.conflictId)));
-      if (conflict && conflict.resolvedAt === undefined) {
+      if (conflict && conflict.resolvedAt === undefined && !isEmptyLocalSaveDeleteConflict(conflict, knownSaveKeys)) {
         publishWriterStatus({ role: "conflict", writerId, fencingToken: lease?.fencingToken ?? writerStatus.fencingToken, leaseExpiresAt: lease?.expiresAt ?? writerStatus.leaseExpiresAt, reason: "另一个标签页检测到存档分叉，双方版本均已保留", conflictId: conflict.conflictId });
       }
     }
@@ -1722,7 +1739,7 @@ async function initializeIndexedDb(): Promise<void> {
     }
     if (record.key.startsWith(`${LOCAL_SAVE_COORDINATION_PREFIX}.conflict.`)) {
       const conflict = parseLocalSaveConflictRecord(record.value);
-      if (conflict && conflict.resolvedAt === undefined && conflict.createdAt >= startupConflictCreatedAt) {
+      if (conflict && conflict.resolvedAt === undefined && !isEmptyLocalSaveDeleteConflict(conflict, knownSaveKeys) && conflict.createdAt >= startupConflictCreatedAt) {
         startupConflictId = conflict.conflictId;
         startupConflictCreatedAt = conflict.createdAt;
       }
@@ -2003,10 +2020,11 @@ export async function getLocalSaveConflicts(): Promise<LocalSaveConflictSummary[
   await initializeLocalSaveStore();
   if (backend !== "indexeddb" || !database) return [];
   const keys = await readAllStoredKeys(database);
+  const storedKeys = new Set(keys);
   const records = await readStoredRecordsByKey(database, keys.filter((key) => key.startsWith(`${LOCAL_SAVE_COORDINATION_PREFIX}.conflict.`)));
   const conflicts = records.flatMap((record) => {
     const conflict = parseLocalSaveConflictRecord(record.value);
-    return conflict && conflict.resolvedAt === undefined ? [conflict] : [];
+    return conflict && conflict.resolvedAt === undefined && !isEmptyLocalSaveDeleteConflict(conflict, storedKeys) ? [conflict] : [];
   });
   const catalogRecords = await readStoredRecordsByKey(database, conflicts.flatMap((conflict) => [
     localSaveCatalogRecordKey(conflict.candidateKey),
@@ -2130,12 +2148,11 @@ export async function resolveLocalSaveConflictDetailed(
       );
     }
     putStoredValue(store, LOCAL_SAVE_WRITER_LEASE_KEY, JSON.stringify(renewedLease), now);
-    const candidateRecord = conflict.candidateDeleted
-      ? undefined
-      : await requestResult(store.get(conflict.candidateKey) as IDBRequest<StoredSaveRecord | undefined>);
-    const persistedRecord = conflict.persistedMissing
-      ? undefined
-      : await requestResult(store.get(conflict.persistedKey) as IDBRequest<StoredSaveRecord | undefined>);
+    const candidateRecord = await requestResult(store.get(conflict.candidateKey) as IDBRequest<StoredSaveRecord | undefined>);
+    const persistedRecord = await requestResult(store.get(conflict.persistedKey) as IDBRequest<StoredSaveRecord | undefined>);
+    if (conflict.candidateDeleted && candidateRecord || conflict.persistedMissing && persistedRecord) {
+      throw new LocalSaveConflictResolutionError("verification-failed", "冲突记录与保留的存档副本不一致，双方原文已保留，请导出副本后检查。", false);
+    }
     const currentRecord = await requestResult(store.get(conflict.saveKey) as IDBRequest<StoredSaveRecord | undefined>);
     const revisionRecord = await requestResult(store.get(localSaveRevisionKey(conflict.saveKey)) as IDBRequest<StoredSaveRecord | undefined>);
     const candidate = conflict.candidateDeleted ? null : candidateRecord?.value ?? null;

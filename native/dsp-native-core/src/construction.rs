@@ -4079,17 +4079,12 @@ where
     runtime.indexed_try_map(centers, |index, center| probe(index, center))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn quantum_prefetch_jobs(
+fn quantum_target_jobs(
     state: &CoreState,
     base: &Map<String, Value>,
     automation: &Map<String, Value>,
     jobs: &Map<String, Value>,
-    center: &Map<String, Value>,
     target: &crate::construction_planner::Target,
-    work_seconds: f64,
-    has_existing_job: bool,
-    power_factor: f64,
 ) -> f64 {
     let target_stock = automation
         .get("targetStock")
@@ -4097,63 +4092,53 @@ fn quantum_prefetch_jobs(
         .map(|targets| floor_amount(finite_number(targets.get(&target.id))))
         .unwrap_or(0.0);
     let current = current_stock(base, &target.id) + pending_stock_in_jobs(state, jobs, &target.id);
-    let target_jobs = ((target_stock - current).max(0.0) / target.output_amount.max(1.0)).ceil();
-    let machine_count = floor_amount(finite_number(center.get("machineCount"))).max(1.0);
-    let work_jobs =
-        (machine_count * CONSTRUCTION_QUANTUM_PREFETCH_SECONDS * power_factor.clamp(0.0, 1.0)
-            / work_seconds.max(EPSILON))
+    ((target_stock - current).max(0.0) / target.output_amount.max(1.0)).ceil()
+}
+
+fn quantum_prefetch_jobs(
+    machine_count: f64,
+    target_jobs: f64,
+    work_seconds: f64,
+    prefetch_seconds: f64,
+    power_factor: f64,
+) -> f64 {
+    let work_jobs = (machine_count * prefetch_seconds * power_factor / work_seconds.max(EPSILON))
         .ceil()
         .max(1.0);
-    let requested_jobs = (target_jobs + if has_existing_job { 1.0 } else { 0.0 }).max(1.0);
     let prefetch_limit = if machine_count >= CONSTRUCTION_EXTENDED_STACK_THRESHOLD {
         CONSTRUCTION_QUANTUM_EXTENDED_PREFETCH_MAX_JOBS
     } else {
         CONSTRUCTION_QUANTUM_PREFETCH_MAX_JOBS
     };
-    prefetch_limit.min(requested_jobs.min(work_jobs).max(1.0))
+    prefetch_limit.min(target_jobs.min(work_jobs))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn quantum_missing_for_batch(
-    state: &CoreState,
-    base: &Map<String, Value>,
-    automation: &Map<String, Value>,
-    jobs: &Map<String, Value>,
-    center: &Map<String, Value>,
-    target: &crate::construction_planner::Target,
+fn add_quantum_batch_costs(
+    costs: &mut BTreeMap<String, f64>,
     batch: &RepeatableBatch,
+    jobs: f64,
+) {
+    for (item_id, amount) in &batch.tray_costs {
+        let total = costs.entry(item_id.clone()).or_default();
+        *total = safe_add(*total, safe_multiply(*amount, jobs));
+    }
+}
+
+fn quantum_missing_costs(
+    costs: BTreeMap<String, f64>,
     planet_tray: &Map<String, Value>,
-    job_inventory: &Map<String, Value>,
     quantum: &Map<String, Value>,
-    has_existing_job: bool,
-    power_factor: f64,
 ) -> BTreeMap<String, f64> {
-    let jobs_to_prefetch = quantum_prefetch_jobs(
-        state,
-        base,
-        automation,
-        jobs,
-        center,
-        target,
-        batch.work_seconds,
-        has_existing_job,
-        power_factor,
-    );
-    batch
-        .tray_costs
-        .iter()
+    costs
+        .into_iter()
         .filter(|(item_id, _)| !matches!(item_id.as_str(), "logistics_drone" | "logistics_vessel"))
-        .filter_map(|(item_id, raw_amount)| {
-            let required = safe_multiply(*raw_amount, jobs_to_prefetch);
+        .filter_map(|(item_id, required)| {
             let available = safe_add(
-                safe_add(
-                    inventory_amount(planet_tray, item_id),
-                    inventory_amount(job_inventory, item_id),
-                ),
-                inventory_amount(quantum, item_id),
+                inventory_amount(planet_tray, &item_id),
+                inventory_amount(quantum, &item_id),
             );
             let amount = (required - available).max(0.0);
-            (amount > 0.0).then(|| (item_id.clone(), amount))
+            (amount > 0.0).then_some((item_id, amount))
         })
         .collect()
 }
@@ -4233,6 +4218,47 @@ fn combine_quantum_planning_inventory(
     Ok(result)
 }
 
+fn select_ready_quantum_target(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    planet_tray: &Map<String, Value>,
+    quantum: &Map<String, Value>,
+) -> anyhow::Result<Option<(crate::construction_planner::Target, crate::construction_planner::Plan)>> {
+    let mut selection_automation = automation.clone();
+    let mut skipped = HashSet::new();
+    for _ in 0..64 {
+        let Some(candidate) =
+            select_target_skipping(state, base, &selection_automation, jobs, &skipped)
+        else {
+            break;
+        };
+        let inventory = crate::construction_planner::inventory_from_sources(planet_tray, quantum);
+        if let crate::construction_planner::PlanOutcome::Ready(plan) =
+            crate::construction_planner::probe_plan(state, base, &candidate, inventory)
+        {
+            return Ok(Some((candidate, plan)));
+        }
+        skipped.insert(candidate.id.clone());
+        set_number(
+            &mut selection_automation,
+            "cursor",
+            (candidate.index + 1) as f64,
+        )?;
+    }
+    Ok(None)
+}
+
+fn construction_quantum_power_factor(center: &Map<String, Value>) -> f64 {
+    center
+        .get("powerFactor")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0)
+}
+
 fn no_job_quantum_missing_materials(
     state: &CoreState,
     base: &Map<String, Value>,
@@ -4250,33 +4276,18 @@ fn no_job_quantum_missing_materials(
     let planet_tray = tray(base, planet_id).unwrap_or(&empty);
     let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
     let mut virtual_quantum = combine_quantum_planning_inventory(&[quantum, warehouse])?;
-    let mut selection_automation = automation.clone();
-    let mut skipped = HashSet::new();
-    for _ in 0..64 {
-        let Some(candidate) =
-            select_target_skipping(state, base, &selection_automation, jobs, &skipped)
-        else {
-            break;
-        };
-        let inventory =
-            crate::construction_planner::inventory_from_sources(planet_tray, &virtual_quantum);
-        if matches!(
-            crate::construction_planner::probe_plan(state, base, &candidate, inventory),
-            crate::construction_planner::PlanOutcome::Ready(_)
-        ) {
-            target = candidate;
-            break;
-        }
-        skipped.insert(candidate.id.clone());
-        set_number(
-            &mut selection_automation,
-            "cursor",
-            (candidate.index + 1) as f64,
-        )?;
+    let mut complete_plan = None;
+    if let Some((ready_target, plan)) =
+        select_ready_quantum_target(state, base, automation, jobs, planet_tray, &virtual_quantum)?
+    {
+        target = ready_target;
+        complete_plan = Some(plan);
     }
     let mut seed_missing = BTreeMap::<String, f64>::new();
-    let mut complete_plan = None;
     for _ in 0..128 {
+        if complete_plan.is_some() {
+            break;
+        }
         let inventory =
             crate::construction_planner::inventory_from_sources(planet_tray, &virtual_quantum);
         match crate::construction_planner::probe_plan(state, base, &target, inventory) {
@@ -4312,26 +4323,140 @@ fn no_job_quantum_missing_materials(
     let Some(batch) = analyze_repeatable_plan(state, base, &target, &plan)? else {
         return Ok(seed_missing);
     };
-    let power_factor = center
-        .get("powerFactor")
-        .and_then(Value::as_f64)
-        .filter(|value| value.is_finite())
-        .unwrap_or(1.0)
-        .clamp(0.0, 1.0);
-    Ok(quantum_missing_for_batch(
-        state,
-        base,
-        automation,
-        jobs,
-        center,
-        &target,
-        &batch,
-        planet_tray,
-        &empty,
-        quantum,
-        false,
+    let power_factor = construction_quantum_power_factor(center);
+    let machine_count = floor_amount(finite_number(center.get("machineCount"))).max(1.0);
+    let count = quantum_prefetch_jobs(
+        machine_count,
+        quantum_target_jobs(state, base, automation, jobs, &target),
+        batch.work_seconds,
+        CONSTRUCTION_QUANTUM_PREFETCH_SECONDS,
         power_factor,
-    ))
+    );
+    let mut required = BTreeMap::new();
+    add_quantum_batch_costs(&mut required, &batch, count);
+    Ok(quantum_missing_costs(required, planet_tray, quantum))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn active_job_quantum_missing_materials(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    center: &Map<String, Value>,
+    warehouse: &Map<String, Value>,
+    job: &Map<String, Value>,
+    prefer_round_robin: bool,
+) -> anyhow::Result<BTreeMap<String, f64>> {
+    let entity_id = string_at(center, "id").unwrap_or_default();
+    let planet_id = string_at(center, "planetId").unwrap_or_default();
+    let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
+    let Some(step) = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .and_then(|steps| steps.get(step_index))
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let step = parse_step(step)?;
+    let current_requirements = requirements(state, &step)?;
+    let job_inventory = job
+        .get("inventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
+    let empty = Map::new();
+    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+    let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
+    if let Some(target) = string_at(job, "constructionId").and_then(|construction_id| {
+        crate::construction_planner::targets(state)
+            .into_iter()
+            .find(|target| target.id == construction_id)
+    }) {
+        let mut elapsed_seconds = finite_number(job.get("elapsedSeconds"));
+        let mut remaining_plan = remaining_job_plan(job, step_index)?;
+        let virtual_quantum = combine_quantum_planning_inventory(&[quantum, warehouse])?;
+        // Execution waits for a saved step that the warehouse can fund.
+        if !requirements_available(job_inventory, planet_tray, &virtual_quantum, &current_requirements) {
+            let available = combine_quantum_planning_inventory(&[&virtual_quantum, job_inventory])?;
+            let inventory =
+                crate::construction_planner::inventory_from_sources(planet_tray, &available);
+            if let Some(repaired) =
+                crate::construction_planner::build_plan(state, base, &target, inventory)
+            {
+                remaining_plan = repaired;
+                elapsed_seconds = 0.0;
+            }
+        }
+        if let Some(remaining_batch) = analyze_repeatable_plan(state, base, &target, &remaining_plan)? {
+            let mut required = remaining_batch
+                .tray_costs
+                .iter()
+                .map(|(item_id, amount)| {
+                    (item_id.clone(), (*amount - inventory_amount(job_inventory, item_id)).max(0.0))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let machine_count = floor_amount(finite_number(center.get("machineCount"))).max(1.0);
+            let power_factor = construction_quantum_power_factor(center);
+            let work_left = (remaining_batch.work_seconds - elapsed_seconds).max(0.0);
+            let prefetch_left = CONSTRUCTION_QUANTUM_PREFETCH_SECONDS
+                - work_left / (machine_count * power_factor);
+            if prefetch_left > EPSILON {
+                // Forecast another complete job without the current job's WIP.
+                let next = if prefer_round_robin {
+                    select_ready_quantum_target(
+                        state,
+                        base,
+                        automation,
+                        jobs,
+                        planet_tray,
+                        &virtual_quantum,
+                    )?
+                } else {
+                    None
+                };
+                let (forecast, planned) =
+                    next.map_or((target, None), |(target, plan)| (target, Some(plan)));
+                let target_jobs = quantum_target_jobs(state, base, automation, jobs, &forecast);
+                if target_jobs > 0.0 {
+                    let plan = planned.or_else(|| {
+                        let inventory = crate::construction_planner::inventory_from_sources(
+                            planet_tray,
+                            &virtual_quantum,
+                        );
+                        crate::construction_planner::build_plan(state, base, &forecast, inventory)
+                    });
+                    if let Some(plan) = plan
+                        && let Some(batch) = analyze_repeatable_plan(state, base, &forecast, &plan)?
+                    {
+                        let count = quantum_prefetch_jobs(
+                            machine_count,
+                            target_jobs,
+                            batch.work_seconds,
+                            prefetch_left,
+                            power_factor,
+                        );
+                        add_quantum_batch_costs(&mut required, &batch, count);
+                    }
+                }
+            }
+            return Ok(quantum_missing_costs(required, planet_tray, quantum));
+        }
+    }
+    let mut missing = BTreeMap::<String, f64>::new();
+    for requirement in current_requirements {
+        if matches!(requirement.item_id.as_str(), "logistics_drone" | "logistics_vessel") {
+            continue;
+        }
+        let required = floor_amount(requirement.amount);
+        let available = inventory_amount(job_inventory, &requirement.item_id)
+            + inventory_amount(planet_tray, &requirement.item_id)
+            + inventory_amount(quantum, &requirement.item_id);
+        let amount = (required - available).max(0.0);
+        if amount > 0.0 {
+            *missing.entry(requirement.item_id).or_default() += amount;
+        }
+    }
+    Ok(missing)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4344,110 +4469,16 @@ fn probe_quantum_demands(
     active_row: Option<usize>,
     center: &Map<String, Value>,
     warehouse: &Map<String, Value>,
+    prefer_round_robin: bool,
 ) -> anyhow::Result<Vec<QuantumDemand>> {
-    if center
-        .get("powerFactor")
-        .and_then(Value::as_f64)
-        .is_some_and(|factor| factor <= EPSILON)
-    {
+    if construction_quantum_power_factor(center) <= EPSILON {
         return Ok(Vec::new());
     }
     let entity_id = string_at(center, "id").unwrap_or_default();
-    let planet_id = string_at(center, "planetId").unwrap_or_default();
     let missing = if let Some(job) = jobs.get(entity_id).and_then(Value::as_object) {
-        let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
-        let Some(step) = job
-            .get("steps")
-            .and_then(Value::as_array)
-            .and_then(|steps| steps.get(step_index))
-        else {
-            return Ok(Vec::new());
-        };
-        let step = parse_step(step)?;
-        let job_inventory = job
-            .get("inventory")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
-        let empty = Map::new();
-        let planet_tray = tray(base, planet_id).unwrap_or(&empty);
-        let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
-        let power_factor = center
-            .get("powerFactor")
-            .and_then(Value::as_f64)
-            .filter(|value| value.is_finite())
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
-        if let Some(target) = string_at(job, "constructionId").and_then(|construction_id| {
-            crate::construction_planner::targets(state)
-                .into_iter()
-                .find(|target| target.id == construction_id)
-        }) {
-            let mut remaining_plan = remaining_job_plan(job, step_index)?;
-            if !requirements_available(
-                job_inventory,
-                planet_tray,
-                quantum,
-                &requirements(state, &step)?,
-            ) {
-                let available =
-                    combine_quantum_planning_inventory(&[quantum, warehouse, job_inventory])?;
-                let inventory =
-                    crate::construction_planner::inventory_from_sources(planet_tray, &available);
-                if let Some(repaired) =
-                    crate::construction_planner::build_plan(state, base, &target, inventory)
-                {
-                    remaining_plan = repaired;
-                }
-            }
-            if let Some(batch) = analyze_repeatable_plan(state, base, &target, &remaining_plan)? {
-                return Ok(quantum_missing_for_batch(
-                    state,
-                    base,
-                    automation,
-                    jobs,
-                    center,
-                    &target,
-                    &batch,
-                    planet_tray,
-                    job_inventory,
-                    quantum,
-                    true,
-                    power_factor,
-                )
-                .into_iter()
-                .filter_map(|(item_id, amount)| {
-                    let amount = floor_amount(amount) as u64;
-                    (amount > 0).then(|| QuantumDemand {
-                        key: format!("construction-direct:{entity_id}:{item_id}"),
-                        entity_index,
-                        active_row,
-                        entity_id: entity_id.to_owned(),
-                        item_id,
-                        amount,
-                        needed_amount: amount,
-                    })
-                })
-                .collect());
-            }
-        }
-        let mut missing = BTreeMap::<String, f64>::new();
-        for requirement in requirements_from_catalog(state.catalog.as_ref(), &step)? {
-            if matches!(
-                requirement.item_id.as_str(),
-                "logistics_drone" | "logistics_vessel"
-            ) {
-                continue;
-            }
-            let required = floor_amount(requirement.amount);
-            let available = inventory_amount(job_inventory, &requirement.item_id)
-                + inventory_amount(planet_tray, &requirement.item_id)
-                + inventory_amount(quantum, &requirement.item_id);
-            let amount = (required - available).max(0.0);
-            if amount > 0.0 {
-                *missing.entry(requirement.item_id).or_default() += amount;
-            }
-        }
-        missing
+        active_job_quantum_missing_materials(
+            state, base, automation, jobs, center, warehouse, job, prefer_round_robin,
+        )?
     } else {
         no_job_quantum_missing_materials(state, base, automation, jobs, center, warehouse)?
     };
@@ -4506,6 +4537,7 @@ fn collect_quantum_demands_with_runtime(
             None,
             center,
             &warehouse,
+            false,
         )
     })?;
     reserve_quantum_demands(
@@ -4520,6 +4552,7 @@ fn collect_quantum_demands_with_runtime(
         planned,
         warehouse,
         boundary_second,
+        |index| (indexed_centers[index].0, None),
     )
 }
 
@@ -4537,8 +4570,9 @@ fn reserve_quantum_demands(
     mut planned: Vec<Vec<QuantumDemand>>,
     mut warehouse: Map<String, Value>,
     boundary_second: f64,
+    center_row: impl Fn(usize) -> (usize, Option<usize>),
 ) -> anyhow::Result<Vec<QuantumDemand>> {
-    let mut all_ids = inputs
+    let mut all_centers = inputs
         .state
         .factory_topology
         .construction_center_indices
@@ -4547,43 +4581,67 @@ fn reserve_quantum_demands(
             entities
                 .get(index)
                 .and_then(Value::as_object)
-                .and_then(|center| string_at(center, "id"))
+                .and_then(|center| {
+                    Some((
+                        string_at(center, "id")?,
+                        construction_quantum_power_factor(center) > EPSILON,
+                    ))
+                })
         })
         .collect::<Vec<_>>();
-    all_ids.sort();
-    let count = all_ids.len().max(1);
+    all_centers.sort_by_key(|(id, _)| *id);
+    let count = all_centers.len().max(1);
     let offset = ((boundary_second.max(0.0) / 5.0).floor() as usize) % count;
-    let has_reservation = |center: &Map<String, Value>| {
-        let id = string_at(center, "id").unwrap_or_default();
+    let has_reservation = |id: &str| {
         inputs.jobs.contains_key(id)
             || quantum_buffer(inputs.automation, id).is_some_and(|inventory| !inventory.is_empty())
     };
+    // Match the shared boundary rotation even when the active directory only
+    // includes a subset of the centers on this simulation step.
+    let powered = || {
+        all_centers
+            .iter()
+            .cycle()
+            .skip(offset)
+            .take(count)
+            .filter(|(_, powered)| *powered)
+            .map(|(id, _)| *id)
+    };
+    let round_robin_center = if powered().take(2).count() > 1 {
+        powered()
+            .find(|id| has_reservation(id))
+            .or_else(|| powered().next())
+    } else {
+        None
+    };
     let mut order = (0..centers.len()).collect::<Vec<_>>();
     order.sort_by_key(|&index| {
-        let position = all_ids
-            .binary_search(&string_at(centers[index], "id").unwrap_or_default())
-            .unwrap_or(index);
+        let id = string_at(centers[index], "id").unwrap_or_default();
+        let position = all_centers.binary_search_by_key(&id, |(id, _)| *id).unwrap_or(index);
         (
-            !has_reservation(centers[index]),
+            !has_reservation(id),
             (position + count - offset) % count,
         )
     });
     let mut result = Vec::new();
     for index in order {
         let mut demands = std::mem::take(&mut planned[index]);
-        if demands.iter().any(|demand| {
+        let id = string_at(centers[index], "id").unwrap_or_default();
+        let prefer_round_robin = round_robin_center == Some(id) && inputs.jobs.contains_key(id);
+        if prefer_round_robin || demands.iter().any(|demand| {
             inventory_amount(&warehouse, &demand.item_id) < demand.needed_amount as f64
-        }) && let Some(first) = demands.first()
-        {
+        }) {
+            let (entity_index, active_row) = center_row(index);
             demands = probe_quantum_demands(
                 inputs.state,
                 inputs.base,
                 inputs.automation,
                 inputs.jobs,
-                first.entity_index,
-                first.active_row,
+                entity_index,
+                active_row,
                 centers[index],
                 &warehouse,
+                prefer_round_robin,
             )?;
         }
         for mut demand in demands {
@@ -4637,6 +4695,7 @@ fn collect_quantum_demands_for_center_indices_with_runtime(
             Some(active_rows[index]),
             center,
             &warehouse,
+            false,
         )
     })?;
     reserve_quantum_demands(
@@ -4646,6 +4705,7 @@ fn collect_quantum_demands_for_center_indices_with_runtime(
         planned,
         warehouse,
         boundary_second,
+        |index| (center_indices[index], Some(active_rows[index])),
     )
 }
 
@@ -6274,7 +6334,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_job_quantum_prefetch_uses_remaining_batch_and_five_second_horizon() {
+    fn existing_job_quantum_prefetch_respects_the_five_second_horizon_and_stock_target() {
         let (state, mut base, mut automation, mut entities) = quantum_probe_fixture(1);
         base.insert("construction".to_owned(), json!({ "widget": 0 }));
         automation.insert("targetStock".to_owned(), json!({ "widget": 100 }));

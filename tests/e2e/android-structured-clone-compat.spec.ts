@@ -76,9 +76,17 @@ for (const missingApi of [false, true]) {
       return workers.some(worker => worker?.name === "factory-simulation" && worker.clone === "function");
     }, { timeout: 20_000 }).toBe(true);
     await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-worker", "active");
-    const pause = page.getByLabel("暂停模拟", { exact: true });
+    const pause = page.getByRole("button", { name: "暂停模拟", exact: true });
     if (await pause.isVisible()) await pause.click();
-    await page.getByTitle("保存并返回主菜单", { exact: true }).click();
+    const more = page.getByRole("navigation", { name: "手机主导航" }).getByRole("button", { name: "更多", exact: true });
+    if (await more.isVisible()) {
+      await more.click();
+      await page.getByRole("button", { name: /^保存并返回主菜单/ }).click();
+      await page.getByRole("alertdialog", { name: "保存并返回主菜单", exact: true })
+        .getByRole("button", { name: "保存并返回", exact: true }).click();
+    } else {
+      await page.getByTitle("保存并返回主菜单", { exact: true }).click();
+    }
     await expect(page.locator(".start-menu")).toBeVisible({ timeout: 30_000 });
     const saved = await readPrimary(page);
     expect(saved?.length).toBeGreaterThan(100);

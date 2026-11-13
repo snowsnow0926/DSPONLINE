@@ -134,13 +134,13 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en&releaseNotesTest=1");
-  const dialog = page.getByRole("dialog", { name: "Content Packs and Return to Vanilla" });
+  const dialog = page.getByRole("dialog", { name: "Mobile Scrolling and Save Conflict Fixes" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.3.11");
+  await expect(dialog).toContainText("1.3.12");
   await expect(dialog).toContainText("Return an existing factory to vanilla");
   await expect(dialog).toContainText("Verified recovery snapshot");
   await expect(dialog).toContainText("Rename IDs with compatible migrations");
-  await expect(dialog).toContainText("Core inventories and funded construction are recovered");
+  await expect(dialog).toContainText("New-game controls and item or recipe lists remain reachable");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);

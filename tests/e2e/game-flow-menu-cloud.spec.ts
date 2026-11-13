@@ -1603,7 +1603,7 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "内容包升级与一键转回原版");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "手机滚动与存档冲突修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.12");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await expect(releaseNotes).toContainText("手机滚动与存档冲突修复");
@@ -1634,7 +1634,7 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "内容包升级与一键转回原版");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "手机滚动与存档冲突修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.12");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-1440.png", fullPage: true });
@@ -1681,7 +1681,7 @@ test("dated release notes appear once and remain available from both settings sc
   await page.getByRole("button", { name: "游戏设置" }).click();
   await page.getByRole("button", { name: "查看2026年11月9日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "内容包升级与一键转回原版");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "手机滚动与存档冲突修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.12");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
@@ -1693,7 +1693,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "内容包升级与一键转回原版");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "手机滚动与存档冲突修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.12");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
   await page.setViewportSize({ width: 844, height: 390 });

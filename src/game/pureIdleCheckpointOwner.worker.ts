@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 import "./save.worker";
 import { writePureIdleRecoveryCheckpoint, type PureIdleRecoveryCheckpointTicket } from "./pureIdleRecovery";
 import { SaveStateChunkAssembler, type SaveStateChunkRequest } from "./saveStateChunkTransfer";

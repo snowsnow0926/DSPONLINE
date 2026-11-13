@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 function source(name: string): string {
@@ -7,6 +7,13 @@ function source(name: string): string {
 }
 
 describe("production Worker import boundaries", () => {
+  it("initializes legacy runtime capabilities in every Worker realm", () => {
+    const workers = readdirSync(new URL(".", import.meta.url)).filter((name) => name.endsWith(".worker.ts"));
+    expect(workers.length).toBeGreaterThan(0);
+    for (const worker of workers) {
+      expect(source("./" + worker).match(/^import .+$/m)?.[0].trim(), worker).toBe('import "../compat/runtime";');
+    }
+  });
   it("keeps save serialization projection free of the storage Worker graph", () => {
     const worker = source("./save.worker.ts");
     const projection = source("./saveProjection.ts");

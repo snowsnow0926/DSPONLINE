@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import {
   LOCAL_SAVE_BROADCAST_CHANNEL,
   LOCAL_SAVE_CONFLICT_KEY_PREFIX,

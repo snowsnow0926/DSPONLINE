@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import type { ContentPackRegistry } from "./contentPacks";
 import { buildChunkedSaveJournalCommit, type ChunkedSaveJournalCommit, type ChunkedSaveJournalContext, type PersistChunkedSaveOptions } from "./chunkedSaveJournal";

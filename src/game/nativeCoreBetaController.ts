@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import {
   getDesktopBridge,
   type DesktopNativeCoreCommitOperationResult,

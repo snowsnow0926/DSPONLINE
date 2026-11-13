@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import { computeSimulationRuntimeDurableIntentSha256 } from "./simulationRuntimeDurableRecovery";
 import {

@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import type { FactoryEntity, GameState, ItemId, PlanetId, RecipeDefinition, TechId } from "./types";
 
 export const EFFECT_KEYS = ["productionSpeed", "powerConsumption", "miningSpeed", "storageCapacity"] as const;

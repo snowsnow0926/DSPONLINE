@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import { getBeltConstructionId, getExtractorBuildingId, getRecipe, ITEMS } from "./content";
 import { hasTypedContentIdReference, removeContentIdReferences, type ContentIdSets } from "./contentIdMigration";
 import type { ContentPackRegistry } from "./contentPacks";

@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import {
   CONSTRUCTION,
   FUEL_ENERGY_MJ,

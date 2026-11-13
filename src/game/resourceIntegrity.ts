@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import { createInitialState } from "./engine";
 import { createVeinReserve, DEFAULT_GALAXY_SEED } from "./galaxy";
 import { computeSaveStateChecksum } from "./saveEnvelopeIntegrity";

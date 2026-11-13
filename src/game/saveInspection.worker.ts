@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import { applyContentPackRegistry, type ContentPackRegistry } from "./contentPacks";
 import { inspectSave, type SaveInspection } from "./storage";

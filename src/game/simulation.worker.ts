@@ -1,5 +1,5 @@
-import "../compat/structuredClone";
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import { applyContentPackRuntimeSnapshot, type ContentPackRuntimeSnapshot } from "./contentPacks";
 import { advancePersistentSimulationRuntime, advancePersistentSimulationRuntimeMulticore, createPersistentSimulationRuntime, createSimulationPlanetPhaseLookup, ensureSimulationDynamicRouteLookup, createSimulationProfiler, markPersistentSimulationRuntimeDirty, replacePersistentSimulationRuntimeState, type PersistentSimulationRuntime, type SimulationProfiler } from "./engine";

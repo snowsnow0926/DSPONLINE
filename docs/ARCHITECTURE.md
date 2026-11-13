@@ -1,8 +1,10 @@
 # 系统架构
 
-## 浏览器对象克隆兼容
+## 浏览器运行时兼容
 
-`src/compat/structuredClone.ts` 以 `core-js-pure` 提供按能力启用的全局 structuredClone 适配。主入口以及调用该方法的共享模块先接入适配，Worker 在自身 realm 完成初始化。原生方法的函数身份、缺失时的对象图复制及应用使用的 ArrayBuffer transfer 分离和失败原子性均有回归验证。[Android 缺失 API 复现与验证](./reviews/2026-11-13-android-structured-clone-compatibility.md)。
+`src/compat/runtime.ts` 统一接入 structuredClone、Array.prototype.at 和 Object.hasOwn 的能力检查，通过固定版本 `core-js-pure` 补齐缺失方法。已有原生函数保留其身份。主界面和共享模块接入该入口，全部 16 个 Worker 的首个模块导入也接入相同入口，三斜线类型引用置于导入之前。对象图复制、ArrayBuffer transfer 分离及失败原子性、数组相对索引和自有属性检查均有回归验证。[对象复制验证](./reviews/2026-11-13-android-structured-clone-compatibility.md)及[Worker 后续兼容修复](./reviews/2026-11-14-android-worker-runtime-compatibility.md)。
+
+模拟 Worker 在精确恢复期间，通过消息返回的 runtimeError 与 error 事件共用恢复计数。初次运行失败进入恢复，其后三次恢复失败会停止自动重建并保留暂停视图和已验证主档，避免重新创建恢复记录时清零次数。
 
 ## 2026-11-09 全部内容包转换与 1.3.11 候选
 

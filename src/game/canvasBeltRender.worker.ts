@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import {
   CANVAS_BELT_RENDER_PROTOCOL_VERSION,

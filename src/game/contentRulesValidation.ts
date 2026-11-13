@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import { BUILDINGS, FUEL_ENERGY_MJ, ITEMS, PLANETS, RECIPES, TECHNOLOGIES, getBeltConstructionId, getBeltTiers } from "./content";
 import { EFFECT_KEYS, type ContentRules } from "./contentRules";
 import type { ContentPackManifest, ModValidationIssue } from "./mods";

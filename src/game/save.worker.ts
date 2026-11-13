@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import { decodeVerifiedSaveTransfer, serializeSaveEnvelopeToTransfer } from "./saveTransfer";
 import { hydrateCurrentPersistentSaveProjection, projectPersistentSaveStateInPlaceOwned } from "./saveProjection";

@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import { createSimulationPlanetPhaseLookup, runPlanetSimulationPhase } from "./engine";
 import type { PlanetPhaseWorkerRequest, PlanetPhaseWorkerResponse } from "./multicoreSimulation";

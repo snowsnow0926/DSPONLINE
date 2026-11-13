@@ -1,4 +1,4 @@
-import "./compat/structuredClone";
+import "./compat/runtime";
 import { addContentPackResources, getTechnologyMultiplier } from "./game/contentRules";
 import { migrateContentPackIds } from "./game/contentIdMigration";
 import {
@@ -11368,6 +11368,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const workerContinuationIsCurrent = () => simulationWorkerRef.current === worker &&
       legacyJavaScriptAuthorityLeaseIsCurrent(workerAuthorityLease);
     let installedSubmission: SimulationSubmission | null = null;
+    const retryFailedSimulationRecovery = () => {
+      const recovery = simulationRecoveryRef.current;
+      if (!recovery) return false;
+      simulationSubmissionRef.current = null;
+      simulationWorkerRef.current = null;
+      setSimulationWorkerActive(false);
+      worker.terminate();
+      recovery.attempts += 1;
+      recovery.nextOperationIndex = 0;
+      if (recovery.attempts <= 2) {
+        simulationWorkerDisabledRef.current = false;
+        setSimulationWorkerGeneration((generation) => generation + 1);
+      } else {
+        simulationRecoveryRef.current = null;
+        simulationWorkerDisabledRef.current = true;
+        setInitialSimulationWorkerReady(true);
+        pauseVisibleStateWithoutRollback("模拟 Worker 连续恢复失败；当前画面与进度已保留并暂停，可重试恢复或导出");
+      }
+      return true;
+    };
     worker.onmessage = async (event: MessageEvent<SimulationWorkerResponse>) => {
       if (!workerContinuationIsCurrent()) return;
       const authorityReplacement = simulationAuthorityReplacementRef.current;
@@ -11799,6 +11819,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       const submission = simulationSubmissionRef.current;
       if (!submission || event.data.id !== submission.id) return;
       if (event.data.runtimeError) {
+        if (retryFailedSimulationRecovery()) return;
         simulationSubmissionRef.current = null;
         simulationPendingSecondsRef.current += submission.simulationSeconds;
         simulationPendingWallSecondsRef.current += submission.wallSeconds;
@@ -12429,6 +12450,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       }
       setInitialSimulationWorkerReady(true);
       const submission = simulationSubmissionRef.current;
+      if (retryFailedSimulationRecovery()) return;
       if (submission?.state.timeWarp.enabled || gameRef.current.timeWarp.enabled) {
         if (pureIdleMacroActiveRef.current) {
           abortPureIdleForWorkerFailure("模拟 Worker 异常");
@@ -12461,24 +12483,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           pendingResumeAfterDurableRecoveryRef.current = true;
           setSimulationWorkerGeneration((generation) => generation + 1);
         }
-        return;
-      }
-      const existingRecovery = simulationRecoveryRef.current;
-      if (existingRecovery) {
-        simulationSubmissionRef.current = null;
-        simulationWorkerRef.current = null;
-        setSimulationWorkerActive(false);
-        worker.terminate();
-        existingRecovery.attempts += 1;
-        existingRecovery.nextOperationIndex = 0;
-        if (existingRecovery.attempts <= 2) {
-          simulationWorkerDisabledRef.current = false;
-          setSimulationWorkerGeneration((generation) => generation + 1);
-          return;
-        }
-        simulationRecoveryRef.current = null;
-        simulationWorkerDisabledRef.current = true;
-        pauseVisibleStateWithoutRollback("模拟 Worker 连续恢复失败；当前画面与进度已保留并暂停，可重试恢复或导出");
         return;
       }
       if (submission) {

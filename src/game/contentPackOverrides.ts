@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import { CONSTRUCTION, ITEMS, getBeltConstructionId, getBeltSpeed } from "./content";
 import { validContentIcon } from "./contentRulesValidation";
 import type { ModRecipeAmount, ModValidationIssue } from "./mods";

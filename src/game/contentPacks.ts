@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import { BUILDINGS, CONSTRUCTION, FUEL_ENERGY_MJ, FUEL_ITEM_IDS, ITEMS, RECIPES, TECHNOLOGIES, TECHNOLOGY_LIST, registerRuntimeBeltDefinition, resetRuntimeBeltDefinitions, validateContentCatalog } from "./content";
 import { setContentRules, type ContentRules } from "./contentRules";
 import { overrideRuntimeBeltDefinition } from "./content";

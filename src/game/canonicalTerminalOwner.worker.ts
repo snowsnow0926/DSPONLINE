@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 import "./save.worker";
 import { applyContentPackRegistry } from "./contentPacks";
 import { parseTrustedWorkerEnvelope } from "./storage";

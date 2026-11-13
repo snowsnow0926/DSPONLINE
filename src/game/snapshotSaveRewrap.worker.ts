@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import { rewrapVerifiedPrimarySaveAsSnapshot } from "./saveTransfer";
 import type { SnapshotSaveRewrapRequest, SnapshotSaveRewrapResponse } from "./snapshotSaveRewrap";

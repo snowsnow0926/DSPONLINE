@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import type { LocalSaveCatalog } from "./localSaveCatalog";
 import { buildLocalSaveCatalog } from "./localSaveCatalogBuild";

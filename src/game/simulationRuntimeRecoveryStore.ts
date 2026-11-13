@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import type { SimulationRuntimeRecoveryBaseIdentity } from "./simulationRuntimeRecovery";
 import {
   SIMULATION_RUNTIME_DURABLE_RECOVERY_MAX_JOURNAL_BYTES,

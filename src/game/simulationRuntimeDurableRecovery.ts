@@ -1,4 +1,4 @@
-import "../compat/structuredClone";
+import "../compat/runtime";
 import { validateContentPackRuntimeSnapshot, type ContentPackRuntimeSnapshot } from "./contentPacks";
 import type { MulticoreSimulationOptions } from "./multicoreSimulation";
 import type { SimulationRuntimeRecoveryBaseIdentity } from "./simulationRuntimeRecovery";

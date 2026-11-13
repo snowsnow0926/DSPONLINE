@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import "../compat/runtime";
 
 import { completeSimulationAdvanceSession, createSimulationAdvanceSession } from "./engine";
 import { applyContentPackRuntimeSnapshot } from "./contentPacks";

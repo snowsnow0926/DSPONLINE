@@ -5,7 +5,7 @@ import { createInitialState, placeBuilding, setEntityRecipe } from "../../src/ga
 import { validateTimedPeriodicProgress, type TimedPeriodicProgressSample } from "../../src/game/periodicProgressValidation";
 import { serializeEnvelope } from "../../src/game/storage";
 
-const RELEASE_NOTE_ID = "2026-11-13-v1.3.13";
+const RELEASE_NOTE_ID = "2026-11-14-v1.3.14";
 
 test.beforeEach(async ({ page }) => {
   const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });

@@ -6,7 +6,7 @@ test.skip(resolveDurableSimulationRuntimeEnabled(process.env), "targets the defa
 async function install(page: Page, injectQuota = false, lowerRetirementThreshold = false) {
   await page.addInitScript(quotaInjection => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.13");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-14-v1.3.14");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     const probe = { active: false, begins: 0, records: 0, completes: 0, checkpoints: 0, ready: 0,

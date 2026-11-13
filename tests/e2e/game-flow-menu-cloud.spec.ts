@@ -8,7 +8,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.13");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-14-v1.3.14");
     }
   });
 }
@@ -1603,12 +1603,12 @@ test("dated release notes appear once and remain available from both settings sc
 
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "Android 工厂启动兼容修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.13");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Android 模拟兼容与恢复修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.14");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(3);
-  await expect(releaseNotes).toContainText("Android 工厂启动兼容修复");
-  await expect(releaseNotes).toContainText("修复安卓建立工厂报错");
-  await expect(releaseNotes).toContainText("后台模拟与存档兼容");
+  await expect(releaseNotes).toContainText("Android 模拟兼容与恢复修复");
+  await expect(releaseNotes).toContainText("修复旧内核模拟报错");
+  await expect(releaseNotes).toContainText("停止异常恢复反复刷屏");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1634,8 +1634,8 @@ test("dated release notes appear once and remain available from both settings sc
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-14-v142-history-1440.png", fullPage: true });
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "Android 工厂启动兼容修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.13");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Android 模拟兼容与恢复修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.14");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(3);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-1440.png", fullPage: true });
 
@@ -1674,15 +1674,15 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-13-v1.3.13");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-14-v1.3.14");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
   await page.getByRole("button", { name: "游戏设置" }).click();
-  await page.getByRole("button", { name: "查看2026年11月13日版本更新记录" }).click();
+  await page.getByRole("button", { name: "查看2026年11月14日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "Android 工厂启动兼容修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.13");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Android 模拟兼容与恢复修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.14");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(3);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
@@ -1693,8 +1693,8 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(operations.getByRole("button", { name: "查看版本更新记录" })).toBeVisible();
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
-  await expect(releaseNotes).toHaveAttribute("aria-label", "Android 工厂启动兼容修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.13");
+  await expect(releaseNotes).toHaveAttribute("aria-label", "Android 模拟兼容与恢复修复");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.14");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(3);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);

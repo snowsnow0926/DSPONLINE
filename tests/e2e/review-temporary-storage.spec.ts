@@ -27,7 +27,7 @@ test(`temporary storage warns only when needed, keeps export usable, and preserv
     }
     if (sessionStorage.getItem("review-temporary-seeded") === "1") return;
     sessionStorage.setItem("review-temporary-seeded", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.13");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-14-v1.3.14");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state: {
       version: 47, entities: [], belts: [], construction: {}, tray: { iron_ore: 42 }, paused: true,

@@ -35,7 +35,7 @@ for (const profile of ["native", "clone-absent", "worker-at-absent", "legacy-run
     await page.addInitScript(({ missingApi, missingCollections, profile }) => {
       const scope = globalThis as typeof globalThis & { originalStructuredClone?: typeof structuredClone };
       scope.originalStructuredClone = scope.structuredClone;
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.13");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-14-v1.3.14");
       localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
       if (missingCollections) {
         Reflect.deleteProperty(Array.prototype, "at");

@@ -3,7 +3,7 @@ import {expect, test} from "@playwright/test";
 test("repeated runtime errors stop recovery and retain the verified primary and visible inventory", async ({page}) => {
   test.setTimeout(90_000);
   await page.addInitScript(() => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.13");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-14-v1.3.14");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     const tracker = {enabled: false, workers: 0, failures: 0};
     (window as typeof window & {runtimeFailureProbe?: typeof tracker}).runtimeFailureProbe = tracker;

@@ -3,7 +3,7 @@ import { startupTimeoutMs } from "./startup-timeout";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
 const BACKUP_KEY = `${SAVE_KEY}.backup`;
-const RELEASE_NOTE_ID = "2026-11-13-v1.3.13";
+const RELEASE_NOTE_ID = "2026-11-14-v1.3.14";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(({ releaseNoteId }) => {

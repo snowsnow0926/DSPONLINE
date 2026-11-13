@@ -1,23 +1,23 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-11-13-v1.3.13";
+export const CURRENT_RELEASE_ID = "2026-11-14-v1.3.14";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const en = locale === "en";
   return {
     id: CURRENT_RELEASE_ID,
-    date: en ? "November 13, 2026" : "2026年11月13日",
-    version: "1.3.13",
-    title: en ? "Android Factory Startup Compatibility" : "Android 工厂启动兼容修复",
-    summary: en ? "Fixes factory creation on Android runtimes missing structuredClone, with compatibility support across the interface, simulation and save workers." : "修复部分安卓运行环境点击“建立工厂”时报 structuredClone is not defined 的问题，兼容处理覆盖主界面、后台模拟与存档流程。",
+    date: en ? "November 14, 2026" : "2026年11月14日",
+    version: "1.3.14",
+    title: en ? "Android Worker Compatibility and Recovery" : "Android 模拟兼容与恢复修复",
+    summary: en ? "Adds legacy runtime support across the interface and workers, and bounds repeated recovery failures while preserving visible progress and verified saves." : "补齐旧版运行环境中主界面与 Worker 的接口兼容，限制连续恢复失败时的自动重建，保留当前画面、进度与已验证存档。",
     items: [
-      { id: "v1313-factory", title: en ? "Factory creation on Android" : "修复安卓建立工厂报错",
-        description: en ? "Android runtimes without structuredClone receive a compatible implementation before content-pack initialization, allowing a new factory to open." : "在缺少 structuredClone 的环境中提前提供兼容实现，支持完成内容包初始化并进入新工厂。" },
-      { id: "v1313-workers", title: en ? "Simulation and save workers" : "后台模拟与存档兼容",
-        description: en ? "The interface and workers initialize cloning support in their own runtime, supporting simulation, saving and reopening." : "主界面和后台 Worker 分别初始化克隆支持，覆盖模拟运行、保存和重新进入工厂。" },
-      { id: "v1313-save", title: en ? "Lossless save cloning" : "完整复制与存档保护",
-        description: en ? "Compatibility checks cover object graphs, shared references and ArrayBuffer transfers, including preservation when a transfer fails." : "兼容处理覆盖对象图、共享引用与 ArrayBuffer 转移，并校验复制失败时的原数据保护。" },
+      { id: "v1314-runtime", title: en ? "Legacy Android runtime support" : "修复旧内核模拟报错",
+        description: en ? "Legacy runtimes receive Array.at and Object.hasOwn support before the interface and all 16 workers initialize, covering simulation and save workflows." : "主界面与全部 16 类 Worker 提前初始化 Array.at、Object.hasOwn 及对象复制兼容，覆盖模拟、操作与保存流程。" },
+      { id: "v1314-recovery", title: en ? "Bounded Worker recovery" : "停止异常恢复反复刷屏",
+        description: en ? "Repeated runtime failures share the recovery attempt limit. After three failed recovery attempts, automatic rebuilding stops and the visible factory stays paused." : "连续运行异常共用恢复次数，累计三次恢复失败后停止自动重建并保持暂停，运行记录反馈可稳定查看。" },
+      { id: "v1314-save", title: en ? "Preserved progress and verified saves" : "保留进度与已验证存档",
+        description: en ? "Failure handling retains the visible factory and verified primary save. Signed Android upgrade, explicit saving and cold reopening preserve inventory and pause state." : "恢复失败时保留当前画面与已验证主档，同签名覆盖升级、显式保存和冷启动读回校验覆盖物资与暂停状态。" },
     ],
   } as const;
 }

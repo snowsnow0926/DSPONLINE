@@ -1605,10 +1605,10 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "手机滚动与存档冲突修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.12");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(4);
   await expect(releaseNotes).toContainText("手机滚动与存档冲突修复");
-  await expect(releaseNotes).toContainText("转换前完整恢复快照");
-  await expect(releaseNotes).toContainText("安全改名与保档迁移");
+  await expect(releaseNotes).toContainText("恢复手机菜单与列表滚动");
+  await expect(releaseNotes).toContainText("修复空存档冲突循环");
 
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   const releaseHistory = releaseNotes.getByRole("navigation", { name: "版本列表" });
@@ -1636,7 +1636,7 @@ test("dated release notes appear once and remain available from both settings sc
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
   await expect(releaseNotes).toHaveAttribute("aria-label", "手机滚动与存档冲突修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.12");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(4);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-1440.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1683,7 +1683,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "手机滚动与存档冲突修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.12");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(4);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
   await page.locator(".start-menu-primary").click();
@@ -1695,7 +1695,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "手机滚动与存档冲突修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.3.12");
-  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(4);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-10-27-v132-844x390.png", fullPage: true });

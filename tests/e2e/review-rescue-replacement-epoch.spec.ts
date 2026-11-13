@@ -30,7 +30,7 @@ test(`an earlier ${mode} cannot replace a factory subsequently loaded from a slo
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (sessionStorage.getItem("rescue-slot-epoch-seeded")) return;
     sessionStorage.setItem("rescue-slot-epoch-seeded", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-09-v1.3.11");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.12");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     const state = {
       version: 47, entities: [], belts: [], construction: {}, tray: { iron_ore: 42 }, paused: true,

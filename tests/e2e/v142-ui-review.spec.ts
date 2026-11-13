@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { workflowTimeoutMs } from "./startup-timeout";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-11-09-v1.3.11";
+const RELEASE_NOTE_ID = "2026-11-13-v1.3.12";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {

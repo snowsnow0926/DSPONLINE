@@ -3,7 +3,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 async function openReviewFactory(page: Page, withNode = false) {
   await page.addInitScript((includeNode) => {
     sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-09-v1.3.11");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.12");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
     localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state: {
       version: 47, entities: includeNode ? [{ id: "review-vein", kind: "vein", planetId: "home", position: { x: 0, y: 0 }, resourceId: "iron_ore", minerCount: 1, resourceRemaining: 1000, resourceCapacity: 1000, inputs: {}, outputs: { iron_ore: 7 }, progress: 0, routingCursor: 0, utilization: 0, productionRate: 0 }] : [], belts: [], construction: {}, tray: {}, totalProduced: {}, paused: true,

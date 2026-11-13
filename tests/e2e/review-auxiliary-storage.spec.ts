@@ -37,7 +37,7 @@ for (const action of ["slot", "snapshot"] as const) {
       }
       if (sessionStorage.getItem("auxiliary-seeded") === "1") return;
       sessionStorage.setItem("auxiliary-seeded", "1");
-      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-09-v1.3.11");
+      localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-13-v1.3.12");
       localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state: {
         version: 47, entities: [], belts: [], tray: { iron_ore: 42 }, construction: {}, paused: true,
         research: { completedTechIds: ["electromagnetism"], selectedTechId: null, progressByTech: {} },

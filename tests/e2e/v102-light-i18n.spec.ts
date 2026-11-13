@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-11-09-v1.3.11";
+const RELEASE_NOTE_ID = "2026-11-13-v1.3.12";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next", lockedPlanets = false) {
   await page.addInitScript(({ releaseNoteId, mobileUi, lockedPlanets }) => {
@@ -144,7 +144,7 @@ test("English light release notes are localized and persist dismissal", async ({
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-09-v1.3.11");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-13-v1.3.12");
 });
 
 test("English light primary workspaces use opaque light surfaces", async ({ page }) => {

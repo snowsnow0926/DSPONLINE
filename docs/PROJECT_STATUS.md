@@ -1,6 +1,8 @@
 # DSP极简网络项目现状
 
-> **2026-11-13 Android 新建工厂兼容修复（本地验证）**。正式1.3.12在缺少structuredClone的环境下重现“建立工厂”报错，定位到内容包初始化。源码 `d41282234ef5` 接入按能力启用的主界面/Worker兼容层。完整单元3971通过/38跳过，相关E2E55项、源码兼容2项、Android成品兼容2项通过，包含Worker active、保存、刷新逐字读回和重新进入。Web/Android干净编译载荷及清单已冻结。公开基线为此前发布的1.3.12，玩家原机与后续正式包待验证。[原因、修复与范围](./reviews/2026-11-13-android-structured-clone-compatibility.md)。
+> **当前正式基线（2026-11-13，1.3.13）**。Android 点击“建立工厂”缺少 structuredClone 的兼容修复已进入香港 Web、Windows、Android、下载页和两端 stable 源。运行 `59c3bcddbe36`，Web current/previous 为 1.3.13/1.3.12、generation 66，下载 current/previous 为 1.3.13/1.3.12。完整浏览器 649 通过/34 跳过，三端 1.3.12 保档升级、400 件网页、37 件下载与两个完整安装包摘要通过。APK 历史签名和每包 209 个资源匹配，Windows 为 NotSigned。实体原机和系统安装向导待复测，香港余量约 19.12%，按必要静态热修的实际占用预算验收。[发布、验收与回退](./releases/1.3.13.md)。
+
+> **2026-11-13 Android 新建工厂兼容修复（本地阶段）**。正式1.3.12在缺少structuredClone的环境下重现“建立工厂”报错，定位到内容包初始化。源码 `d41282234ef5` 接入按能力启用的主界面/Worker兼容层。完整单元3971通过/38跳过，相关E2E55项、源码兼容2项、Android成品兼容2项通过，包含Worker active、保存、刷新逐字读回和重新进入。Web/Android干净编译载荷及清单已冻结，后续纳入正式1.3.13。玩家原机仍待复测。[原因、修复与范围](./reviews/2026-11-13-android-structured-clone-compatibility.md)。
 
 > **当前正式基线（2026-11-13，1.3.12）**。手机菜单与列表滚动、自动卡片遮挡、Windows 空删除冲突循环与处理入口修复已进入香港 Web、Windows、Android、下载页和两端 stable 源。运行 `75724d4a0129`，Web current/previous 为 1.3.12/1.3.11，generation 65；下载 current/previous 为 1.3.12/1.3.11。三端 1.3.11 保档升级、647 项浏览器唯一覆盖、400 件网页与34件下载、两整包摘要和 PWA 回退隔离/离线重开通过。香港约14.03GB/19.0%余量，本次按必要静态热修的实际占用验收。实体设备、原机与系统安装向导仍待复测。[发布与回退](./releases/1.3.12.md)。
 

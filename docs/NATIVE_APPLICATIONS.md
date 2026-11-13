@@ -1,6 +1,8 @@
 # 原生应用构建与更新
 
-> **2026-11-13 Android structuredClone 兼容修复（本地）**。正式1.3.12点击“建立工厂”缺少API的问题已受控复现。源码 `d41282234ef5` 的Android编译成品在原生与缺少API两种环境均完成新建、Worker运行、手机保存、刷新及重新进入。原APK209资源核对通过，修复编译载荷208件冻结，当前为本地验证产物。[验证与待测项](./reviews/2026-11-13-android-structured-clone-compatibility.md)。
+> **当前原生正式下载（2026-11-13，1.3.13）**。Windows x64 1.3.13 与 Android1.3.13/1003013 已上线下载页及 stable 源，运行 `59c3bcddbe36`。Android 缺少 structuredClone 时的建厂、模拟和存档兼容流程通过，APK6140133B、AAB5929435B，历史签名和每包209资源核对通过。Windows setup113308038B、NotSigned/Electron43.8.1，79运行文件匹配，七个网络隔离冲突检查点通过。两端1.3.12保档覆盖升级及冷启动通过，完整公网包SHA和feed SHA512相符。玩家原机、实体设备和系统安装向导待复测。[制品、验收与回退](./releases/1.3.13.md)。
+
+> **2026-11-13 Android structuredClone 兼容修复（本地阶段）**。正式1.3.12点击“建立工厂”缺少API的问题已受控复现。源码 `d41282234ef5` 的Android编译成品在原生与缺少API两种环境均完成新建、Worker运行、手机保存、刷新及重新进入。原APK209资源核对通过，修复编译载荷208件冻结，后续纳入正式1.3.13。[验证与待测项](./reviews/2026-11-13-android-structured-clone-compatibility.md)。
 
 > **当前原生正式下载（2026-11-13，1.3.12）**。Windows x64 1.3.12与Android1.3.12/1003012已上线下载页及stable源。运行 `75724d4a0129`，Windows setup112903058B、NotSigned/Electron43.8.1，79运行文件相同，1.3.11保档升级及七项网络隔离冲突检查通过。APK5948514B、AAB5737833B，历史证书、v2/v3、zipalign及每包209封装资源核对通过，1.3.11同签名升级/保存/冷开通过。公网完整包SHA及feed SHA512相符。实体设备与系统安装向导仍待实测。[制品、验证与回退](./releases/1.3.12.md)。
 
@@ -246,12 +248,12 @@ node scripts/create-native-update-manifests.mjs `
 - 两个发布 workflow 的 token 权限为只读，并显式注入官方 API、公开 origin 和更新基址；普通 Pull Request CI 不接收这些配置或签名 secrets。
 - 向正式更新目录发布前仍需核对版本、通道、SHA-256、证书、安装覆盖、本地存档、云登录、回滚版本和 HTTPS 缓存头。
 
-## 7. 当前原生发布状态（1.3.12）
+## 7. 当前原生发布状态（1.3.13）
 
-- Windows x64与Android的Build ID为 `1.3.12+75724d4a0129`，stable通道。Windows实际 `file://` 入口、预加载桥、1.3.11升级及冷开保档通过。
-- Android稳定APK为 `1.3.12 / 1003012`，5948514B，SHA-256为 `d8b78f5c7f5644ffad56be4e5d8382cc0e7b453337ce81fd1c26cef3862f756f`。历史证书、v2/v3、zipalign及隔离模拟器1.3.11覆盖升级通过，5737833B的AAB归档。
-- Windows安装器112903058B，SHA-256为 `b80a1db6f22ee424807fe2ee8d2e953eaf792f48d0f810706a3c0dbc4e4c8583`，Authenticode为NotSigned。安装器79个运行文件与实测目录一致。
-- 下载current/previous为 `download-site-1.3.12-75724d4a0129` / `download-site-1.3.11-e599f8c68979`。34件文件、两整包、SHA512、缓存头、206与香港302跳转通过。[完整发布与回退](./releases/1.3.12.md)。
+- Windows x64与Android的Build ID为 `1.3.13+59c3bcddbe36`，stable通道。Windows实际 `file://` 入口、预加载桥、1.3.12升级及冷开保档通过。
+- Android稳定APK为 `1.3.13 / 1003013`，6140133B，SHA-256为 `3640704a732b7956dfa9563316cf3883037f239195840f1061082990a6083cbf`。历史证书、v2/v3、zipalign及隔离模拟器1.3.12覆盖升级通过，5929435B的AAB归档。
+- Windows安装器113308038B，SHA-256为 `d764f577b944923db63ef2561e563c7d5ac00201c518777d20c1ca9ec31bf787`，Authenticode为NotSigned。安装器79个运行文件与实测目录一致。
+- 下载current/previous为 `download-site-1.3.13-59c3bcddbe36` / `download-site-1.3.12-75724d4a0129`。37件文件、两整包、SHA512、缓存头、206与香港302跳转通过。[完整发布与回退](./releases/1.3.13.md)。
 - 实体Android、原机、系统输入法、系统NSIS安装/卸载和长时低配实测仍待完成。
 - GitHub Android/Desktop Release工作流具备签名门禁。本机正式Android构建通过受保护入口注入长期签名材料并校验证书连续性。
 - Android 系统浏览器安装 APK 时，玩家设备可能要求允许该来源安装应用；正式商店分发可作为后续渠道，但不改变包名和签名连续性要求。

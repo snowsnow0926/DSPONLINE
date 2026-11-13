@@ -528,12 +528,12 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "内容包升级与一键转回原版");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.11");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
-  await expect(dialog).toContainText("一键转回原版存档");
-  await expect(dialog).toContainText("转换前完整恢复快照");
-  await expect(dialog).toContainText("安全改名与保档迁移");
+  await expect(dialog).toHaveAttribute("aria-label", "手机滚动与存档冲突修复");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.12");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(4);
+  await expect(dialog).toContainText("恢复手机菜单与列表滚动");
+  await expect(dialog).toContainText("修复空存档冲突循环");
+  await expect(dialog).toContainText("恢复存档冲突处理入口");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

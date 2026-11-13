@@ -137,9 +137,9 @@ test("English light release notes are localized and persist dismissal", async ({
   const dialog = page.getByRole("dialog", { name: "Mobile Scrolling and Save Conflict Fixes" });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("1.3.12");
-  await expect(dialog).toContainText("Return an existing factory to vanilla");
-  await expect(dialog).toContainText("Verified recovery snapshot");
-  await expect(dialog).toContainText("Rename IDs with compatible migrations");
+  await expect(dialog).toContainText("Scroll mobile menus and lists");
+  await expect(dialog).toContainText("Recover from empty-save conflicts");
+  await expect(dialog).toContainText("Resolve save conflicts from settings");
   await expect(dialog).toContainText("New-game controls and item or recipe lists remain reachable");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();

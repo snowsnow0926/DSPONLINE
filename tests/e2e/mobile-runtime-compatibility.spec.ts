@@ -9,6 +9,11 @@ test.beforeEach(async ({ context }) => {
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
   });
   await context.route("**/api/**", route => route.fulfill({ status: 503, contentType: "application/json", body: "{}" }));
+  await context.route(/\.css(?:\?.*)?$/, async route => {
+    const response = await route.fetch();
+    const body = (await response.text()).replace(/(?<![-\w])(?:inset|translate)\s*:\s*[^;]+;/g, "");
+    await route.fulfill({ response, body });
+  });
 });
 
 async function writerStatus(page: Page) {

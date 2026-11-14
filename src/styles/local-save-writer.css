@@ -1,9 +1,11 @@
 .local-save-writer-banner {
   position: fixed;
   z-index: 10020;
-  inset: 12px 12px auto 50%;
+  top: 12px;
+  right: 12px;
+  left: 50%;
   width: min(760px, calc(100vw - 24px));
-  translate: -50% 0;
+  transform: translateX(-50%);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -17,7 +19,7 @@
 }
 
 .local-save-writer-banner--conflict { border-color: color-mix(in srgb, var(--coral) 74%, transparent); color: var(--coral); }
-.local-save-writer-banner--temporary { inset-block: auto max(12px, env(safe-area-inset-bottom)); }
+.local-save-writer-banner--temporary { top: auto; bottom: max(12px, env(safe-area-inset-bottom)); }
 .local-save-writer-banner > span { min-width: 0; display: grid; gap: 3px; }
 .local-save-writer-banner strong { color: var(--text); font-size: calc(13px * var(--ui-font-scale, 1)); }
 .local-save-writer-banner small { color: var(--text-soft); font-size: calc(12px * var(--ui-font-scale, 1)); line-height: 1.45; overflow-wrap: anywhere; }
@@ -32,15 +34,16 @@
 .local-save-writer-banner .local-save-writer-banner__result--error { color: var(--coral); }
 
 @media (max-width: 720px) {
-  .local-save-writer-banner { inset: max(8px, env(safe-area-inset-top)) 8px auto 50%; width: calc(100vw - 16px); grid-template-columns: auto minmax(0, 1fr); }
+  .local-save-writer-banner { top: max(8px, env(safe-area-inset-top)); right: 8px; left: 50%; width: calc(100vw - 16px); grid-template-columns: auto minmax(0, 1fr); }
   .local-save-writer-banner button { grid-column: 1 / -1; min-height: 44px; }
   .local-save-writer-banner__actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr; }
   .local-save-writer-banner em { grid-column: 1 / -1; }
-  .local-save-writer-banner--temporary { inset-block: auto calc(80px + env(safe-area-inset-bottom, 0px)); }
+  .local-save-writer-banner--temporary { top: auto; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); }
 }
 
 /* The opt-in phone shell can stay active at tablet/desktop widths. Its touch
    controls also grow with text size, so a width-only fixed gap is insufficient. */
 .game-shell[data-mobile-shell="true"] ~ .local-save-writer-banner--temporary {
-  inset-block: auto calc(max(60px, 48px * var(--ui-font-scale, 1)) + 12px + env(safe-area-inset-bottom, 0px));
+  top: auto;
+  bottom: calc(max(60px, 48px * var(--ui-font-scale, 1)) + 12px + env(safe-area-inset-bottom, 0px));
 }

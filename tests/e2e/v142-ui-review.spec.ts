@@ -528,12 +528,12 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "Android 模拟兼容与恢复修复");
+  await expect(dialog).toHaveAttribute("aria-label", "手机网页滚动与存档接管修复");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.15");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(3);
-  await expect(dialog).toContainText("修复旧内核模拟报错");
-  await expect(dialog).toContainText("停止异常恢复反复刷屏");
-  await expect(dialog).toContainText("保留进度与已验证存档");
+  await expect(dialog).toContainText("配方与物品列表可滚动");
+  await expect(dialog).toContainText("接管后继续游戏");
+  await expect(dialog).toContainText("保留原有存档");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

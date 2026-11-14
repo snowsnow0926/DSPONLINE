@@ -78,3 +78,46 @@ for (const timing of ["absent", "throws"] as const) {
   });
 }
 
+test("startup waits for an abandoned lease and reopens the verified save before mounting the menu", async ({ page }) => {
+  await page.goto("/?menu=1&storageMigration=production");
+  await expect(page.locator(".start-menu")).toBeVisible();
+  const original = await page.evaluate(async () => {
+    const storage = await import("/src/game/storage.ts");
+    const engine = await import("/src/game/engine.ts");
+    const state = engine.createInitialState();
+    state.paused = true;
+    state.tray.iron_ore = 42;
+    const saved = await storage.saveGameVerified(state);
+    if (!saved.success) throw new Error(saved.message);
+    const store = await import("/src/game/localSaveStore.ts");
+    const raw = await store.readPersistedLocalSaveValue("dsp-idle-network.save.v1");
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dsp-idle-network.local-saves");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction("records", "readwrite");
+        const records = transaction.objectStore("records");
+        const request = records.get("dsp-idle-network.local-save-coordination.v1.writer-lease");
+        request.onsuccess = () => {
+          const record = request.result;
+          const lease = JSON.parse(record.value);
+          records.put({ ...record, value: JSON.stringify({ ...lease, ownerId: "tab_closed_mobile_document", heartbeatAt: Date.now(), expiresAt: Date.now() + 1_000 }) });
+        };
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+      });
+    } finally {
+      database.close();
+    }
+    return raw;
+  });
+  await page.reload();
+  await expect(page.locator(".start-menu")).toBeVisible();
+  expect((await writerStatus(page)).role).toBe("primary");
+  expect(await page.evaluate(async () => (await import("/src/game/localSaveStore.ts")).readPersistedLocalSaveValue("dsp-idle-network.save.v1"))).toBe(original);
+  await expect(page.locator(".local-save-writer-banner")).toHaveCount(0);
+});
+

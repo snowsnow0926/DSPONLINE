@@ -1326,10 +1326,9 @@ async function claimWriterLease(expectedPrevious?: Pick<LocalSaveWriterLease, "o
   return true;
 }
 
-async function retryInitialAndroidWriterLease(blocked: LocalSaveWriterLease | null): Promise<void> {
+async function retryInitialWriterLease(blocked: LocalSaveWriterLease | null): Promise<void> {
   const canWait = () => writerStatus.role === "secondary" && !writerClosing && document.visibilityState !== "hidden";
-  if (__APP_PLATFORM__ !== "android" || backend !== "indexeddb" || !database ||
-    !canWait()) return;
+  if (backend !== "indexeddb" || !database || !canWait()) return;
   if (!blocked || blocked.ownerId === writerId) return;
   const remainingMs = Math.max(0, blocked.expiresAt - Date.now());
   // Native authority and anomalously distant leases must never become short
@@ -1339,7 +1338,7 @@ async function retryInitialAndroidWriterLease(blocked: LocalSaveWriterLease | nu
   while (performance.now() < deadline && canWait()) {
     const current = parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY));
     if (!current || current.ownerId !== blocked.ownerId || current.fencingToken !== blocked.fencingToken) return;
-    // A live writer renewing its lease is not an interrupted Android document.
+    // A renewed lease belongs to a live writer, so this page stays read-only.
     if (current.expiresAt > blocked.expiresAt) return;
     if (current.expiresAt <= Date.now() && await claimWriterLease(blocked)) return;
     await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
@@ -1933,15 +1932,15 @@ export function initializeLocalSaveStore(): Promise<void> {
       initializeFallback();
     }
     installCoordinationListeners();
-    const initialAndroidLease = __APP_PLATFORM__ === "android" && backend === "indexeddb" && database
+    const initialWriterLease = backend === "indexeddb" && database
       ? parseLocalSaveWriterLease(await readCoordinationValue(database, LOCAL_SAVE_WRITER_LEASE_KEY))
       : null;
     const claimed = await claimWriterLease();
     // main.tsx awaits this initialization before mounting any menu or loading
-    // candidate. A prior Android document's lease can outlive that document;
+    // candidate. A prior browser document's lease can outlive that document;
     // retry here only, never after a read-only page has captured player state.
     if (!claimed && !startupConflictId) {
-      await retryInitialAndroidWriterLease(initialAndroidLease).catch(() => undefined); // Keep the original read-only boundary on storage failure.
+      await retryInitialWriterLease(initialWriterLease).catch(() => undefined); // Keep the original read-only boundary on storage failure.
     }
     if (startupConflictId) {
       publishWriterStatus({ ...writerStatus, role: "conflict", reason: "检测到旧标签页留下的急救存档，已保留双方版本", conflictId: startupConflictId });

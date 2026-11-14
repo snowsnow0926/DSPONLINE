@@ -1,0 +1,257 @@
+{
+  "schemaVersion": 1,
+  "version": "1.3.15",
+  "completedAt": "2026-11-14T15:02:00.125463+00:00",
+  "runtimeSha": "a905ca9e604efa6b8a4998a49a0fd1a3a679e70e",
+  "buildId": "1.3.15+a905ca9e604e",
+  "target": "Hong Kong Web only",
+  "webArtifact": {
+    "ok": true,
+    "sourceSha": "a905ca9e604efa6b8a4998a49a0fd1a3a679e70e",
+    "releaseId": "1.3.15-a905ca9e604e",
+    "buildId": "1.3.15+a905ca9e604e",
+    "sourceGitClean": true,
+    "fileCount": 200,
+    "aggregateSha256": "5b6245824078ed7d4a8eb0f6c29e03f89a96db5b8483d0445d7112f6e03292fa",
+    "manifestSha256": "31e6cc00f0625af90d4f1c624b94b82b7103cc6b56dd31afd28a0725a5712f4d",
+    "bytes": 2726287,
+    "sha256": "e74b7b2d6760e8ae91bfa3923289f42e6d3756585636fe792a34c683ddf158a5",
+    "sourceZipBytes": 13513282,
+    "sourceZipSha256": "ab8439f2768647988558d5391845c776d4e4b1c70854c711d1f6b8ed724ee82c",
+    "candidatePath": "D:\\GameDev\\WorkArtifacts\\DSPidle2\\release-1.3.15-web\\candidate"
+  },
+  "qualification": {
+    "readyForReleasePreflight": true,
+    "runtimeSha": "a905ca9e604efa6b8a4998a49a0fd1a3a679e70e",
+    "buildId": "1.3.15+a905ca9e604e",
+    "releaseId": "1.3.15-a905ca9e604e",
+    "checkedAt": "2026-11-14T14:51:09.641074+00:00",
+    "counts": {
+      "unit": {
+        "passed": 3982,
+        "skipped": 38,
+        "failed": 0
+      },
+      "server": {
+        "pass": 415,
+        "fail": 0,
+        "skipped": 2
+      },
+      "ops": {
+        "pass": 60,
+        "fail": 0,
+        "skipped": 6
+      },
+      "release-switch": {
+        "pass": 33,
+        "fail": 0,
+        "skipped": 0
+      },
+      "native": {
+        "pass": 638,
+        "fail": 0,
+        "skipped": 2
+      },
+      "rust": {
+        "passed": 1354,
+        "failed": 0,
+        "skipped": 3
+      }
+    },
+    "browserStats": {
+      "e2e-webkit": {
+        "startTime": "2026-11-14T14:35:54.896Z",
+        "duration": 185271.4,
+        "expected": 30,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "e2e-durable": {
+        "startTime": "2026-11-14T14:44:22.478Z",
+        "duration": 188594.84900000002,
+        "expected": 25,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "e2e-production": {
+        "startTime": "2026-11-14T14:47:32.164Z",
+        "duration": 26554.753999999997,
+        "expected": 9,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "e2e-recheck-final": {
+        "startTime": "2026-11-14T14:50:04.718Z",
+        "duration": 28876.698,
+        "expected": 1,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "e2e-initial": {
+        "startTime": "2026-11-14T14:35:04.007Z",
+        "duration": 825793.507,
+        "expected": 658,
+        "skipped": 34,
+        "unexpected": 1,
+        "flaky": 0
+      },
+      "e2e-unique": {
+        "expected": 659,
+        "skipped": 34,
+        "unexpected": 0,
+        "rechecked": 1
+      }
+    },
+    "webFiles": 200,
+    "webAggregateSha256": "5b6245824078ed7d4a8eb0f6c29e03f89a96db5b8483d0445d7112f6e03292fa",
+    "compiledCatalogGroups": 16,
+    "chromePwaUpgrade": true,
+    "webkitMobileUpgrade": true,
+    "apiContractUnchanged": true,
+    "productionDependencyVulnerabilities": 0,
+    "originalIosDeviceTested": false,
+    "releaseTarget": "Hong Kong Web only",
+    "nativePackagesPublished": false,
+    "residualGaps": [
+      "Original iOS device and native finger gesture remain to be retested",
+      "Native tools skip the optional Electron MessagePort smoke and a directory-symlink case requiring an unavailable Windows privilege"
+    ]
+  },
+  "sourcePublication": {
+    "ok": true,
+    "runtimeSha": "a905ca9e604efa6b8a4998a49a0fd1a3a679e70e",
+    "publishedCommit": "90ce881a547f5bc670b2b16837c04b4a62433c44",
+    "remoteHeadMatches": true,
+    "strictHostKeyValidation": true,
+    "physicalEgress": true,
+    "officialSsh443": true,
+    "forcePush": false,
+    "verifiedAt": "2026-11-14T14:58:02.8009906Z"
+  },
+  "production": {
+    "web": "1.3.15-a905ca9e604e",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "webVersion": "1.3.15",
+    "webBuildId": "1.3.15+a905ca9e604e",
+    "stateCurrent": {
+      "webReleaseId": "1.3.15-a905ca9e604e",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "statePrevious": {
+      "webReleaseId": "1.3.14-2798a0ccca04",
+      "apiReleaseId": "api-1.3.0-4c8d0c13a714",
+      "slot": "green",
+      "port": 4322
+    },
+    "generation": 68,
+    "proxyGeneration": 202,
+    "proxyMode": "forward",
+    "pendingSwitch": false,
+    "healthOk": true,
+    "readyWritable": true,
+    "nginxValid": true,
+    "nginxSha256": "7b6a7185dd2353f136b56efa96ba5127c7363ee3e65f3777ae1de2a578d0d578",
+    "backupState": "disabled",
+    "offsiteBackupTimer": "inactive",
+    "diskAvailableBytes": 13939531776,
+    "diskAvailableRatio": 0.1887316029713418
+  },
+  "apiProcessUnchanged": true,
+  "proxyProcessUnchanged": true,
+  "databaseIdentityPreserved": true,
+  "configurationBackupVerified": true,
+  "rollbackFilesVerified": 200,
+  "databaseSnapshotsCreated": 0,
+  "observation": {
+    "samples": 12,
+    "windowSeconds": 55,
+    "allHealthy": true,
+    "backupDisabled": true,
+    "sameApiProcess": true,
+    "sameProxyProcess": true,
+    "web": "1.3.15-a905ca9e604e",
+    "diskAvailableRatio": 0.18878073787538013
+  },
+  "fallback": {
+    "published": true,
+    "previousWeb": "1.3.14-2798a0ccca04",
+    "rootWeb": "1.3.15-a905ca9e604e",
+    "nginxSha256": "7b6a7185dd2353f136b56efa96ba5127c7363ee3e65f3777ae1de2a578d0d578",
+    "previousHtmlByteExact": true,
+    "oldWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "backup": "/var/backups/dsp-idle/1.3.15-a905ca9e604e/fallback/original-app.conf"
+  },
+  "public": {
+    "pwaInstallWindowSeconds": 600,
+    "pwaInstallElapsedMs": 295793,
+    "pwaPhaseElapsedMs": 323153,
+    "compressedTransport": true,
+    "twentySecondIdleTimeout": true,
+    "largeAssetDeadlineSeconds": 180,
+    "physicalEgress": true,
+    "strictTls": true,
+    "publicWeb": "1.3.15-a905ca9e604e",
+    "filesVerified": 200,
+    "allSizesAndSha256Match": true,
+    "cacheHeadersVerified": true,
+    "wwwCanonicalRedirect": true,
+    "publicHealth": true,
+    "publicReadyWritable": true,
+    "backupState": "disabled",
+    "previous": "1.3.14-2798a0ccca04",
+    "previousFilesVerified": 200,
+    "previousHtmlByteExact": true,
+    "previousWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "currentCacheBeforeAfterSha256": "e16b50bc2d15e7774066567cf3976ccfbbcde5972c5393f2411856f06da7f478",
+    "fallbackCacheIsolation": true,
+    "offlineCurrentReopen": true,
+    "browserProductionApiBlocked": true,
+    "blockedApiRequests": 22,
+    "productionPlayerWrites": false
+  },
+  "upgradeChrome": {
+    "oldBuild": "1.3.14+2798a0ccca04",
+    "newBuild": "1.3.15+a905ca9e604e",
+    "fixture": "public synthetic paused v47, autosave disabled",
+    "bytes": 119402,
+    "sha256": "5f6fb25d5af7528f605a370d249179fb8362b7ff8ca5ce8ef8097704d688338f",
+    "oldPrimaryByteIdentical": true,
+    "newPrimaryByteIdentical": true,
+    "offlinePrimaryByteIdentical": true,
+    "offlineReopen": true,
+    "productionApiCalled": false
+  },
+  "upgradeWebKit": {
+    "oldBuild": "1.3.14+2798a0ccca04",
+    "newBuild": "1.3.15+a905ca9e604e",
+    "fixture": "public synthetic paused v47, autosave disabled",
+    "bytes": 119402,
+    "sha256": "bc53708ce1831c7d689be102127f8b75f482894ddc2e19035135a4ba0d46792a",
+    "oldPrimaryByteIdentical": true,
+    "newPrimaryByteIdentical": true,
+    "secondReloadPrimaryByteIdentical": true,
+    "secondReload": true,
+    "engine": "webkit",
+    "mobileViewport": true,
+    "productionApiCalled": false
+  },
+  "nativeDownloadAndFeedChanged": false,
+  "originalIosDeviceTested": false,
+  "stageFailures": [
+    "The full Chromium run had one stale 1.3.14 announcement expectation; the first focused retry exposed the remaining old item label. All four assertions were updated and the final focused scenario passed with source runtime unchanged.",
+    "The first fallback publication rejected the old-worker rule and restored the original Nginx config automatically. Read-only diagnosis confirmed current 1.3.15 remained writable. The escaped version matcher was corrected in the generated candidate, independently syntax checked and republished successfully.",
+    "The source publication helper initially required a trailing dot in the verified DNS answer name. The DNS-name comparison was normalized, and strict existing SSH host-key verification, fast-forward push and remote-head readback then passed."
+  ],
+  "diagnosticNotes": [
+    "Optional Electron MessagePort and Windows directory-symlink privilege tests were skipped.",
+    "Public TLS probe listener warnings and isolated API refusal messages are retained in the task logs."
+  ]
+}

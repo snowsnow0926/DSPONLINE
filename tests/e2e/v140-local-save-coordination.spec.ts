@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { workflowTimeoutMs } from "./startup-timeout";
+import { startupTimeoutMs, workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
 const SAVE_KEY = "dsp-idle-network.save.v1";
@@ -15,7 +15,9 @@ async function preparePage(page: Page, disableCoordinationApis = false) {
     }
   }, { releaseNoteId: RELEASE_NOTE_ID, disable: disableCoordinationApis });
   await page.goto("/?menu=1&storageMigration=production");
-  await expect(page.locator(".start-menu")).toBeVisible();
+  // Startup can wait for an abandoned ordinary lease (up to 15 seconds)
+  // before loading a player-state candidate.
+  await expect(page.locator(".start-menu")).toBeVisible({ timeout: startupTimeoutMs(30_000) });
 }
 
 async function readRecord(page: Page, key: string): Promise<string | null> {
@@ -184,7 +186,7 @@ test("upgrades an existing IndexedDB v1 in place without changing save bytes", a
     });
   }, { key: SAVE_KEY, value: original });
   await page.reload();
-  await expect(page.locator(".start-menu")).toBeVisible();
+  await expect(page.locator(".start-menu")).toBeVisible({ timeout: startupTimeoutMs(30_000) });
   expect(await readRecord(page, SAVE_KEY)).toBe(original);
   const version = await page.evaluate(async () => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {

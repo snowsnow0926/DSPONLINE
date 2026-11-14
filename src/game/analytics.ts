@@ -95,14 +95,19 @@ function transferEventName(bytes: number): AnalyticsEventName {
 
 function installPagePerformanceTracking(): void {
   const captureLoad = () => window.setTimeout(() => {
-    const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
-    const durationMs = navigation && navigation.loadEventEnd > navigation.startTime
-      ? navigation.loadEventEnd - navigation.startTime
-      : performance.now();
-    const transferBytes = performance.getEntriesByType("resource")
-      .reduce((sum, entry) => sum + Math.max(0, (entry as PerformanceResourceTiming).transferSize || 0), 0);
-    trackAnalyticsEvent(loadEventName(durationMs));
-    trackAnalyticsEvent(transferEventName(transferBytes));
+    try {
+      if (typeof performance.getEntriesByType !== "function") return;
+      const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+      const durationMs = navigation && navigation.loadEventEnd > navigation.startTime
+        ? navigation.loadEventEnd - navigation.startTime
+        : performance.now();
+      const transferBytes = performance.getEntriesByType("resource")
+        .reduce((sum, entry) => sum + Math.max(0, (entry as PerformanceResourceTiming).transferSize || 0), 0);
+      trackAnalyticsEvent(loadEventName(durationMs));
+      trackAnalyticsEvent(transferEventName(transferBytes));
+    } catch {
+      // Optional navigation/resource timing must not become a runtime error.
+    }
   }, 0);
   if (document.readyState === "complete") captureLoad();
   else window.addEventListener("load", captureLoad, { once: true });

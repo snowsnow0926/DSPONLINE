@@ -288,11 +288,21 @@ function consumeSameTabWriterContinuation(existing: string | null, now = Date.no
 
 function resolveLocalSaveWriterId(): string {
   if (typeof window === "undefined") return createLocalSaveWriterId();
+  let navigationType: string | undefined;
+  let legacyNavigationType: number | undefined;
   try {
-    const navigationType = (performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined)?.type;
+    navigationType = (performance.getEntriesByType?.("navigation")[0] as PerformanceNavigationTiming | undefined)?.type;
+    legacyNavigationType = performance.navigation?.type;
+  } catch {
+    // Navigation Timing is optional. Its absence must not skip tab identity
+    // storage or the explicit continuation left before an application reload.
+  }
+  try {
     const existing = window.sessionStorage.getItem(LOCAL_SAVE_WRITER_SESSION_KEY);
     const continuedByPreviousDocument = consumeSameTabWriterContinuation(existing);
-    if (validLocalSaveWriterId(existing) && (navigationType === "reload" || navigationType === "back_forward" || continuedByPreviousDocument)) return existing;
+    const continuedNavigation = navigationType === "reload" || navigationType === "back_forward" ||
+      navigationType === undefined && (legacyNavigationType === 1 || legacyNavigationType === 2);
+    if (validLocalSaveWriterId(existing) && (continuedNavigation || continuedByPreviousDocument)) return existing;
     const created = createLocalSaveWriterId();
     window.sessionStorage.setItem(LOCAL_SAVE_WRITER_SESSION_KEY, created);
     return created;
@@ -321,9 +331,10 @@ let legacyCatalogIndexScheduled = false;
 const RAW_CACHE_LIMIT = 2;
 let synchronousFallbackInitialized = false;
 
-function markSameTabWriterContinuation(): void {
+export function prepareLocalSaveWriterReload(): void {
   if (typeof window === "undefined") return;
   try {
+    window.sessionStorage.setItem(LOCAL_SAVE_WRITER_SESSION_KEY, writerId);
     window.sessionStorage.setItem(LOCAL_SAVE_WRITER_CONTINUATION_KEY, JSON.stringify({ writerId, createdAt: Date.now() }));
   } catch {
     // A reload still falls back to PerformanceNavigationTiming when session
@@ -332,9 +343,9 @@ function markSameTabWriterContinuation(): void {
 }
 
 if (typeof window !== "undefined") {
-  window.addEventListener("beforeunload", markSameTabWriterContinuation);
+  window.addEventListener("beforeunload", prepareLocalSaveWriterReload);
   window.addEventListener("pagehide", (event) => {
-    if (!(event as PageTransitionEvent).persisted) markSameTabWriterContinuation();
+    if (!(event as PageTransitionEvent).persisted) prepareLocalSaveWriterReload();
   });
   window.addEventListener("pageshow", (event) => {
     if (!(event as PageTransitionEvent).persisted) return;

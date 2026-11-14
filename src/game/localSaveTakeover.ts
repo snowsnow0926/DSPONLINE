@@ -1,4 +1,4 @@
-import { getLocalSaveWriterStatus, takeOverLocalSaveWriter } from "./localSaveStore";
+import { getLocalSaveWriterStatus, prepareLocalSaveWriterReload, takeOverLocalSaveWriter } from "./localSaveStore";
 
 export interface CurrentTabTakeoverResult {
   ok: boolean;
@@ -38,6 +38,9 @@ export function requestCurrentTabTakeover(): Promise<CurrentTabTakeoverResult> {
           ? { ok: true, reload: true, message: "本标签页已取得本地存档写入权，正在重新载入" }
           : { ok: false, reload: false, message: "接管失败；原存档和旧标签页均未修改" };
       })();
-  activeRequest = run.finally(() => { activeRequest = null; });
+  activeRequest = run.then((result) => {
+    if (result.ok && result.reload) prepareLocalSaveWriterReload();
+    return result;
+  }).finally(() => { activeRequest = null; });
   return activeRequest;
 }

@@ -8,18 +8,25 @@
   --accessible-dialog-max-inline-size: 42rem;
   position: fixed;
   z-index: var(--accessible-dialog-z-index, 20000);
-  inset: 0;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 100%;
   isolation: isolate;
   pointer-events: none;
 }
 
 .accessible-dialog__backdrop {
+  box-sizing: border-box;
   position: absolute;
   display: grid;
   overflow: auto;
   overscroll-behavior: contain;
   place-items: center;
-  inset: 0;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 100%;
   padding:
     max(1rem, env(safe-area-inset-top, 0rem))
     max(1rem, env(safe-area-inset-right, 0rem))

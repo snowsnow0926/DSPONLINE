@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-11-14-v1.3.14";
+const RELEASE_NOTE_ID = "2026-11-14-v1.3.15";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next", lockedPlanets = false) {
   await page.addInitScript(({ releaseNoteId, mobileUi, lockedPlanets }) => {
@@ -134,17 +134,17 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en&releaseNotesTest=1");
-  const dialog = page.getByRole("dialog", { name: "Android Worker Compatibility and Recovery" });
+  const dialog = page.getByRole("dialog", { name: "Mobile Web Scrolling and Save Takeover" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.3.14");
-  await expect(dialog).toContainText("Legacy Android runtime support");
-  await expect(dialog).toContainText("Bounded Worker recovery");
-  await expect(dialog).toContainText("Preserved progress and verified saves");
-  await expect(dialog).toContainText("Legacy runtimes receive Array.at and Object.hasOwn support");
+  await expect(dialog).toContainText("1.3.15");
+  await expect(dialog).toContainText("Scroll recipe and item lists");
+  await expect(dialog).toContainText("Continue after taking over a save");
+  await expect(dialog).toContainText("Preserve existing saves");
+  await expect(dialog).toContainText("Mobile selection panels keep a usable height");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-14-v1.3.14");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-14-v1.3.15");
 });
 
 test("English light primary workspaces use opaque light surfaces", async ({ page }) => {

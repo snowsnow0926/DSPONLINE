@@ -80,3 +80,7 @@ APK/AAB 历史证书连续性、APK v2/v3、zipalign 和每包 209 个资源逐�
 验证索引为本工作树 `artifacts/ios-scroll-takeover-20261114/delivery-proof.json`，外部目录的 `verification/` 保留对应日志、JSON、驱动和成品截图。原始失败追踪保存在外部同任务目录的 e2e-*results/ 中。早期冻结候选完整保留，交付只使用 candidate-verified。
 
 本批交付为本地开发候选，正式版本仍按 [1.3.14 发布记录](../releases/1.3.14.md)。本批没有操作生产 Web、API、数据库、下载页或 stable feed。后续新版本号、发布目标和正式发布检查待相应发布任务确定；原玩家设备与实际浏览器触摸仍需回测。代码回退可使用主线基线 8fd3b25e；本批没有生产回退操作。
+
+## 后续网页发布授权
+
+用户随后确认无法下滑的玩家使用 iOS 网页版，要求将修复推到网页版。按 1.3.15 香港 Web 热修准备，原机版本仍未知。先前 Android 本地候选保留为开发阶段证据，本轮网页验收及发布单独记录在[1.3.15 交接](../releases/1.3.15-development-handoff-2026-11-14.md)。

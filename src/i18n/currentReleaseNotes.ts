@@ -1,6 +1,6 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-11-14-v1.3.14";
+export const CURRENT_RELEASE_ID = "2026-11-14-v1.3.15";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
@@ -8,16 +8,16 @@ export function getCurrentReleaseNotes(locale: AppLocale) {
   return {
     id: CURRENT_RELEASE_ID,
     date: en ? "November 14, 2026" : "2026年11月14日",
-    version: "1.3.14",
-    title: en ? "Android Worker Compatibility and Recovery" : "Android 模拟兼容与恢复修复",
-    summary: en ? "Adds legacy runtime support across the interface and workers, and bounds repeated recovery failures while preserving visible progress and verified saves." : "补齐旧版运行环境中主界面与 Worker 的接口兼容，限制连续恢复失败时的自动重建，保留当前画面、进度与已验证存档。",
+    version: "1.3.15",
+    title: en ? "Mobile Web Scrolling and Save Takeover" : "手机网页滚动与存档接管修复",
+    summary: en ? "Fixes recipe and item list scrolling on mobile browsers and lets a successful save takeover continue after reloading." : "修复手机浏览器中配方、物品列表无法滑动，以及接管本页后刷新仍提示只读的问题。",
     items: [
-      { id: "v1314-runtime", title: en ? "Legacy Android runtime support" : "修复旧内核模拟报错",
-        description: en ? "Legacy runtimes receive Array.at and Object.hasOwn support before the interface and all 16 workers initialize, covering simulation and save workflows." : "主界面与全部 16 类 Worker 提前初始化 Array.at、Object.hasOwn 及对象复制兼容，覆盖模拟、操作与保存流程。" },
-      { id: "v1314-recovery", title: en ? "Bounded Worker recovery" : "停止异常恢复反复刷屏",
-        description: en ? "Repeated runtime failures share the recovery attempt limit. After three failed recovery attempts, automatic rebuilding stops and the visible factory stays paused." : "连续运行异常共用恢复次数，累计三次恢复失败后停止自动重建并保持暂停，运行记录反馈可稳定查看。" },
-      { id: "v1314-save", title: en ? "Preserved progress and verified saves" : "保留进度与已验证存档",
-        description: en ? "Failure handling retains the visible factory and verified primary save. Signed Android upgrade, explicit saving and cold reopening preserve inventory and pause state." : "恢复失败时保留当前画面与已验证主档，同签名覆盖升级、显式保存和冷启动读回校验覆盖物资与暂停状态。" },
+      { id: "v1315-scroll", title: en ? "Scroll recipe and item lists" : "配方与物品列表可滚动",
+        description: en ? "Mobile selection panels keep a usable height in portrait, landscape and larger text settings, with their close button within reach." : "选择面板在手机横屏、竖屏和大字号下保持可用高度，可上下滑动浏览条目，关闭按钮保持可达。" },
+      { id: "v1315-takeover", title: en ? "Continue after taking over a save" : "接管后继续游戏",
+        description: en ? "A successful takeover keeps this page's save ownership through its reload. An abandoned page's short lease can also expire safely during startup." : "成功接管后，刷新会保留本页的存档管理身份；启动时也可等待已关闭页面遗留的短期占用安全到期。" },
+      { id: "v1315-save", title: en ? "Preserve existing saves" : "保留原有存档",
+        description: en ? "Existing saves stay intact during takeover. Other open pages remain read-only, protecting progress from older page state." : "接管和重新载入保留已有存档，其他页面继续受只读保护，避免旧页面覆盖新进度。" },
     ],
   } as const;
 }

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { workflowTimeoutMs } from "./startup-timeout";
 
-const RELEASE_NOTE_ID = "2026-11-14-v1.3.14";
+const RELEASE_NOTE_ID = "2026-11-14-v1.3.15";
 
 async function installMenuPreferences(page: Page): Promise<void> {
   await page.addInitScript((releaseNoteId) => {

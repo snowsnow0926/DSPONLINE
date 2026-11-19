@@ -1,0 +1,476 @@
+{
+  "version": "1.3.16",
+  "runtimeSha": "baff972821237835381c8f7ea40960ad8138f477",
+  "buildId": "1.3.16+baff97282123",
+  "releaseId": "1.3.16-baff97282123",
+  "qualification": {
+    "readyForReleasePreflight": true,
+    "runtimeSha": "baff972821237835381c8f7ea40960ad8138f477",
+    "buildId": "1.3.16+baff97282123",
+    "releaseId": "1.3.16-baff97282123",
+    "testCounts": {
+      "unit": {
+        "pass": 3983,
+        "fail": 0,
+        "skipped": 38
+      },
+      "server": {
+        "pass": 415,
+        "fail": 0,
+        "skipped": 2
+      },
+      "ops": {
+        "pass": 60,
+        "fail": 0,
+        "skipped": 6
+      },
+      "release-switch": {
+        "pass": 33,
+        "fail": 0,
+        "skipped": 0
+      },
+      "native-recheck": {
+        "pass": 638,
+        "fail": 0,
+        "skipped": 2
+      },
+      "rust": {
+        "pass": 1354,
+        "fail": 0,
+        "skipped": 3
+      }
+    },
+    "browser": {
+      "full": {
+        "startTime": "2026-11-19T04:52:23.429Z",
+        "duration": 1434716.978,
+        "expected": 658,
+        "skipped": 35,
+        "unexpected": 3,
+        "flaky": 0
+      },
+      "unique": {
+        "expected": 662,
+        "skipped": 34,
+        "unexpected": 0
+      },
+      "rechecked": 3,
+      "e2e-durable": {
+        "startTime": "2026-11-19T04:55:59.899Z",
+        "duration": 222492.614,
+        "expected": 25,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "e2e-production": {
+        "startTime": "2026-11-19T04:55:01.324Z",
+        "duration": 25838.272999999997,
+        "expected": 11,
+        "skipped": 1,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "e2e-android-touch-complete": {
+        "startTime": "2026-11-19T05:10:25.378Z",
+        "duration": 8974.94,
+        "expected": 3,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "e2e-android-compat": {
+        "startTime": "2026-11-19T05:04:36.193Z",
+        "duration": 35751.432,
+        "expected": 4,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "e2e-webkit-touch": {
+        "startTime": "2026-11-19T04:59:54.081Z",
+        "duration": 4725.880999999999,
+        "expected": 1,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "e2e-webkit-menu": {
+        "startTime": "2026-11-19T05:03:19.584Z",
+        "duration": 13890.465,
+        "expected": 3,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      }
+    },
+    "webManifest": "63aa0be7d4655a12da9b86a6147010b76971f213a9cda962875e0fba1cb53b9f",
+    "downloadManifest": "6e7930fbfe61b6e7f2fc00a6812c5677eaee87329bb55339fff7119725a65488",
+    "windowsManifest": "cd9ad073e087adea7fb305b20c484d9bba664e697955fdee3318f09ea5e560b9"
+  },
+  "componentManifests": {
+    "web": {
+      "name": "1.3.16-web-manifest.json",
+      "sha256": "63aa0be7d4655a12da9b86a6147010b76971f213a9cda962875e0fba1cb53b9f"
+    },
+    "native-download": {
+      "name": "1.3.16-native-download-manifest.json",
+      "sha256": "6e7930fbfe61b6e7f2fc00a6812c5677eaee87329bb55339fff7119725a65488"
+    },
+    "windows": {
+      "name": "1.3.16-windows-manifest.json",
+      "sha256": "cd9ad073e087adea7fb305b20c484d9bba664e697955fdee3318f09ea5e560b9"
+    }
+  },
+  "webFreeze": {
+    "archive": "web-1.3.16-baff97282123.tar.gz",
+    "bytes": 2737224,
+    "sha256": "399a5c22a1c1f72a4675dbef2090f01153850262c2b2fcbb77b63e8a2eb087ec",
+    "fileCount": 200,
+    "sourceZipBytes": 13539761,
+    "sourceZipSha256": "3932ee7f6bbd24b151a8d72b942a3792b65191a7d18a1e9123ba57541ff4185f",
+    "aggregateSha256": "ec79989935f678a8b577bf36e4832134c5522cce4d93331b1a6f2fc980a87452"
+  },
+  "downloadFreeze": {
+    "releaseId": "download-site-1.3.16-baff97282123",
+    "sourceSha": "baff972821237835381c8f7ea40960ad8138f477",
+    "expectedPrevious": "download-site-1.3.14-2798a0ccca04",
+    "archiveBytes": 119271004,
+    "archiveSha256": "1e9aed194863dde509f32eebfc586bc065c995e92afa1b88f0fa83c697726800",
+    "manifestSha256": "6e7930fbfe61b6e7f2fc00a6812c5677eaee87329bb55339fff7119725a65488",
+    "aggregateSha256": "d1034a832d752e9d88422fb339f8078a75ea22b9b02d50373a464bc476d8a6cb",
+    "finalFileCount": 43,
+    "deltaFileCount": 9,
+    "retainedOldFileCount": 34
+  },
+  "webSwitch": {
+    "published": true,
+    "web": "1.3.16-baff97282123",
+    "rollback": "1.3.15-a905ca9e604e",
+    "api": "api-1.3.0-4c8d0c13a714",
+    "apiProcessUnchanged": true,
+    "proxyProcessUnchanged": true,
+    "databaseIdentityPreserved": true,
+    "backupState": "disabled",
+    "generation": 69,
+    "buildId": "1.3.16+baff97282123",
+    "ready": true
+  },
+  "downloadSwitch": {
+    "published": true,
+    "current": "download-site-1.3.16-baff97282123",
+    "previous": "download-site-1.3.14-2798a0ccca04",
+    "version": "1.3.16",
+    "buildId": "1.3.16+baff97282123",
+    "filesVerified": 43,
+    "servicesUnchanged": true,
+    "nginxConfigUnchanged": true,
+    "gamePointersUnchanged": true,
+    "databaseTouched": false,
+    "backupsSettingsChanged": false
+  },
+  "windowsPackage": {
+    "status": "NotSigned",
+    "bytes": 113295747,
+    "sha256": "4feac9235b9f84665971ec52073e3fb9ac06853c90f4455850df0f4dd10c630f"
+  },
+  "androidPackages": {
+    "apk": {
+      "name": "app-release.apk",
+      "size": 6204136,
+      "sha256": "ef3b8fcc5ab7783b56bfd162b3c42f169f6ab6038db11343c2dd0423e622cb88",
+      "v2": true,
+      "v3": true,
+      "zipalign": true,
+      "certificateContinuity": true
+    },
+    "aab": {
+      "name": "app-release.aab",
+      "size": 5993451,
+      "sha256": "2a72f6915dbcce524ba205fed3bfb176faf6240535bcea60734ecd5abfdbe1c6",
+      "certificateContinuity": true
+    },
+    "versionCode": "1003016"
+  },
+  "androidUpgrade": {
+    "ok": true,
+    "buildId": "1.3.16+baff97282123",
+    "installedApkSha256": "ef3b8fcc5ab7783b56bfd162b3c42f169f6ab6038db11343c2dd0423e622cb88",
+    "storagePermissionsRequested": [],
+    "fromVersion": "1.3.14",
+    "toVersion": "1.3.16",
+    "firstInstallTimePreserved": true,
+    "oldIronOre": 1,
+    "ironOreAfterUpgrade": 1,
+    "newIronOreAfterSaving": 2,
+    "ironOreAfterColdReopen": 2,
+    "pausedStatePreserved": true,
+    "oldExplicitSaveConfirmed": true,
+    "newExplicitSaveConfirmed": true,
+    "networkDisabled": true,
+    "noActiveDefaultNetwork": true,
+    "freshIsolatedEmulator": true,
+    "physicalDeviceTested": false,
+    "packageCrashRecords": 0,
+    "packageAnrRecords": 0,
+    "deviceDirectory": "android-device-05",
+    "harnessNotes": "The isolated emulator started with clean userdata for 1.3.14. The first post-upgrade launch returned to the launcher. Same-userdata emulator restart, 1.3.16 entry, old inventory readback, explicit save and cold reopen passed. The obsolete stop marker made the driver exit after writing the verified proof.",
+    "resumedSameEmulatorAfterInitialLaunch": true,
+    "crashAndAnrScope": "Post-resume logcat of the same validation emulator"
+  },
+  "windowsUpgrade": {
+    "ok": true,
+    "version": "1.3.16",
+    "upgradedFrom": "1.3.14",
+    "electronVersion": "43.8.1",
+    "packaged": true,
+    "isolatedProfile": true,
+    "networkBlocked": true,
+    "newGame": true,
+    "explicitSave": true,
+    "coldReopen": true,
+    "savedCharacters": 90597,
+    "savedSha256": "1632c5492fee61631fa6bb7003e2da840346ce7c12a70b5eded36c053bcd7915",
+    "pageErrors": []
+  },
+  "webUpgrade": {
+    "oldBuild": "1.3.15+a905ca9e604e",
+    "newBuild": "1.3.16+baff97282123",
+    "fixture": "public synthetic paused v47, autosave disabled",
+    "bytes": 119402,
+    "sha256": "94777cc49ce91067b89e95468ee95a2a266803355373edca01acb72f8c14f539",
+    "oldPrimaryByteIdentical": true,
+    "newPrimaryByteIdentical": true,
+    "offlinePrimaryByteIdentical": true,
+    "offlineReopen": true,
+    "productionApiCalled": false
+  },
+  "webkitUpgrade": {
+    "oldBuild": "1.3.15+a905ca9e604e",
+    "newBuild": "1.3.16+baff97282123",
+    "fixture": "public synthetic paused v47, autosave disabled",
+    "bytes": 119402,
+    "sha256": "563444c81a6f1f9868fac1420acb4339ddb0351d953813ebadd710c135adec3c",
+    "oldPrimaryByteIdentical": true,
+    "newPrimaryByteIdentical": true,
+    "secondReloadPrimaryByteIdentical": true,
+    "secondReload": true,
+    "engine": "webkit",
+    "mobileViewport": true,
+    "productionApiCalled": false
+  },
+  "webObservation": {
+    "samples": 12,
+    "windowSeconds": 55,
+    "allHealthy": true,
+    "backupDisabled": true,
+    "sameApiProcess": true,
+    "sameProxyProcess": true,
+    "web": "1.3.16-baff97282123",
+    "diskAvailableRatio": 0.17827823532269432
+  },
+  "downloadObservation": {
+    "ok": true,
+    "checkedAt": "2026-11-19T13:21:36.059061+08:00",
+    "elapsedSeconds": 56.84,
+    "samples": [
+      {
+        "sample": 1,
+        "elapsedSeconds": 0.16,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 2,
+        "elapsedSeconds": 5.31,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 3,
+        "elapsedSeconds": 10.48,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 4,
+        "elapsedSeconds": 15.62,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 5,
+        "elapsedSeconds": 20.77,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 6,
+        "elapsedSeconds": 25.92,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 7,
+        "elapsedSeconds": 31.07,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 8,
+        "elapsedSeconds": 36.22,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 9,
+        "elapsedSeconds": 41.38,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 10,
+        "elapsedSeconds": 46.55,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 11,
+        "elapsedSeconds": 51.69,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      },
+      {
+        "sample": 12,
+        "elapsedSeconds": 56.84,
+        "versionsCorrect": true,
+        "servicesUnchanged": true
+      }
+    ],
+    "productionWritten": false
+  },
+  "fallback": {
+    "published": true,
+    "previousWeb": "1.3.15-a905ca9e604e",
+    "rootWeb": "1.3.16-baff97282123",
+    "nginxSha256": "12b239b7d62d9c9ae784d94faef72613800e971874727ba62dc8cc2278854307",
+    "previousHtmlByteExact": true,
+    "oldWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "backup": "/var/backups/dsp-idle/1.3.16-baff97282123/fallback/original-app.conf"
+  },
+  "publicWeb": {
+    "ok": true,
+    "publicWeb": "1.3.16-baff97282123",
+    "filesVerified": 200,
+    "previous": "1.3.15-a905ca9e604e",
+    "previousFilesVerified": 200,
+    "compressedTransport": true,
+    "twentySecondIdleTimeout": true,
+    "largeAssetDeadlineSeconds": 180,
+    "physicalEgress": true,
+    "strictTls": true,
+    "allSizesAndSha256Match": true,
+    "cacheHeadersVerified": true,
+    "wwwCanonicalRedirect": true,
+    "publicHealth": true,
+    "publicReadyWritable": true,
+    "backupState": "disabled",
+    "previousHtmlByteExact": true,
+    "previousWorkerRejected": true,
+    "currentWorkerAvailable": true
+  },
+  "publicPwa": {
+    "pwaInstallWindowSeconds": 600,
+    "pwaInstallElapsedMs": 265713,
+    "pwaPhaseElapsedMs": 271989,
+    "compressedTransport": true,
+    "twentySecondIdleTimeout": true,
+    "largeAssetDeadlineSeconds": 180,
+    "physicalEgress": true,
+    "strictTls": true,
+    "publicWeb": "1.3.16-baff97282123",
+    "filesVerified": 200,
+    "allSizesAndSha256Match": true,
+    "cacheHeadersVerified": true,
+    "wwwCanonicalRedirect": true,
+    "publicHealth": true,
+    "publicReadyWritable": true,
+    "backupState": "disabled",
+    "previous": "1.3.15-a905ca9e604e",
+    "previousFilesVerified": 200,
+    "previousHtmlByteExact": true,
+    "previousWorkerRejected": true,
+    "currentWorkerAvailable": true,
+    "currentCacheBeforeAfterSha256": "4b248ea9d99e441b2a777cb7f4b9b4e0868f5ce180e269eab4ade2e96cf7b7c6",
+    "fallbackCacheIsolation": true,
+    "offlineCurrentReopen": true,
+    "browserProductionApiBlocked": true,
+    "blockedApiRequests": 20,
+    "productionPlayerWrites": false
+  },
+  "publicPackages": {
+    "ok": true,
+    "files": [
+      {
+        "path": "downloads/android/dsp-idle-1.3.16-1003016.apk",
+        "bytes": 6204136,
+        "sha256": "ef3b8fcc5ab7783b56bfd162b3c42f169f6ab6038db11343c2dd0423e622cb88",
+        "strictTls": true,
+        "physicalEgress": true
+      },
+      {
+        "path": "downloads/desktop/stable/dsp-idle-1.3.16-x64-setup.exe",
+        "bytes": 113295747,
+        "sha256": "4feac9235b9f84665971ec52073e3fb9ac06853c90f4455850df0f4dd10c630f",
+        "strictTls": true,
+        "physicalEgress": true,
+        "sha512Base64": "ykbFVP2qxgxauO8g0eT0KYZOeBIDHKCxzdyfbRCZcVBcUDswyZtbdCPUaUbi7QfADhhnJzJjHouZjYzfT4IEOQ==",
+        "matchesStableFeedSha512": true
+      }
+    ]
+  },
+  "downloadVerified": {
+    "fileCount": 43,
+    "redirects": [
+      {
+        "path": "/downloads/android/stable.json",
+        "status": 200,
+        "correctDestination": true
+      },
+      {
+        "path": "/downloads/desktop/stable/latest.yml",
+        "status": 200,
+        "correctDestination": true
+      },
+      {
+        "path": "/downloads/android/dsp-idle-1.3.16-1003016.apk",
+        "status": 206,
+        "correctDestination": true
+      },
+      {
+        "path": "/downloads/desktop/stable/dsp-idle-1.3.16-x64-setup.exe",
+        "status": 206,
+        "correctDestination": true
+      }
+    ],
+    "browser": {
+      "ok": true,
+      "version": "1.3.16",
+      "bothDownloadButtonsVisible": true,
+      "correctVersionedLinks": true,
+      "publicHttps": true
+    }
+  },
+  "rollback": {
+    "web": "1.3.15-a905ca9e604e",
+    "download": "download-site-1.3.14-2798a0ccca04",
+    "fallbackConfig": "/var/backups/dsp-idle/1.3.16-baff97282123/fallback/original-app.conf",
+    "fallbackConfigSha256": "7b6a7185dd2353f136b56efa96ba5127c7363ee3e65f3777ae1de2a578d0d578"
+  },
+  "disk": {
+    "hongKongBytes": 13166116864,
+    "hongKongRatio": 0.17826010088294203,
+    "shanghaiBytes": 16784240640
+  }
+}

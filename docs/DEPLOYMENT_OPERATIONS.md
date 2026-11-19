@@ -1,5 +1,7 @@
 # 部署与运维手册
 
+> **2026-11-19 当前基线 1.3.16**。香港 Web current/previous 为 `1.3.16-baff97282123` / `1.3.15-a905ca9e604e`，generation/proxy 为 69/202，运行 API `api-1.3.0-4c8d0c13a714`。新上海下载 current/previous 为 `download-site-1.3.16-baff97282123` / `download-site-1.3.14-2798a0ccca04`。上一稳定入口指向不可变 `1.3.15-a905ca9e604e`，回退 Nginx 原件与下载备份见[正式发布记录](./releases/1.3.16.md)。
+
 > **当前 Web 基线（2026-11-14，1.3.15）**。香港current/previous为 `1.3.15-a905ca9e604e` / `1.3.14-2798a0ccca04`，generation/proxy为68/202，API仍为 `api-1.3.0-4c8d0c13a714`、green/4322、forward，无pending。55秒12次健康观察及公网400文件通过。上一稳定入口指向不可变1.3.14，活动Nginx SHA为 `7b6a7185dd2353f136b56efa96ba5127c7363ee3e65f3777ae1de2a578d0d578`，首次回退匹配失败已自动还原后修正复验。PWA隔离/离线通过，最终约13.94GB/18.87%余量。静态热修备份配置、指针及载荷，API进程/数据库身份保持，备份disabled与timer inactive保持。本轮未操作上海或原生更新源。[精确状态、备份及回退](./releases/1.3.15.md)。
 
 > **当前基线（2026-11-14，1.3.14）**。香港 Web current/previous 为 `1.3.14-2798a0ccca04` / `1.3.13-59c3bcddbe36`，generation/proxy 为67/202，API为 `api-1.3.0-4c8d0c13a714`、green/4322、forward，无pending，健康与可写12次观察通过。上一稳定入口指向不可变1.3.13，活动Nginx SHA为 `8c93979436d41f48052f228b0550de45d1d29565514f3d88d95bf12bf14b02a5`，原件已精确备份。新上海下载 current/previous 为1.3.14/1.3.13，40文件及12次观察通过，证书和服务匹配预检。公网400网页、40下载、两个整包与PWA隔离/离线通过。香港约14.10GB/19.10%余量，按必要静态热修预算验收。[备份、状态与回退](./releases/1.3.14.md)。

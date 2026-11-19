@@ -2,6 +2,12 @@
 
 All notable player-facing changes are recorded here. Game-state migration versions are tracked separately from product versions.
 
+## [1.3.16] · 2026-11-19
+
+- 触控中断或在画布外抬手后，下一次单指拖动恢复平移。
+- 双指缩放跟随手指中点，保留待部署建筑、数量和蓝图。
+- 香港 Web/PWA、Windows、Android 与新上海下载源已发布。[验证与回退](./docs/releases/1.3.16.md)
+
 ## [Unreleased]
 
 ### 1.2.7（Windows/Rust 原生整合候选，未发布，2026-09-02）

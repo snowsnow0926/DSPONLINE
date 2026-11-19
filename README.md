@@ -8,15 +8,15 @@
 
 ## 当前正式版本
 
-以下版本已于 2026-11-09 完成公网版本、清单和安装包校验。
+2026-11-19 已完成公网版本、清单和安装包校验。
 
 | 平台 | 正式版本 | 入口 |
 | --- | --- | --- |
-| Web / PWA | **1.3.11** | [在线游玩](https://dsponline.cn/) |
-| Windows x64 | **1.3.11** | [下载安装包](https://download.dsponline.cn/downloads/desktop/stable/dsp-idle-1.3.11-x64-setup.exe) |
-| Android 7+ | **1.3.11 / 1003011** | [下载 APK](https://download.dsponline.cn/downloads/android/dsp-idle-1.3.11-1003011.apk) |
+| Web / PWA | **1.3.16** | [在线游玩](https://dsponline.cn/) |
+| Windows x64 | **1.3.16** | [下载安装包](https://download.dsponline.cn/downloads/desktop/stable/dsp-idle-1.3.16-x64-setup.exe) |
+| Android 7+ | **1.3.16 / 1003016** | [下载 APK](https://download.dsponline.cn/downloads/android/dsp-idle-1.3.16-1003016.apk) |
 
-1.3.11 提供一键转回原版存档、内容包 v5 覆盖和安全改名，保留 Windows 云存档读取热修。三端保档升级、公网整包及 PWA 离线与回退隔离通过。[完整发布记录与回退](./docs/releases/1.3.11.md)
+1.3.16 修复触控中断后的单指误缩放。双指缩放会保留已选建筑、数量及蓝图。三端保档升级和 PWA 离线重开通过。[完整发布记录与回退](./docs/releases/1.3.16.md)
 
 Windows 安装包当前为 `NotSigned`，Android 沿用长期发布证书。下载页提供 SHA-256 校验值；完整安装包信息见 [原生应用说明](./docs/NATIVE_APPLICATIONS.md)。
 

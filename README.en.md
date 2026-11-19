@@ -8,15 +8,15 @@ A 2D infinite-canvas idle factory game inspired by the production flow of Dyson 
 
 ## Current Releases
 
-Public versions, manifests, and installation packages were verified on November 9, 2026.
+Public versions, manifests, and installation packages were verified on November 19, 2026.
 
 | Platform | Stable version | Get it |
 | --- | --- | --- |
-| Web / PWA | **1.3.11** | [Play online](https://dsponline.cn/) |
-| Windows x64 | **1.3.11** | [Download installer](https://download.dsponline.cn/downloads/desktop/stable/dsp-idle-1.3.11-x64-setup.exe) |
-| Android 7+ | **1.3.11 / 1003011** | [Download APK](https://download.dsponline.cn/downloads/android/dsp-idle-1.3.11-1003011.apk) |
+| Web / PWA | **1.3.16** | [Play online](https://dsponline.cn/) |
+| Windows x64 | **1.3.16** | [Download installer](https://download.dsponline.cn/downloads/desktop/stable/dsp-idle-1.3.16-x64-setup.exe) |
+| Android 7+ | **1.3.16 / 1003016** | [Download APK](https://download.dsponline.cn/downloads/android/dsp-idle-1.3.16-1003016.apk) |
 
-Version 1.3.11 adds conversion to vanilla saves, v5 core overrides, and safe ID renaming, and includes the Windows cloud-save read hotfix. Save-preserving upgrades, public package checks, PWA offline reopening, and fallback cache isolation passed. [Release record and rollback details](./docs/releases/1.3.11.md)
+Version 1.3.16 restores one-finger panning after interrupted touches and keeps the selected building, quantity, or blueprint available after pinching to zoom. Save-preserving upgrades and PWA offline reopening passed. [Release record and rollback details](./docs/releases/1.3.16.md)
 
 The Windows installer is currently `NotSigned`; Android retains its long-term release certificate. The download page provides SHA-256 checksums. Package details are in [Native Applications](./docs/NATIVE_APPLICATIONS.md).
 

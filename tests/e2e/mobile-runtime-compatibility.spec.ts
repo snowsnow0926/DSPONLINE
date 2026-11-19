@@ -4,7 +4,7 @@ test.use({ viewport: { width: 390, height: 700 }, hasTouch: true });
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => {
-    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-14-v1.3.15");
+    localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-19-v1.3.16");
     localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
     localStorage.setItem("dsp-idle-network.basic-onboarding.v1", JSON.stringify({ version: 1, skipped: true, stepIndex: 5 }));
   });

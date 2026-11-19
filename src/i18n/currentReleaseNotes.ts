@@ -1,23 +1,23 @@
 import type { AppLocale } from "./locale";
 
-export const CURRENT_RELEASE_ID = "2026-11-14-v1.3.15";
+export const CURRENT_RELEASE_ID = "2026-11-19-v1.3.16";
 
 /** Keep the menu summary small; historical notes stay behind the dialog. */
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const en = locale === "en";
   return {
     id: CURRENT_RELEASE_ID,
-    date: en ? "November 14, 2026" : "2026年11月14日",
-    version: "1.3.15",
-    title: en ? "Mobile Web Scrolling and Save Takeover" : "手机网页滚动与存档接管修复",
-    summary: en ? "Fixes recipe and item list scrolling on mobile browsers and lets a successful save takeover continue after reloading." : "修复手机浏览器中配方、物品列表无法滑动，以及接管本页后刷新仍提示只读的问题。",
+    date: en ? "November 19, 2026" : "2026年11月19日",
+    version: "1.3.16",
+    title: en ? "Mobile Canvas and Building Placement Fixes" : "手机画布触控与建筑部署修复",
+    summary: en ? "Restores one-finger panning after an interrupted touch and keeps pending buildings available after pinching to zoom." : "修复手机上触控中断后单指误缩放，以及双指缩放后待部署建筑消失的问题。",
     items: [
-      { id: "v1315-scroll", title: en ? "Scroll recipe and item lists" : "配方与物品列表可滚动",
-        description: en ? "Mobile selection panels keep a usable height in portrait, landscape and larger text settings, with their close button within reach." : "选择面板在手机横屏、竖屏和大字号下保持可用高度，可上下滑动浏览条目，关闭按钮保持可达。" },
-      { id: "v1315-takeover", title: en ? "Continue after taking over a save" : "接管后继续游戏",
-        description: en ? "A successful takeover keeps this page's save ownership through its reload. An abandoned page's short lease can also expire safely during startup." : "成功接管后，刷新会保留本页的存档管理身份；启动时也可等待已关闭页面遗留的短期占用安全到期。" },
-      { id: "v1315-save", title: en ? "Preserve existing saves" : "保留原有存档",
-        description: en ? "Existing saves stay intact during takeover. Other open pages remain read-only, protecting progress from older page state." : "接管和重新载入保留已有存档，其他页面继续受只读保护，避免旧页面覆盖新进度。" },
+      { id: "v1316-pan", title: en ? "One-finger panning recovers" : "触控中断后恢复单指平移",
+        description: en ? "Releasing a finger outside the canvas or interrupting a gesture clears stale touches. The next single-finger drag pans the canvas." : "手指在画布外抬起或触控被打断时，会清理残留触点。下一次单指拖动可正常平移画布。" },
+      { id: "v1316-pinch", title: en ? "Pinch zoom follows your fingers" : "双指缩放跟随手指中心",
+        description: en ? "The canvas zooms around the midpoint between your fingers in portrait and landscape, even when a pinch starts on a building." : "横屏或竖屏时，画布围绕双指的中点缩放，从建筑上起手也能正常缩放。" },
+      { id: "v1316-placement", title: en ? "Continue placing after zooming" : "缩放后继续部署建筑",
+        description: en ? "Pinching keeps the selected building, quantity or blueprint. Lift your fingers, then tap a spot on the canvas to place it." : "双指缩放会保留已选建筑、数量或蓝图。松手后点画布落点即可部署。" },
     ],
   } as const;
 }

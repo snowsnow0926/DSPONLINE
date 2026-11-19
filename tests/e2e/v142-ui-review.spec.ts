@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { workflowTimeoutMs } from "./startup-timeout";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-11-14-v1.3.15";
+const RELEASE_NOTE_ID = "2026-11-19-v1.3.16";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -528,12 +528,12 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "手机网页滚动与存档接管修复");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.15");
+  await expect(dialog).toHaveAttribute("aria-label", "手机画布触控与建筑部署修复");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.3.16");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(3);
-  await expect(dialog).toContainText("配方与物品列表可滚动");
-  await expect(dialog).toContainText("接管后继续游戏");
-  await expect(dialog).toContainText("保留原有存档");
+  await expect(dialog).toContainText("触控中断后恢复单指平移");
+  await expect(dialog).toContainText("双指缩放跟随手指中心");
+  await expect(dialog).toContainText("缩放后继续部署建筑");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();
   for (const action of [close, acknowledge]) {

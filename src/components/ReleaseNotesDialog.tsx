@@ -7,6 +7,7 @@ import { getReleaseNotes127, getReleaseNotes128, getReleaseNotes129, getReleaseN
 import { AccessibleDialog } from "./AccessibleDialog";
 import { getReleaseNotes1313 } from "../i18n/releaseNotes1313";
 import { getReleaseNotes1314 } from "../i18n/releaseNotes1314";
+import { getReleaseNotes1315 } from "../i18n/releaseNotes1315";
 import { getReleaseNotes1312 } from "../i18n/releaseNotes1312";
 import { getReleaseNotes1311 } from "../i18n/releaseNotes1311";
 import { getReleaseNotes1310 } from "../i18n/releaseNotes1310";
@@ -207,6 +208,7 @@ export interface ReleaseNotesRecord {
 /** Static, offline-readable history. Keep entries small; only one page is rendered. */
 export const RELEASE_NOTES_HISTORY: readonly ReleaseNotesRecord[] = [
   CURRENT_RELEASE_NOTES,
+  getReleaseNotes1315("zh-CN"),
   getReleaseNotes1314("zh-CN"),
   getReleaseNotes1313("zh-CN"),
   getReleaseNotes1312("zh-CN"),
@@ -620,6 +622,7 @@ export function ReleaseNotesDialog({ open, onClose }: { open: boolean; onClose: 
   const selectedReleaseRecord = RELEASE_NOTES_HISTORY.find((release) => release.id === selectedReleaseId) ?? CURRENT_RELEASE_NOTES;
   const selectedRelease = selectedReleaseRecord.id === CURRENT_RELEASE_NOTES.id
     ? localizedCurrentRelease
+    : selectedReleaseRecord.version === "1.3.15" ? getReleaseNotes1315(locale)
     : selectedReleaseRecord.version === "1.3.14" ? getReleaseNotes1314(locale)
     : selectedReleaseRecord.version === "1.3.13" ? getReleaseNotes1313(locale)
     : selectedReleaseRecord.version === "1.3.12" ? getReleaseNotes1312(locale)

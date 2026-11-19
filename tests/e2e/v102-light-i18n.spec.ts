@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { workflowTimeoutMs } from "./startup-timeout";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-11-14-v1.3.15";
+const RELEASE_NOTE_ID = "2026-11-19-v1.3.16";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next", lockedPlanets = false) {
   await page.addInitScript(({ releaseNoteId, mobileUi, lockedPlanets }) => {
@@ -134,17 +134,17 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en&releaseNotesTest=1");
-  const dialog = page.getByRole("dialog", { name: "Mobile Web Scrolling and Save Takeover" });
+  const dialog = page.getByRole("dialog", { name: "Mobile Canvas and Building Placement Fixes" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.3.15");
-  await expect(dialog).toContainText("Scroll recipe and item lists");
-  await expect(dialog).toContainText("Continue after taking over a save");
-  await expect(dialog).toContainText("Preserve existing saves");
-  await expect(dialog).toContainText("Mobile selection panels keep a usable height");
+  await expect(dialog).toContainText("1.3.16");
+  await expect(dialog).toContainText("One-finger panning recovers");
+  await expect(dialog).toContainText("Pinch zoom follows your fingers");
+  await expect(dialog).toContainText("Continue placing after zooming");
+  await expect(dialog).toContainText("The next single-finger drag pans the canvas");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();
   await expect(dialog).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-14-v1.3.15");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-11-19-v1.3.16");
 });
 
 test("English light primary workspaces use opaque light surfaces", async ({ page }) => {

@@ -7,7 +7,7 @@ const BACKUP_KEY = `${SAVE_KEY}.backup`;
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-14-v1.3.15");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-11-19-v1.3.16");
   });
   const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
   await page.addLocatorHandler(offlineReport, async () => {

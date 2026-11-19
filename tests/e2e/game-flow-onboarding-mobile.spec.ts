@@ -1952,6 +1952,117 @@ test("a second finger takes over a pending node drag and pans or zooms the mobil
   }
 });
 
+async function findClearPanePoint(page: Page, offsets: { x: number; y: number }[]) {
+  const point = await page.locator(".react-flow__pane").evaluate((pane, offsets) => {
+    const bounds = pane.getBoundingClientRect();
+    for (let y = Math.ceil(bounds.top) + 60; y < bounds.bottom - 50; y += 12) {
+      for (let x = Math.ceil(bounds.left) + 48; x < bounds.right - 48; x += 12) {
+        if (offsets.every((offset) => document.elementFromPoint(x + offset.x, y + offset.y) === pane)) return { x, y };
+      }
+    }
+    return null;
+  }, offsets);
+  if (!point) throw new Error("Expected an unobstructed canvas area for the touch gesture");
+  return point;
+}
+
+function readTouchViewport(page: Page) {
+  return page.locator(".react-flow__viewport").evaluate((viewport) => {
+    const { left, top } = viewport.closest(".react-flow")!.getBoundingClientRect();
+    const matrix = new DOMMatrix(getComputedStyle(viewport).transform);
+    return { left, top, x: matrix.e, y: matrix.f, zoom: matrix.a };
+  });
+}
+
+test("mobile canvas recovers single-finger panning after a research station touch ends outside it", async ({ browser }) => {
+  const { context, page } = await createTouchPage(browser, { width: 390, height: 844 });
+  try {
+    await freshGame(page);
+    await dismissOnboarding(page);
+    const research = page.getByTitle("部署矩阵研究站", { exact: true });
+    await research.tap();
+    const placement = await findClearPanePoint(page, [{ x: 30, y: 50 }, { x: 0, y: 0 }]);
+    await page.touchscreen.tap(placement.x, placement.y);
+
+    const lab = page.locator(".factory-node__header").filter({ hasText: "研究站" });
+    await page.locator(".react-flow__controls-fitview").tap();
+    await lab.tap();
+    await page.getByRole("button", { name: "关闭侧栏" }).tap({ position: { x: 12, y: 12 } });
+    const blank = await findClearPanePoint(page, [{ x: 0, y: 0 }]);
+    await page.touchscreen.tap(blank.x, blank.y);
+
+    const labBounds = (await lab.boundingBox())!;
+    const x = Math.round(labBounds.x + labBounds.width / 2);
+    const y = Math.round(labBounds.y + labBounds.height / 2);
+    // Exercise Chrome's real retargeting after loss of implicit touch capture.
+    await lab.evaluate((header) => header.addEventListener("pointerdown", (event) => {
+      const pointer = event as PointerEvent;
+      (pointer.target as Element).releasePointerCapture(pointer.pointerId);
+    }, { capture: true, once: true }));
+    const session = await context.newCDPSession(page);
+    await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 1 }] });
+    await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: 20, id: 1 }] });
+    await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+    const start = await findClearPanePoint(page, [{ x: 0, y: 0 }, { x: 48, y: 11 }, { x: 96, y: 22 }]);
+    const before = await readTouchViewport(page);
+    await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...start, id: 2 }] });
+    await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: start.x + 48, y: start.y + 11, id: 2 }] });
+    await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: start.x + 96, y: start.y + 22, id: 2 }] });
+    await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    const after = await readTouchViewport(page);
+    expect(after.zoom).toBeCloseTo(before.zoom, 4);
+    expect(after.x - before.x).toBeCloseTo(96, 0);
+    expect(after.y - before.y).toBeCloseTo(22, 0);
+    await expect(page.getByRole("dialog", { name: "设备快捷操作" })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+for (const { viewport, orientation, finish } of [
+  { viewport: { width: 390, height: 844 }, orientation: "portrait", finish: "touchEnd" },
+  { viewport: { width: 844, height: 390 }, orientation: "landscape", finish: "touchCancel" },
+] as const) {
+  test(`mobile pinch keeps pending building placement usable in ${orientation}`, async ({ browser }) => {
+    const { context, page } = await createTouchPage(browser, viewport);
+    try {
+      await page.goto("/?mobileUi=next");
+      await dismissOnboarding(page);
+      await page.getByRole("button", { name: "建造", exact: true }).tap();
+      const buildSheet = page.getByRole("dialog", { name: "建造" });
+      await buildSheet.locator(".mobile-build-card:not([disabled])").filter({ hasText: "风力涡轮机" }).tap();
+      const bar = page.getByRole("toolbar", { name: "建筑放置状态" });
+      await bar.getByLabel("增加放置数量").tap();
+      await expect(bar.locator(".mobile-placement-stepper strong")).toHaveText("2");
+
+      const { x, y } = await findClearPanePoint(page, [-60, -36, 36, 60].map((x) => ({ x, y: 0 })));
+      const before = await readTouchViewport(page);
+      const anchorY = (y - before.top - before.y) / before.zoom;
+      const session = await context.newCDPSession(page);
+      await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: x - 36, y, id: 1 }] });
+      await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: x - 36, y, id: 1 }, { x: x + 36, y, id: 2 }] });
+      await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x - 60, y, id: 1 }, { x: x + 60, y, id: 2 }] });
+      await session.send("Input.dispatchTouchEvent", { type: finish, touchPoints: [] });
+      await expect(bar).toBeVisible();
+      await expect(bar.locator(".mobile-placement-stepper strong")).toHaveText("2");
+      const after = await readTouchViewport(page);
+      expect(after.zoom).toBeGreaterThan(before.zoom * 1.15);
+      expect(after.top + after.y + anchorY * after.zoom).toBeCloseTo(y, 0);
+
+      const placement = await findClearPanePoint(page, [{ x: 0, y: 0 }]);
+      // A browser can emit a click after the last pinch contact ends.
+      await page.locator(".react-flow__pane").dispatchEvent("click", { detail: 1, clientX: placement.x, clientY: placement.y });
+      await expect(page.locator(".power-node")).toHaveCount(0);
+      await page.touchscreen.tap(placement.x, placement.y);
+      await expect(page.locator(".power-node")).toContainText("×2");
+      await expect(bar).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
 test("coarse-pointer connection preview snaps to a nearby target port", async ({ browser }) => {
   const { context, page } = await createTouchPage(browser, { width: 844, height: 390 });
   try {

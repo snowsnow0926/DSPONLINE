@@ -1,7 +1,7 @@
 import { useCallback, useLayoutEffect, useRef, type HTMLAttributes, type PointerEvent as ReactPointerEvent } from "react";
 
 type LongPressBindings<T extends HTMLElement> = Pick<HTMLAttributes<T>,
-  "onPointerDownCapture" | "onPointerMoveCapture" | "onPointerUpCapture" | "onPointerCancelCapture" | "onLostPointerCaptureCapture" | "onClickCapture">;
+  "onPointerDownCapture" | "onPointerMoveCapture" | "onLostPointerCaptureCapture" | "onClickCapture">;
 
 interface LongPressOptions<T extends HTMLElement> {
   delayMs?: number;
@@ -46,8 +46,26 @@ export function useLongPress<T extends HTMLElement>({
 
   useLayoutEffect(() => {
     cancelAll();
-    return cancelAll;
-  }, [cancelAll, disabled, resetKey]);
+    if (disabled) return;
+    const finish = (event: PointerEvent) => {
+      if (!activePointersRef.current.delete(event.pointerId)) return;
+      if (completedPressRef.current?.pointerId === event.pointerId) {
+        if (event.type === "pointercancel") completedPressRef.current = null;
+        else completedPressRef.current.expiresAt = performance.now() + 500;
+      }
+      cancel(event.pointerId);
+    };
+    // A touch can finish over another surface if implicit capture is lost.
+    window.addEventListener("pointerup", finish, true);
+    window.addEventListener("pointercancel", finish, true);
+    window.addEventListener("blur", cancelAll);
+    return () => {
+      window.removeEventListener("pointerup", finish, true);
+      window.removeEventListener("pointercancel", finish, true);
+      window.removeEventListener("blur", cancelAll);
+      cancelAll();
+    };
+  }, [cancel, cancelAll, disabled, resetKey]);
 
   return {
     onPointerDownCapture: (event) => {
@@ -58,6 +76,7 @@ export function useLongPress<T extends HTMLElement>({
         return;
       }
       if (pointerEvent.pointerType === "mouse" || pointerEvent.button !== 0) return;
+      if (pointerEvent.isPrimary) cancelAll();
       activePointersRef.current.add(pointerEvent.pointerId);
       if (activePointersRef.current.size > 1) {
         cancel();
@@ -90,18 +109,6 @@ export function useLongPress<T extends HTMLElement>({
       if (Math.hypot(pointerEvent.clientX - gesture.x, pointerEvent.clientY - gesture.y) > movementTolerance) {
         cancel(pointerEvent.pointerId);
       }
-    },
-    onPointerUpCapture: (event) => {
-      const pointerId = (event as ReactPointerEvent<T>).pointerId;
-      if (completedPressRef.current?.pointerId === pointerId) completedPressRef.current.expiresAt = performance.now() + 500;
-      activePointersRef.current.delete(pointerId);
-      cancel(pointerId);
-    },
-    onPointerCancelCapture: (event) => {
-      const pointerId = (event as ReactPointerEvent<T>).pointerId;
-      if (completedPressRef.current?.pointerId === pointerId) completedPressRef.current = null;
-      activePointersRef.current.delete(pointerId);
-      cancel(pointerId);
     },
     onLostPointerCaptureCapture: (event) => {
       const pointerId = (event as ReactPointerEvent<T>).pointerId;

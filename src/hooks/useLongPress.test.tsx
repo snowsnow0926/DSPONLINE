@@ -67,6 +67,22 @@ describe("useLongPress", () => {
     expect(onLongPress).toHaveBeenCalledOnce();
   });
 
+  it("cancels a press released outside the surface before the menu opens", () => {
+    const onLongPress = vi.fn();
+    function Harness() {
+      return <div {...useLongPress<HTMLDivElement>({ delayMs: 100, getTarget: () => "entity", onLongPress })} />;
+    }
+    act(() => root.render(<Harness />));
+    const target = host.firstElementChild!;
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 1)));
+    act(() => document.body.dispatchEvent(pointerEvent("pointerup", 1)));
+    act(() => vi.advanceTimersByTime(150));
+    expect(onLongPress).not.toHaveBeenCalled();
+    act(() => target.dispatchEvent(pointerEvent("pointerdown", 2)));
+    act(() => vi.advanceTimersByTime(100));
+    expect(onLongPress).toHaveBeenCalledOnce();
+  });
+
   it("consumes the release click after a long hold but preserves the next ordinary tap", () => {
     const click = vi.fn();
     function Harness() {

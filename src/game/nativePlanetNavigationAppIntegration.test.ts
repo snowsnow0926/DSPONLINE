@@ -77,14 +77,15 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/factoryThinViewAllSelectedEntityIds = useMemo\([\s\S]*?nativeFactoryUnpinnedBootstrap\s*\?\s*\[\]/);
     expect(app).toMatch(/factoryThinViewAllSelectedBeltIds = useMemo\([\s\S]*?nativeFactoryUnpinnedBootstrap[\s\S]*?\?\s*\[\]/);
     expect(app).toMatch(/factoryInteractionConnectionEntityIds = useMemo\([\s\S]*?nativeFactoryUnpinnedBootstrap[\s\S]*?\? \[\]/);
-    expect(app).toMatch(/const abortCanvasGestureLifecycle = useCallback[\s\S]*?factoryGestureEpochRef\.current \+= 1[\s\S]*?canvasPointerMotionRef\.current = stopCanvasPointerMotionSession[\s\S]*?capturedPointerIds[\s\S]*?activeCanvasTouchesRef\.current\.clear\(\)[\s\S]*?canvasMultiTouchRef\.current = null[\s\S]*?nodeDragActiveRef\.current = false[\s\S]*?nodeDragGestureEpochRef\.current = null[\s\S]*?multiDragStartRef\.current = null[\s\S]*?connectionHandleSpatialIndexRef\.current = null[\s\S]*?suppressConnectionClickRef\.current = false[\s\S]*?selectionModeRef\.current = false/);
+    expect(app).toMatch(/const resetCanvasTouches = useCallback[\s\S]*?hasPointerCapture[\s\S]*?releasePointerCapture[\s\S]*?activeCanvasTouchesRef\.current\.clear\(\)[\s\S]*?canvasMultiTouchRef\.current = null[\s\S]*?blockCanvasTouchRef\.current = false/);
+    expect(app).toMatch(/const abortCanvasGestureLifecycle = useCallback[\s\S]*?factoryGestureEpochRef\.current \+= 1[\s\S]*?canvasPointerMotionRef\.current = stopCanvasPointerMotionSession[\s\S]*?resetCanvasTouches\(\)[\s\S]*?nodeDragActiveRef\.current = false[\s\S]*?nodeDragGestureEpochRef\.current = null[\s\S]*?multiDragStartRef\.current = null[\s\S]*?connectionHandleSpatialIndexRef\.current = null[\s\S]*?suppressConnectionClickRef\.current = false[\s\S]*?selectionModeRef\.current = false/);
     expect(app).toMatch(/const resetPlanetScopedFactoryUi = useCallback[\s\S]*?abortCanvasGestureLifecycle\(\)[\s\S]*?onMiningStop\(\)[\s\S]*?flowStore\.getState\(\)\.cancelConnection\(\)[\s\S]*?clickConnectionPreviewRef\.current = null[\s\S]*?setPlacement\(null\)[\s\S]*?setRegionMode\(false\)/);
     expect(app).toMatch(/useLayoutEffect\(\(\) => \{[\s\S]*?nativeFactoryRouteUnsafe[\s\S]*?abortCanvasGestureLifecycle\(\)/);
     expect(app).not.toMatch(/useLayoutEffect\(\(\) => \{\s*if \(nativeFactoryProjectionPending\) abortCanvasGestureLifecycle/);
     expect(app).toMatch(/if \(canvasWorkspaceHidden \|\| nativeFactoryRouteUnsafe\) stopCanvasPointerMotion\(\)/);
     expect(app).toMatch(/useLongPress<HTMLElement>\(\{[\s\S]*?disabled: nativeFactoryRouteUnsafe,[\s\S]*?resetKey: factoryGestureRouteKey/);
     expect(app).not.toMatch(/resetKey:[^\n]*(?:factoryThinViewExpectedRevision|acceptedRevision)/);
-    expect(app).toMatch(/onPointerUpCapture=\{\(event\) => \{[\s\S]*?longPressBindings\.onPointerUpCapture[\s\S]*?stopCanvasPointerMotion\(\)[\s\S]*?nativeFactoryProjectionPending/);
+    expect(app).toMatch(/onPointerUpCapture=\{\(event\) => \{\s*stopCanvasPointerMotion\(\);\s*if \(endCanvasMultiTouch\(event\)\) return;\s*if \(nativeFactoryProjectionPending\)/);
     expect(app).toMatch(/workspace\.sessionId !== canvas\.sessionId[\s\S]*?workspace\.revision !== canvas\.revision[\s\S]*?nativeFactoryUnpinnedBootstrap\) resetPlanetScopedFactoryUi\(\)[\s\S]*?setNativeFactoryConfirmedProjectionRoute/);
   });
 

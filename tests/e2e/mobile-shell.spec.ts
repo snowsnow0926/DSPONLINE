@@ -278,9 +278,11 @@ test("orientation changes preserve world center, selection, inspector sheet and 
   await expect(page.locator('.game-shell[data-mobile-overlay="inspector"]')).toBeVisible();
   await expect(node).toHaveClass(/selected/);
   await expect.poll(worldCenter).toMatchObject({ zoom: before.zoom });
-  const after = await worldCenter();
-  expect(Math.abs(after.x - before.x)).toBeLessThanOrEqual(2);
-  expect(Math.abs(after.y - before.y)).toBeLessThanOrEqual(2);
+  // The canvas ResizeObserver can apply the final dock height a frame later.
+  await expect.poll(async () => {
+    const after = await worldCenter();
+    return Math.max(Math.abs(after.x - before.x), Math.abs(after.y - before.y));
+  }).toBeLessThanOrEqual(2);
   await page.locator(".mobile-next-sheet").getByRole("button", { name: /^关闭/ }).click();
   await page.screenshot({ path: "artifacts/qa/mobile-next-landscape-844x390.png", fullPage: true });
 

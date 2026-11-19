@@ -2543,9 +2543,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     pointerIds: [number, number];
     initialCenter: { x: number; y: number };
     initialDistance: number;
-    initialViewport: { x: number; y: number; zoom: number };
+    initialViewport: CanvasViewport;
+    canvasOrigin: { x: number; y: number };
   } | null>(null);
   const blockCanvasTouchRef = useRef(false);
+  const suppressCanvasTouchClickRef = useRef(false);
   const syntheticTouchCancelRef = useRef(false);
   const connectRequestRef = useRef<(connection: Connection, tier?: BeltTier) => boolean>(() => false);
   const connectionDraftRef = useRef<ConnectionDraft | null>(null);
@@ -5380,6 +5382,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     connectionCandidateNodeIdRef.current = nodeId;
     setConnectionCandidateNodeId(nodeId);
   }, []);
+  const resetCanvasTouches = useCallback(() => {
+    const canvas = factoryCanvasRef.current;
+    for (const pointerId of activeCanvasTouchesRef.current.keys()) {
+      try {
+        if (canvas?.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+      } catch { /* Capture can already be gone after a route change. */ }
+    }
+    activeCanvasTouchesRef.current.clear();
+    canvasMultiTouchRef.current = null;
+    blockCanvasTouchRef.current = false;
+  }, []);
   const abortCanvasGestureLifecycle = useCallback(() => {
     factoryGestureEpochRef.current += 1;
     const capture = canvasPointerCaptureRef.current;
@@ -5391,12 +5404,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (canvasPointerMotionFrameRef.current != null) window.cancelAnimationFrame(canvasPointerMotionFrameRef.current);
     canvasPointerMotionFrameRef.current = null;
     const canvas = factoryCanvasRef.current;
-    const capturedPointerIds = new Set<number>(activeCanvasTouchesRef.current.keys());
-    if (regionPointerRef.current) capturedPointerIds.add(regionPointerRef.current.pointerId);
-    if (canvas) {
-      for (const pointerId of capturedPointerIds) {
-        try { if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId); } catch { /* Route replacement can detach capture between checks. */ }
-      }
+    const regionPointer = regionPointerRef.current;
+    if (canvas && regionPointer) {
+      try { if (canvas.hasPointerCapture(regionPointer.pointerId)) canvas.releasePointerCapture(regionPointer.pointerId); } catch { /* Route replacement can detach capture between checks. */ }
     }
     const resizeCapture = regionResizeRef.current;
     if (resizeCapture) {
@@ -5406,8 +5416,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         }
       } catch { /* The region handle may already have unmounted at the revision boundary. */ }
     }
-    activeCanvasTouchesRef.current.clear();
-    canvasMultiTouchRef.current = null;
+    resetCanvasTouches();
     regionPointerRef.current = null;
     regionResizeRef.current = null;
     nodeDragActiveRef.current = false;
@@ -5416,7 +5425,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     dragAlignmentSpatialIndexRef.current = null;
     alignmentSpatialIndexRef.current = null;
     connectionHandleSpatialIndexRef.current = null;
-    blockCanvasTouchRef.current = false;
     syntheticTouchCancelRef.current = false;
     suppressConnectionClickRef.current = false;
     window.clearTimeout(suppressConnectionClickTimerRef.current);
@@ -5428,7 +5436,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setAlignmentGuides({ x: null, y: null });
     setRegionDraft(null);
     setRegionResizePreview(null);
-  }, []);
+  }, [resetCanvasTouches]);
   useLayoutEffect(() => {
     if (!nativePlayerAuthorityOwnsRuntime) return;
     abortCanvasGestureLifecycle();
@@ -19206,10 +19214,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setRegionGroupMovePreview(null);
     stopCanvasPointerMotion();
     blockCanvasTouchRef.current = true;
+    suppressCanvasTouchClickRef.current = true;
+    nodeDragGestureEpochRef.current = null;
     nodeDragActiveRef.current = false;
     dragAlignmentSpatialIndexRef.current = null;
     onMiningStop();
-    continuousPlacementRef.current = null;
     regionPointerRef.current = null;
     regionResizeRef.current = null;
     dragConnectionStartRef.current = null;
@@ -19222,12 +19231,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setClickConnectionSnapPoint(null);
     updateConnectionDraft(null);
     setConnectionHint(null);
-    setPlacement(null);
-    setBlueprintPlacementId(null);
+    // The interrupted press cannot place anything. Keep the chosen building or blueprint for a later tap.
     setSelectionMode(false);
     setRegionMode(false);
     setMobileCanvasMode("browse");
-    setMobileContinuousPlacement(false);
     setRegionDraft(null);
     setRegionResizePreview(null);
     setMobileActionEntityId(null);
@@ -19239,36 +19246,39 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (!coarsePointer || event.pointerType !== "touch") return false;
     activeCanvasTouchesRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY, target: event.target });
     if (activeCanvasTouchesRef.current.size < 2) return blockCanvasTouchRef.current;
-    const points = [...activeCanvasTouchesRef.current.entries()].slice(0, 2);
-    const [firstId, first] = points[0];
-    const [secondId, second] = points[1];
-    const initialCenter = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
-    canvasMultiTouchRef.current = {
-      pointerIds: [firstId, secondId],
-      initialCenter,
-      initialDistance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
-      initialViewport: { ...viewportRef.current },
-    };
-    canvasPinchLodRef.current = getCanvasLod(viewportRef.current.zoom);
-    cancelPendingTouchAction();
-    for (const pointerId of [firstId, secondId]) {
-      try { event.currentTarget.setPointerCapture(pointerId); } catch { /* Safari can reject transfer from a child capture. */ }
-    }
-    if (first.target instanceof Element && typeof PointerEvent !== "undefined") {
-      syntheticTouchCancelRef.current = true;
-      first.target.dispatchEvent(new PointerEvent("pointercancel", {
-        bubbles: true,
-        pointerId: firstId,
-        pointerType: "touch",
-        clientX: first.x,
-        clientY: first.y,
-      }));
-      syntheticTouchCancelRef.current = false;
+    if (!canvasMultiTouchRef.current) {
+      const [[firstId, first], [secondId, second]] = [...activeCanvasTouchesRef.current];
+      const { x, y } = (flowStore.getState().domNode ?? event.currentTarget).getBoundingClientRect();
+      const initialViewport = getViewport();
+      canvasMultiTouchRef.current = {
+        pointerIds: [firstId, secondId],
+        initialCenter: { x: (first.x + second.x) / 2 - x, y: (first.y + second.y) / 2 - y },
+        initialDistance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+        initialViewport,
+        canvasOrigin: { x, y },
+      };
+      canvasPinchLodRef.current = getCanvasLod(initialViewport.zoom);
+      const takingOver = !blockCanvasTouchRef.current;
+      if (takingOver) cancelPendingTouchAction();
+      for (const pointerId of [firstId, secondId]) {
+        try { event.currentTarget.setPointerCapture(pointerId); } catch { /* Safari can reject transfer from a child capture. */ }
+      }
+      if (takingOver && first.target instanceof Element && typeof PointerEvent !== "undefined") {
+        syntheticTouchCancelRef.current = true;
+        first.target.dispatchEvent(new PointerEvent("pointercancel", {
+          bubbles: true,
+          pointerId: firstId,
+          pointerType: "touch",
+          clientX: first.x,
+          clientY: first.y,
+        }));
+        syntheticTouchCancelRef.current = false;
+      }
     }
     event.preventDefault();
     event.stopPropagation();
     return true;
-  }, [cancelPendingTouchAction, coarsePointer]);
+  }, [cancelPendingTouchAction, coarsePointer, flowStore, getViewport]);
 
   const moveCanvasMultiTouch = useCallback((event: React.PointerEvent<HTMLElement>): boolean => {
     if (event.pointerType !== "touch") return false;
@@ -19284,7 +19294,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const first = activeCanvasTouchesRef.current.get(gesture.pointerIds[0]);
     const second = activeCanvasTouchesRef.current.get(gesture.pointerIds[1]);
     if (!first || !second) return true;
-    const center = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+    const center = { x: (first.x + second.x) / 2 - gesture.canvasOrigin.x, y: (first.y + second.y) / 2 - gesture.canvasOrigin.y };
     const distance = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
     const zoom = Math.max(canvasMinimumZoom, Math.min(1.8, gesture.initialViewport.zoom * distance / gesture.initialDistance));
     const worldCenter = {
@@ -19308,18 +19318,53 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return true;
   }, [canvasMinimumZoom, setViewport]);
 
-  const endCanvasMultiTouch = useCallback((event: React.PointerEvent<HTMLElement>): boolean => {
-    if (event.pointerType !== "touch") return false;
-    activeCanvasTouchesRef.current.delete(event.pointerId);
-    if (!canvasMultiTouchRef.current && !blockCanvasTouchRef.current) return false;
-    if (activeCanvasTouchesRef.current.size < 2) canvasMultiTouchRef.current = null;
+  const finishCanvasTouch = useCallback((pointerId: number): boolean => {
+    if (!activeCanvasTouchesRef.current.delete(pointerId)) return false;
+    const blocked = blockCanvasTouchRef.current;
+    if (canvasMultiTouchRef.current?.pointerIds.includes(pointerId)) canvasMultiTouchRef.current = null;
     if (activeCanvasTouchesRef.current.size === 0) blockCanvasTouchRef.current = false;
-    try {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    } catch { /* The browser may already have released capture on cancellation. */ }
+    return blocked;
+  }, []);
+
+  const endCanvasMultiTouch = useCallback((event: React.PointerEvent<HTMLElement>): boolean => {
+    if (event.pointerType !== "touch" || !finishCanvasTouch(event.pointerId)) return false;
     event.preventDefault();
     event.stopPropagation();
     return true;
+  }, [finishCanvasTouch]);
+
+  useEffect(() => {
+    if (!coarsePointer) return;
+    const finishOutsideCanvas = (event: PointerEvent) => {
+      if (event.pointerType !== "touch" || syntheticTouchCancelRef.current) return;
+      // The section handles its own release so it can consume the end of a pinch.
+      if (event.target instanceof Node && factoryCanvasRef.current?.contains(event.target)) return;
+      finishCanvasTouch(event.pointerId);
+    };
+    const resetWhenHidden = () => {
+      if (document.visibilityState === "hidden") resetCanvasTouches();
+    };
+    window.addEventListener("pointerup", finishOutsideCanvas, true);
+    window.addEventListener("pointercancel", finishOutsideCanvas, true);
+    window.addEventListener("lostpointercapture", finishOutsideCanvas, true);
+    window.addEventListener("blur", resetCanvasTouches);
+    window.addEventListener("orientationchange", resetCanvasTouches);
+    document.addEventListener("visibilitychange", resetWhenHidden);
+    return () => {
+      window.removeEventListener("pointerup", finishOutsideCanvas, true);
+      window.removeEventListener("pointercancel", finishOutsideCanvas, true);
+      window.removeEventListener("lostpointercapture", finishOutsideCanvas, true);
+      window.removeEventListener("blur", resetCanvasTouches);
+      window.removeEventListener("orientationchange", resetCanvasTouches);
+      document.removeEventListener("visibilitychange", resetWhenHidden);
+      resetCanvasTouches();
+    };
+  }, [coarsePointer, finishCanvasTouch, resetCanvasTouches]);
+
+  const preventCompetingCanvasTouch = useCallback((event: React.TouchEvent<HTMLElement>) => {
+    // React Flow still listens for TouchEvents to pan even with zoomOnPinch disabled.
+    // Let touchend and touchcancel reach it so the original one-finger gesture can finish.
+    if (blockCanvasTouchRef.current) event.stopPropagation();
   }, []);
 
   const onPaneClick = useCallback((event: React.MouseEvent) => {
@@ -23024,12 +23069,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             aria-busy={nativeFactoryProjectionPending}
             aria-label="生产网络画布"
             ref={factoryCanvasRef}
+            onTouchStartCapture={preventCompetingCanvasTouch}
+            onTouchMoveCapture={preventCompetingCanvasTouch}
             onPointerDownCapture={(event) => {
               if (nativeFactoryProjectionPending) {
                 event.preventDefault();
                 event.stopPropagation();
                 return;
               }
+              // A primary touch starts a new contact sequence, including after a lost release.
+              if (event.pointerType === "touch" && event.isPrimary && activeCanvasTouchesRef.current.size > 0) {
+                activeCanvasTouchesRef.current.delete(event.pointerId);
+                resetCanvasTouches();
+              }
+              if (!blockCanvasTouchRef.current) suppressCanvasTouchClickRef.current = false;
               longPressBindings.onPointerDownCapture?.(event);
               if (beginCanvasMultiTouch(event)) return;
               beginPlacementPointerMotion(event);
@@ -23056,7 +23109,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               onRegionPointerMove(event);
             }}
             onPointerUpCapture={(event) => {
-              longPressBindings.onPointerUpCapture?.(event);
               stopCanvasPointerMotion();
               if (endCanvasMultiTouch(event)) return;
               if (nativeFactoryProjectionPending) {
@@ -23069,13 +23121,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               if (syntheticTouchCancelRef.current) return;
               regionSelectionStartRef.current = null;
               setRegionGroupMovePreview(null);
-              longPressBindings.onPointerCancelCapture?.(event);
               stopCanvasPointerMotion();
               if (endCanvasMultiTouch(event)) return;
               finishRegionPointer(event, true);
             }}
             onLostPointerCaptureCapture={(event) => {
               longPressBindings.onLostPointerCaptureCapture?.(event);
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) return;
+              if (event.pointerType === "touch") finishCanvasTouch(event.pointerId);
               stopCanvasPointerMotion();
             }}
           onFocusCapture={(event) => {
@@ -23087,7 +23140,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             setFocusedNodeId(nextNode?.dataset.id ?? null);
           }}
           onClickCapture={(event) => {
-            if (nativeFactoryProjectionPending) {
+            if (nativeFactoryProjectionPending || (suppressCanvasTouchClickRef.current && event.detail !== 0)) {
               event.preventDefault();
               event.stopPropagation();
               return;

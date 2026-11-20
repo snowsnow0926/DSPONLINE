@@ -209,6 +209,74 @@ describe("construction quantum recovery in the persistent Web runtime", () => {
     expect(run(s).construction.arc_smelter).toBe(1);
   });
 
+  it("delivers the saved step when the warehouse can fund either recipe path", () => {
+    const s = factory({ ...direct, iron_ore: "4" });
+    s.constructionAutomation.jobs.entity_1 = { constructionId: "arc_smelter", inventory: {}, elapsedSeconds: 0, stepIndex: 0, steps: [
+      { kind: "material", recipeId: "iron_ingot", batches: 4, outputItemId: "iron_ingot", outputAmount: 4 },
+      { kind: "building", constructionId: "arc_smelter" },
+    ] };
+
+    const boundary = run(s, 5);
+    expect(boundary.quantumLogisticsNetwork.runtimeFlow?.constructionDeliveries?.entity_1?.delivered)
+      .toMatchObject({ iron_ore: 4 });
+    const end = run(boundary, 3);
+    expect(end.construction.arc_smelter).toBe(1);
+    expect(end.quantumLogisticsNetwork.inventory.iron_ore).toBe("0");
+    expect(end.quantumLogisticsNetwork.inventory.iron_ingot).toBe("4");
+  });
+
+  it("prefetches complete recipes for later jobs without reusing the current job's WIP", () => {
+    const s = factory({ iron_ingot: "100", magnet: "100", copper_ingot: "100" });
+    s.tray = { circuit_board: 20 };
+    s.planetTrays.home = s.tray;
+    s.construction.mining_machine = 0;
+    s.constructionAutomation.targetStock = { mining_machine: 4 };
+    s.constructionAutomation.jobs.entity_1 = {
+      constructionId: "mining_machine",
+      inventory: { gear: 2, magnetic_coil: 2 },
+      elapsedSeconds: 0,
+      stepIndex: 2,
+      steps: [
+        { kind: "material", recipeId: "magnetic_coil", batches: 1, outputItemId: "magnetic_coil", outputAmount: 2 },
+        { kind: "material", recipeId: "gear", batches: 2, outputItemId: "gear", outputAmount: 2 },
+        { kind: "building", constructionId: "mining_machine" },
+      ],
+    };
+
+    const boundary = run(s, 5);
+    expect(boundary.quantumLogisticsNetwork.runtimeFlow?.constructionDeliveries?.entity_1?.delivered)
+      .toEqual({ copper_ingot: 3, iron_ingot: 22, magnet: 6 });
+    const end = run(boundary, 5);
+    expect(end.construction.mining_machine).toBe(4);
+    expect(end.quantumLogisticsNetwork.inventory).toEqual({ iron_ingot: "78", magnet: "94", copper_ingot: "97" });
+  });
+
+  it("uses the rotating quantum forecast to supply another stock target", () => {
+    const s = factory({ ...direct, iron_ingot: "100", magnetic_coil: "100", gear: "100" });
+    s.tray = { circuit_board: 100 };
+    s.planetTrays.home = s.tray;
+    s.construction.mining_machine = 0;
+    s.constructionAutomation.targetStock = { mining_machine: 100, arc_smelter: 1 };
+    s.constructionAutomation.cursor = CONSTRUCTION.findIndex(d => d.buildingId === "arc_smelter");
+    s.entities.push({ ...structuredClone(s.entities[0]), id: "entity_4" });
+    for (const id of ["entity_1", "entity_4"]) {
+      s.constructionAutomation.jobs[id] = {
+        constructionId: "mining_machine",
+        inventory: { gear: 2, magnetic_coil: 2 },
+        elapsedSeconds: 0,
+        stepIndex: 0,
+        steps: [{ kind: "building", constructionId: "mining_machine" }],
+      };
+    }
+
+    const boundary = run(s, 5);
+    expect(boundary.quantumLogisticsNetwork.runtimeFlow?.constructionDeliveries?.entity_4?.delivered)
+      .toMatchObject({ stone_brick: 2 });
+    const end = run(boundary, 5);
+    expect(end.construction.arc_smelter).toBe(1);
+    expect(end.construction.mining_machine).toBeGreaterThan(1);
+  });
+
   it("keeps direct delivery opt-in", () => {
     const s = factory(direct); s.constructionAutomation.quantumSourceEnabled = false;
     const end = run(s);

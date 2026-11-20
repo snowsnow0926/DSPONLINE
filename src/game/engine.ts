@@ -6677,71 +6677,55 @@ function constructionQuantumAvailable(
     Math.max(0, Math.floor(quantumBuffer[itemId] ?? 0)));
 }
 
-function constructionQuantumPrefetchJobs(
+function constructionQuantumTargetJobs(
   state: GameState,
-  center: FactoryEntity,
-  definition: ConstructionAutomationTargetDefinition | undefined,
-  workSeconds: number,
-  hasExistingJob: boolean,
-  prefetchSeconds = QUANTUM_SETTLEMENT_SECONDS,
-  powerFactor = 1,
+  definition: ConstructionAutomationTargetDefinition,
+  context: ConstructionPlanningContext,
 ): number {
-  const target = definition ? Math.max(0, Math.floor(state.constructionAutomation.targetStock[definition.id] ?? 0)) : 0;
-  const current = definition ? constructionAutomationCurrentStock(state, definition.id) : 0;
-  const pending = definition ? constructionAutomationPending(state, definition.id) : 0;
-  const outputAmount = Math.max(1, definition?.outputAmount ?? 1);
-  const targetJobs = Math.max(0, Math.ceil(Math.max(0, target - current - pending) / outputAmount));
+  const target = Math.max(0, Math.floor(state.constructionAutomation.targetStock[definition.id] ?? 0));
+  const current = constructionAutomationCurrentStock(state, definition.id);
+  const pending = constructionAutomationPending(state, definition.id, context);
+  return Math.ceil(Math.max(0, target - current - pending) / Math.max(1, definition.outputAmount));
+}
+
+function constructionQuantumPrefetchJobs(
+  center: FactoryEntity,
+  targetJobs: number,
+  workSeconds: number,
+  prefetchSeconds: number,
+  powerFactor: number,
+): number {
   const machineCount = Number.isFinite(center.machineCount) ? Math.max(1, Math.floor(center.machineCount)) : 1;
   const normalizedWorkSeconds = Number.isFinite(workSeconds) ? Math.max(EPSILON, workSeconds) : 1;
-  const normalizedPrefetchSeconds = Number.isFinite(prefetchSeconds)
-    ? Math.max(0, prefetchSeconds)
-    : QUANTUM_SETTLEMENT_SECONDS;
-  const normalizedPowerFactor = Number.isFinite(powerFactor)
-    ? Math.max(0, Math.min(1, powerFactor))
-    : 0;
-  const workJobs = Math.max(1, Math.ceil(
-    machineCount * normalizedPrefetchSeconds * normalizedPowerFactor / normalizedWorkSeconds,
-  ));
-  const requestedJobs = Math.max(1, targetJobs + (hasExistingJob ? 1 : 0));
+  const workJobs = Math.max(1, Math.ceil(machineCount * prefetchSeconds * powerFactor / normalizedWorkSeconds));
   const prefetchLimit = machineCount >= CONSTRUCTION_AUTOMATION_EXTENDED_STACK_THRESHOLD
     ? CONSTRUCTION_QUANTUM_EXTENDED_PREFETCH_MAX_JOBS
     : CONSTRUCTION_QUANTUM_PREFETCH_MAX_JOBS;
-  return Math.min(prefetchLimit, Math.max(1, Math.min(requestedJobs, workJobs)));
+  return Math.min(prefetchLimit, targetJobs, workJobs);
 }
 
-function constructionQuantumMissingForBatch(
-  state: GameState,
-  center: FactoryEntity,
-  definition: ConstructionAutomationTargetDefinition,
-  plan: ConstructionAutomationPlan,
-  tray: Partial<Record<ItemId, number>>,
-  jobInventory: Partial<Record<ItemId, number>>,
-  quantumBuffer: Partial<Record<ItemId, number>>,
-  hasExistingJob: boolean,
-  prefetchSeconds = QUANTUM_SETTLEMENT_SECONDS,
-  powerFactor = 1,
-): Array<{ itemId: ItemId; amount: number }> | null {
-  const batch = analyzeRepeatableConstructionAutomationPlan(state, definition, plan);
-  if (!batch) return null;
-  const jobs = constructionQuantumPrefetchJobs(
-    state,
-    center,
-    definition,
-    batch.workSeconds,
-    hasExistingJob,
-    prefetchSeconds,
-    powerFactor,
-  );
-  const missing = new Map<ItemId, number>();
-  for (const [itemId, rawAmount] of Object.entries(batch.trayCosts) as Array<[ItemId, number]>) {
-    if (isPortableFleetItem(itemId)) continue;
-    const required = constructionQuantumSafeMultiply(rawAmount, jobs);
-    const available = constructionQuantumAvailable(tray, jobInventory, quantumBuffer, itemId);
-    const amount = Math.max(0, required - available);
-    if (amount > 0) missing.set(itemId, amount);
+function addConstructionQuantumBatchCosts(
+  costs: Partial<Record<ItemId, number>>,
+  batch: RepeatableConstructionAutomationBatch,
+  jobs: number,
+): void {
+  for (const [itemId, amount] of Object.entries(batch.trayCosts) as Array<[ItemId, number]>) {
+    costs[itemId] = constructionQuantumSafeAdd(costs[itemId] ?? 0, constructionQuantumSafeMultiply(amount, jobs));
   }
-  return [...missing.entries()]
-    .map(([itemId, amount]) => ({ itemId, amount }))
+}
+
+function constructionQuantumMissingCosts(
+  costs: Partial<Record<ItemId, number>>,
+  tray: Partial<Record<ItemId, number>>,
+  quantumBuffer: Partial<Record<ItemId, number>>,
+): Array<{ itemId: ItemId; amount: number }> {
+  return (Object.entries(costs) as Array<[ItemId, number]>)
+    .filter(([itemId]) => !isPortableFleetItem(itemId))
+    .map(([itemId, amount]) => ({
+      itemId,
+      amount: Math.max(0, amount - constructionQuantumAvailable(tray, {}, quantumBuffer, itemId)),
+    }))
+    .filter(({ amount }) => amount > 0)
     .sort((left, right) => left.itemId.localeCompare(right.itemId));
 }
 
@@ -6759,6 +6743,7 @@ function constructionQuantumMissingMaterials(
   prefetchSeconds = QUANTUM_SETTLEMENT_SECONDS,
   powerFactorOverride?: number,
   warehouse: Partial<Record<ItemId, number>> = constructionQuantumWarehouseInventory(state),
+  preferRoundRobin = false,
 ): Array<{ itemId: ItemId; amount: number }> {
   if (!state.constructionAutomation.enabled) return [];
   // Do not fill a stopped center's private cache while its previous power
@@ -6774,30 +6759,51 @@ function constructionQuantumMissingMaterials(
     const step = job.steps[job.stepIndex];
     if (!step) return [];
     const definition = getConstructionAutomationTargetDefinition(job.constructionId);
-    let remainingPlan: ConstructionAutomationPlan = {
-      steps: job.steps.slice(job.stepIndex),
-      recipeDecisions: job.recipeDecisions,
-    };
-    if (definition && !constructionAutomationInputsAvailable(state, center.planetId, job, step, center.id)) {
-      const available = constructionQuantumPlanningInventory([quantumBuffer, warehouse, job.inventory]);
-      const repaired = buildConstructionAutomationPlan(state, definition, center.planetId, available, getPlanningContext());
-      if (!repaired.blocker) remainingPlan = repaired;
+    const virtualInventory = constructionQuantumPlanningInventory([quantumBuffer, warehouse]);
+    if (definition) {
+      const context = getPlanningContext();
+      let elapsedSeconds = job.elapsedSeconds;
+      let remainingPlan: ConstructionAutomationPlan = {
+        steps: job.steps.slice(job.stepIndex),
+        recipeDecisions: job.recipeDecisions,
+      };
+      // Execution waits for the saved step when the warehouse can fund it.
+      // Probe an alternative only when that step is genuinely unavailable.
+      if (!constructionMaterialsAvailable(job.inventory, tray, virtualInventory, constructionAutomationRequirements(step))) {
+        const available = constructionQuantumPlanningInventory([virtualInventory, job.inventory]);
+        const repaired = buildConstructionAutomationPlan(state, definition, center.planetId, available, context);
+        if (!repaired.blocker) {
+          remainingPlan = repaired;
+          elapsedSeconds = 0;
+        }
+      }
+      const remainingBatch = analyzeRepeatableConstructionAutomationPlan(state, definition, remainingPlan, context);
+      if (remainingBatch) {
+        const required: Partial<Record<ItemId, number>> = {};
+        for (const [itemId, amount] of Object.entries(remainingBatch.trayCosts) as Array<[ItemId, number]>) {
+          required[itemId] = Math.max(0, amount - Math.max(0, Math.floor(job.inventory[itemId] ?? 0)));
+        }
+        const workLeft = Math.max(0, remainingBatch.workSeconds - elapsedSeconds);
+        const prefetchLeft = prefetchSeconds - workLeft / (Math.max(1, center.machineCount) * powerFactor);
+        if (prefetchLeft > EPSILON) {
+          // Forecast another complete job without the current job's WIP.
+          // One powered center follows the round-robin cursor per boundary.
+          const next = preferRoundRobin ? constructionQuantumTarget(state, center, virtualInventory, getPlanningContext) : null;
+          const readyNext = next && !next.plan.blocker ? next : null;
+          const forecast = readyNext?.target.definition ?? definition;
+          const targetJobs = constructionQuantumTargetJobs(state, forecast, context);
+          if (targetJobs > 0) {
+            const plan = readyNext?.plan ?? buildConstructionAutomationPlan(state, forecast, center.planetId, virtualInventory, context);
+            const batch = !plan.blocker && analyzeRepeatableConstructionAutomationPlan(state, forecast, plan, context);
+            if (batch) {
+              const count = constructionQuantumPrefetchJobs(center, targetJobs, batch.workSeconds, prefetchLeft, powerFactor);
+              addConstructionQuantumBatchCosts(required, batch, count);
+            }
+          }
+        }
+        return constructionQuantumMissingCosts(required, tray, quantumBuffer);
+      }
     }
-    const batchMissing = definition
-      ? constructionQuantumMissingForBatch(
-        state,
-        center,
-        definition,
-        remainingPlan,
-        tray,
-        job.inventory,
-        quantumBuffer,
-        true,
-        prefetchSeconds,
-        powerFactor,
-      )
-      : null;
-    if (batchMissing) return batchMissing;
     const requiredByItem = new Map<ItemId, number>();
     for (const requirement of constructionAutomationRequirements(step)) {
       if (isPortableFleetItem(requirement.itemId)) continue;
@@ -6835,19 +6841,17 @@ function constructionQuantumMissingMaterials(
     virtualInventory[plan.blocker.itemId] = constructionQuantumSafeAdd(virtualInventory[plan.blocker.itemId] ?? 0, amount);
   }
   if (completePlan) {
-    const batchMissing = constructionQuantumMissingForBatch(
-      state,
-      center,
-      target.definition,
-      completePlan,
-      tray,
-      {},
-      quantumBuffer,
-      false,
-      prefetchSeconds,
-      powerFactor,
-    );
-    if (batchMissing) return batchMissing;
+    const context = getPlanningContext();
+    const batch = analyzeRepeatableConstructionAutomationPlan(state, target.definition, completePlan, context);
+    if (batch) {
+      const count = constructionQuantumPrefetchJobs(
+        center, constructionQuantumTargetJobs(state, target.definition, context),
+        batch.workSeconds, prefetchSeconds, powerFactor,
+      );
+      const required: Partial<Record<ItemId, number>> = {};
+      addConstructionQuantumBatchCosts(required, batch, count);
+      return constructionQuantumMissingCosts(required, tray, quantumBuffer);
+    }
   }
   return [...seedMissingByItem.entries()]
     .filter(([itemId]) => !isPortableFleetItem(itemId))
@@ -6955,6 +6959,9 @@ function collectConstructionQuantumDemands(
   // Keep it lazy for stopped/unpowered centers and already-complete jobs.
   let planningContext: ConstructionPlanningContext | undefined;
   const getPlanningContext = () => planningContext ??= createConstructionPlanningContext(state);
+  const powered = ordered.filter((center) =>
+    (powerFactorByCenterId?.get(center.id) ?? center.powerFactor ?? 1) > EPSILON);
+  const roundRobinCenter = powered.length > 1 ? powered[0] : undefined;
   for (const center of ordered) {
     for (const missing of constructionQuantumMissingMaterials(
       state,
@@ -6963,6 +6970,7 @@ function collectConstructionQuantumDemands(
       prefetchSeconds,
       powerFactorByCenterId?.get(center.id),
       warehouse,
+      center === roundRobinCenter,
     )) {
       if (missing.amount < 1) continue;
       const delivery = deliveries
